@@ -6,6 +6,8 @@ The goal is simple: help churches emit CDE DTEs correctly, securely, and afforda
 
 > This project is not legal or tax advice. Before production use, validate your configuration, MH credentials, document mappings, and operating procedures with your accountant, legal representative, and Ministerio de Hacienda onboarding process.
 
+> DiezmosSV is an independent open-source project. It is not affiliated with, endorsed by, sponsored by, or officially supported by Wompi or Cloudflare. Wompi and Cloudflare are referenced only because this app integrates with their public services.
+
 ## What This Does
 
 - Receives Wompi payment webhooks at `POST /webhooks/wompi`.
@@ -227,4 +229,4 @@ The official MH signer is still useful as a conformance oracle during onboarding
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+Apache License 2.0. See [LICENSE](./LICENSE).
