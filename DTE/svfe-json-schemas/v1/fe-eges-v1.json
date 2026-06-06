@@ -1,0 +1,590 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Evento de Gestion",
+  "type": "object",
+  "properties": {
+    "identificacion": {
+      "description": "Identificación",
+      "type": "object",
+      "properties": {
+        "version": {
+          "type": "integer",
+          "description": "Versión",
+          "const": 1
+        },
+        "ambiente": {
+          "type": "string",
+          "description": "Ambiente de destino",
+          "enum": [
+            "00",
+            "01"
+          ]
+        },
+        "codigoGeneracion": {
+          "type": "string",
+          "description": "Código de Generación",
+          "maxLength": 36,
+          "minLength": 36,
+          "pattern": "^[A-F0-9]{8}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{12}$"
+        },
+        "tipoEvento": {
+          "description": "Tipo de Evento",
+          "type": "string",
+          "const": "16"
+        },
+        "fecEmi": {
+          "type": "string",
+          "description": "Fecha del evento",
+          "format": "date"
+        },
+        "horEmi": {
+          "type": "string",
+          "description": "Hora del evento",
+          "pattern": "^(0[0-9]|1[0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]$"
+        },
+        "fusion": {
+          "description": "Fusiones y otros",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tipoMoneda": {
+          "type": "string",
+          "description": "Tipo de Moneda",
+          "enum": [
+            "USD"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "version",
+        "ambiente",
+        "codigoGeneracion",
+        "tipoEvento",
+        "fecEmi",
+        "horEmi",
+        "fusion",
+        "tipoMoneda"
+      ]
+    },
+    "emisor": {
+      "type": "object",
+      "description": "Información del Emisor",
+      "properties": {
+        "nit": {
+          "description": "NIT (Emisor)",
+          "type": "string"
+        },
+        "nombre": {
+          "type": "string",
+          "description": "Nombre (Emisor)",
+          "maxLength": 250,
+          "minLength": 1
+        },
+        "codEstableMH": {
+          "description": "Código del establecimiento asignado por el MH",
+          "type": "string",
+          "maxLength": 4,
+          "minLength": 4
+        },
+        "codEstable": {
+          "description": "Código del establecimiento asignado por el contribuyente (Opcional)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 10
+        },
+        "codPuntoVentaMH": {
+          "description": "Código del Punto de Venta (Emisor) asignado por el MH",
+          "type": "string",
+          "maxLength": 4,
+          "minLength": 4
+        },
+        "codPuntoVenta": {
+          "description": "Código del Punto de Venta (Emisor) asignado por el contribuyente (Opcional)",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 15
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "nit",
+        "nombre",
+        "codEstableMH",
+        "codPuntoVentaMH"
+      ]
+    },
+    "documento": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "description": "Informacion del Documento a aplicar el evento",
+      "properties": {
+        "tipoDte": {
+          "type": "string",
+          "description": "Tipo de DTE"
+        },
+        "tipoGeneracion": {
+          "type": "integer",
+          "description": "Tipo de Generacion del Documento Tributario relacionado"
+        },
+        "numeroDocumento": {
+          "type": "string",
+          "description": "Numero de documento tributario relacionado",
+          "maxLength": 36
+        },
+        "fecEmi": {
+          "type": "string",
+          "description": "Fecha del evento",
+          "format": "date"
+        },
+        "numeroDocumentoC": {
+          "description": "Numero del documento de complemento",
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 36
+        },
+        "tipoDocumento": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Tipo de documento de identificación (Receptor)"
+        },
+        "numDocumento": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Número de documento de Identificación (Receptor)",
+          "maxLength": 20
+        },
+        "nombre": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Nombre (Receptor)",
+          "minLength": 1,
+          "maxLength": 250
+        },
+        "telefono": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Teléfono (Receptor) (Opcional)",
+          "maxLength": 30
+        },
+        "correo": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Correo electrónico (Receptor)",
+          "maxLength": 100
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tipoDte",
+        "tipoGeneracion",
+        "numeroDocumento",
+        "fecEmi",
+        "numeroDocumentoC",
+        "tipoDocumento",
+        "numDocumento",
+        "nombre",
+        "correo"
+      ]
+    },
+    "ventaTercero": {
+      "description": "Ventas por Cuenta de Terceros",
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "nit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "NIT por cuenta de Terceros",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "nombre": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Nombre, denominación o razón social del Tercero",
+          "maxLength": 250
+        },
+        "codDomiciliado": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Domicilio Fiscal"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "nit",
+        "nombre",
+        "codDomiciliado"
+      ]
+    },
+    "cuerpoDocumento": {
+      "type": "array",
+      "description": "Cuerpo del Documento",
+      "minItems": 1,
+      "maxItems": 2000,
+      "items": {
+        "type": "object",
+        "properties": {
+          "numItem": {
+            "type": "integer",
+            "description": "N° de ítem",
+            "minimum": 1,
+            "maximum": 2000
+          },
+          "tipoItem": {
+            "type": "integer",
+            "description": "Tipo de ítem"
+          },
+          "cantidad": {
+            "type": "number",
+            "description": "Cantidad",
+            "exclusiveMinimum": 0,
+            "multipleOf": 1e-08
+          },
+          "codigo": {
+            "description": "codigo",
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 25
+          },
+          "uniMedida": {
+            "type": "integer",
+            "description": "Unidad de Medida",
+            "minimum": 1
+          },
+          "descripcion": {
+            "description": "Descripcion",
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 1500
+          },
+          "codigoS": {
+            "description": "Codigo del bien en sustitución",
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 25
+          },
+          "descripcionS": {
+            "description": "Descripcion del bien en sustitución",
+            "type": [
+              "string",
+              "null"
+            ],
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "precioUni": {
+            "type": "number",
+            "description": "Precio Unitario",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          },
+          "montoDescu": {
+            "type": "number",
+            "description": "Descuento por ítem",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          },
+          "ventaNoSuj": {
+            "type": "number",
+            "description": "Ventas no Sujetas",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          },
+          "ventaExenta": {
+            "type": "number",
+            "description": "Ventas Exentas",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          },
+          "ventaGravada": {
+            "type": "number",
+            "description": "Ventas Gravadas",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          },
+          "noGravado": {
+            "type": "number",
+            "description": "Cargos/Abonos que no afectan la base imponible",
+            "minimum": 0,
+            "multipleOf": 1e-08
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "numItem",
+          "tipoItem",
+          "cantidad",
+          "codigo",
+          "descripcion",
+          "uniMedida",
+          "codigoS",
+          "descripcionS",
+          "precioUni",
+          "montoDescu",
+          "ventaNoSuj",
+          "ventaExenta",
+          "ventaGravada",
+          "noGravado"
+        ]
+      }
+    },
+    "resumen": {
+      "type": "object",
+      "description": "Resumen",
+      "properties": {
+        "totalNoSuj": {
+          "type": "number",
+          "description": "Total de Operaciones no Sujetas",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "totalExenta": {
+          "type": "number",
+          "description": "Total de Operaciones exentas",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "totalGravada": {
+          "type": "number",
+          "description": "Suma de Operaciones sin Impuestos",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "subTotalVentas": {
+          "type": "number",
+          "description": "Suma de Operaciones sin Impuestos",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "seguro": {
+          "type": "number",
+          "description": "Seguro",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "flete": {
+          "type": "number",
+          "description": "Flete",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "subTotal": {
+          "type": "number",
+          "description": "Subtotal",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "totalNoGravado": {
+          "type": "number",
+          "description": "Total Cargos/Abonos que no afectan la base imponible",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "montoTotalOperacion": {
+          "type": "number",
+          "description": "Monto Total de la Operación",
+          "minimum": 0,
+          "multipleOf": 0.01
+        },
+        "totalLetras": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Valor en Letras",
+          "maxLength": 200
+        },
+        "pagos": {
+          "description": "Pagos",
+          "type": [
+            "array",
+            "null"
+          ],
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "plazo": {
+                "description": "Plazo",
+                "type": "string"
+              },
+              "periodo": {
+                "description": "Período de plazo",
+                "type": "number",
+                "exclusiveMinimum": 0
+              }
+            },
+            "additionalProperties": false,
+            "required": [
+              "plazo",
+              "periodo"
+            ]
+          }
+        },
+        "fecha": {
+          "description": "Fecha de vencimiento de la garantia",
+          "type": "string",
+          "format": "date"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "totalNoSuj",
+        "totalExenta",
+        "totalGravada",
+        "subTotalVentas",
+        "seguro",
+        "flete",
+        "subTotal",
+        "totalNoGravado",
+        "montoTotalOperacion",
+        "totalLetras",
+        "pagos",
+        "fecha"
+      ]
+    },
+    "motivo": {
+      "description": "Datos del motivo de Anulacion",
+      "type": "object",
+      "properties": {
+        "tipoAnulacion": {
+          "type": "integer",
+          "description": "Tipo de Gestion"
+        },
+        "motivoAnulacion": {
+          "type": "string",
+          "description": "Motivo de anulacion",
+          "maxLength": 250,
+          "minLength": 5
+        },
+        "nombreResponsable": {
+          "description": "Nombre de la persona responsable de anular el DTE",
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 5
+        },
+        "tipDocResponsable": {
+          "type": "integer",
+          "description": "Tipo documento de identificación: 1 - NIT, 2 - DUI, 3 - Carnet de residente, 4 - PASAPORTE, 5 - OTRO"
+        },
+        "numDocResponsable": {
+          "type": "string",
+          "description": "Número de documento de identificación ",
+          "maxLength": 20,
+          "minLength": 3
+        },
+        "nombreSolicita": {
+          "description": "Nombre de la persona que solicita anular el DTE",
+          "type": "string",
+          "maxLength": 100,
+          "minLength": 5
+        },
+        "tipDocSolicita": {
+          "type": "integer",
+          "description": "Tipo documento de identificación solicitante: 1 - NIT, 2 - DUI, 3 - Carnet de residente, 4 - PASAPORTE, 5 - OTRO"
+        },
+        "numDocSolicita": {
+          "type": "string",
+          "description": "Número de documento de identificación solicitante.",
+          "maxLength": 20,
+          "minLength": 3
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "tipoAnulacion",
+        "motivoAnulacion",
+        "nombreResponsable",
+        "tipDocResponsable",
+        "numDocResponsable",
+        "nombreSolicita",
+        "tipDocSolicita",
+        "numDocSolicita"
+      ]
+    },
+    "apendice": {
+      "description": "Apéndice",
+      "type": [
+        "array",
+        "null"
+      ],
+      "minItems": 1,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "campo": {
+            "type": "string",
+            "description": "Nombre del campo",
+            "maxLength": 25
+          },
+          "etiqueta": {
+            "type": "string",
+            "description": "Descripción",
+            "maxLength": 50
+          },
+          "valor": {
+            "type": "string",
+            "description": "Valor/Dato",
+            "maxLength": 150
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "campo",
+          "etiqueta",
+          "valor"
+        ]
+      }
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "identificacion",
+    "emisor",
+    "documento",
+    "ventaTercero",
+    "cuerpoDocumento",
+    "resumen",
+    "motivo",
+    "apendice"
+  ]
+}

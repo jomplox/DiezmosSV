@@ -1,0 +1,43 @@
+{
+  "IdCuenta": "00000000-0000-4000-8000-000000000000",
+  "FechaTransaccion": "2026-06-02T14:05:20.7421642-06:00",
+  "Monto": "10.00",
+  "ModuloUtilizado": "BotonPago",
+  "FormaPagoUtilizada": "PagoNormal",
+  "IdTransaccion": "11111111-1111-4111-8111-111111111111",
+  "ResultadoTransaccion": "ExitosaAprobada",
+  "CodigoAutorizacion": "000000",
+  "IdIntentoPago": "70000003-2222-4222-8222-700000032222",
+  "CantidadCuotas": null,
+  "Cantidad": 1,
+  "EsProductiva": false,
+  "Aplicativo": {
+    "Nombre": "Iglesia Demo",
+    "Url": "https://example.org/",
+    "Id": "33333333-3333-4333-8333-333333333333"
+  },
+  "EnlacePago": {
+    "Id": 1,
+    "IdentificadorEnlaceComercio": "Diezmos y Ofrendas Demo",
+    "NombreProducto": "Diezmos y Ofrendas",
+    "DescripcionProducto": "Donacion demo para pruebas de integracion."
+  },
+  "Cliente": {
+    "CantidadCompra": "1",
+    "DocumentoIdentidad": "000000000",
+    "EsTrasnaccion3dsTokenizada": "False",
+    "Nombre": "Donante",
+    "Direccion": "Direccion demo",
+    "EMail": "donante@example.org",
+    "Celular": "00000000",
+    "Apellidos": "Demo",
+    "NombreRegion": "San Salvador",
+    "NombrePais": "El Salvador",
+    "CodigoPais": "SV",
+    "CodigoRegion": "SV-SS"
+  },
+  "Tarjeta": "0000 0000 0000 0000",
+  "EsInternacional": false,
+  "IdExterno": "Diezmos y Ofrendas Demo",
+  "IdGrupoTarjetas": null
+}

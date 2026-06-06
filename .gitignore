@@ -1,0 +1,21 @@
+node_modules/
+dist/
+.wrangler/
+.dev.vars
+.DS_Store
+
+# Never publish real credentials, private keys, live certificates, or local MH exports.
+DTE/Credentials/
+
+# Keep the required JSON schemas, but do not publish bulky/private MH bundles.
+DTE/dte-firmador/
+DTE/svfe-api-firmador/
+DTE/*.pdf
+DTE/*.xlsx
+DTE/*_OCR.md
+DTE/*_by_PaddleOCR*.md
+
+# Local/private samples and duplicated working docs.
+WompiWebhookSample.json
+PRD_CDE_DTE_Wompi_ElSalvador*.md
+GOAL.md
