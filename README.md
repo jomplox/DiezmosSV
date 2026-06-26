@@ -200,8 +200,6 @@ MH_PASSWORD_TEST="..."
 MH_USER_PROD="..."
 MH_PASSWORD_PROD="..."
 
-EMAIL_API_URL="..."
-EMAIL_API_KEY="..."
 EMAIL_FROM="dte@example.org"
 
 EMISOR_CONFIG_JSON="{...}"
@@ -260,8 +258,6 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
-npx wrangler secret put EMAIL_API_KEY --env staging
-npx wrangler secret put EMAIL_API_URL --env staging
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
@@ -309,8 +305,6 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
-npx wrangler secret put EMAIL_API_KEY --env production
-npx wrangler secret put EMAIL_API_URL --env production
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
 
@@ -341,8 +335,7 @@ Do one controlled low-value production issuance with live monitoring before enab
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
-| `EMAIL_API_KEY` | Transactional email provider API key. |
-| `EMAIL_API_URL` / `EMAIL_FROM` | Email endpoint and sender address. |
+| `EMAIL_FROM` | Sender address for Cloudflare Email Service. The sender domain must be onboarded in Cloudflare Email Sending. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
@@ -356,13 +349,20 @@ Do one controlled low-value production issuance with live monitoring before enab
 | `APP_ENV` | Informational environment name. |
 | `MOCK_EXTERNAL_SERVICES` | `"true"` stubs MH + email (great for local dev). |
 | `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
+| `EMAIL` | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in `.dev.vars`; set the real remote value as a Cloudflare secret. |
 
+Remote staging/production email delivery uses Cloudflare Email Service, not a separate HTTP email
+provider. The binding is declared as `send_email` in `wrangler.toml` and is restricted to the
+configured `EMAIL_FROM` sender. To send receipts to arbitrary donor addresses, the Cloudflare account
+must have Email Sending enabled for the sender domain; otherwise Cloudflare may only permit delivery
+to verified destination addresses.
+
 The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
-credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and email provider
-secrets. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
+credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
+sender address. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
 `CLOUDFLARE_API_TOKEN` is missing, the screen remains read-only and tells the owner that the
@@ -485,7 +485,7 @@ a production integration. Every church must still provide its own:
 - MH test and production API credentials
 - MH certificate XML and private-key password
 - Wompi webhook secret
-- Email provider credentials
+- Cloudflare Email Service sender domain and `EMAIL_FROM`
 - Emisor configuration
 - Responsible-person data for invalidation and contingency events
 - A legal/finance decision for donors with incomplete identification

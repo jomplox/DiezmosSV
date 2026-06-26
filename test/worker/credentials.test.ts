@@ -18,8 +18,7 @@ describe("credential status", () => {
       MH_CERT_PASSWORD: "cert-password",
       EMISOR_CONFIG_JSON: "{}",
       WOMPI_API_SECRET: "wompi-secret",
-      EMAIL_API_URL: "https://mail.example/send",
-      EMAIL_API_KEY: "email-key",
+      EMAIL: { send: async () => ({ messageId: "message-1" }) } as SendEmail,
       EMAIL_FROM: "dte@example.org"
     }));
 
@@ -71,16 +70,12 @@ describe("credential secret patch", () => {
       certificateXml: "   ",
       certificatePassword: "",
       emisorConfigJson: "",
-      emailApiUrl: "https://mail.example/send",
-      emailApiKey: "email-key",
       emailFrom: "dte@example.org"
     });
 
     expect(patch).toEqual({
       MH_USER_PROD: { type: "secret_text", name: "MH_USER_PROD", text: "06140707001011" },
       MH_PASSWORD_PROD: { type: "secret_text", name: "MH_PASSWORD_PROD", text: "prod-password" },
-      EMAIL_API_URL: { type: "secret_text", name: "EMAIL_API_URL", text: "https://mail.example/send" },
-      EMAIL_API_KEY: { type: "secret_text", name: "EMAIL_API_KEY", text: "email-key" },
       EMAIL_FROM: { type: "secret_text", name: "EMAIL_FROM", text: "dte@example.org" }
     });
   });

@@ -10,8 +10,6 @@ export interface CredentialUpdateInput {
   certificatePassword?: string;
   emisorConfigJson?: string;
   wompiSecret?: string;
-  emailApiUrl?: string;
-  emailApiKey?: string;
   emailFrom?: string;
 }
 
@@ -78,8 +76,7 @@ export function credentialStatus(env: Env): CredentialStatus {
     item(env, "WOMPI_API_SECRET", "Webhook HMAC")
   ]);
   const email = group("Correo", [
-    item(env, "EMAIL_API_URL", "Endpoint proveedor"),
-    item(env, "EMAIL_API_KEY", "API key proveedor"),
+    { name: "EMAIL", label: "Cloudflare Email Service binding", configured: Boolean(env.EMAIL) },
     item(env, "EMAIL_FROM", "Remitente")
   ]);
 
@@ -103,8 +100,6 @@ export function buildCredentialSecretPatch(input: CredentialUpdateInput): Secret
   putIfPresent(patch, "MH_CERT_PASSWORD", input.certificatePassword);
   putIfPresent(patch, "EMISOR_CONFIG_JSON", input.emisorConfigJson);
   putIfPresent(patch, "WOMPI_API_SECRET", input.wompiSecret);
-  putIfPresent(patch, "EMAIL_API_URL", input.emailApiUrl);
-  putIfPresent(patch, "EMAIL_API_KEY", input.emailApiKey);
   putIfPresent(patch, "EMAIL_FROM", input.emailFrom);
 
   const certificateXml = trim(input.certificateXml);

@@ -432,14 +432,6 @@ function CredentialsPanel({
             <textarea value={input.emisorConfigJson} onChange={(event) => onChange({ ...input, emisorConfigJson: event.target.value })} placeholder="EMISOR_CONFIG_JSON" spellCheck={false} />
           </label>
           <label>
-            <span>Email API URL</span>
-            <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder="EMAIL_API_URL" type="url" />
-          </label>
-          <label>
-            <span>Email API key</span>
-            <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder="EMAIL_API_KEY" type="password" autoComplete="new-password" />
-          </label>
-          <label>
             <span>Email remitente</span>
             <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder="EMAIL_FROM" type="email" />
           </label>
@@ -757,8 +749,6 @@ interface CredentialFormInput {
   certificatePassword: string;
   emisorConfigJson: string;
   wompiSecret: string;
-  emailApiUrl: string;
-  emailApiKey: string;
   emailFrom: string;
 }
 
@@ -771,8 +761,6 @@ function emptyCredentialInput(environment: CredentialFormInput["environment"]): 
     certificatePassword: "",
     emisorConfigJson: "",
     wompiSecret: "",
-    emailApiUrl: "",
-    emailApiKey: "",
     emailFrom: ""
   };
 }

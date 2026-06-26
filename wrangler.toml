@@ -4,6 +4,10 @@ compatibility_date = "2026-06-02"
 compatibility_flags = ["nodejs_compat"]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
 
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
+
 [vars]
 APP_ENV = "local"
 MOCK_EXTERNAL_SERVICES = "true"
@@ -41,6 +45,10 @@ crons = ["*/15 * * * *"]
 # Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
 [env.staging]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[[env.staging.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
 
 [env.staging.vars]
 APP_ENV = "staging"
@@ -80,6 +88,10 @@ crons = ["*/15 * * * *"]
 # Deploy only after staging UAT approval and one controlled production issuance plan.
 [env.production]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[[env.production.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
 
 [env.production.vars]
 APP_ENV = "production"

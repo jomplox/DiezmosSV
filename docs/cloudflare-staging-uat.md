@@ -40,8 +40,6 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npx wrangler secret put MH_CERT_XML_PART_2 --env staging
    npx wrangler secret put MH_USER_TEST --env staging
    npx wrangler secret put MH_PASSWORD_TEST --env staging
-   npx wrangler secret put EMAIL_API_KEY --env staging
-   npx wrangler secret put EMAIL_API_URL --env staging
    npx wrangler secret put EMAIL_FROM --env staging
    npx wrangler secret put EMISOR_CONFIG_JSON --env staging
    ```
@@ -52,6 +50,12 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 
    `CLOUDFLARE_API_TOKEN` is only needed when owners should be able to update secrets from the
    deployed **Credenciales** screen. Scope it narrowly to this Worker script's secret-edit API.
+
+   Receipt email uses the Cloudflare Email Service `EMAIL` binding declared in `wrangler.toml`.
+   Before expecting donor delivery, onboard the sender domain under Cloudflare Email Sending and set
+   `EMAIL_FROM` to an address on that domain. If Cloudflare returns `destination address is not a
+   verified address`, the Worker is reaching Email Service but the account/domain is still limited to
+   verified destination addresses rather than arbitrary donor recipients.
 
 6. Apply the schema and deploy:
 
@@ -122,6 +126,7 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
 8. Open **Credenciales** as an OWNER and verify that:
    - The staging Worker name and app environment are visible.
    - MH test, MH production, signer, issuer, Wompi, and email statuses show configured or pending.
+   - Correo shows the Cloudflare `EMAIL` binding and `EMAIL_FROM` as configured.
    - Blank fields are understood as "leave unchanged".
    - If the Cloudflare writer token is not configured, the save action fails visibly instead of
      storing secrets in D1.

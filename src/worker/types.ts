@@ -4,6 +4,7 @@ export interface Env {
   DB: D1Database;
   ISSUANCE_QUEUE: Queue<IssuanceMessage>;
   ASSETS: Fetcher;
+  EMAIL?: SendEmail;
   APP_ENV?: string;
   MOCK_EXTERNAL_SERVICES?: string;
   BOOTSTRAP_OWNER_TOKEN?: string;
@@ -31,8 +32,6 @@ export interface Env {
   MH_ANULACION_URL_TEST?: string;
   MH_ANULACION_URL_PROD?: string;
   MH_USER_AGENT?: string;
-  EMAIL_API_URL?: string;
-  EMAIL_API_KEY?: string;
   EMAIL_FROM?: string;
   EMISOR_CONFIG_JSON?: string;
 }

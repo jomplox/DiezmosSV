@@ -61,6 +61,62 @@ describe("owner bootstrap", () => {
 });
 
 describe("document email resend", () => {
+  it("sends receipts through the Cloudflare Email Service binding", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-1" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({
+      from: "legacy-contact-6@example.com",
+      to: "legacy-contact-2@example.com",
+      subject: "Comprobante DTE por donacion",
+      text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
+      attachments: [
+        expect.objectContaining({
+          filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.pdf",
+          type: "application/pdf",
+          disposition: "attachment"
+        }),
+        expect.objectContaining({
+          filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.json",
+          type: "application/json",
+          disposition: "attachment"
+        })
+      ]
+    });
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "SENT",
+      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-1" })
+    }));
+  });
+
   it("records and returns email failures when the provider is not configured", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
@@ -81,7 +137,7 @@ describe("document email resend", () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: "email_send_failed",
-      message: expect.stringContaining("EMAIL_API_URL")
+      message: expect.stringContaining("Cloudflare EMAIL binding")
     });
     expect(db.emailDeliveries).toHaveLength(1);
     expect(db.emailDeliveries[0]).toMatchObject({

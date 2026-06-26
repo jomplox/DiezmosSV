@@ -9,21 +9,32 @@ export class EmailService {
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
     const pdf = await renderDtePdf(record);
     const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donacion" : "Comprobante DTE por donacion";
+    const from = this.env.EMAIL_FROM ?? "dte@example.org";
+    const pdfAttachment = {
+      filename: `${record.codigo_generacion}.pdf`,
+      contentBase64: bytesToBase64(pdf),
+      contentType: "application/pdf"
+    };
+    const jsonAttachment = {
+      filename: `${record.codigo_generacion}.json`,
+      contentBase64: bytesToBase64(new TextEncoder().encode(record.signed_jws ?? record.plain_json)),
+      contentType: "application/json"
+    };
     const payload = {
-      from: this.env.EMAIL_FROM ?? "dte@example.org",
+      from,
       to: toEmail,
       subject,
       text: `Adjuntamos su Comprobante de Donacion Electronico ${record.numero_control}.`,
       attachments: [
         {
-          filename: `${record.codigo_generacion}.pdf`,
-          contentType: "application/pdf",
-          contentBase64: bytesToBase64(pdf)
+          filename: pdfAttachment.filename,
+          contentType: pdfAttachment.contentType,
+          contentBase64: pdfAttachment.contentBase64
         },
         {
-          filename: `${record.codigo_generacion}.json`,
-          contentType: "application/json",
-          contentBase64: bytesToBase64(new TextEncoder().encode(record.signed_jws ?? record.plain_json))
+          filename: jsonAttachment.filename,
+          contentType: jsonAttachment.contentType,
+          contentBase64: jsonAttachment.contentBase64
         }
       ]
     };
@@ -31,21 +42,29 @@ export class EmailService {
     if (isMockMode(this.env)) {
       return { mock: true, toEmail, subject };
     }
-    if (!this.env.EMAIL_API_URL || !this.env.EMAIL_API_KEY) {
-      throw new Error("EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled");
+    if (this.env.EMAIL) {
+      const result = await this.env.EMAIL.send({
+        from,
+        to: toEmail,
+        subject,
+        text: payload.text,
+        attachments: [
+          {
+            filename: pdfAttachment.filename,
+            type: pdfAttachment.contentType,
+            disposition: "attachment",
+            content: pdfAttachment.contentBase64
+          },
+          {
+            filename: jsonAttachment.filename,
+            type: jsonAttachment.contentType,
+            disposition: "attachment",
+            content: jsonAttachment.contentBase64
+          }
+        ]
+      });
+      return { provider: "cloudflare-email", messageId: result.messageId };
     }
-    const response = await fetch(this.env.EMAIL_API_URL, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.env.EMAIL_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
-    const body = await response.text();
-    if (!response.ok) {
-      throw new Error(`Email provider failed: ${response.status} ${body}`);
-    }
-    return body ? JSON.parse(body) : { ok: true };
+    throw new Error("Cloudflare EMAIL binding is required when mock mode is disabled");
   }
 }
