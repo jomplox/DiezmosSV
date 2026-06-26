@@ -5,6 +5,7 @@ import {
   Clock,
   Download,
   EyeOff,
+  FileSpreadsheet,
   FileText,
   FlaskConical,
   History,
@@ -24,7 +25,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "failures" | "contingency" | "audit" | "users" | "credentials";
+type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
@@ -32,6 +33,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "contingency", label: "Contingencia", icon: Clock },
   { id: "audit", label: "Auditoria", icon: History },
   { id: "users", label: "Usuarios", icon: Users },
+  { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
   { id: "credentials", label: "Credenciales", icon: Settings, minRole: "OWNER" }
 ];
 
@@ -52,6 +54,7 @@ export function App() {
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState("");
+  const [exportPeriod, setExportPeriod] = useState(currentMonthValue);
   const [testInput, setTestInput] = useState<TestDteInput>({
     amount: "1.00",
     donorName: "",
@@ -167,6 +170,28 @@ export function App() {
       link.download = `${selected.codigo_generacion}.${format}`;
       link.click();
       URL.revokeObjectURL(href);
+    });
+  }
+
+  async function downloadF960Csv() {
+    await runAction("export-f960", async () => {
+      const params = new URLSearchParams();
+      if (exportPeriod) params.set("period", exportPeriod);
+      const response = await fetch(`/api/exports/f960.csv?${params}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "f960.csv");
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast("CSV F960 descargado");
     });
   }
 
@@ -320,6 +345,15 @@ export function App() {
           </section>
         )}
 
+        {view === "exports" && can(user, "ADMIN") && (
+          <ExportPanel
+            period={exportPeriod}
+            busy={busy === "export-f960"}
+            onPeriodChange={setExportPeriod}
+            onDownload={downloadF960Csv}
+          />
+        )}
+
         {view === "credentials" && (
           <CredentialsPanel
             status={credentials}
@@ -333,6 +367,40 @@ export function App() {
       </main>
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
     </div>
+  );
+}
+
+function ExportPanel({
+  period,
+  busy,
+  onPeriodChange,
+  onDownload
+}: {
+  period: string;
+  busy: boolean;
+  onPeriodChange: (period: string) => void;
+  onDownload: () => Promise<void>;
+}) {
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>F960 CSV</h2>
+          <p>Documentos aceptados del periodo.</p>
+        </div>
+        <FileSpreadsheet size={20} />
+      </div>
+      <div className="export-controls">
+        <label>
+          <span>Periodo</span>
+          <input value={period} onChange={(event) => onPeriodChange(event.target.value)} type="month" />
+        </label>
+        <button className="primary" disabled={busy} onClick={() => void onDownload()}>
+          <Download size={16} />
+          {busy ? "Preparando" : "Descargar CSV"}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -731,7 +799,18 @@ function delay(ms: number): Promise<void> {
 function subtitleFor(view: View): string {
   if (view === "documents") return "Emision, sello, correo y acciones legales por CDE.";
   if (view === "credentials") return "Secretos MH, Wompi y correo para el Worker actual.";
+  if (view === "exports") return "Archivos CSV para declaracion y control.";
   return "Operaciones administrativas y trazabilidad.";
+}
+
+function currentMonthValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+}
+
+function filenameFromDisposition(disposition: string | null, fallback: string): string {
+  const match = disposition?.match(/filename="([^"]+)"/);
+  return match?.[1] ?? fallback;
 }
 
 interface TestDteInput {

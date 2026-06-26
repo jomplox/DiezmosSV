@@ -6,6 +6,7 @@ import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
 import { buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
+import { buildF960Export } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
@@ -119,6 +120,30 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/credentials") {
     return handleCredentialsRoute(request, env, repo, user);
+  }
+
+  if (url.pathname === "/api/exports/f960.csv" && request.method === "GET") {
+    const actor = requireRole(user, "ADMIN");
+    let result;
+    try {
+      result = buildF960Export(await repo.listAcceptedDteDocumentsForExport(), url.searchParams.get("period"));
+    } catch (error) {
+      return jsonResponse({ error: "invalid_export_period", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "F960_EXPORTED",
+      entityType: "export",
+      entityId: result.filename,
+      summary: `${result.rowCount} rows exported`
+    });
+    return new Response(result.csv, {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${result.filename}"`
+      }
+    });
   }
 
   const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);

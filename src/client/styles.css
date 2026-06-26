@@ -228,6 +228,7 @@ h2 {
 .auth-card input,
 .test-panel input,
 .user-create input,
+.export-controls input,
 .credential-fields input,
 .credential-fields textarea,
 select {
@@ -242,6 +243,7 @@ select,
 .auth-card input,
 .test-panel input,
 .user-create input,
+.export-controls input,
 .credential-fields input,
 .credential-fields textarea {
   border: 1px solid #d8e0e3;
@@ -307,6 +309,28 @@ select,
   display: grid;
   grid-template-columns: repeat(4, minmax(140px, 1fr)) max-content;
   margin-bottom: 16px;
+}
+
+.export-panel {
+  max-width: 640px;
+}
+
+.export-controls {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) max-content;
+  gap: 12px;
+  align-items: end;
+}
+
+.export-controls label {
+  display: grid;
+  gap: 6px;
+}
+
+.export-controls label span {
+  color: #52656c;
+  font-size: 12px;
+  font-weight: 650;
 }
 
 .credential-layout {
@@ -763,7 +787,8 @@ pre {
   }
 
   .test-grid,
-  .user-create {
+  .user-create,
+  .export-controls {
     grid-template-columns: 1fr;
   }
 

@@ -133,6 +133,13 @@ export class Repository {
       .then((result) => result.results ?? []);
   }
 
+  async listAcceptedDteDocumentsForExport(): Promise<DteDocumentRecord[]> {
+    return this.db
+      .prepare("SELECT * FROM dte_documents WHERE status = 'ACCEPTED' AND sello_recibido IS NOT NULL ORDER BY issued_at ASC")
+      .all<DteDocumentRecord>()
+      .then((result) => result.results ?? []);
+  }
+
   async updateDocumentSigned(id: string, signedJws: string): Promise<void> {
     await this.db
       .prepare("UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? WHERE id = ?")

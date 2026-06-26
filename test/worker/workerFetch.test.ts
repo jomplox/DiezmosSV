@@ -212,6 +212,53 @@ describe("document email resend", () => {
   });
 });
 
+describe("F960 CSV export", () => {
+  it("returns accepted CDEs in the real F960 semicolon format", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(
+      testDocument(),
+      {
+        ...testDocument(),
+        id: "doc_failed",
+        codigo_generacion: "0E9A4B17-C473-4B75-B2C7-E5B06D076D3B",
+        numero_control: "DTE-15-M001P004-000000000000010",
+        status: "FAILED",
+        sello_recibido: null
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960.csv?period=2026-06", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-062026.csv"');
+    await expect(response.text()).resolves.toBe(
+      "1;;Example Person;9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;100000001;062026\r\n"
+    );
+  });
+
+  it("requires an admin role", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960.csv", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
     const db = new InMemoryD1();
@@ -341,6 +388,30 @@ class Statement {
     return null;
   }
 
+  async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("FROM dte_documents")) {
+      let documents = [...this.db.documents];
+      if (this.sql.includes("status = ?")) {
+        const status = String(this.args[0]);
+        documents = documents.filter((document) => document.status === status);
+      }
+      if (this.sql.includes("status = 'ACCEPTED'")) {
+        documents = documents.filter((document) => document.status === "ACCEPTED");
+      }
+      if (this.sql.includes("sello_recibido IS NOT NULL")) {
+        documents = documents.filter((document) => document.sello_recibido !== null);
+      }
+      if (this.sql.includes("issued_at >= ?") && this.sql.includes("issued_at < ?")) {
+        const start = String(this.args[1]);
+        const end = String(this.args[2]);
+        documents = documents.filter((document) => document.issued_at >= start && document.issued_at < end);
+      }
+      documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at));
+      return { results: documents as T[] };
+    }
+    return { results: [] };
+  }
+
   async run(): Promise<Record<string, never>> {
     if (this.sql.includes("INSERT INTO users")) {
       const [id, email, name, role, passwordHash, passwordSalt] = this.args.map(String);
@@ -393,7 +464,7 @@ function testDocument(): DteDocumentRecord {
     status: "ACCEPTED",
     plain_json: JSON.stringify({
       emisor: { nombre: "ExamplePerson1" },
-      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com" },
+      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", tipoDocumento: "13", numDocumento: "100000001" },
       resumen: { valorTotal: 100 },
       identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
     }),
