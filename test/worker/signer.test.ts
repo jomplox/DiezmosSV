@@ -3,14 +3,16 @@ import { parseMhCertificate, signMhDocument, verifyMhJws } from "../../src/worke
 import { base64ToBytes, bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 
 describe("native MH signer", () => {
-  it("emits an RS512 compact JWS that verifies with the certificate public key", async () => {
+  it("emits an official-style RS512 JWS that verifies with the certificate public key", async () => {
     const password = "correct horse battery staple";
     const certXml = await generatedCertificateXml(password);
     const payload = { identificacion: { tipoDte: "15" }, resumen: { valorTotal: 10 } };
 
     const jws = await signMhDocument(payload, certXml, password);
+    const [, encodedPayload] = jws.split(".");
 
     expect(jws.split(".")).toHaveLength(3);
+    expect(Buffer.from(encodedPayload, "base64url").toString("utf8")).toBe(JSON.stringify(payload, null, 2));
     expect(await verifyMhJws(jws, certXml)).toBe(true);
   });
 

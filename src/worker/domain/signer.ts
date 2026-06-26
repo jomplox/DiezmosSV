@@ -19,7 +19,7 @@ export async function signMhDocument(document: unknown, certXml: string, passwor
   }
 
   const header = base64UrlFromString(JSON.stringify({ alg: "RS512" }));
-  const payload = base64UrlFromString(JSON.stringify(document));
+  const payload = base64UrlFromString(JSON.stringify(document, null, 2));
   const signingInput = `${header}.${payload}`;
   const key = await crypto.subtle.importKey(
     "pkcs8",

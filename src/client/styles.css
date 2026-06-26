@@ -43,6 +43,11 @@ button:hover {
   border-color: #8aa6a5;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .app-shell {
   display: grid;
   grid-template-columns: 248px minmax(0, 1fr);
@@ -123,6 +128,12 @@ td span {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
+}
+
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 h1,
@@ -214,6 +225,8 @@ h2 {
 
 .search input,
 .auth-card input,
+.test-panel input,
+.user-create input,
 select {
   border: 0;
   outline: 0;
@@ -223,12 +236,48 @@ select {
 }
 
 select,
-.auth-card input {
+.auth-card input,
+.test-panel input,
+.user-create input {
   border: 1px solid #d8e0e3;
   border-radius: 6px;
   min-height: 38px;
   padding: 0 10px;
   background: #ffffff;
+}
+
+.test-panel {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 14px;
+  align-items: end;
+  margin-bottom: 18px;
+  padding: 14px;
+  background: #eef8f7;
+  border: 1px solid #c8ebe7;
+  border-radius: 8px;
+}
+
+.test-panel h2 {
+  margin-bottom: 4px;
+}
+
+.test-panel p {
+  color: #52656c;
+  font-size: 12px;
+}
+
+.test-grid,
+.user-create {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr)) max-content;
+  gap: 8px;
+  align-items: center;
+}
+
+.user-create {
+  grid-template-columns: repeat(4, minmax(140px, 1fr)) max-content;
+  margin-bottom: 16px;
 }
 
 .icon-button {
@@ -317,6 +366,7 @@ tbody tr.selected {
 .mono {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
 
 .status {
@@ -401,7 +451,7 @@ dd {
 
 .actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-bottom: 14px;
 }
@@ -409,6 +459,7 @@ dd {
 .actions button {
   padding: 0 8px;
   font-size: 12px;
+  min-width: 0;
 }
 
 .danger {
@@ -528,6 +579,20 @@ pre {
   .toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .topbar-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .test-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .test-grid,
+  .user-create {
+    grid-template-columns: 1fr;
   }
 
   .stats {

@@ -68,25 +68,24 @@ export class MhClient {
       return cached.token;
     }
 
-    const form = new URLSearchParams();
     const credentials = this.credentials(ambiente);
-    form.set("user", credentials.user);
-    form.set("pwd", credentials.password);
-    const response = await fetch(mhEndpoint(this.env, "auth", ambiente), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        "User-Agent": this.env.MH_USER_AGENT ?? "DiezmosSV/1.0"
-      },
-      body: form
-    });
-    if (!response.ok) {
-      throw new Error(`MH auth failed: ${response.status} ${await response.text()}`);
+    const primaryAuthUrl = mhEndpoint(this.env, "auth", ambiente);
+    let data = await this.authenticate(primaryAuthUrl, credentials);
+    let token = data.body?.token;
+
+    // Some MH test accounts are provisioned through the central auth service while still transmitting to TEST endpoints.
+    if (!token && ambiente === "00" && isInvalidCredentials(data)) {
+      const centralAuthUrl = mhEndpoint(this.env, "auth", "01");
+      if (centralAuthUrl !== primaryAuthUrl) {
+        data = await this.authenticate(centralAuthUrl, credentials);
+        token = data.body?.token;
+      }
     }
-    const data = (await response.json()) as { body?: { token?: string }; tokenType?: string };
-    const token = data.body?.token;
+
     if (!token) {
-      throw new Error("MH auth response did not include body.token");
+      const code = data.body?.codigoMsg ? ` ${data.body.codigoMsg}` : "";
+      const message = data.body?.descripcionMsg ? `: ${data.body.descripcionMsg}` : "";
+      throw new Error(`MH auth response did not include body.token${code}${message}`);
     }
     const expiresAt = new Date(Date.now() + 23 * 60 * 60 * 1000).toISOString();
     await this.env.DB.prepare(
@@ -97,6 +96,24 @@ export class MhClient {
       .bind(ambiente, token, data.tokenType ?? "Bearer", expiresAt, nowIso())
       .run();
     return token;
+  }
+
+  private async authenticate(url: string, credentials: { user: string; password: string }): Promise<MhAuthResponse> {
+    const form = new URLSearchParams();
+    form.set("user", credentials.user);
+    form.set("pwd", credentials.password);
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": this.env.MH_USER_AGENT ?? "DiezmosSV/1.0"
+      },
+      body: form
+    });
+    if (!response.ok) {
+      throw new Error(`MH auth failed: ${response.status} ${await response.text()}`);
+    }
+    return (await response.json()) as MhAuthResponse;
   }
 
   private jsonHeaders(token: string): HeadersInit {
@@ -119,6 +136,19 @@ export class MhClient {
       password: this.env.MH_PASSWORD_TEST ?? requireSecret(this.env, "MH_PASSWORD")
     };
   }
+}
+
+interface MhAuthResponse {
+  body?: {
+    codigoMsg?: string;
+    descripcionMsg?: string;
+    token?: string;
+  };
+  tokenType?: string;
+}
+
+function isInvalidCredentials(data: MhAuthResponse): boolean {
+  return data.body?.codigoMsg === "106";
 }
 
 async function parseMhResponse(response: Response): Promise<MhResponse> {

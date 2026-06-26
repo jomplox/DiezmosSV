@@ -67,3 +67,79 @@ max_batch_timeout = 5
 
 [triggers]
 crons = ["*/15 * * * *"]
+
+# Remote TEST/Staging. Replace the zero database_id after:
+#   npx wrangler d1 create diezmossv-staging-resource-example
+# Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
+[env.staging]
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[env.staging.vars]
+APP_ENV = "staging"
+MOCK_EXTERNAL_SERVICES = "false"
+# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
+MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
+MH_CONTINGENCIA_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
+MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
+MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
+MH_USER_AGENT = "DiezmosSV/1.0"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "diezmossv-staging-resource-example"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[env.staging.queues.producers]]
+binding = "ISSUANCE_QUEUE"
+queue = "diezmossv-staging-issuance-example"
+
+[[env.staging.queues.consumers]]
+queue = "diezmossv-staging-issuance-example"
+max_batch_size = 10
+max_batch_timeout = 5
+
+[env.staging.triggers]
+crons = ["*/15 * * * *"]
+
+# Remote production. Replace the zero database_id after:
+#   npx wrangler d1 create diezmossv-production-resource-example
+# Deploy only after staging UAT approval and one controlled production issuance plan.
+[env.production]
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[env.production.vars]
+APP_ENV = "production"
+MOCK_EXTERNAL_SERVICES = "false"
+# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
+MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
+MH_CONTINGENCIA_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
+MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
+MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
+MH_USER_AGENT = "DiezmosSV/1.0"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "diezmossv-production-resource-example"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[env.production.queues.producers]]
+binding = "ISSUANCE_QUEUE"
+queue = "diezmossv-production-issuance-example"
+
+[[env.production.queues.consumers]]
+queue = "diezmossv-production-issuance-example"
+max_batch_size = 10
+max_batch_timeout = 5
+
+[env.production.triggers]
+crons = ["*/15 * * * *"]

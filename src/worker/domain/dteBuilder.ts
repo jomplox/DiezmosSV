@@ -82,7 +82,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     },
     otrosDocumentos: [
       {
-        codDocAsociado: null,
+        codDocAsociado: 1,
         descDocumento: "Referencia Wompi",
         detalleDocumento: payload.IdTransaccion
       }

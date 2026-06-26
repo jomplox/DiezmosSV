@@ -6,6 +6,13 @@
     "build": "vite build && tsc -p tsconfig.worker.json --noEmit",
     "dev": "vite --host 127.0.0.1",
     "dev:worker": "wrangler dev",
+    "cf:whoami": "wrangler whoami",
+    "cf:migrate:staging": "wrangler d1 migrations apply diezmossv-staging-resource-example --env staging --remote",
+    "cf:deploy:staging": "npm run build && wrangler deploy --env staging",
+    "cf:tail:staging": "wrangler tail --env staging",
+    "cf:migrate:prod": "wrangler d1 migrations apply diezmossv-production-resource-example --env production --remote",
+    "cf:deploy:prod": "npm run build && wrangler deploy --env production",
+    "cf:tail:prod": "wrangler tail --env production",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit"

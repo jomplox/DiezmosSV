@@ -1,11 +1,13 @@
 import { getEmisorConfig, requireSecret } from "./config";
 import { buildInvalidacionEvent, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
+import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
 import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader } from "./domain/wompi";
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
 import { EmailService } from "./services/email";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
+import { renderDtePdf } from "./services/pdf";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, WompiWebhook } from "./types";
 import { cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
@@ -128,6 +130,39 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse(await new IssuancePipeline(env).runContingencySweep());
   }
 
+  if (url.pathname === "/api/test/dte" && request.method === "POST") {
+    const actor = requireRole(user, "OPERATOR");
+    if ((env.APP_ENV ?? "local").toLowerCase() === "production") {
+      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+    }
+    const input = (await request.json().catch(() => ({}))) as TestWompiInput;
+    const donorDocument = input.donorDocument?.trim();
+    if (!donorDocument) {
+      return jsonResponse({ error: "missing_donor_document" }, { status: 400 });
+    }
+    let payload;
+    try {
+      payload = buildTestWompiPayload({ ...input, donorDocument });
+    } catch (error) {
+      return jsonResponse({ error: "invalid_test_payload", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
+    const rawBody = JSON.stringify(payload);
+    const environment = ambienteFromWompi(payload);
+    const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, { source: "admin_test_generation" }, environment);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: inserted ? "TEST_WOMPI_CREATED" : "TEST_WOMPI_DUPLICATE",
+      entityType: "wompi_event",
+      entityId: record.id,
+      summary: payload.IdTransaccion
+    });
+    if (inserted) {
+      await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
+    }
+    return jsonResponse({ ok: true, wompiEventId: record.id, queued: inserted, transactionId: payload.IdTransaccion }, { status: inserted ? 202 : 200 });
+  }
+
   if (url.pathname === "/api/users" && request.method === "GET") {
     requireRole(user, "ADMIN");
     return jsonResponse({ users: await repo.listUsers() });
@@ -169,6 +204,27 @@ async function handleDocumentRoute(
   if (!action && request.method === "GET") {
     requireRole(user, "VIEWER");
     return jsonResponse({ document, audit: await repo.listAudit("dte_document", document.id) });
+  }
+
+  if (action === "pdf" && request.method === "GET") {
+    requireRole(user, "VIEWER");
+    const pdf = await renderDtePdf(document);
+    return new Response(pdf, {
+      headers: {
+        "Content-Type": "application/pdf",
+        "Content-Disposition": `attachment; filename="${document.codigo_generacion}.pdf"`
+      }
+    });
+  }
+
+  if (action === "json" && request.method === "GET") {
+    requireRole(user, "VIEWER");
+    return new Response(document.signed_jws ?? document.plain_json, {
+      headers: {
+        "Content-Type": document.signed_jws ? "application/jose" : "application/json",
+        "Content-Disposition": `attachment; filename="${document.codigo_generacion}.json"`
+      }
+    });
   }
 
   if (action === "resend" && request.method === "POST") {

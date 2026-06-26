@@ -2,6 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+.dev.vars.*
 .DS_Store
 
 # Never publish real credentials, private keys, live certificates, or local MH exports.

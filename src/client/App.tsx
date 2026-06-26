@@ -2,10 +2,14 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
+  Download,
   FileText,
+  FlaskConical,
   History,
   KeyRound,
+  LogOut,
   Mail,
+  UserPlus,
   RefreshCw,
   RotateCcw,
   Search,
@@ -40,6 +44,20 @@ export function App() {
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
+  const [busy, setBusy] = useState("");
+  const [testInput, setTestInput] = useState<TestDteInput>({
+    amount: "1.00",
+    donorName: "",
+    donorEmail: "",
+    donorDocument: "",
+    donorPhone: ""
+  });
+  const [newUser, setNewUser] = useState<CreateUserInput>({
+    name: "",
+    email: "",
+    role: "VIEWER",
+    password: ""
+  });
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const filteredStatus = view === "failures" ? "FAILED" : status;
@@ -49,7 +67,7 @@ export function App() {
       return;
     }
     void refresh();
-  }, [token, filteredStatus, query]);
+  }, [token, filteredStatus, query, view]);
 
   async function refresh() {
     const params = new URLSearchParams();
@@ -81,15 +99,79 @@ export function App() {
     await login(email, password);
   }
 
+  function logout() {
+    localStorage.removeItem("diezmos_token");
+    localStorage.removeItem("diezmos_user");
+    setToken("");
+    setUser(null);
+    setDocuments([]);
+    setSelectedId(null);
+  }
+
+  async function createTestDte() {
+    if (!testInput.donorDocument.trim()) {
+      setToast("Ingrese documento del donante para la prueba");
+      return;
+    }
+    await runAction("test-dte", async () => {
+      await api("/api/test/dte", token, { method: "POST", body: testInput });
+      setToast("DTE de prueba enviado a cola");
+      await delay(2500);
+      await refresh();
+    });
+  }
+
   async function documentAction(action: "resend" | "retry" | "invalidate") {
     if (!selected) return;
     const body =
       action === "invalidate"
         ? { tipoAnulacion: 2, motivoAnulacion: "Invalidacion solicitada desde panel" }
         : {};
-    await api(`/api/documents/${selected.id}/${action}`, token, { method: "POST", body });
-    setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : "Invalidacion transmitida");
-    await refresh();
+    await runAction(action, async () => {
+      await api(`/api/documents/${selected.id}/${action}`, token, { method: "POST", body });
+      setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : "Invalidacion transmitida");
+      await refresh();
+    });
+  }
+
+  async function downloadDocument(format: "pdf" | "json") {
+    if (!selected) return;
+    await runAction(`download-${format}`, async () => {
+      const response = await fetch(`/api/documents/${selected.id}/${format}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = `${selected.codigo_generacion}.${format}`;
+      link.click();
+      URL.revokeObjectURL(href);
+    });
+  }
+
+  async function createUser() {
+    await runAction("create-user", async () => {
+      const created = await api<{ user: User }>("/api/users", token, { method: "POST", body: newUser });
+      setToast(`Usuario creado: ${created.user.email}`);
+      setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
+      await refresh();
+    });
+  }
+
+  async function runAction(name: string, action: () => Promise<void>) {
+    setBusy(name);
+    try {
+      await action();
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy("");
+    }
   }
 
   if (!token || !user) {
@@ -129,15 +211,24 @@ export function App() {
             <h1>{navItems.find((item) => item.id === view)?.label}</h1>
             <p>{view === "documents" ? "Emision, sello, correo y acciones legales por CDE." : "Operaciones administrativas y trazabilidad."}</p>
           </div>
-          <div className={contingency ? "contingency-banner open" : "contingency-banner"}>
-            <Clock size={16} />
-            {contingency ? `Contingencia ${String(contingency.status)}` : "Sin contingencia abierta"}
+          <div className="topbar-actions">
+            <div className={contingency ? "contingency-banner open" : "contingency-banner"}>
+              <Clock size={16} />
+              {contingency ? `Contingencia ${String(contingency.status)}` : "Sin contingencia abierta"}
+            </div>
+            <button className="icon-button" onClick={logout} title="Cerrar sesion">
+              <LogOut size={17} />
+            </button>
           </div>
         </header>
 
         {(view === "documents" || view === "failures") && (
-          <section className="document-layout">
-            <div className="table-panel">
+          <>
+            {view === "documents" && can(user, "OPERATOR") && (
+              <TestDtePanel input={testInput} busy={busy === "test-dte"} onChange={setTestInput} onSubmit={createTestDte} />
+            )}
+            <section className="document-layout">
+              <div className="table-panel">
               <div className="toolbar">
                 <label className="search">
                   <Search size={16} />
@@ -158,8 +249,14 @@ export function App() {
               <Stats documents={documents} />
               <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
             </div>
-            <DetailPanel selected={selected} onAction={documentAction} />
-          </section>
+              <DetailPanel
+                selected={selected}
+                busy={busy}
+                onAction={documentAction}
+                onDownload={downloadDocument}
+              />
+            </section>
+          </>
         )}
 
         {view === "contingency" && (
@@ -187,12 +284,51 @@ export function App() {
 
         {view === "users" && (
           <section className="single-panel">
-            {can(user, "ADMIN") ? <UserTable users={users} /> : <p>No tiene permisos para administrar usuarios.</p>}
+            {can(user, "ADMIN") ? (
+              <>
+                <UserCreateForm input={newUser} busy={busy === "create-user"} onChange={setNewUser} onSubmit={createUser} />
+                <UserTable users={users} />
+              </>
+            ) : (
+              <p>No tiene permisos para administrar usuarios.</p>
+            )}
           </section>
         )}
       </main>
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
     </div>
+  );
+}
+
+function TestDtePanel({
+  input,
+  busy,
+  onChange,
+  onSubmit
+}: {
+  input: TestDteInput;
+  busy: boolean;
+  onChange: (input: TestDteInput) => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <section className="test-panel">
+      <div>
+        <h2>Generar DTE de prueba</h2>
+        <p>Ambiente 00 desde una donacion Wompi simulada.</p>
+      </div>
+      <div className="test-grid">
+        <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
+        <input value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Donante" />
+        <input value={input.donorDocument} onChange={(event) => onChange({ ...input, donorDocument: event.target.value })} placeholder="Documento" />
+        <input value={input.donorEmail} onChange={(event) => onChange({ ...input, donorEmail: event.target.value })} placeholder="Correo" type="email" />
+        <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Telefono" />
+        <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
+          <FlaskConical size={16} />
+          {busy ? "Generando" : "Generar prueba"}
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -288,11 +424,22 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
   );
 }
 
-function DetailPanel({ selected, onAction }: { selected?: DteDocument; onAction: (action: "resend" | "retry" | "invalidate") => void }) {
+function DetailPanel({
+  selected,
+  busy,
+  onAction,
+  onDownload
+}: {
+  selected?: DteDocument;
+  busy: string;
+  onAction: (action: "resend" | "retry" | "invalidate") => void;
+  onDownload: (format: "pdf" | "json") => void;
+}) {
   if (!selected) {
     return <aside className="detail-panel empty">Sin documentos.</aside>;
   }
   const plain = JSON.parse(selected.plain_json);
+  const canInvalidate = selected.status === "ACCEPTED" && Boolean(selected.sello_recibido);
   return (
     <aside className="detail-panel">
       <div className="detail-head">
@@ -316,9 +463,11 @@ function DetailPanel({ selected, onAction }: { selected?: DteDocument; onAction:
         <span>Ventana legal calculada desde el sello para invalidacion CDE.</span>
       </div>
       <div className="actions">
-        <button onClick={() => onAction("resend")}><Mail size={16} />Reenviar</button>
-        <button onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
-        <button className="danger" onClick={() => onAction("invalidate")}><AlertTriangle size={16} />Invalidar</button>
+        <button disabled={busy === "resend"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar</button>
+        <button disabled={busy === "retry"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
+        <button className="danger" disabled={!canInvalidate || busy === "invalidate"} onClick={() => onAction("invalidate")}><AlertTriangle size={16} />Invalidar</button>
+        <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
+        <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
       <pre>{JSON.stringify(plain.resumen, null, 2)}</pre>
     </aside>
@@ -344,6 +493,36 @@ function UserTable({ users }: { users: User[] }) {
       <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th></tr></thead>
       <tbody>{users.map((user) => <tr key={user.id}><td>{user.name}</td><td>{user.email}</td><td>{user.role}</td></tr>)}</tbody>
     </table>
+  );
+}
+
+function UserCreateForm({
+  input,
+  busy,
+  onChange,
+  onSubmit
+}: {
+  input: CreateUserInput;
+  busy: boolean;
+  onChange: (input: CreateUserInput) => void;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <div className="user-create">
+      <input value={input.name} onChange={(event) => onChange({ ...input, name: event.target.value })} placeholder="Nombre" />
+      <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} placeholder="Correo" type="email" />
+      <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })}>
+        <option value="VIEWER">VIEWER</option>
+        <option value="OPERATOR">OPERATOR</option>
+        <option value="ADMIN">ADMIN</option>
+        <option value="OWNER">OWNER</option>
+      </select>
+      <input value={input.password} onChange={(event) => onChange({ ...input, password: event.target.value })} placeholder="Contrasena inicial" type="password" />
+      <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
+        <UserPlus size={16} />
+        Crear usuario
+      </button>
+    </div>
   );
 }
 
@@ -383,4 +562,23 @@ function can(user: User | null, role: Role): boolean {
   return user ? rank[user.role] >= rank[role] : false;
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
+
+interface TestDteInput {
+  amount: string;
+  donorName: string;
+  donorEmail: string;
+  donorDocument: string;
+  donorPhone: string;
+}
+
+interface CreateUserInput {
+  name: string;
+  email: string;
+  role: Role;
+  password: string;
+}

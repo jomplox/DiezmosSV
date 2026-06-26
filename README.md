@@ -152,6 +152,7 @@ DiezmosSV/
 │   └── client/                 # React + Vite admin panel
 ├── migrations/                 # D1 schema (0001_init.sql)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
+├── docs/                       # Deployment and UAT runbooks
 ├── examples/                   # wompi-webhook.sample.json (safe test payload)
 ├── test/worker/                # Vitest unit tests
 └── wrangler.toml               # Bindings, vars, queues, crons
@@ -225,36 +226,75 @@ The tests cover:
 ## 📦 Deploy to Cloudflare
 
 <details>
-<summary><strong>Step-by-step deployment</strong></summary>
+<summary><strong>TEST/Staging deployment</strong></summary>
 
 <br/>
 
+The default Wrangler config is local/mock. Real Cloudflare testing uses the `staging` environment:
+
 ```bash
-# 1 — Create the D1 database, then put the returned id in wrangler.toml
-npx wrangler d1 create example-worker
+# 1 - Authenticate Wrangler
+npx wrangler login
+npm run cf:whoami
 
-# 2 — Create the issuance queue
-npx wrangler queues create diezmossv-local-issuance-example
+# 2 - Create remote resources, then copy the returned D1 id into
+#     wrangler.toml under [[env.staging.d1_databases]]
+npx wrangler d1 create diezmossv-staging-resource-example
+npx wrangler queues create diezmossv-staging-issuance-example
 
-# 3 — Set production secrets
-npx wrangler secret put WOMPI_API_SECRET
-npx wrangler secret put MH_CERT_PASSWORD
-npx wrangler secret put MH_CERT_XML
-npx wrangler secret put MH_USER_TEST
-npx wrangler secret put MH_PASSWORD_TEST
-npx wrangler secret put MH_USER_PROD
-npx wrangler secret put MH_PASSWORD_PROD
-npx wrangler secret put EMAIL_API_KEY
+# 3 - Set TEST/staging secrets
+npx wrangler secret put WOMPI_API_SECRET --env staging
+npx wrangler secret put MH_CERT_PASSWORD --env staging
+npx wrangler secret put MH_CERT_XML --env staging
+npx wrangler secret put MH_USER_TEST --env staging
+npx wrangler secret put MH_PASSWORD_TEST --env staging
+npx wrangler secret put EMAIL_API_KEY --env staging
+npx wrangler secret put EMAIL_API_URL --env staging
+npx wrangler secret put EMAIL_FROM --env staging
+npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
-# 4 — Apply remote migrations
-npx wrangler d1 migrations apply example-worker
-
-# 5 — Build & deploy
-npm run build
-npx wrangler deploy
+# 4 - Apply migrations and deploy the Worker + ASSETS
+npm run cf:migrate:staging
+npm run cf:deploy:staging
 ```
 
-After deploy, set `MOCK_EXTERNAL_SERVICES = "false"` and point Wompi at your Worker (see below).
+Staging runs with `MOCK_EXTERNAL_SERVICES = "false"`. Use only MH ambiente `00` data here:
+test MH API user/password, the matching signer certificate XML/password, and a test Wompi secret.
+See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checklist.
+
+</details>
+
+<details>
+<summary><strong>Production cutover</strong></summary>
+
+<br/>
+
+Production is intentionally a separate Wrangler environment and should be used only after staging
+UAT approval.
+
+```bash
+# 1 - Create production resources, then copy the returned D1 id into
+#     wrangler.toml under [[env.production.d1_databases]]
+npx wrangler d1 create diezmossv-production-resource-example
+npx wrangler queues create diezmossv-production-issuance-example
+
+# 2 - Set production secrets
+npx wrangler secret put WOMPI_API_SECRET --env production
+npx wrangler secret put MH_CERT_PASSWORD --env production
+npx wrangler secret put MH_CERT_XML --env production
+npx wrangler secret put MH_USER_PROD --env production
+npx wrangler secret put MH_PASSWORD_PROD --env production
+npx wrangler secret put EMAIL_API_KEY --env production
+npx wrangler secret put EMAIL_API_URL --env production
+npx wrangler secret put EMAIL_FROM --env production
+npx wrangler secret put EMISOR_CONFIG_JSON --env production
+
+# 3 - Apply migrations and deploy after staging approval
+npm run cf:migrate:prod
+npm run cf:deploy:prod
+```
+
+Do one controlled low-value production issuance with live monitoring before enabling normal volume.
 
 </details>
 
@@ -262,7 +302,8 @@ After deploy, set `MOCK_EXTERNAL_SERVICES = "false"` and point Wompi at your Wor
 
 ## ⚙️ Configuration reference
 
-**Secrets** — set with `wrangler secret put` in production, or in `.dev.vars` locally:
+**Secrets** - set with `wrangler secret put --env staging` / `--env production` remotely, or in
+`.dev.vars` locally:
 
 | Variable | Purpose |
 |---|---|
@@ -272,13 +313,14 @@ After deploy, set `MOCK_EXTERNAL_SERVICES = "false"` and point Wompi at your Wor
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
 | `EMAIL_API_KEY` | Transactional email provider API key. |
-| `EMAIL_API_URL` / `EMAIL_FROM` | Email endpoint and sender address (set in `.dev.vars`; configure as a var/secret in production). |
+| `EMAIL_API_URL` / `EMAIL_FROM` | Email endpoint and sender address. |
+| `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
 > `MH_USER_*` / `MH_PASSWORD_*` is for the API. Don't use production credentials for test donations —
 > a test payment routed to `ambiente=00` with production-only credentials will fail authentication.
 
-**Vars** — set in `wrangler.toml [vars]`:
+**Vars** - set in `wrangler.toml [vars]` and duplicated per Wrangler environment:
 
 | Variable | Purpose |
 |---|---|
@@ -286,7 +328,7 @@ After deploy, set `MOCK_EXTERNAL_SERVICES = "false"` and point Wompi at your Wor
 | `MOCK_EXTERNAL_SERVICES` | `"true"` stubs MH + email (great for local dev). |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
-| `EMISOR_CONFIG_JSON` | Issuer (church) configuration: name, tax id, activity, address, control prefix, responsible person. |
+| `EMISOR_CONFIG_JSON` | Demo-only issuer config for local mock runs. Set the real value as a Cloudflare secret. |
 
 ---
 

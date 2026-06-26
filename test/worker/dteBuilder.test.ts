@@ -14,6 +14,7 @@ describe("DTE builders", () => {
     expect(document.identificacion.tipoDte).toBe("15");
     expect(document.identificacion.ambiente).toBe("00");
     expect(document.identificacion.numeroControl).toBe("DTE-15-00010001-000000000000001");
+    expect(document.otrosDocumentos[0].codDocAsociado).toBe(1);
     expect(document.receptor.nombre).toBe("Donante Demo");
     expect(document.resumen.valorTotal).toBe(10);
   });
