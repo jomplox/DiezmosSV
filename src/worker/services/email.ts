@@ -8,7 +8,7 @@ export class EmailService {
 
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
     const pdfBytes = await renderDtePdf(record);
-    const jsonBytes = new TextEncoder().encode(record.signed_jws ?? record.plain_json);
+    const jsonBytes = new TextEncoder().encode(record.plain_json);
     const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donacion" : "Comprobante DTE por donacion";
     const from = this.env.EMAIL_FROM ?? "dte@example.org";
     const pdfAttachment = {

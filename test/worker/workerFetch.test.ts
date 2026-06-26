@@ -128,6 +128,44 @@ describe("document email resend", () => {
     }));
   });
 
+  it("attaches valid DTE JSON even when the document has a signed JWS", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push({
+      ...testDocument(),
+      signed_jws: "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-1" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const sentMessage = sentMessages[0] as { attachments: Array<{ filename: string; content: unknown }> };
+    const jsonAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".json"));
+    expect(jsonAttachment?.content).toBeInstanceOf(Uint8Array);
+    expect(JSON.parse(new TextDecoder().decode(jsonAttachment?.content as Uint8Array))).toMatchObject({
+      receptor: { correo: "legacy-contact-2@example.com" }
+    });
+  });
+
   it("falls back to an HTTP email provider when Cloudflare requires verified destinations", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
