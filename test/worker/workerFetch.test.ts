@@ -439,6 +439,39 @@ describe("advanced CDE generation", () => {
     expect(db.documents).toHaveLength(0);
     expect(queued).toHaveLength(0);
   });
+
+  it("rejects an advanced CDE draft with an invalid DUI check digit", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    const draft = advancedCdeDraft();
+    (draft.receptor as Record<string, unknown>).tipoDocumento = "13";
+    (draft.receptor as Record<string, unknown>).numDocumento = "00000000-9";
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ draft })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_advanced_cde",
+      message: expect.stringContaining("DUI")
+    });
+    expect(db.documents).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+  });
 });
 
 describe("credential administration", () => {

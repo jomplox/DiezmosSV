@@ -456,6 +456,17 @@ select,
   font-weight: 650;
 }
 
+.field-error {
+  color: #a93530;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.advanced-form-grid input[aria-invalid="true"] {
+  border-color: #c2413b;
+  box-shadow: 0 0 0 1px rgba(194, 65, 59, 0.08);
+}
+
 .advanced-form-grid .span-2 {
   grid-column: 1 / -1;
 }

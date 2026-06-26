@@ -1,6 +1,7 @@
 import type { Ambiente, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
 import { mhDateTime } from "../utils/dates";
 import { generationCode, numeroControl } from "../utils/ids";
+import { assertValidDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
 
@@ -123,6 +124,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" }
     ]
   };
+  validateCdeDui(document);
   validateCde(document);
   return document;
 }
@@ -149,6 +151,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     horEmi: time,
     tipoMoneda: "USD"
   };
+  validateCdeDui(document);
   validateCde(document);
   return document;
 }
@@ -284,6 +287,13 @@ function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig
     distrito: config.direccion.distrito,
     complemento: complement
   };
+}
+
+function validateCdeDui(document: Record<string, unknown>): void {
+  const receptor = isRecord(document.receptor) ? document.receptor : {};
+  if (isDuiDocumentType(receptor.tipoDocumento)) {
+    assertValidDui(valueAsString(receptor.numDocumento));
+  }
 }
 
 function centsToAmount(cents: number): number {

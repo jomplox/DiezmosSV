@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { buildCdeDocument, buildContingenciaEvent, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildCdeDocument, buildContingenciaEvent, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
 import type { DteDocumentRecord, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -17,6 +17,53 @@ describe("DTE builders", () => {
     expect(document.otrosDocumentos[0].codDocAsociado).toBe(1);
     expect(document.receptor.nombre).toBe("Donante Demo");
     expect(document.resumen.valorTotal).toBe(10);
+  });
+
+  it("accepts valid DUI check-digit vectors in CDE receptor data", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00000000-0" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+
+    expect(document.receptor.tipoDocumento).toBe("13");
+    expect(document.receptor.numDocumento).toBe("00000000-0");
+  });
+
+  it("rejects invalid DUI check digits before building a CDE for MH", () => {
+    expect(() =>
+      buildCdeDocument(
+        { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00000000-9" } } as WompiWebhook,
+        emisorConfig,
+        {
+          sequence: 1,
+          issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+        }
+      )
+    ).toThrow(/DUI.*digito verificador/i);
+  });
+
+  it("rejects invalid DUI values in advanced CDE drafts", () => {
+    const draft = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00016297-5" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+    draft.receptor.numDocumento = "00016297-6";
+
+    expect(() =>
+      buildAdvancedCdeDocument(draft, emisorConfig, {
+        sequence: 2,
+        environment: "00",
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      })
+    ).toThrow(/DUI.*digito verificador/i);
   });
 
   it("builds a schema-valid contingency event for queued CDEs", () => {

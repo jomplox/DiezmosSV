@@ -36,7 +36,7 @@ export function buildTestWompiPayload(input: TestWompiInput = {}): WompiWebhook 
       DescripcionProducto: "Prueba controlada de integracion DTE"
     },
     Cliente: {
-      DocumentoIdentidad: clean(input.donorDocument) ?? "SIN-DOCUMENTO",
+      DocumentoIdentidad: clean(input.donorDocument) ?? "00000000-0",
       Nombre: firstName,
       Apellidos: lastName,
       Direccion: clean(input.donorAddress) ?? "Direccion de prueba",

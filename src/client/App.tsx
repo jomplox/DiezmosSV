@@ -28,6 +28,7 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
@@ -155,6 +156,11 @@ export function App() {
   async function createTestDte() {
     if (!testInput.donorDocument.trim()) {
       setToast("Ingrese documento del donante para la prueba");
+      return;
+    }
+    const donorDuiError = duiValidationMessage(testInput.donorDocument);
+    if (donorDuiError) {
+      setToast(donorDuiError);
       return;
     }
     await runAction("test-dte", async () => {
@@ -831,6 +837,7 @@ function AdvancedDteModal({
 }) {
   const activeStep = Math.max(0, Math.min(step, advancedCdeSteps.length - 1));
   const active = advancedCdeSteps[activeStep];
+  const donorDocumentError = isDuiDocumentType(form.donorTipoDocumento) ? duiValidationMessage(form.donorDocument) : "";
   const update = (patch: Partial<AdvancedCdeFormInput>) => onChange({ ...form, ...patch });
   return (
     <div className="modal-backdrop">
@@ -879,7 +886,12 @@ function AdvancedDteModal({
                   </select>
                 </AdvancedField>
                 <AdvancedField label="Numero documento">
-                  <input value={form.donorDocument} onChange={(event) => update({ donorDocument: event.target.value })} />
+                  <input
+                    value={form.donorDocument}
+                    onChange={(event) => update({ donorDocument: event.target.value })}
+                    aria-invalid={donorDocumentError ? "true" : "false"}
+                  />
+                  {donorDocumentError && <small className="field-error">{donorDocumentError}</small>}
                 </AdvancedField>
                 <AdvancedField label="NRC">
                   <input value={form.donorNrc} onChange={(event) => update({ donorNrc: event.target.value })} placeholder="Opcional" />
@@ -1542,11 +1554,23 @@ function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
   ];
   const missing = requiredFields.find(([value]) => !cleanText(value));
   if (missing) return `${missing[1]} es requerido`;
+  if (isDuiDocumentType(form.donorTipoDocumento)) {
+    const duiError = duiValidationMessage(form.donorDocument);
+    if (duiError) return duiError;
+  }
   if (cleanText(form.codPais).length !== 2) return "Pais debe usar codigo ISO de 2 letras";
   if (decimalValue(form.cantidad, 0) <= 0) return "Cantidad debe ser mayor que cero";
   if (decimalValue(form.valorUni, 0) <= 0) return "Valor unitario debe ser mayor que cero";
   if (decimalValue(form.valorTotal, 0) <= 0) return "Valor total debe ser mayor que cero";
   return null;
+}
+
+function duiValidationMessage(value: string): string {
+  const raw = cleanText(value);
+  if (!raw) return "";
+  if (cleanDui(raw).length !== 9) return "DUI debe tener 9 digitos";
+  if (!isValidDui(raw)) return "DUI con digito verificador invalido";
+  return "";
 }
 
 function cloneRecord(value: Record<string, unknown> | null): Record<string, unknown> {
