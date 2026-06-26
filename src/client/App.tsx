@@ -28,7 +28,34 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
-import { CAT020_COUNTRIES, isCat020CountryCode, normalizeCat020CountryCode } from "../shared/catalogs";
+import {
+  CAT012_DEPARTMENTS,
+  CAT014_UNITS,
+  CAT017_PAYMENT_FORMS,
+  CAT019_ACTIVITIES,
+  CAT020_COUNTRIES,
+  CAT021_ASSOCIATED_DOCUMENTS,
+  CAT022_DOCUMENT_TYPES,
+  CAT026_DONATION_TYPES,
+  CAT032_DOMICILE,
+  type CatalogOption,
+  findCatalogOption,
+  getCat008Districts,
+  getCat013Municipalities,
+  isCat008DistrictCode,
+  isCat012DepartmentCode,
+  isCat013MunicipalityCode,
+  isCat014UnitCode,
+  isCat017PaymentFormCode,
+  isCat019ActivityCode,
+  isCat020CountryCode,
+  isCat021AssociatedDocumentCode,
+  isCat022DocumentTypeCode,
+  isCat026DonationTypeCode,
+  isCat032DomicileCode,
+  normalizeCatalogCode,
+  normalizeCat020CountryCode
+} from "../shared/catalogs";
 import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
@@ -840,6 +867,23 @@ function AdvancedDteModal({
   const active = advancedCdeSteps[activeStep];
   const donorDocumentError = isDuiDocumentType(form.donorTipoDocumento) ? duiValidationMessage(form.donorDocument) : "";
   const update = (patch: Partial<AdvancedCdeFormInput>) => onChange({ ...form, ...patch });
+  const municipalityOptions = getCat013Municipalities(form.departamento);
+  const districtOptions = getCat008Districts(form.departamento);
+  const updateDepartment = (departamento: string) => {
+    const municipalities = getCat013Municipalities(departamento);
+    const districts = getCat008Districts(departamento);
+    update({
+      departamento,
+      municipio: catalogSelectValue(municipalities, form.municipio) || municipalities[0]?.code || "",
+      distrito: catalogSelectValue(districts, form.distrito) || districts[0]?.code || ""
+    });
+  };
+  const updateActivity = (donorCodActividad: string) => {
+    update({
+      donorCodActividad,
+      donorDescActividad: findCatalogOption(CAT019_ACTIVITIES, donorCodActividad)?.label ?? ""
+    });
+  };
   return (
     <div className="modal-backdrop">
       <section className="advanced-dte-modal" role="dialog" aria-modal="true" aria-labelledby="advanced-dte-title">
@@ -880,11 +924,7 @@ function AdvancedDteModal({
                   <input value={form.donorName} onChange={(event) => update({ donorName: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Tipo documento">
-                  <select value={form.donorTipoDocumento} onChange={(event) => update({ donorTipoDocumento: event.target.value })}>
-                    <option value="13">DUI</option>
-                    <option value="36">NIT</option>
-                    <option value="37">Otro</option>
-                  </select>
+                  <CatalogSelect value={form.donorTipoDocumento} options={CAT022_DOCUMENT_TYPES} onChange={(donorTipoDocumento) => update({ donorTipoDocumento })} />
                 </AdvancedField>
                 <AdvancedField label="Numero documento">
                   <input
@@ -897,11 +937,8 @@ function AdvancedDteModal({
                 <AdvancedField label="NRC">
                   <input value={form.donorNrc} onChange={(event) => update({ donorNrc: event.target.value })} placeholder="Opcional" />
                 </AdvancedField>
-                <AdvancedField label="Codigo actividad">
-                  <input value={form.donorCodActividad} onChange={(event) => update({ donorCodActividad: event.target.value })} placeholder="Opcional" />
-                </AdvancedField>
-                <AdvancedField label="Actividad economica">
-                  <input value={form.donorDescActividad} onChange={(event) => update({ donorDescActividad: event.target.value })} placeholder="Opcional" />
+                <AdvancedField label="Actividad economica" span>
+                  <CatalogSelect value={form.donorCodActividad} options={CAT019_ACTIVITIES} onChange={updateActivity} placeholder="No aplica" />
                 </AdvancedField>
                 <AdvancedField label="Correo">
                   <input value={form.donorEmail} onChange={(event) => update({ donorEmail: event.target.value })} type="email" />
@@ -910,29 +947,26 @@ function AdvancedDteModal({
                   <input value={form.donorPhone} onChange={(event) => update({ donorPhone: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Domicilio fiscal">
-                  <select value={form.codDomiciliado} onChange={(event) => update({ codDomiciliado: event.target.value })}>
-                    <option value="1">Domiciliado</option>
-                    <option value="2">No domiciliado</option>
-                  </select>
+                  <CatalogSelect value={form.codDomiciliado} options={CAT032_DOMICILE} onChange={(codDomiciliado) => update({ codDomiciliado })} />
                 </AdvancedField>
                 <AdvancedField label="Pais">
-                  <CountrySelect value={form.codPais} onChange={(codPais) => update({ codPais })} />
+                  <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
               </div>
             )}
             {active.id === "direccion" && (
               <div className="advanced-form-grid">
                 <AdvancedField label="Departamento">
-                  <input value={form.departamento} onChange={(event) => update({ departamento: event.target.value })} />
+                  <CatalogSelect value={form.departamento} options={CAT012_DEPARTMENTS} onChange={updateDepartment} />
                 </AdvancedField>
                 <AdvancedField label="Municipio">
-                  <input value={form.municipio} onChange={(event) => update({ municipio: event.target.value })} />
+                  <CatalogSelect value={form.municipio} options={municipalityOptions} onChange={(municipio) => update({ municipio })} placeholder="Seleccione" />
                 </AdvancedField>
                 <AdvancedField label="Distrito">
-                  <input value={form.distrito} onChange={(event) => update({ distrito: event.target.value })} />
+                  <CatalogSelect value={form.distrito} options={districtOptions} onChange={(distrito) => update({ distrito })} placeholder="Seleccione" />
                 </AdvancedField>
                 <AdvancedField label="Pais direccion">
-                  <CountrySelect value={form.codPais} onChange={(codPais) => update({ codPais })} />
+                  <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
                 <AdvancedField label="Complemento / direccion completa" span>
                   <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} rows={4} />
@@ -942,7 +976,7 @@ function AdvancedDteModal({
             {active.id === "donacion" && (
               <div className="advanced-form-grid">
                 <AdvancedField label="Tipo donacion">
-                  <input value={form.tipoDonacion} onChange={(event) => update({ tipoDonacion: event.target.value })} inputMode="numeric" />
+                  <CatalogSelect value={form.tipoDonacion} options={CAT026_DONATION_TYPES} onChange={(tipoDonacion) => update({ tipoDonacion })} />
                 </AdvancedField>
                 <AdvancedField label="Cantidad">
                   <input value={form.cantidad} onChange={(event) => update({ cantidad: event.target.value })} inputMode="decimal" />
@@ -951,7 +985,7 @@ function AdvancedDteModal({
                   <input value={form.codigo} onChange={(event) => update({ codigo: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Unidad medida">
-                  <input value={form.uniMedida} onChange={(event) => update({ uniMedida: event.target.value })} inputMode="numeric" />
+                  <CatalogSelect value={form.uniMedida} options={CAT014_UNITS} onChange={(uniMedida) => update({ uniMedida })} />
                 </AdvancedField>
                 <AdvancedField label="Tipo depreciacion">
                   <input value={form.tipoDepreciacion} onChange={(event) => update({ tipoDepreciacion: event.target.value })} inputMode="numeric" />
@@ -970,7 +1004,7 @@ function AdvancedDteModal({
             {active.id === "pago" && (
               <div className="advanced-form-grid">
                 <AdvancedField label="Codigo pago">
-                  <input value={form.pagoCodigo} onChange={(event) => update({ pagoCodigo: event.target.value })} />
+                  <CatalogSelect value={form.pagoCodigo} options={CAT017_PAYMENT_FORMS} onChange={(pagoCodigo) => update({ pagoCodigo })} />
                 </AdvancedField>
                 <AdvancedField label="Referencia pago">
                   <input value={form.pagoReferencia} onChange={(event) => update({ pagoReferencia: event.target.value })} />
@@ -979,6 +1013,9 @@ function AdvancedDteModal({
                   <input value={form.totalLetras} onChange={(event) => update({ totalLetras: event.target.value })} placeholder="Opcional" />
                 </AdvancedField>
                 <AdvancedField label="Documento asociado">
+                  <CatalogSelect value={form.documentoCodigo} options={CAT021_ASSOCIATED_DOCUMENTS} onChange={(documentoCodigo) => update({ documentoCodigo })} />
+                </AdvancedField>
+                <AdvancedField label="Identificacion documento">
                   <input value={form.documentoDesc} onChange={(event) => update({ documentoDesc: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Detalle documento">
@@ -1043,16 +1080,33 @@ function AdvancedField({ label, span, children }: { label: string; span?: boolea
   );
 }
 
-function CountrySelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+function CatalogSelect({
+  value,
+  options,
+  onChange,
+  placeholder
+}: {
+  value: string;
+  options: readonly CatalogOption[];
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const selectedValue = catalogSelectValue(options, value);
   return (
-    <select value={value} onChange={(event) => onChange(event.target.value)}>
-      {CAT020_COUNTRIES.map((country) => (
-        <option key={country.code} value={country.code}>
-          {country.code} - {country.label}
+    <select value={selectedValue} onChange={(event) => onChange(event.target.value)}>
+      {(placeholder || !selectedValue) && <option value="">{placeholder ?? "Seleccione"}</option>}
+      {options.map((option) => (
+        <option key={`${option.code}-${option.label}`} value={option.code}>
+          {option.code} - {option.label}
         </option>
       ))}
     </select>
   );
+}
+
+function catalogSelectValue(options: readonly CatalogOption[], value: unknown): string {
+  const code = normalizeCatalogCode(value);
+  return options.some((option) => option.code === code) ? code : "";
 }
 
 function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void> }) {
@@ -1386,6 +1440,7 @@ interface AdvancedCdeFormInput {
   totalLetras: string;
   pagoCodigo: string;
   pagoReferencia: string;
+  documentoCodigo: string;
   documentoDesc: string;
   documentoDetalle: string;
   apendiceCampo: string;
@@ -1405,9 +1460,9 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
     donorPhone: "00000000",
     codDomiciliado: "1",
     codPais: "SV",
-    departamento: "",
-    municipio: "",
-    distrito: "",
+    departamento: "06",
+    municipio: "22",
+    distrito: "01",
     direccionComplemento: "Direccion de prueba",
     tipoDonacion: "1",
     cantidad: "1",
@@ -1420,6 +1475,7 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
     totalLetras: "",
     pagoCodigo: "01",
     pagoReferencia: "STAGING",
+    documentoCodigo: "1",
     documentoDesc: "Referencia Wompi",
     documentoDetalle: "DTE avanzado",
     apendiceCampo: "Aplicativo",
@@ -1438,32 +1494,37 @@ function advancedFormFromDraft(draft: Record<string, unknown>): AdvancedCdeFormI
   const apendice = firstRecord(draft.apendice);
   const fallback = defaultAdvancedCdeForm();
   const countryCode = normalizeCat020CountryCode(textValue(receptor.codPais, fallback.codPais));
+  const departmentCode = catalogSelectValue(CAT012_DEPARTMENTS, textValue(direccion.departamento, fallback.departamento)) || fallback.departamento;
+  const municipalityOptions = getCat013Municipalities(departmentCode);
+  const districtOptions = getCat008Districts(departmentCode);
+  const activityCode = catalogSelectValue(CAT019_ACTIVITIES, textValue(receptor.codActividad));
   return {
     donorName: textValue(receptor.nombre, fallback.donorName),
-    donorTipoDocumento: textValue(receptor.tipoDocumento, fallback.donorTipoDocumento),
+    donorTipoDocumento: catalogSelectValue(CAT022_DOCUMENT_TYPES, textValue(receptor.tipoDocumento, fallback.donorTipoDocumento)) || fallback.donorTipoDocumento,
     donorDocument: textValue(receptor.numDocumento, fallback.donorDocument),
     donorNrc: textValue(receptor.nrc),
-    donorCodActividad: textValue(receptor.codActividad),
-    donorDescActividad: textValue(receptor.descActividad),
+    donorCodActividad: activityCode,
+    donorDescActividad: activityCode ? findCatalogOption(CAT019_ACTIVITIES, activityCode)?.label ?? textValue(receptor.descActividad) : "",
     donorEmail: textValue(receptor.correo),
     donorPhone: textValue(receptor.telefono),
-    codDomiciliado: textValue(receptor.codDomiciliado, fallback.codDomiciliado),
+    codDomiciliado: catalogSelectValue(CAT032_DOMICILE, textValue(receptor.codDomiciliado, fallback.codDomiciliado)) || fallback.codDomiciliado,
     codPais: isCat020CountryCode(countryCode) ? countryCode : fallback.codPais,
-    departamento: textValue(direccion.departamento),
-    municipio: textValue(direccion.municipio),
-    distrito: textValue(direccion.distrito),
+    departamento: departmentCode,
+    municipio: catalogSelectValue(municipalityOptions, textValue(direccion.municipio, fallback.municipio)) || municipalityOptions[0]?.code || fallback.municipio,
+    distrito: catalogSelectValue(districtOptions, textValue(direccion.distrito, fallback.distrito)) || districtOptions[0]?.code || fallback.distrito,
     direccionComplemento: textValue(direccion.complemento, fallback.direccionComplemento),
-    tipoDonacion: textValue(item.tipoDonacion, fallback.tipoDonacion),
+    tipoDonacion: catalogSelectValue(CAT026_DONATION_TYPES, textValue(item.tipoDonacion, fallback.tipoDonacion)) || fallback.tipoDonacion,
     cantidad: textValue(item.cantidad, fallback.cantidad),
     codigo: textValue(item.codigo, fallback.codigo),
-    uniMedida: textValue(item.uniMedida, fallback.uniMedida),
+    uniMedida: catalogSelectValue(CAT014_UNITS, textValue(item.uniMedida, fallback.uniMedida)) || fallback.uniMedida,
     descripcion: textValue(item.descripcion, fallback.descripcion),
     tipoDepreciacion: textValue(item.tipoDepreciacion, fallback.tipoDepreciacion),
     valorUni: textValue(item.valorUni, fallback.valorUni),
     valorTotal: textValue(item.valor, textValue(resumen.valorTotal, fallback.valorTotal)),
     totalLetras: textValue(resumen.totalLetras),
-    pagoCodigo: textValue(pago.codigo, fallback.pagoCodigo),
+    pagoCodigo: catalogSelectValue(CAT017_PAYMENT_FORMS, textValue(pago.codigo, fallback.pagoCodigo)),
     pagoReferencia: textValue(pago.referencia, fallback.pagoReferencia),
+    documentoCodigo: catalogSelectValue(CAT021_ASSOCIATED_DOCUMENTS, textValue(documento.codDocAsociado, fallback.documentoCodigo)) || fallback.documentoCodigo,
     documentoDesc: textValue(documento.descDocumento, fallback.documentoDesc),
     documentoDetalle: textValue(documento.detalleDocumento, fallback.documentoDetalle),
     apendiceCampo: textValue(apendice.campo, fallback.apendiceCampo),
@@ -1535,7 +1596,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
   draft.otrosDocumentos = [
     {
       ...documento,
-      codDocAsociado: 1,
+      codDocAsociado: integerValue(form.documentoCodigo, 1),
       descDocumento: cleanText(form.documentoDesc) || "Referencia avanzada",
       detalleDocumento: cleanText(form.documentoDetalle) || cleanText(form.pagoReferencia) || "DTE avanzado"
     }
@@ -1572,7 +1633,17 @@ function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
     const duiError = duiValidationMessage(form.donorDocument);
     if (duiError) return duiError;
   }
+  if (!isCat022DocumentTypeCode(form.donorTipoDocumento)) return "Tipo documento debe existir en CAT-022";
+  if (cleanText(form.donorCodActividad) && !isCat019ActivityCode(form.donorCodActividad)) return "Actividad economica debe existir en CAT-019";
+  if (!isCat032DomicileCode(form.codDomiciliado)) return "Domicilio fiscal debe existir en CAT-032";
   if (!isCat020CountryCode(form.codPais)) return "Pais debe existir en CAT-020";
+  if (!isCat012DepartmentCode(form.departamento)) return "Departamento debe existir en CAT-012";
+  if (!isCat013MunicipalityCode(form.municipio, form.departamento)) return "Municipio debe existir en CAT-013";
+  if (!isCat008DistrictCode(form.distrito, form.departamento)) return "Distrito debe existir en CAT-008";
+  if (!isCat026DonationTypeCode(form.tipoDonacion)) return "Tipo donacion debe existir en CAT-026";
+  if (!isCat014UnitCode(form.uniMedida)) return "Unidad medida debe existir en CAT-014";
+  if (!isCat017PaymentFormCode(form.pagoCodigo)) return "Codigo pago debe existir en CAT-017";
+  if (!isCat021AssociatedDocumentCode(form.documentoCodigo)) return "Documento asociado debe existir en CAT-021";
   if (decimalValue(form.cantidad, 0) <= 0) return "Cantidad debe ser mayor que cero";
   if (decimalValue(form.valorUni, 0) <= 0) return "Valor unitario debe ser mayor que cero";
   if (decimalValue(form.valorTotal, 0) <= 0) return "Valor total debe ser mayor que cero";

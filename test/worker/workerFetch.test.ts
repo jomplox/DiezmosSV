@@ -820,7 +820,7 @@ function advancedCdeDraft(): Record<string, unknown> {
     cuerpoDocumento: [
       {
         numItem: 1,
-        tipoDonacion: 4,
+        tipoDonacion: 1,
         cantidad: 1,
         codigo: "DIEZMO",
         uniMedida: 99,

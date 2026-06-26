@@ -1,7 +1,19 @@
 import type { Ambiente, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
 import { mhDateTime } from "../utils/dates";
 import { generationCode, numeroControl } from "../utils/ids";
-import { isCat020CountryCode } from "../../shared/catalogs";
+import {
+  isCat008DistrictCode,
+  isCat012DepartmentCode,
+  isCat013MunicipalityCode,
+  isCat014UnitCode,
+  isCat017PaymentFormCode,
+  isCat019ActivityCode,
+  isCat020CountryCode,
+  isCat021AssociatedDocumentCode,
+  isCat022DocumentTypeCode,
+  isCat026DonationTypeCode,
+  isCat032DomicileCode
+} from "../../shared/catalogs";
 import { assertValidDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
@@ -126,7 +138,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     ]
   };
   validateCdeDui(document);
-  validateCdeCountry(document);
+  validateCdeCatalogs(document);
   validateCde(document);
   return document;
 }
@@ -154,7 +166,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     tipoMoneda: "USD"
   };
   validateCdeDui(document);
-  validateCdeCountry(document);
+  validateCdeCatalogs(document);
   validateCde(document);
   return document;
 }
@@ -299,12 +311,57 @@ function validateCdeDui(document: Record<string, unknown>): void {
   }
 }
 
-function validateCdeCountry(document: Record<string, unknown>): void {
+function validateCdeCatalogs(document: Record<string, unknown>): void {
   const receptor = isRecord(document.receptor) ? document.receptor : {};
-  const countryCode = valueAsString(receptor.codPais);
-  if (!isCat020CountryCode(countryCode)) {
-    throw new Error(`CDE receptor.codPais must exist in CAT-020 Pais: ${countryCode ?? "missing"}`);
+  assertCatalogField("receptor.tipoDocumento", "CAT-022 Tipo de documento de identificación", receptor.tipoDocumento, isCat022DocumentTypeCode);
+  assertOptionalCatalogField("receptor.codActividad", "CAT-019 Código de Actividad Económica", receptor.codActividad, isCat019ActivityCode);
+  assertCatalogField("receptor.codDomiciliado", "CAT-032 Domicilio Fiscal", receptor.codDomiciliado, isCat032DomicileCode);
+  assertCatalogField("receptor.codPais", "CAT-020 País", receptor.codPais, isCat020CountryCode);
+
+  const direccion = isRecord(receptor.direccion) ? receptor.direccion : null;
+  if (direccion) {
+    assertCatalogField("receptor.direccion.departamento", "CAT-012 Departamento", direccion.departamento, isCat012DepartmentCode);
+    assertCatalogField("receptor.direccion.municipio", "CAT-013 Municipio", direccion.municipio, isCat013MunicipalityCode);
+    assertCatalogField("receptor.direccion.distrito", "CAT-008 Distrito", direccion.distrito, isCat008DistrictCode);
   }
+
+  const item = firstArrayRecord(document.cuerpoDocumento);
+  if (item) {
+    assertCatalogField("cuerpoDocumento.tipoDonacion", "CAT-026 Tipo de Donación", item.tipoDonacion, isCat026DonationTypeCode);
+    assertCatalogField("cuerpoDocumento.uniMedida", "CAT-014 Unidad de Medida", item.uniMedida, isCat014UnitCode);
+  }
+
+  const resumen = isRecord(document.resumen) ? document.resumen : {};
+  const pago = firstArrayRecord(resumen.pagos);
+  if (pago) {
+    assertOptionalCatalogField("resumen.pagos.codigo", "CAT-017 Forma de Pago", pago.codigo, isCat017PaymentFormCode);
+  }
+
+  const otrosDocumento = firstArrayRecord(document.otrosDocumentos);
+  if (otrosDocumento) {
+    assertOptionalCatalogField("otrosDocumentos.codDocAsociado", "CAT-021 Documentos Asociados", otrosDocumento.codDocAsociado, isCat021AssociatedDocumentCode);
+  }
+}
+
+function assertCatalogField(label: string, catalogName: string, value: unknown, isValid: (value: unknown) => boolean): void {
+  if (!isValid(value)) {
+    throw new Error(`CDE ${label} must exist in catalog ${catalogName}: ${displayValue(value)}`);
+  }
+}
+
+function assertOptionalCatalogField(label: string, catalogName: string, value: unknown, isValid: (value: unknown) => boolean): void {
+  if (value == null || value === "") {
+    return;
+  }
+  assertCatalogField(label, catalogName, value, isValid);
+}
+
+function firstArrayRecord(value: unknown): Record<string, unknown> | null {
+  return Array.isArray(value) && isRecord(value[0]) ? value[0] : null;
+}
+
+function displayValue(value: unknown): string {
+  return value == null ? "missing" : String(value);
 }
 
 function centsToAmount(cents: number): number {

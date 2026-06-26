@@ -79,6 +79,37 @@ describe("DTE builders", () => {
     ).toThrow(/CAT-020/i);
   });
 
+  it("rejects advanced CDE catalog values outside their MH catalogs", () => {
+    const draft = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00000000-0" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+    draft.receptor.direccion = {
+      departamento: "06",
+      municipio: "22",
+      distrito: "01",
+      complemento: "Direccion de prueba"
+    };
+    draft.receptor.tipoDocumento = "99";
+    draft.receptor.codDomiciliado = 9;
+    draft.cuerpoDocumento[0].tipoDonacion = 9;
+    draft.cuerpoDocumento[0].uniMedida = 999;
+    draft.resumen.pagos[0].codigo = "ZZ";
+    draft.otrosDocumentos[0].codDocAsociado = 99;
+
+    expect(() =>
+      buildAdvancedCdeDocument(draft, emisorConfig, {
+        sequence: 2,
+        environment: "00",
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      })
+    ).toThrow(/catalog/i);
+  });
+
   it("builds a schema-valid contingency event for queued CDEs", () => {
     const event = buildContingenciaEvent(emisorConfig, {
       ambiente: "00",
