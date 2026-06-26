@@ -1,7 +1,11 @@
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
-import { ELIM_LOGO_PNG_BASE64 } from "./orgLogo";
+import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import type { DteDocumentRecord } from "../types";
+
+const LOGO_X = 28;
+const LOGO_BOTTOM_Y = 729;
+const LOGO_HEIGHT = 42;
 
 export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Array> {
   const document = JSON.parse(record.plain_json) as CdePdfJson;
@@ -13,12 +17,11 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   const page = pdf.addPage([612, 792]);
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const logo = await pdf.embedPng(base64ToBytes(ELIM_LOGO_PNG_BASE64));
   const black = rgb(0, 0, 0);
   const grayFill = rgb(0.88, 0.88, 0.88);
   const green = rgb(0.0, 0.46, 0.07);
 
-  drawOrganizationLogo(page, logo);
+  drawOrganizationLogo(page);
   drawCentered(page, "DOCUMENTO TRIBUTARIO ELECTRÓNICO", 769, 9, bold, 190, 230);
   drawCentered(page, "COMPROBANTE DE DONACIÓN", 744, 14, bold, 170, 275);
   drawQr(page, buildQrPayload(record), 508, 690, 82);
@@ -74,8 +77,12 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   return pdf.save();
 }
 
-function drawOrganizationLogo(page: PDFPage, logo: PDFImage): void {
-  page.drawImage(logo, { x: 24, y: 727, width: 144, height: 50.4 });
+function drawOrganizationLogo(page: PDFPage): void {
+  const scale = LOGO_HEIGHT / ORG_LOGO_VIEW_BOX.height;
+  const topY = LOGO_BOTTOM_Y + LOGO_HEIGHT;
+  for (const path of ORG_LOGO_PATHS) {
+    page.drawSvgPath(path, { x: LOGO_X, y: topY, scale, color: rgb(0, 0, 0) });
+  }
 }
 
 function drawPartyBox(
@@ -251,14 +258,6 @@ function numberValue(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
-function base64ToBytes(value: string): Uint8Array {
-  const binary = atob(value.replace(/\s+/g, ""));
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
-  }
-  return bytes;
-}
 
 function amountInWords(amount: number, provided: string | null | undefined): string {
   const integer = Math.floor(Math.abs(amount));

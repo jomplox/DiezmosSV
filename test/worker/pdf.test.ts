@@ -32,6 +32,13 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("CIEN DOLARES 00/100 CTVS.");
     expect(text).toContain("Total de la Donación");
   });
+
+  it("draws the default logo as vector paths instead of an embedded raster image", async () => {
+    const pdf = await renderDtePdf(testDocument());
+    const pdfBody = Buffer.from(pdf).toString("latin1");
+
+    expect(pdfBody).not.toContain("/Subtype /Image");
+  });
 });
 
 function testDocument(): DteDocumentRecord {
