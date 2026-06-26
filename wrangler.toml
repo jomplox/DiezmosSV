@@ -54,6 +54,7 @@ allowed_sender_addresses = ["legacy-contact-4@example.com"]
 APP_ENV = "staging"
 MOCK_EXTERNAL_SERVICES = "false"
 CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-resource-example"
+EMAIL_ARBITRARY_RECIPIENTS = "true"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
