@@ -1,6 +1,8 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   Cloud,
   Clock,
   Download,
@@ -21,8 +23,9 @@ import {
   ShieldCheck,
   Users
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
+import { openNativeDatePicker } from "./datePicker";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
@@ -403,6 +406,16 @@ function ExportPanel({
   onEndDateChange: (date: string) => void;
   onDownload: (format: "csv" | "xlsx") => Promise<void>;
 }) {
+  const startDateInput = useRef<HTMLInputElement>(null);
+  const endDateInput = useRef<HTMLInputElement>(null);
+  const [openPicker, setOpenPicker] = useState<"start" | "end" | null>(null);
+
+  function openDateField(input: HTMLInputElement | null, field: "start" | "end"): void {
+    if (!openNativeDatePicker(input)) {
+      setOpenPicker(field);
+    }
+  }
+
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -413,13 +426,47 @@ function ExportPanel({
         <FileSpreadsheet size={20} />
       </div>
       <div className="export-controls">
-        <label>
+        <label className="date-field" onBlur={(event) => {
+          if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+            setOpenPicker(null);
+          }
+        }}>
           <span>Desde</span>
-          <input value={startDate} onChange={(event) => onStartDateChange(event.target.value)} type="date" />
+          <input
+            ref={startDateInput}
+            value={startDate}
+            onChange={(event) => onStartDateChange(event.target.value)}
+            onClick={() => openDateField(startDateInput.current, "start")}
+            type="date"
+          />
+          {openPicker === "start" && (
+            <DatePickerCalendar
+              value={startDate}
+              onSelect={onStartDateChange}
+              onClose={() => setOpenPicker(null)}
+            />
+          )}
         </label>
-        <label>
+        <label className="date-field" onBlur={(event) => {
+          if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+            setOpenPicker(null);
+          }
+        }}>
           <span>Hasta</span>
-          <input value={endDate} onChange={(event) => onEndDateChange(event.target.value)} type="date" />
+          <input
+            ref={endDateInput}
+            value={endDate}
+            onChange={(event) => onEndDateChange(event.target.value)}
+            onClick={() => openDateField(endDateInput.current, "end")}
+            type="date"
+          />
+          {openPicker === "end" && (
+            <DatePickerCalendar
+              value={endDate}
+              onSelect={onEndDateChange}
+              onClose={() => setOpenPicker(null)}
+            />
+          )}
         </label>
         <button className="primary" disabled={busy === "export-csv"} onClick={() => void onDownload("csv")}>
           <Download size={16} />
@@ -438,6 +485,61 @@ function ExportPanel({
       </div>
       <F960PreviewTable rows={preview.rows} />
     </section>
+  );
+}
+
+function DatePickerCalendar({
+  value,
+  onSelect,
+  onClose
+}: {
+  value: string;
+  onSelect: (date: string) => void;
+  onClose: () => void;
+}) {
+  const [visibleMonth, setVisibleMonth] = useState(() => monthStart(value));
+  const days = useMemo(() => calendarDays(visibleMonth), [visibleMonth]);
+
+  useEffect(() => {
+    setVisibleMonth(monthStart(value));
+  }, [value]);
+
+  return (
+    <div className="date-popover" role="dialog" aria-label="Seleccionar fecha" onMouseDown={(event) => event.preventDefault()}>
+      <div className="date-popover-head">
+        <button type="button" className="icon-button" onClick={() => setVisibleMonth(addMonths(visibleMonth, -1))} title="Mes anterior">
+          <ChevronLeft size={16} />
+        </button>
+        <strong>{monthLabel(visibleMonth)}</strong>
+        <button type="button" className="icon-button" onClick={() => setVisibleMonth(addMonths(visibleMonth, 1))} title="Mes siguiente">
+          <ChevronRight size={16} />
+        </button>
+      </div>
+      <div className="date-grid date-weekdays">
+        {["D", "L", "M", "M", "J", "V", "S"].map((day, index) => (
+          <span key={`${day}-${index}`}>{day}</span>
+        ))}
+      </div>
+      <div className="date-grid">
+        {days.map((day, index) =>
+          day ? (
+            <button
+              key={formatDateValue(day)}
+              type="button"
+              className={formatDateValue(day) === value ? "selected" : ""}
+              onClick={() => {
+                onSelect(formatDateValue(day));
+                onClose();
+              }}
+            >
+              {day.getUTCDate()}
+            </button>
+          ) : (
+            <span key={`empty-${index}`} />
+          )
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -888,6 +990,37 @@ function currentMonthStartValue(): string {
 function todayDateValue(): string {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function monthStart(value: string): Date {
+  const match = value.match(/^(\d{4})-(\d{2})-\d{2}$/);
+  if (match) {
+    return new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, 1));
+  }
+  const now = new Date();
+  return new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1));
+}
+
+function addMonths(value: Date, offset: number): Date {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth() + offset, 1));
+}
+
+function calendarDays(month: Date): Array<Date | null> {
+  const firstDay = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), 1));
+  const totalDays = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth() + 1, 0)).getUTCDate();
+  const days: Array<Date | null> = Array.from({ length: firstDay.getUTCDay() }, () => null);
+  for (let day = 1; day <= totalDays; day += 1) {
+    days.push(new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), day)));
+  }
+  return days;
+}
+
+function formatDateValue(value: Date): string {
+  return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+}
+
+function monthLabel(value: Date): string {
+  return new Intl.DateTimeFormat("es-SV", { month: "long", timeZone: "UTC", year: "numeric" }).format(value);
 }
 
 function exportParams(startDate: string, endDate: string): URLSearchParams {

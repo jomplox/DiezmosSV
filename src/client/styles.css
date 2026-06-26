@@ -324,10 +324,76 @@ select,
   gap: 6px;
 }
 
+.export-controls .date-field {
+  position: relative;
+}
+
 .export-controls label span {
   color: #52656c;
   font-size: 12px;
   font-weight: 650;
+}
+
+.date-popover {
+  background: #ffffff;
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  box-shadow: 0 14px 38px rgba(18, 40, 46, 0.16);
+  left: 0;
+  padding: 10px;
+  position: absolute;
+  top: calc(100% + 6px);
+  width: 250px;
+  z-index: 10;
+}
+
+.date-popover-head,
+.date-grid {
+  align-items: center;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+
+.date-popover-head {
+  grid-template-columns: 32px 1fr 32px;
+  margin-bottom: 8px;
+  text-align: center;
+}
+
+.date-popover-head strong {
+  color: #1b2328;
+  font-size: 13px;
+  text-transform: capitalize;
+}
+
+.date-weekdays {
+  color: #52656c;
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 4px;
+  text-align: center;
+}
+
+.date-grid button,
+.date-grid span {
+  align-items: center;
+  display: flex;
+  justify-content: center;
+  min-height: 30px;
+}
+
+.date-grid button {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0;
+}
+
+.date-grid button:hover,
+.date-grid button.selected {
+  background: #e8f7f4;
+  border-color: #0d8b8f;
+  color: #006a6e;
 }
 
 .export-summary {
