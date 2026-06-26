@@ -332,16 +332,46 @@ select,
   box-shadow: 0 18px 54px rgba(17, 35, 39, 0.22);
 }
 
+.confirm-modal {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  background: #ffffff;
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  box-shadow: 0 18px 54px rgba(17, 35, 39, 0.22);
+}
+
 .advanced-dte-modal header,
-.advanced-dte-modal footer {
+.advanced-dte-modal footer,
+.confirm-modal header,
+.confirm-modal footer {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 
-.advanced-dte-modal footer {
+.advanced-dte-modal footer,
+.confirm-modal footer {
   justify-content: flex-end;
+}
+
+.confirm-modal h2 {
+  margin-bottom: 4px;
+}
+
+.confirm-modal p {
+  color: #52656c;
+  font-size: 13px;
+}
+
+.confirm-facts {
+  padding: 12px;
+  border: 1px solid #e1e7e9;
+  border-radius: 6px;
+  background: #f7f9fa;
 }
 
 .wizard-actions {
@@ -952,6 +982,43 @@ dd {
   font-size: 13px;
 }
 
+.legal-box.warning {
+  color: #855900;
+  background: #fff7df;
+  border-color: #f0d089;
+}
+
+.legal-box.expired {
+  color: #a93530;
+  background: #fae8e6;
+  border-color: #e9b7b2;
+}
+
+.legal-box.pending {
+  color: #52656c;
+  background: #f5f7f8;
+  border-color: #d8e0e3;
+}
+
+.legal-box div {
+  display: grid;
+  gap: 3px;
+}
+
+.legal-box strong {
+  color: inherit;
+}
+
+.legal-box span,
+.legal-box small {
+  display: block;
+}
+
+.legal-box small {
+  color: inherit;
+  opacity: 0.78;
+}
+
 .actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -968,6 +1035,12 @@ dd {
 .danger {
   color: #a93530;
   border-color: #e9b7b2;
+}
+
+.danger.solid {
+  color: #ffffff;
+  background: #a93530;
+  border-color: #a93530;
 }
 
 .primary {

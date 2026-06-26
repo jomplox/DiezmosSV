@@ -28,6 +28,7 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { invalidationWindowInfo } from "./invalidationWindow";
 import {
   CAT012_DEPARTMENTS,
   CAT014_UNITS,
@@ -88,6 +89,8 @@ export function App() {
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState("");
+  const [now, setNow] = useState(() => new Date());
+  const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
   const [advancedDteOpen, setAdvancedDteOpen] = useState(false);
   const [advancedDteTemplate, setAdvancedDteTemplate] = useState<Record<string, unknown> | null>(null);
   const [advancedDteForm, setAdvancedDteForm] = useState(defaultAdvancedCdeForm);
@@ -116,8 +119,14 @@ export function App() {
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
+  const pendingInvalidation = useMemo(() => documents.find((document) => document.id === pendingInvalidationId) ?? null, [documents, pendingInvalidationId]);
   const filteredStatus = view === "failures" ? "FAILED" : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
+
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(new Date()), 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     if (!token) {
@@ -179,6 +188,7 @@ export function App() {
     setUser(null);
     setDocuments([]);
     setSelectedId(null);
+    setPendingInvalidationId(null);
   }
 
   async function createTestDte() {
@@ -231,15 +241,16 @@ export function App() {
     });
   }
 
-  async function documentAction(action: "resend" | "retry" | "invalidate") {
-    if (!selected) return;
+  async function documentAction(action: "resend" | "retry" | "invalidate", target = selected) {
+    if (!target) return;
     const body =
       action === "invalidate"
         ? { tipoAnulacion: 2, motivoAnulacion: "Invalidacion solicitada desde panel" }
         : {};
     await runAction(action, async () => {
-      await api(`/api/documents/${selected.id}/${action}`, token, { method: "POST", body });
+      await api(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : "Invalidacion transmitida");
+      if (action === "invalidate") setPendingInvalidationId(null);
       await refresh();
     });
   }
@@ -398,7 +409,9 @@ export function App() {
               <DetailPanel
                 selected={selected}
                 busy={busy}
+                now={now}
                 onAction={documentAction}
+                onInvalidateRequest={setPendingInvalidationId}
                 onDownload={downloadDocument}
               />
             </section>
@@ -476,6 +489,15 @@ export function App() {
           onReload={openAdvancedDte}
           onStepChange={setAdvancedDteStep}
           onSubmit={createAdvancedDte}
+        />
+      )}
+      {pendingInvalidation && (
+        <InvalidationConfirmDialog
+          document={pendingInvalidation}
+          busy={busy === "invalidate"}
+          now={now}
+          onCancel={() => setPendingInvalidationId(null)}
+          onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
       )}
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
@@ -1206,19 +1228,24 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
 function DetailPanel({
   selected,
   busy,
+  now,
   onAction,
+  onInvalidateRequest,
   onDownload
 }: {
   selected?: DteDocument;
   busy: string;
+  now: Date;
   onAction: (action: "resend" | "retry" | "invalidate") => void;
+  onInvalidateRequest: (id: string) => void;
   onDownload: (format: "pdf" | "json") => void;
 }) {
   if (!selected) {
     return <aside className="detail-panel empty">Sin documentos.</aside>;
   }
   const plain = JSON.parse(selected.plain_json);
-  const canInvalidate = selected.status === "ACCEPTED" && Boolean(selected.sello_recibido);
+  const invalidationWindow = invalidationWindowInfo(selected, now);
+  const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
   return (
     <aside className="detail-panel">
       <div className="detail-head">
@@ -1237,19 +1264,78 @@ function DetailPanel({
         <dt>Ambiente</dt>
         <dd>{selected.environment === "01" ? "Produccion" : "Pruebas"}</dd>
       </dl>
-      <div className="legal-box">
-        <CheckCircle2 size={17} />
-        <span>Ventana legal calculada desde el sello para invalidacion CDE.</span>
+      <div className={`legal-box ${invalidationWindow.tone}`}>
+        <LegalIcon size={17} />
+        <div>
+          <strong>Ventana de invalidacion CDE</strong>
+          <span>{invalidationWindow.remainingLabel}</span>
+          {invalidationWindow.deadlineLabel && <small>Limite: {invalidationWindow.deadlineLabel} hora El Salvador</small>}
+        </div>
       </div>
       <div className="actions">
         <button disabled={busy === "resend"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar</button>
         <button disabled={busy === "retry"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
-        <button className="danger" disabled={!canInvalidate || busy === "invalidate"} onClick={() => onAction("invalidate")}><AlertTriangle size={16} />Invalidar</button>
+        <button className="danger" disabled={!invalidationWindow.canInvalidate || busy === "invalidate"} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
       <pre>{JSON.stringify(plain.resumen, null, 2)}</pre>
     </aside>
+  );
+}
+
+function InvalidationConfirmDialog({
+  document,
+  busy,
+  now,
+  onCancel,
+  onConfirm
+}: {
+  document: DteDocument;
+  busy: boolean;
+  now: Date;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const windowInfo = invalidationWindowInfo(document, now);
+  return (
+    <div className="modal-backdrop">
+      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="invalidation-confirm-title">
+        <header>
+          <div>
+            <h2 id="invalidation-confirm-title">Confirmar invalidacion</h2>
+            <p>Esta accion transmite un evento de invalidacion al MH y no se puede deshacer desde el panel.</p>
+          </div>
+          <button className="icon-button" onClick={onCancel} disabled={busy} title="Cerrar">
+            <X size={17} />
+          </button>
+        </header>
+        <div className={`legal-box ${windowInfo.tone}`}>
+          <AlertTriangle size={17} />
+          <div>
+            <strong>{windowInfo.remainingLabel}</strong>
+            {windowInfo.deadlineLabel && <small>Limite: {windowInfo.deadlineLabel} hora El Salvador</small>}
+          </div>
+        </div>
+        <dl className="confirm-facts">
+          <dt>Control</dt>
+          <dd className="mono">{document.numero_control}</dd>
+          <dt>Codigo generacion</dt>
+          <dd className="mono">{document.codigo_generacion}</dd>
+          <dt>Sello</dt>
+          <dd className="mono">{document.sello_recibido ?? "Pendiente"}</dd>
+          <dt>Donante</dt>
+          <dd>{document.donor_name ?? "N/D"}</dd>
+        </dl>
+        <footer>
+          <button onClick={onCancel} disabled={busy}>Cancelar</button>
+          <button className="danger solid" onClick={onConfirm} disabled={busy || !windowInfo.canInvalidate}>
+            <AlertTriangle size={16} />
+            {busy ? "Invalidando" : "Confirmar invalidacion"}
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }
 
