@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { renderDtePdf } from "../../src/worker/services/pdf";
+import { buildDteQrPayload, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 describe("DTE PDF rendering", () => {
@@ -38,6 +38,15 @@ describe("DTE PDF rendering", () => {
     const pdfBody = Buffer.from(pdf).toString("latin1");
 
     expect(pdfBody).not.toContain("/Subtype /Image");
+  });
+
+  it("uses the MH public consultation QR URL with generation code and issue date", () => {
+    const url = new URL(buildDteQrPayload(testDocument()));
+
+    expect(url.href).toBe("https://admin.factura.gob.sv/consultaPublica?ambiente=00&codGen=6CAE5F7E-A590-4573-8EF2-FE48B14796C4&fechaEmi=2026-06-25");
+    expect(url.searchParams.get("tipoDte")).toBeNull();
+    expect(url.searchParams.get("codigoGeneracion")).toBeNull();
+    expect(url.searchParams.get("sello")).toBeNull();
   });
 });
 

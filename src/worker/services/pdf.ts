@@ -24,7 +24,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   drawOrganizationLogo(page);
   drawCentered(page, "DOCUMENTO TRIBUTARIO ELECTRÓNICO", 769, 9, bold, 190, 230);
   drawCentered(page, "COMPROBANTE DE DONACIÓN", 744, 14, bold, 170, 275);
-  drawQr(page, buildQrPayload(record), 508, 690, 82);
+  drawQr(page, buildDteQrPayload(record), 508, 690, 82);
 
   page.drawRectangle({ x: 18, y: 682, width: 294, height: 40, color: grayFill });
   drawKeyValue(page, "Código de generación:", record.codigo_generacion, 24, 708, 84, regular, bold, 7.6, black);
@@ -184,12 +184,12 @@ function drawRightAligned(page: PDFPage, text: string, y: number, size: number, 
   page.drawText(text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
 }
 
-function buildQrPayload(record: DteDocumentRecord): string {
+export function buildDteQrPayload(record: DteDocumentRecord): string {
+  const document = JSON.parse(record.plain_json) as CdePdfJson;
   const params = new URLSearchParams({
     ambiente: record.environment,
-    tipoDte: record.tipo_dte,
-    codigoGeneracion: record.codigo_generacion,
-    sello: record.sello_recibido ?? "TRANSITORIO"
+    codGen: record.codigo_generacion,
+    fechaEmi: document.identificacion?.fecEmi ?? record.issued_at.slice(0, 10)
   });
   return `https://admin.factura.gob.sv/consultaPublica?${params.toString()}`;
 }
