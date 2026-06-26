@@ -7,17 +7,18 @@ export class EmailService {
   constructor(private readonly env: Env) {}
 
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
-    const pdf = await renderDtePdf(record);
+    const pdfBytes = await renderDtePdf(record);
+    const jsonBytes = new TextEncoder().encode(record.signed_jws ?? record.plain_json);
     const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donacion" : "Comprobante DTE por donacion";
     const from = this.env.EMAIL_FROM ?? "dte@example.org";
     const pdfAttachment = {
       filename: `${record.codigo_generacion}.pdf`,
-      contentBase64: bytesToBase64(pdf),
+      contentBase64: bytesToBase64(pdfBytes),
       contentType: "application/pdf"
     };
     const jsonAttachment = {
       filename: `${record.codigo_generacion}.json`,
-      contentBase64: bytesToBase64(new TextEncoder().encode(record.signed_jws ?? record.plain_json)),
+      contentBase64: bytesToBase64(jsonBytes),
       contentType: "application/json"
     };
     const payload = {
@@ -54,13 +55,13 @@ export class EmailService {
               filename: pdfAttachment.filename,
               type: pdfAttachment.contentType,
               disposition: "attachment",
-              content: pdfAttachment.contentBase64
+              content: pdfBytes
             },
             {
               filename: jsonAttachment.filename,
               type: jsonAttachment.contentType,
               disposition: "attachment",
-              content: jsonAttachment.contentBase64
+              content: jsonBytes
             }
           ]
         });

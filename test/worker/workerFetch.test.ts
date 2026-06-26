@@ -113,6 +113,13 @@ describe("document email resend", () => {
         })
       ]
     });
+    const sentMessage = sentMessages[0] as { attachments: Array<{ content: unknown }> };
+    expect(sentMessage.attachments[0].content).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode((sentMessage.attachments[0].content as Uint8Array).slice(0, 4))).toBe("%PDF");
+    expect(sentMessage.attachments[1].content).toBeInstanceOf(Uint8Array);
+    expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
+      receptor: { correo: "legacy-contact-2@example.com" }
+    });
     expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
