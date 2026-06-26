@@ -3,6 +3,8 @@ import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import type { DteDocumentRecord } from "../types";
 
+type PdfColor = ReturnType<typeof rgb>;
+
 const LOGO_X = 28;
 const LOGO_BOTTOM_Y = 729;
 const LOGO_HEIGHT = 42;
@@ -26,17 +28,17 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   drawCentered(page, "COMPROBANTE DE DONACIÓN", 744, 14, bold, 170, 275);
   drawQr(page, buildDteQrPayload(record), 508, 690, 82);
 
-  page.drawRectangle({ x: 18, y: 682, width: 294, height: 40, color: grayFill });
-  drawKeyValue(page, "Código de generación:", record.codigo_generacion, 24, 708, 84, regular, bold, 7.6, black);
-  drawKeyValue(page, "Número de control:", record.numero_control, 24, 696, 84, regular, bold, 7.6, black);
-  drawKeyValue(page, "Sello de recepción:", record.sello_recibido ?? "TRANSITORIO", 24, 684, 84, regular, bold, 7.6, green);
+  drawRoundedRectangle(page, { x: 18, y: 685, width: 294, height: 40, radius: 5, color: grayFill });
+  drawKeyValue(page, "Código de generación:", record.codigo_generacion, 24, 716, 84, regular, bold, 7.6, black);
+  drawKeyValue(page, "Número de control:", record.numero_control, 24, 704, 84, regular, bold, 7.6, black);
+  drawKeyValue(page, "Sello de recepción:", record.sello_recibido ?? "TRANSITORIO", 24, 692, 84, regular, bold, 7.6, green);
 
-  page.drawText(`TIPO DE MODELO: v${document.identificacion?.version ?? ""}`, { x: 318, y: 708, size: 7.7, font: regular, color: black });
-  page.drawText(`PREVIO / TIPO DTE: ${record.tipo_dte}`, { x: 404, y: 708, size: 7.7, font: regular, color: black });
-  page.drawText(`TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 696, size: 7.7, font: regular, color: black });
-  page.drawText(`FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 684, size: 7.7, font: bold, color: black });
-  page.drawText("Moneda:", { x: 424, y: 684, size: 7.7, font: regular, color: black });
-  page.drawText(document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 684, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
+  page.drawText(`TIPO DE MODELO: v${document.identificacion?.version ?? ""}`, { x: 318, y: 716, size: 7.7, font: regular, color: black });
+  page.drawText(`PREVIO / TIPO DTE: ${record.tipo_dte}`, { x: 404, y: 716, size: 7.7, font: regular, color: black });
+  page.drawText(`TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 704, size: 7.7, font: regular, color: black });
+  page.drawText(`FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 692, size: 7.7, font: bold, color: black });
+  page.drawText("Moneda:", { x: 424, y: 692, size: 7.7, font: regular, color: black });
+  page.drawText(document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 692, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
 
   drawCentered(page, "EMISOR:", 675, 7.5, bold, 18, 294);
   drawCentered(page, "RECEPTOR:", 675, 7.5, bold, 318, 276);
@@ -85,6 +87,47 @@ function drawOrganizationLogo(page: PDFPage): void {
   }
 }
 
+function drawRoundedRectangle(
+  page: PDFPage,
+  options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    radius: number;
+    color?: PdfColor;
+    borderColor?: PdfColor;
+    borderWidth?: number;
+  }
+): void {
+  const radius = Math.max(0, Math.min(options.radius, options.width / 2, options.height / 2));
+  const { x, y, width, height, color, borderColor, borderWidth } = options;
+  if (radius === 0) {
+    page.drawRectangle({ x, y, width, height, color, borderColor, borderWidth });
+    return;
+  }
+  const path = [
+    `M ${radius} 0`,
+    `L ${width - radius} 0`,
+    `Q ${width} 0 ${width} ${radius}`,
+    `L ${width} ${height - radius}`,
+    `Q ${width} ${height} ${width - radius} ${height}`,
+    `L ${radius} ${height}`,
+    `Q 0 ${height} 0 ${height - radius}`,
+    `L 0 ${radius}`,
+    `Q 0 0 ${radius} 0`,
+    "Z"
+  ].join(" ");
+  page.drawSvgPath(path, {
+    x,
+    y: y + height,
+    scale: 1,
+    color,
+    borderColor,
+    borderWidth
+  });
+}
+
 function drawPartyBox(
   page: PDFPage,
   options: {
@@ -104,7 +147,7 @@ function drawPartyBox(
   }
 ): void {
   const black = rgb(0, 0, 0);
-  page.drawRectangle({ x: options.x, y: options.y, width: options.width, height: options.height, borderColor: black, borderWidth: 0.8 });
+  drawRoundedRectangle(page, { x: options.x, y: options.y, width: options.width, height: options.height, radius: 6, borderColor: black, borderWidth: 0.8 });
   const left = options.x + 6;
   const valueX = options.x + (options.width > 285 ? 91 : 82);
   const docX = options.x + (options.width > 285 ? 106 : 86);
@@ -119,26 +162,26 @@ function drawPartyBox(
 
 function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont, bold: PDFFont): void {
   const black = rgb(0, 0, 0);
-  page.drawRectangle({ x: 18, y: 550, width: 576, height: 22, color: black });
-  page.drawText("CANTIDAD", { x: 24, y: 557, size: 8.3, font: regular, color: rgb(1, 1, 1) });
-  drawCentered(page, "DESCRIPCIÓN", 557, 8.3, regular, 145, 280, rgb(1, 1, 1));
-  drawRightAligned(page, "VALOR", 557, 8.3, regular, 588, rgb(1, 1, 1));
+  drawRoundedRectangle(page, { x: 18, y: 548, width: 576, height: 22, radius: 5, color: black });
+  page.drawText("CANTIDAD", { x: 24, y: 555, size: 8.3, font: regular, color: rgb(1, 1, 1) });
+  drawCentered(page, "DESCRIPCIÓN", 555, 8.3, regular, 145, 280, rgb(1, 1, 1));
+  drawRightAligned(page, "VALOR", 555, 8.3, regular, 588, rgb(1, 1, 1));
 
-  page.drawText(formatQuantity(numberValue(item.cantidad, 1)), { x: 24, y: 540, size: 8.2, font: regular, color: black });
-  page.drawText(clean(item.descripcion) || "DONACIÓN", { x: 75, y: 540, size: 8.2, font: regular, color: black });
-  drawRightAligned(page, formatMoney(numberValue(item.valor, amount), false), 540, 8.2, regular, 588, black);
+  page.drawText(formatQuantity(numberValue(item.cantidad, 1)), { x: 24, y: 538, size: 8.2, font: regular, color: black });
+  page.drawText(clean(item.descripcion) || "DONACIÓN", { x: 75, y: 538, size: 8.2, font: regular, color: black });
+  drawRightAligned(page, formatMoney(numberValue(item.valor, amount), false), 538, 8.2, regular, 588, black);
 }
 
 function drawTotals(page: PDFPage, amount: number, totalLetras: string | null | undefined, regular: PDFFont, bold: PDFFont): void {
   const black = rgb(0, 0, 0);
-  page.drawRectangle({ x: 18, y: 26, width: 354, height: 62, borderColor: rgb(0.45, 0.45, 0.45), borderWidth: 0.7 });
-  page.drawText(`Valor en Letras:  ${amountInWords(amount, totalLetras)}`, { x: 24, y: 73, size: 7.9, font: regular, color: black });
-  page.drawText("Observaciones:", { x: 24, y: 46, size: 7.9, font: regular, color: black });
+  drawRoundedRectangle(page, { x: 18, y: 16, width: 354, height: 62, radius: 5, borderColor: rgb(0.45, 0.45, 0.45), borderWidth: 0.7 });
+  page.drawText(`Valor en Letras:  ${amountInWords(amount, totalLetras)}`, { x: 24, y: 66, size: 7.9, font: regular, color: black });
+  page.drawText("Observaciones:", { x: 24, y: 39, size: 7.9, font: regular, color: black });
 
-  page.drawRectangle({ x: 378, y: 26, width: 216, height: 28, borderColor: black, borderWidth: 1.2 });
-  page.drawText("Total de la Donación", { x: 384, y: 36, size: 8.4, font: bold, color: black });
-  page.drawText("$", { x: 482, y: 36, size: 8.4, font: regular, color: black });
-  drawRightAligned(page, formatMoney(amount, false), 36, 8.4, bold, 588, black);
+  drawRoundedRectangle(page, { x: 375, y: 16, width: 220, height: 28, radius: 3, borderColor: black, borderWidth: 1.2 });
+  page.drawText("Total de la Donación", { x: 381, y: 29, size: 8.4, font: bold, color: black });
+  page.drawText("$", { x: 480, y: 29, size: 8.4, font: regular, color: black });
+  drawRightAligned(page, formatMoney(amount, false), 29, 8.4, bold, 588, black);
 }
 
 function drawQr(page: PDFPage, text: string, x: number, y: number, size: number): void {
