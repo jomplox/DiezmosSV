@@ -1,14 +1,18 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  Cloud,
   Clock,
   Download,
+  EyeOff,
   FileText,
   FlaskConical,
   History,
   KeyRound,
+  Lock,
   LogOut,
   Mail,
+  Settings,
   UserPlus,
   RefreshCw,
   RotateCcw,
@@ -17,16 +21,18 @@ import {
   Users
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import type { AuditRow, DteDocument, User } from "./types";
+import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 
-type View = "documents" | "failures" | "contingency" | "audit" | "users";
+type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
+type View = "documents" | "failures" | "contingency" | "audit" | "users" | "credentials";
 
-const navItems: Array<{ id: View; label: string; icon: typeof FileText }> = [
+const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Clock },
   { id: "audit", label: "Auditoria", icon: History },
-  { id: "users", label: "Usuarios", icon: Users }
+  { id: "users", label: "Usuarios", icon: Users },
+  { id: "credentials", label: "Credenciales", icon: Settings, minRole: "OWNER" }
 ];
 
 export function App() {
@@ -40,6 +46,7 @@ export function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [users, setUsers] = useState<User[]>([]);
+  const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [contingency, setContingency] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string>("");
@@ -58,9 +65,11 @@ export function App() {
     role: "VIEWER",
     password: ""
   });
+  const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const filteredStatus = view === "failures" ? "FAILED" : status;
+  const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
 
   useEffect(() => {
     if (!token) {
@@ -84,6 +93,9 @@ export function App() {
     if (view === "users" && can(user, "ADMIN")) {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
     }
+    if (view === "credentials" && can(user, "OWNER")) {
+      setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials);
+    }
   }
 
   async function login(email: string, password: string) {
@@ -94,8 +106,12 @@ export function App() {
     setUser(result.user);
   }
 
-  async function bootstrap(email: string, name: string, password: string) {
-    await api("/api/auth/bootstrap-owner", "", { method: "POST", body: { email, name, password } });
+  async function bootstrap(email: string, name: string, password: string, setupToken: string) {
+    await api("/api/auth/bootstrap-owner", "", {
+      method: "POST",
+      headers: { "X-Bootstrap-Owner-Token": setupToken },
+      body: { email, name, password }
+    });
     await login(email, password);
   }
 
@@ -163,6 +179,15 @@ export function App() {
     });
   }
 
+  async function updateCredentials() {
+    await runAction("credentials", async () => {
+      const result = await api<{ updated: string[]; deleted: string[] }>("/api/credentials", token, { method: "POST", body: credentialInput });
+      setToast(`Secretos actualizados: ${result.updated.length}`);
+      setCredentialInput(emptyCredentialInput(credentialInput.environment));
+      setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials);
+    });
+  }
+
   async function runAction(name: string, action: () => Promise<void>) {
     setBusy(name);
     try {
@@ -189,7 +214,7 @@ export function App() {
           </div>
         </div>
         <nav>
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)}>
@@ -209,7 +234,7 @@ export function App() {
         <header className="topbar">
           <div>
             <h1>{navItems.find((item) => item.id === view)?.label}</h1>
-            <p>{view === "documents" ? "Emision, sello, correo y acciones legales por CDE." : "Operaciones administrativas y trazabilidad."}</p>
+            <p>{subtitleFor(view)}</p>
           </div>
           <div className="topbar-actions">
             <div className={contingency ? "contingency-banner open" : "contingency-banner"}>
@@ -294,9 +319,143 @@ export function App() {
             )}
           </section>
         )}
+
+        {view === "credentials" && (
+          <CredentialsPanel
+            status={credentials}
+            input={credentialInput}
+            busy={busy === "credentials"}
+            onChange={setCredentialInput}
+            onSubmit={updateCredentials}
+            onRefresh={async () => setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials)}
+          />
+        )}
       </main>
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
     </div>
+  );
+}
+
+function CredentialsPanel({
+  status,
+  input,
+  busy,
+  onChange,
+  onSubmit,
+  onRefresh
+}: {
+  status: CredentialStatus | null;
+  input: CredentialFormInput;
+  busy: boolean;
+  onChange: (input: CredentialFormInput) => void;
+  onSubmit: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const groups = status ? Object.entries(status.groups) : [];
+  return (
+    <section className="credential-layout">
+      <div className="credential-status-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Estado de secretos</h2>
+            <p>{status?.target.scriptName ?? "Worker no configurado"} · {status?.target.appEnv ?? "sin ambiente"}</p>
+          </div>
+          <button className="icon-button" onClick={() => void onRefresh()} title="Actualizar">
+            <RefreshCw size={17} />
+          </button>
+        </div>
+        <div className={status?.target.writerConfigured ? "writer-state ready" : "writer-state"}>
+          <Cloud size={17} />
+          <span>{status?.target.writerConfigured ? "Actualizacion directa activa" : "Falta token Cloudflare para guardar desde aqui"}</span>
+        </div>
+        <div className="credential-groups">
+          {groups.map(([id, group]) => (
+            <div className="credential-group" key={id}>
+              <div className="credential-group-title">
+                {group.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                <strong>{group.label}</strong>
+              </div>
+              <ul>
+                {group.items.map((item) => (
+                  <li key={item.name}>
+                    <span>{item.label}</span>
+                    <strong className={item.configured ? "configured" : ""}>{item.configured ? "Configurado" : "Pendiente"}</strong>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <form
+        className="credential-form-panel"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void onSubmit();
+        }}
+      >
+        <div className="panel-head">
+          <div>
+            <h2>Actualizar secretos</h2>
+            <p>Los valores son write-only en Cloudflare; deje campos en blanco para conservarlos.</p>
+          </div>
+          <Lock size={20} />
+        </div>
+        <div className="segmented credential-env">
+          <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+          <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Produccion 01</button>
+        </div>
+        <div className="credential-fields">
+          <label>
+            <span>Usuario MH API</span>
+            <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={input.environment === "test" ? "MH_USER_TEST" : "MH_USER_PROD"} autoComplete="off" />
+          </label>
+          <label>
+            <span>Password MH API</span>
+            <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={input.environment === "test" ? "MH_PASSWORD_TEST" : "MH_PASSWORD_PROD"} type="password" autoComplete="new-password" />
+          </label>
+          <label className="span-2">
+            <span>Certificado XML firmador</span>
+            <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value })} placeholder="Se divide automaticamente para Cloudflare" spellCheck={false} />
+          </label>
+          <label>
+            <span>Password llave privada</span>
+            <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder="MH_CERT_PASSWORD" type="password" autoComplete="new-password" />
+          </label>
+          <label>
+            <span>Wompi webhook HMAC</span>
+            <input value={input.wompiSecret} onChange={(event) => onChange({ ...input, wompiSecret: event.target.value })} placeholder="WOMPI_API_SECRET" type="password" autoComplete="new-password" />
+          </label>
+          <label className="span-2">
+            <span>Emisor config JSON</span>
+            <textarea value={input.emisorConfigJson} onChange={(event) => onChange({ ...input, emisorConfigJson: event.target.value })} placeholder="EMISOR_CONFIG_JSON" spellCheck={false} />
+          </label>
+          <label>
+            <span>Email API URL</span>
+            <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder="EMAIL_API_URL" type="url" />
+          </label>
+          <label>
+            <span>Email API key</span>
+            <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder="EMAIL_API_KEY" type="password" autoComplete="new-password" />
+          </label>
+          <label>
+            <span>Email remitente</span>
+            <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder="EMAIL_FROM" type="email" />
+          </label>
+        </div>
+        <div className="credential-actions">
+          <div>
+            <EyeOff size={16} />
+            <span>Los valores enviados no se muestran ni se guardan en D1.</span>
+          </div>
+          <button className="primary" disabled={busy} type="submit">
+            <KeyRound size={16} />
+            {busy ? "Guardando" : "Guardar secretos"}
+          </button>
+        </div>
+      </form>
+    </section>
   );
 }
 
@@ -332,11 +491,12 @@ function TestDtePanel({
   );
 }
 
-function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string) => Promise<void> }) {
+function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void> }) {
   const [mode, setMode] = useState<"login" | "bootstrap">("login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState("");
   return (
     <div className="auth-screen">
@@ -346,7 +506,7 @@ function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, passwor
           event.preventDefault();
           setError("");
           try {
-            if (mode === "bootstrap") await onBootstrap(email, name, password);
+            if (mode === "bootstrap") await onBootstrap(email, name, password, setupToken);
             else await onLogin(email, password);
           } catch (err) {
             setError(err instanceof Error ? err.message : String(err));
@@ -362,6 +522,7 @@ function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, passwor
         {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" />}
         <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />
         <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Contrasena" type="password" />
+        {mode === "bootstrap" && <input value={setupToken} onChange={(event) => setSetupToken(event.target.value)} placeholder="Token de setup" type="password" />}
         {error && <p className="error">{error}</p>}
         <button className="primary" type="submit">
           <KeyRound size={16} />
@@ -530,12 +691,13 @@ function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status.toLowerCase()}`}>{status}</span>;
 }
 
-async function api<T>(path: string, token: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+async function api<T>(path: string, token: string, options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
   const response = await fetch(path, {
     method: options.method ?? "GET",
     headers: {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(options.body ? { "Content-Type": "application/json" } : {})
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers ?? {})
     },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
@@ -566,7 +728,11 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
+function subtitleFor(view: View): string {
+  if (view === "documents") return "Emision, sello, correo y acciones legales por CDE.";
+  if (view === "credentials") return "Secretos MH, Wompi y correo para el Worker actual.";
+  return "Operaciones administrativas y trazabilidad.";
+}
 
 interface TestDteInput {
   amount: string;
@@ -581,4 +747,32 @@ interface CreateUserInput {
   email: string;
   role: Role;
   password: string;
+}
+
+interface CredentialFormInput {
+  environment: "test" | "production";
+  mhUser: string;
+  mhPassword: string;
+  certificateXml: string;
+  certificatePassword: string;
+  emisorConfigJson: string;
+  wompiSecret: string;
+  emailApiUrl: string;
+  emailApiKey: string;
+  emailFrom: string;
+}
+
+function emptyCredentialInput(environment: CredentialFormInput["environment"]): CredentialFormInput {
+  return {
+    environment,
+    mhUser: "",
+    mhPassword: "",
+    certificateXml: "",
+    certificatePassword: "",
+    emisorConfigJson: "",
+    wompiSecret: "",
+    emailApiUrl: "",
+    emailApiKey: "",
+    emailFrom: ""
+  };
 }

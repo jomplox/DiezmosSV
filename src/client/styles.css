@@ -19,7 +19,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -227,6 +228,8 @@ h2 {
 .auth-card input,
 .test-panel input,
 .user-create input,
+.credential-fields input,
+.credential-fields textarea,
 select {
   border: 0;
   outline: 0;
@@ -238,7 +241,9 @@ select {
 select,
 .auth-card input,
 .test-panel input,
-.user-create input {
+.user-create input,
+.credential-fields input,
+.credential-fields textarea {
   border: 1px solid #d8e0e3;
   border-radius: 6px;
   min-height: 38px;
@@ -246,11 +251,19 @@ select,
   background: #ffffff;
 }
 
+.credential-fields textarea {
+  min-height: 104px;
+  padding: 10px;
+  resize: vertical;
+}
+
 .test-panel {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 14px;
   align-items: end;
+  min-width: 0;
+  width: 100%;
   margin-bottom: 18px;
   padding: 14px;
   background: #eef8f7;
@@ -269,15 +282,170 @@ select,
 
 .test-grid,
 .user-create {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(120px, 1fr)) max-content;
   gap: 8px;
   align-items: center;
 }
 
+.test-grid {
+  display: flex;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.test-grid input {
+  flex: 1 1 112px;
+  min-width: 96px;
+  width: auto;
+}
+
+.test-grid button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .user-create {
+  display: grid;
   grid-template-columns: repeat(4, minmax(140px, 1fr)) max-content;
   margin-bottom: 16px;
+}
+
+.credential-layout {
+  display: grid;
+  grid-template-columns: 360px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.credential-status-panel,
+.credential-form-panel {
+  background: #ffffff;
+  border: 1px solid #dfe6e8;
+  border-radius: 8px;
+  padding: 16px;
+  min-width: 0;
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-head h2 {
+  margin-bottom: 4px;
+}
+
+.panel-head p {
+  color: #52656c;
+  font-size: 12px;
+}
+
+.writer-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 10px;
+  color: #7c4d00;
+  background: #fff8e8;
+  border: 1px solid #efcf91;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.writer-state.ready {
+  color: #006d66;
+  background: #edf9f7;
+  border-color: #c8ebe7;
+}
+
+.credential-groups {
+  display: grid;
+  gap: 10px;
+}
+
+.credential-group {
+  border-top: 1px solid #e5ecee;
+  padding-top: 10px;
+}
+
+.credential-group-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #1b2328;
+}
+
+.credential-group ul {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.credential-group li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #61737a;
+  font-size: 12px;
+}
+
+.credential-group li strong {
+  color: #a93530;
+  font-size: 11px;
+}
+
+.credential-group li strong.configured {
+  color: #00756f;
+}
+
+.credential-env {
+  margin-bottom: 14px;
+}
+
+.credential-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.credential-fields label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.credential-fields label span {
+  color: #52656c;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.credential-fields .span-2 {
+  grid-column: 1 / -1;
+}
+
+.credential-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+}
+
+.credential-actions div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #61737a;
+  font-size: 12px;
 }
 
 .icon-button {
@@ -565,6 +733,10 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .credential-layout {
+    grid-template-columns: 1fr;
+  }
+
   .detail-panel {
     position: static;
   }
@@ -593,6 +765,21 @@ pre {
   .test-grid,
   .user-create {
     grid-template-columns: 1fr;
+  }
+
+  .credential-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .credential-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .test-grid input,
+  .test-grid button {
+    flex-basis: 100%;
+    width: 100%;
   }
 
   .stats {

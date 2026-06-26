@@ -4,6 +4,7 @@ import { signMhDocument } from "./domain/signer";
 import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
 import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader } from "./domain/wompi";
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
+import { buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -11,7 +12,10 @@ import { renderDtePdf } from "./services/pdf";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, WompiWebhook } from "./types";
 import { cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
+import { timingSafeEqual } from "./utils/encoding";
 import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
+
+const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -86,6 +90,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
+    if (!hasValidBootstrapOwnerToken(request, env)) {
+      return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
+    }
     const body = (await request.json()) as { email: string; name: string; password: string };
     const owner = await auth.bootstrapOwner(body);
     await repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
@@ -108,6 +115,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         limit: Number(url.searchParams.get("limit") ?? 50)
       })
     });
+  }
+
+  if (url.pathname === "/api/credentials") {
+    return handleCredentialsRoute(request, env, repo, user);
   }
 
   const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);
@@ -188,6 +199,43 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   return notFound();
 }
 
+async function handleCredentialsRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+  const actor = requireRole(user, "OWNER");
+  if (request.method === "GET") {
+    return jsonResponse({ credentials: credentialStatus(env) });
+  }
+  if (request.method !== "POST") {
+    return methodNotAllowed();
+  }
+
+  const input = (await request.json()) as CredentialUpdateInput;
+  if (input.environment !== "test" && input.environment !== "production") {
+    return jsonResponse({ error: "invalid_credential_environment" }, { status: 400 });
+  }
+  const patch = buildCredentialSecretPatch(input);
+  if (Object.keys(patch).length === 0) {
+    return jsonResponse({ error: "no_credentials_supplied" }, { status: 400 });
+  }
+  try {
+    const result = await patchCloudflareWorkerSecrets(env, patch);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "CREDENTIALS_UPDATED",
+      entityType: "credentials",
+      entityId: input.environment,
+      summary: `Updated ${input.environment} credential secrets`,
+      metadata: { updated: result.updated, deleted: result.deleted }
+    });
+    return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted });
+  } catch (error) {
+    if (error instanceof CredentialWriterConfigError) {
+      return jsonResponse({ error: "credential_writer_not_configured", message: error.message }, { status: 503 });
+    }
+    return jsonResponse({ error: "credential_update_failed", message: error instanceof Error ? error.message : String(error) }, { status: 502 });
+  }
+}
+
 async function handleDocumentRoute(
   request: Request,
   env: Env,
@@ -234,10 +282,25 @@ async function handleDocumentRoute(
     if (!toEmail) {
       return jsonResponse({ error: "missing_email" }, { status: 400 });
     }
-    const response = await new EmailService(env).sendReceipt(document, toEmail);
-    await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "SENT", providerResponse: response });
-    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Resent to ${toEmail}`, metadata: response });
-    return jsonResponse({ ok: true });
+    try {
+      const response = await new EmailService(env).sendReceipt(document, toEmail);
+      await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "SENT", providerResponse: response });
+      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Resent to ${toEmail}`, metadata: response });
+      return jsonResponse({ ok: true });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "FAILED", providerResponse: { error: message } });
+      await repo.createAudit({
+        actorType: "USER",
+        actorId: actor.id,
+        action: "EMAIL_RESEND_FAILED",
+        entityType: "dte_document",
+        entityId: document.id,
+        summary: message,
+        metadata: { toEmail }
+      });
+      return jsonResponse({ error: "email_send_failed", message }, { status: 502 });
+    }
   }
 
   if (action === "retry" && request.method === "POST") {
@@ -326,4 +389,10 @@ async function handleDocumentRoute(
   }
 
   return methodNotAllowed();
+}
+
+function hasValidBootstrapOwnerToken(request: Request, env: Env): boolean {
+  const expected = env.BOOTSTRAP_OWNER_TOKEN?.trim();
+  const supplied = request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim();
+  return Boolean(expected && supplied && timingSafeEqual(supplied, expected));
 }

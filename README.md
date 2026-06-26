@@ -181,11 +181,15 @@ npm run dev          # Vite UI, proxies /api and /webhooks to the Worker
 ```
 
 Open the Vite URL and use **`Crear owner`** on first run to bootstrap the initial admin account.
+The setup form requires the `BOOTSTRAP_OWNER_TOKEN` value from your local `.dev.vars`.
 
 A starter `.dev.vars` looks like this — use **separate** MH credentials for test and production:
 
 ```bash
 WOMPI_API_SECRET="..."
+BOOTSTRAP_OWNER_TOKEN="..."
+CLOUDFLARE_ACCOUNT_ID="..."
+CLOUDFLARE_API_TOKEN="..."
 MH_CERT_PASSWORD="..."
 MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
 # Remote Cloudflare deploys can use MH_CERT_XML_PART_1 and MH_CERT_XML_PART_2
@@ -248,6 +252,9 @@ npx wrangler queues create diezmossv-staging-issuance-example
 
 # 3 - Set TEST/staging secrets
 npx wrangler secret put WOMPI_API_SECRET --env staging
+npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env staging
+npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env staging
+npx wrangler secret put CLOUDFLARE_API_TOKEN --env staging
 npx wrangler secret put MH_CERT_PASSWORD --env staging
 npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
@@ -266,6 +273,7 @@ npm run cf:deploy:staging
 STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
 STAGING_EMAIL="owner@example.org" \
 STAGING_PASSWORD="..." \
+STAGING_BOOTSTRAP_TOKEN="..." \
 WOMPI_API_SECRET="..." \
 SMOKE_DONOR_DOCUMENT="..." \
 npm run smoke:staging
@@ -293,6 +301,9 @@ npx wrangler queues create diezmossv-production-issuance-example
 
 # 2 - Set production secrets
 npx wrangler secret put WOMPI_API_SECRET --env production
+npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env production
+npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env production
+npx wrangler secret put CLOUDFLARE_API_TOKEN --env production
 npx wrangler secret put MH_CERT_PASSWORD --env production
 npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
@@ -322,6 +333,9 @@ Do one controlled low-value production issuance with live monitoring before enab
 | Variable | Purpose |
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
+| `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. Rotate or remove it after the owner account exists. |
+| `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account target used by the OWNER-only credential UI when saving Worker secrets. |
+| `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token used by the OWNER-only credential UI to call the Worker secret bulk-update endpoint. |
 | `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). Works locally and remotely only when it fits Cloudflare's 5 KB Worker variable limit. |
 | `MH_CERT_XML_PART_1` / `MH_CERT_XML_PART_2` | Split form of the same certificate XML for Cloudflare Workers when `MH_CERT_XML` is over the per-variable limit. |
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
@@ -341,9 +355,18 @@ Do one controlled low-value production issuance with live monitoring before enab
 |---|---|
 | `APP_ENV` | Informational environment name. |
 | `MOCK_EXTERNAL_SERVICES` | `"true"` stubs MH + email (great for local dev). |
+| `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in `.dev.vars`; set the real remote value as a Cloudflare secret. |
+
+The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
+credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and email provider
+secrets. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
+never the secret values. Blank fields preserve the existing secret, and successful updates are audited
+by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
+`CLOUDFLARE_API_TOKEN` is missing, the screen remains read-only and tells the owner that the
+Cloudflare writer is not configured.
 
 ---
 

@@ -7,6 +7,7 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 [vars]
 APP_ENV = "local"
 MOCK_EXTERNAL_SERVICES = "true"
+CLOUDFLARE_SCRIPT_NAME = "example-worker"
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
@@ -44,6 +45,7 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 [env.staging.vars]
 APP_ENV = "staging"
 MOCK_EXTERNAL_SERVICES = "false"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-resource-example"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
@@ -82,6 +84,7 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 [env.production.vars]
 APP_ENV = "production"
 MOCK_EXTERNAL_SERVICES = "false"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-resource-example"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"

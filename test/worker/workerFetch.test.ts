@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import worker from "../../src/worker/index";
-import type { Env } from "../../src/worker/types";
+import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 describe("Worker fetch error handling", () => {
   it("converts async API auth errors into JSON responses", async () => {
@@ -14,3 +14,281 @@ describe("Worker fetch error handling", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "auth_error" });
   });
 });
+
+describe("owner bootstrap", () => {
+  it("rejects first-owner bootstrap when the setup token is missing", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      bootstrapRequest(),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "bootstrap_token_required" });
+    expect(db.users).toHaveLength(0);
+  });
+
+  it("rejects first-owner bootstrap when the setup token is wrong", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      bootstrapRequest({ token: "wrong-token" }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "bootstrap_token_required" });
+    expect(db.users).toHaveLength(0);
+  });
+
+  it("creates the first owner when the setup token matches", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      bootstrapRequest({ token: "setup-token" }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+
+    expect(response.status).toBe(201);
+    await expect(response.json()).resolves.toMatchObject({
+      user: {
+        email: "legacy-contact-3@example.com",
+        name: "Example Person",
+        role: "OWNER"
+      }
+    });
+    expect(db.users).toHaveLength(1);
+    expect(db.users[0].role).toBe("OWNER");
+  });
+});
+
+describe("document email resend", () => {
+  it("records and returns email failures when the provider is not configured", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_send_failed",
+      message: expect.stringContaining("EMAIL_API_URL")
+    });
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "FAILED"
+    });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_RESEND_FAILED", entity_id: "doc_1" }));
+  });
+});
+
+describe("credential administration", () => {
+  it("returns safe credential status to owners", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/credentials", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+        MH_USER_TEST: "0614",
+        MH_PASSWORD_TEST: "test-password",
+        MH_CERT_XML_PART_1: "<CertificadoMH>",
+        MH_CERT_XML_PART_2: "</CertificadoMH>",
+        MH_CERT_PASSWORD: "cert-password"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as Record<string, unknown>;
+    expect(data).toMatchObject({
+      credentials: {
+        target: {
+          appEnv: "staging",
+          scriptName: "diezmossv-staging-resource-example",
+          writerConfigured: false
+        },
+        groups: {
+          mhTest: { ready: true },
+          signer: { ready: true }
+        }
+      }
+    });
+    expect(JSON.stringify(data)).not.toContain("test-password");
+    expect(JSON.stringify(data)).not.toContain("cert-password");
+  });
+
+  it("returns a clear error when credential update is not configured", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/credentials", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ environment: "test", mhUser: "0614", mhPassword: "test-password" })
+      }),
+      env(db, { APP_ENV: "staging" })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "credential_writer_not_configured"
+    });
+    expect(db.audits).toHaveLength(0);
+  });
+});
+
+function bootstrapRequest(options: { token?: string } = {}): Request {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (options.token) {
+    headers.set("X-Bootstrap-Owner-Token", options.token);
+  }
+  return new Request("https://example.org/api/auth/bootstrap-owner", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      email: "legacy-contact-3@example.com",
+      name: "Example Person",
+      password: "long-enough-password"
+    })
+  });
+}
+
+function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
+  return {
+    DB: db as unknown as D1Database,
+    ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+    ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+    ...values
+  };
+}
+
+class InMemoryD1 {
+  readonly users: Array<Record<string, string>> = [];
+  readonly audits: Array<Record<string, unknown>> = [];
+  readonly documents: DteDocumentRecord[] = [];
+  readonly emailDeliveries: Array<Record<string, unknown>> = [];
+  sessionUser: Record<string, string> | null = null;
+
+  prepare(sql: string): Statement {
+    return new Statement(this, sql);
+  }
+}
+
+class Statement {
+  private args: unknown[] = [];
+
+  constructor(
+    private readonly db: InMemoryD1,
+    private readonly sql: string
+  ) {}
+
+  bind(...args: unknown[]): this {
+    this.args = args;
+    return this;
+  }
+
+  async first<T>(): Promise<T | null> {
+    if (this.sql.includes("FROM sessions") && this.sql.includes("JOIN users")) {
+      return this.db.sessionUser as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM users")) {
+      return { count: this.db.users.length } as T;
+    }
+    if (this.sql.includes("FROM users WHERE id = ?")) {
+      return (this.db.users.find((user) => user.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
+      return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
+    }
+    return null;
+  }
+
+  async run(): Promise<Record<string, never>> {
+    if (this.sql.includes("INSERT INTO users")) {
+      const [id, email, name, role, passwordHash, passwordSalt] = this.args.map(String);
+      this.db.users.push({
+        id,
+        email,
+        name,
+        role,
+        password_hash: passwordHash,
+        password_salt: passwordSalt,
+        disabled_at: ""
+      });
+    }
+    if (this.sql.includes("INSERT INTO audit_logs")) {
+      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson] = this.args;
+      this.db.audits.push({
+        id,
+        actor_type: actorType,
+        actor_id: actorId,
+        action,
+        entity_type: entityType,
+        entity_id: entityId,
+        summary,
+        metadata_json: metadataJson
+      });
+    }
+    if (this.sql.includes("INSERT INTO email_deliveries")) {
+      const [id, documentId, toEmail, status, providerResponseJson, sentAt] = this.args;
+      this.db.emailDeliveries.push({
+        id,
+        document_id: documentId,
+        to_email: toEmail,
+        status,
+        provider_response_json: providerResponseJson,
+        sent_at: sentAt
+      });
+    }
+    return {};
+  }
+}
+
+function testDocument(): DteDocumentRecord {
+  return {
+    id: "doc_1",
+    wompi_event_id: "wompi_1",
+    tipo_dte: "15",
+    environment: "00",
+    codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
+    numero_control: "DTE-15-M001P004-000000000000009",
+    status: "ACCEPTED",
+    plain_json: JSON.stringify({
+      emisor: { nombre: "ExamplePerson1" },
+      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com" },
+      resumen: { valorTotal: 100 },
+      identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
+    }),
+    signed_jws: null,
+    sello_recibido: "20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE",
+    mh_estado: "PROCESADO",
+    mh_observaciones_json: "[]",
+    donor_email: "legacy-contact-2@example.com",
+    donor_name: "Example Person",
+    amount_cents: 10000,
+    issued_at: "2026-06-26T01:46:47.015Z",
+    accepted_at: "2026-06-26T01:46:48.000Z",
+    contingency_period_id: null,
+    created_at: "2026-06-26T01:46:47.015Z",
+    updated_at: "2026-06-26T01:46:48.000Z"
+  };
+}

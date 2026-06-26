@@ -13,6 +13,7 @@ Required env:
 
 Optional env:
   STAGING_BOOTSTRAP=1      Bootstrap owner before login if login fails and D1 is empty
+  STAGING_BOOTSTRAP_TOKEN  Required when STAGING_BOOTSTRAP=1; sent as X-Bootstrap-Owner-Token
   STAGING_NAME             Bootstrap owner name, default "Staging Owner"
   SMOKE_AMOUNT             Donation amount, default "1.00"
   SMOKE_DONOR_NAME         Donor name, default "Staging Smoke"
@@ -39,6 +40,9 @@ if (args.has("--help") || args.has("-h")) {
 
 const dryRun = args.has("--dry-run");
 const required = ["STAGING_URL", "STAGING_EMAIL", "STAGING_PASSWORD", "WOMPI_API_SECRET", "SMOKE_DONOR_DOCUMENT"];
+if (process.env.STAGING_BOOTSTRAP === "1") {
+  required.push("STAGING_BOOTSTRAP_TOKEN");
+}
 const missing = required.filter((key) => !process.env[key]);
 if (missing.length > 0) {
   fail(`Missing required env: ${missing.join(", ")}\n${help}`);
@@ -49,6 +53,7 @@ const config = {
   email: requiredEnv("STAGING_EMAIL"),
   password: requiredEnv("STAGING_PASSWORD"),
   bootstrap: process.env.STAGING_BOOTSTRAP === "1",
+  bootstrapToken: process.env.STAGING_BOOTSTRAP_TOKEN ?? "",
   name: process.env.STAGING_NAME ?? "Staging Owner",
   wompiSecret: requiredEnv("WOMPI_API_SECRET"),
   amount: process.env.SMOKE_AMOUNT ?? "1.00",
@@ -75,6 +80,7 @@ if (dryRun) {
     amount: config.amount,
     signedWebhookShape: Boolean(signWompiPayload(JSON.stringify(payload), config.wompiSecret)),
     willCreateUser: config.createUser,
+    willBootstrap: config.bootstrap,
     willInvalidate: config.invalidate,
     retryDocumentId: config.retryDocumentId ?? null
   });
@@ -193,6 +199,7 @@ async function authenticate() {
     await jsonRequest("/api/auth/bootstrap-owner", {
       method: "POST",
       token: null,
+      headers: { "X-Bootstrap-Owner-Token": config.bootstrapToken },
       body: { email: config.email, name: config.name, password: config.password }
     });
     return login();

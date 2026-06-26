@@ -39,3 +39,24 @@ export interface AuditRow {
   metadata_json: string;
   created_at: string;
 }
+
+export interface CredentialStatusItem {
+  name: string;
+  label: string;
+  configured: boolean;
+}
+
+export interface CredentialStatusGroup {
+  label: string;
+  ready: boolean;
+  items: CredentialStatusItem[];
+}
+
+export interface CredentialStatus {
+  target: {
+    appEnv: string;
+    scriptName: string | null;
+    writerConfigured: boolean;
+  };
+  groups: Record<string, CredentialStatusGroup>;
+}

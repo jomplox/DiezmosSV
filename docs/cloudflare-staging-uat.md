@@ -32,6 +32,9 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 
    ```bash
    npx wrangler secret put WOMPI_API_SECRET --env staging
+   npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env staging
+   npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env staging
+   npx wrangler secret put CLOUDFLARE_API_TOKEN --env staging
    npx wrangler secret put MH_CERT_PASSWORD --env staging
    npx wrangler secret put MH_CERT_XML_PART_1 --env staging
    npx wrangler secret put MH_CERT_XML_PART_2 --env staging
@@ -46,6 +49,9 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    Local dev may keep the certificate in one `MH_CERT_XML` value. Cloudflare Workers limit each
    variable/secret to 5 KB, so staging and production should split larger MH certificate XML values
    across `MH_CERT_XML_PART_1` and `MH_CERT_XML_PART_2`.
+
+   `CLOUDFLARE_API_TOKEN` is only needed when owners should be able to update secrets from the
+   deployed **Credenciales** screen. Scope it narrowly to this Worker script's secret-edit API.
 
 6. Apply the schema and deploy:
 
@@ -64,6 +70,7 @@ The quickest repeatable smoke pass is:
 STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
 STAGING_EMAIL="owner@example.org" \
 STAGING_PASSWORD="..." \
+STAGING_BOOTSTRAP_TOKEN="..." \
 WOMPI_API_SECRET="..." \
 SMOKE_DONOR_DOCUMENT="..." \
 SMOKE_DONOR_EMAIL="smoke@example.org" \
@@ -74,7 +81,7 @@ Useful flags:
 
 ```bash
 # Bootstrap the first owner if the staging D1 database is empty.
-STAGING_BOOTSTRAP=1 npm run smoke:staging
+STAGING_BOOTSTRAP=1 STAGING_BOOTSTRAP_TOKEN="..." npm run smoke:staging
 
 # Also create a disposable VIEWER user.
 SMOKE_CREATE_USER=1 npm run smoke:staging
@@ -95,7 +102,7 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
 `SMOKE_ALLOW_EMAIL_FAILURE=1` is set.
 
 1. Open the Worker URL and confirm the admin UI loads from ASSETS.
-2. Bootstrap the owner account if the staging D1 database is empty, then log in.
+2. Bootstrap the owner account with the `BOOTSTRAP_OWNER_TOKEN` if the staging D1 database is empty, then log in.
 3. Create at least one additional operator/admin user from the UI.
 4. Click **Generar prueba** with a known test donor document. Expected result:
    - The request is accepted by `/api/test/dte`.
@@ -112,7 +119,13 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
 6. Open the audit tab and verify entries exist for login, test generation, issuance, resend, retry,
    invalidation, and user creation where applicable.
 7. Run a contingency sweep from the UI and verify the button returns visibly instead of hanging.
-8. Watch logs during the smoke pass:
+8. Open **Credenciales** as an OWNER and verify that:
+   - The staging Worker name and app environment are visible.
+   - MH test, MH production, signer, issuer, Wompi, and email statuses show configured or pending.
+   - Blank fields are understood as "leave unchanged".
+   - If the Cloudflare writer token is not configured, the save action fails visibly instead of
+     storing secrets in D1.
+9. Watch logs during the smoke pass:
 
    ```bash
    npm run cf:tail:staging

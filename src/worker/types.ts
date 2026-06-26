@@ -6,6 +6,11 @@ export interface Env {
   ASSETS: Fetcher;
   APP_ENV?: string;
   MOCK_EXTERNAL_SERVICES?: string;
+  BOOTSTRAP_OWNER_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_SCRIPT_NAME?: string;
+  CLOUDFLARE_API_BASE_URL?: string;
   WOMPI_API_SECRET?: string;
   MH_CERT_XML?: string;
   MH_CERT_XML_PART_1?: string;
