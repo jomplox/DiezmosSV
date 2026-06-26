@@ -4,17 +4,17 @@ import type { DteDocument } from "../../src/client/types";
 
 describe("invalidation window presentation", () => {
   it("shows the remaining legal window for accepted stamped CDEs", () => {
-    const info = invalidationWindowInfo(testDocument(), new Date("2026-07-13T20:59:59.000Z"));
+    const info = invalidationWindowInfo(testDocument(), new Date("2026-06-29T02:59:59.000Z"));
 
     expect(info.canInvalidate).toBe(true);
-    expect(info.deadlineIso).toBe("2026-07-14T23:59:59.000Z");
-    expect(info.deadlineLabel).toBe("14/07/2026, 17:59");
+    expect(info.deadlineIso).toBe("2026-06-30T05:59:59.000Z");
+    expect(info.deadlineLabel).toBe("29/06/2026, 23:59");
     expect(info.remainingLabel).toBe("Quedan 1 dia y 3 horas para invalidar este CDE.");
     expect(info.tone).toBe("ok");
   });
 
   it("marks the window as closed after the legal deadline", () => {
-    const info = invalidationWindowInfo(testDocument(), new Date("2026-07-15T00:00:00.000Z"));
+    const info = invalidationWindowInfo(testDocument(), new Date("2026-06-30T06:00:00.000Z"));
 
     expect(info.canInvalidate).toBe(false);
     expect(info.remainingLabel).toBe("La ventana legal de invalidacion ya cerro.");

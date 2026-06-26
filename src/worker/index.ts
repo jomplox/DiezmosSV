@@ -11,7 +11,7 @@ import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { Repository } from "./storage/repository";
-import type { Env, IssuanceMessage, WompiWebhook } from "./types";
+import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { timingSafeEqual } from "./utils/encoding";
 import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
@@ -351,6 +351,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function mhRejectionMessage(result: MhResponse): string {
+  const raw = isRecord(result.raw) ? result.raw : {};
+  const code = typeof raw.codigoMsg === "string" ? raw.codigoMsg : "";
+  const description = typeof raw.descripcionMsg === "string" ? raw.descripcionMsg : "";
+  const rawMessage = [code, description].filter(Boolean).join(": ");
+  if (rawMessage) {
+    return rawMessage;
+  }
+  if (result.observaciones.length > 0) {
+    return result.observaciones.join("; ");
+  }
+  return result.estado || "Invalidacion rechazada por MH";
+}
+
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -545,7 +559,18 @@ async function handleDocumentRoute(
       summary: result.estado,
       metadata: result.raw
     });
-    return jsonResponse({ accepted: result.accepted, eventId, deadline, result });
+    const responseBody = { accepted: result.accepted, eventId, deadline, result };
+    if (!result.accepted) {
+      return jsonResponse(
+        {
+          ...responseBody,
+          error: "invalidation_rejected",
+          message: mhRejectionMessage(result)
+        },
+        { status: 409 }
+      );
+    }
+    return jsonResponse(responseBody);
   }
 
   return methodNotAllowed();

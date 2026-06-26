@@ -206,7 +206,7 @@ export function buildInvalidacionEvent(
       version: 3,
       ambiente: record.environment,
       codigoGeneracion: generationCode(),
-      fecEmi: date,
+      fecEmi: original.identificacion.fecEmi,
       horEmi: time,
       fusion: null
     },

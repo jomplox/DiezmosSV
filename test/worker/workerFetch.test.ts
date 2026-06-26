@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
+import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 afterEach(() => {
@@ -247,6 +248,62 @@ describe("document email resend", () => {
       status: "FAILED"
     });
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_RESEND_FAILED", entity_id: "doc_1" }));
+  });
+});
+
+describe("document invalidation", () => {
+  it("returns a conflict when MH rejects the invalidation event", async () => {
+    const db = new InMemoryD1();
+    const document = testDocument();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+    const certPassword = "correct horse battery staple";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            estado: "RECHAZADO",
+            codigoMsg: "027",
+            descripcionMsg: "[identificacion.fecEmi] DATO NO COINCIDE CON DTE",
+            selloRecibido: null,
+            observaciones: []
+          },
+          { status: 400 }
+        )
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Prueba rechazada" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        MH_CERT_XML: await generatedCertificateXml(certPassword),
+        MH_CERT_PASSWORD: certPassword,
+        MH_USER_TEST: "10000003520015",
+        MH_PASSWORD_TEST: "test-password",
+        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+        MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+      })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      accepted: false,
+      error: "invalidation_rejected",
+      message: expect.stringContaining("DATO NO COINCIDE")
+    });
+    expect(document.status).toBe("ACCEPTED");
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "DTE_INVALIDATION_REJECTED", entity_id: "doc_1" }));
   });
 });
 
@@ -740,7 +797,7 @@ function testDocument(): DteDocumentRecord {
     status: "ACCEPTED",
     plain_json: JSON.stringify({
       emisor: { nombre: "ExamplePerson1" },
-      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", tipoDocumento: "13", numDocumento: "100000001" },
+      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
       resumen: { valorTotal: 100 },
       identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
     }),
@@ -845,6 +902,30 @@ function advancedCdeDraft(): Record<string, unknown> {
       { campo: "Origen", etiqueta: "Origen", valor: "DTE avanzado" }
     ]
   };
+}
+
+function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) }
+  });
+}
+
+async function generatedCertificateXml(password: string): Promise<string> {
+  const pair = (await crypto.subtle.generateKey(
+    {
+      name: "RSASSA-PKCS1-v1_5",
+      modulusLength: 2048,
+      publicExponent: new Uint8Array([1, 0, 1]),
+      hash: "SHA-512"
+    },
+    true,
+    ["sign", "verify"]
+  )) as CryptoKeyPair;
+  const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
+  const spki = new Uint8Array((await crypto.subtle.exportKey("spki", pair.publicKey)) as ArrayBuffer);
+  const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
+  return `<CertificadoMH><nit>12345678901234</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
 }
 
 function emisorConfig() {

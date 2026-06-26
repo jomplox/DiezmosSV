@@ -128,7 +128,7 @@ describe("DTE builders", () => {
     const original = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 1,
       issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
-    });
+    }) as Record<string, any>;
     const record = {
       id: "dte_1",
       wompi_event_id: "wompi_1",
@@ -164,10 +164,12 @@ describe("DTE builders", () => {
         tipDocSolicita: "13",
         numDocSolicita: "000000000"
       },
-      new Date("2026-06-02T15:05:20.742-06:00")
+      new Date("2026-06-03T15:05:20.742-06:00")
     ) as Record<string, any>;
 
     expect(event.emisor.codEstableMH).toBe("M001");
     expect(event.emisor.codPuntoVentaMH).toBe("P004");
+    expect(event.identificacion.fecEmi).toBe(original.identificacion.fecEmi);
+    expect(event.documento.fecEmi).toBe(original.identificacion.fecEmi);
   });
 });
