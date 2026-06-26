@@ -197,6 +197,8 @@ MH_PASSWORD_PROD="..."
 EMAIL_API_URL="..."
 EMAIL_API_KEY="..."
 EMAIL_FROM="dte@example.org"
+
+EMISOR_CONFIG_JSON="{...}"
 ```
 
 > 🔒 **Never commit real credentials.** `.dev.vars`, `DTE/Credentials/`, MH PDFs, real Wompi webhook
@@ -256,6 +258,14 @@ npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 # 4 - Apply migrations and deploy the Worker + ASSETS
 npm run cf:migrate:staging
 npm run cf:deploy:staging
+
+# 5 - Run the deployed edge smoke test
+STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
+STAGING_EMAIL="owner@example.org" \
+STAGING_PASSWORD="..." \
+WOMPI_API_SECRET="..." \
+SMOKE_DONOR_DOCUMENT="..." \
+npm run smoke:staging
 ```
 
 Staging runs with `MOCK_EXTERNAL_SERVICES = "false"`. Use only MH ambiente `00` data here:
@@ -328,7 +338,7 @@ Do one controlled low-value production issuance with live monitoring before enab
 | `MOCK_EXTERNAL_SERVICES` | `"true"` stubs MH + email (great for local dev). |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
-| `EMISOR_CONFIG_JSON` | Demo-only issuer config for local mock runs. Set the real value as a Cloudflare secret. |
+| `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in `.dev.vars`; set the real remote value as a Cloudflare secret. |
 
 ---
 

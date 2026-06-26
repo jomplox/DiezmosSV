@@ -53,6 +53,42 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 
 Capture the Worker URL from Wrangler after deploy.
 
+The quickest repeatable smoke pass is:
+
+```bash
+STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
+STAGING_EMAIL="owner@example.org" \
+STAGING_PASSWORD="..." \
+WOMPI_API_SECRET="..." \
+SMOKE_DONOR_DOCUMENT="..." \
+SMOKE_DONOR_EMAIL="smoke@example.org" \
+npm run smoke:staging
+```
+
+Useful flags:
+
+```bash
+# Bootstrap the first owner if the staging D1 database is empty.
+STAGING_BOOTSTRAP=1 npm run smoke:staging
+
+# Also create a disposable VIEWER user.
+SMOKE_CREATE_USER=1 npm run smoke:staging
+
+# Consume the accepted TEST DTE by sending an invalidation event.
+SMOKE_INVALIDATE=1 npm run smoke:staging
+
+# Exercise retry against a known failed/rejected staging document.
+SMOKE_RETRY_DOCUMENT_ID="dte_..." npm run smoke:staging
+
+# Check configuration and signed-webhook shape without network calls.
+npm run smoke:staging -- --dry-run
+```
+
+By default, the script verifies the deployed admin shell, `/api/health`, login, signed Wompi webhook
+ingress, Queue-driven CDE issuance to MH `ambiente=00`, admin-generated TEST DTE issuance, PDF/JSON
+downloads, email resend, contingency sweep, and audit-log visibility. It fails on email resend unless
+`SMOKE_ALLOW_EMAIL_FAILURE=1` is set.
+
 1. Open the Worker URL and confirm the admin UI loads from ASSETS.
 2. Bootstrap the owner account if the staging D1 database is empty, then log in.
 3. Create at least one additional operator/admin user from the UI.

@@ -13,6 +13,7 @@
     "cf:migrate:prod": "wrangler d1 migrations apply diezmossv-production-resource-example --env production --remote",
     "cf:deploy:prod": "npm run build && wrangler deploy --env production",
     "cf:tail:prod": "wrangler tail --env production",
+    "smoke:staging": "node scripts/staging-smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit"

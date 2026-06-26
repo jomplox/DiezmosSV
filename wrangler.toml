@@ -16,39 +16,6 @@ MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
 MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
 MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
 MH_USER_AGENT = "DiezmosSV/1.0"
-EMISOR_CONFIG_JSON = """{
-  "tipoDocumento": "36",
-  "numDocumento": "10000000000001",
-  "nrc": null,
-  "nombre": "Iglesia Demo",
-  "codActividad": "94910",
-  "descActividad": "Actividades de organizaciones religiosas",
-  "nombreComercial": "Iglesia Demo",
-  "direccion": {
-    "departamento": "06",
-    "municipio": "14",
-    "distrito": "01",
-    "complemento": "San Salvador, El Salvador"
-  },
-  "telefono": "70000003",
-  "correo": "dte@example.org",
-  "codEstable": "0001",
-  "codEstableMH": "0001",
-  "codPuntoVenta": "01",
-  "codPuntoVentaMH": "0001",
-  "controlPrefix": "00010001",
-  "defaultReceptorTipoDocumento": "13",
-  "defaultCodPais": "SV",
-  "defaultDonationType": 1,
-  "defaultUnidadMedida": 99,
-  "paymentMethodCode": null,
-  "responsable": {
-    "nombre": "Responsable Legal",
-    "tipoDocumento": "13",
-    "numeroDocumento": "000000000",
-    "tipoEstablecimiento": "02"
-  }
-}"""
 
 [[d1_databases]]
 binding = "DB"
