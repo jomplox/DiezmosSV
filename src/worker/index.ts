@@ -6,7 +6,7 @@ import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
 import { buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
-import { buildF960Export } from "./services/f960";
+import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
@@ -122,26 +122,35 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleCredentialsRoute(request, env, repo, user);
   }
 
+  if (url.pathname === "/api/exports/f960" && request.method === "GET") {
+    requireRole(user, "ADMIN");
+    const selection = await f960Selection(repo, url);
+    if (selection instanceof Response) return selection;
+    return jsonResponse(selection);
+  }
+
   if (url.pathname === "/api/exports/f960.csv" && request.method === "GET") {
     const actor = requireRole(user, "ADMIN");
-    let result;
-    try {
-      result = buildF960Export(await repo.listAcceptedDteDocumentsForExport(), url.searchParams.get("period"));
-    } catch (error) {
-      return jsonResponse({ error: "invalid_export_period", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
-    }
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "F960_EXPORTED",
-      entityType: "export",
-      entityId: result.filename,
-      summary: `${result.rowCount} rows exported`
-    });
-    return new Response(result.csv, {
+    const selection = await f960Selection(repo, url);
+    if (selection instanceof Response) return selection;
+    await auditExport(repo, actor, "F960_EXPORTED", selection.csvFilename, selection.rowCount);
+    return new Response(buildF960Csv(selection), {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${result.filename}"`
+        "Content-Disposition": `attachment; filename="${selection.csvFilename}"`
+      }
+    });
+  }
+
+  if (url.pathname === "/api/exports/f960.xlsx" && request.method === "GET") {
+    const actor = requireRole(user, "ADMIN");
+    const selection = await f960Selection(repo, url);
+    if (selection instanceof Response) return selection;
+    await auditExport(repo, actor, "F960_INSPECTION_EXPORTED", selection.xlsxFilename, selection.rowCount);
+    return new Response(buildF960Xlsx(selection), {
+      headers: {
+        "Content-Type": XLSX_MIME,
+        "Content-Disposition": `attachment; filename="${selection.xlsxFilename}"`
       }
     });
   }
@@ -414,6 +423,29 @@ async function handleDocumentRoute(
   }
 
   return methodNotAllowed();
+}
+
+async function f960Selection(repo: Repository, url: URL): Promise<F960Selection | Response> {
+  try {
+    return buildF960Selection(await repo.listAcceptedDteDocumentsForExport(), {
+      period: url.searchParams.get("period"),
+      startDate: url.searchParams.get("startDate"),
+      endDate: url.searchParams.get("endDate")
+    });
+  } catch (error) {
+    return jsonResponse({ error: "invalid_export_filter", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+  }
+}
+
+async function auditExport(repo: Repository, actor: AuthUser, action: string, filename: string, rowCount: number): Promise<void> {
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action,
+    entityType: "export",
+    entityId: filename,
+    summary: `${rowCount} rows exported`
+  });
 }
 
 function hasValidBootstrapOwnerToken(request: Request, env: Env): boolean {

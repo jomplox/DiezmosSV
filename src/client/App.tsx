@@ -54,7 +54,13 @@ export function App() {
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState("");
-  const [exportPeriod, setExportPeriod] = useState(currentMonthValue);
+  const [exportStartDate, setExportStartDate] = useState(currentMonthStartValue);
+  const [exportEndDate, setExportEndDate] = useState(todayDateValue);
+  const [exportPreview, setExportPreview] = useState<F960Preview>({
+    rows: [],
+    rowCount: 0,
+    amountTotal: "0.00"
+  });
   const [testInput, setTestInput] = useState<TestDteInput>({
     amount: "1.00",
     donorName: "",
@@ -79,7 +85,7 @@ export function App() {
       return;
     }
     void refresh();
-  }, [token, filteredStatus, query, view]);
+  }, [token, filteredStatus, query, view, exportStartDate, exportEndDate]);
 
   async function refresh() {
     const params = new URLSearchParams();
@@ -98,6 +104,15 @@ export function App() {
     }
     if (view === "credentials" && can(user, "OWNER")) {
       setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials);
+    }
+    if (view === "exports" && can(user, "ADMIN")) {
+      if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
+        setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
+        setToast("Revise el rango de fechas");
+        return;
+      }
+      const params = exportParams(exportStartDate, exportEndDate);
+      setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
     }
   }
 
@@ -173,11 +188,9 @@ export function App() {
     });
   }
 
-  async function downloadF960Csv() {
-    await runAction("export-f960", async () => {
-      const params = new URLSearchParams();
-      if (exportPeriod) params.set("period", exportPeriod);
-      const response = await fetch(`/api/exports/f960.csv?${params}`, {
+  async function downloadF960(format: "csv" | "xlsx") {
+    await runAction(`export-${format}`, async () => {
+      const response = await fetch(`/api/exports/f960.${format}?${exportParams(exportStartDate, exportEndDate)}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) {
@@ -188,10 +201,10 @@ export function App() {
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
-      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "f960.csv");
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `f960.${format}`);
       link.click();
       URL.revokeObjectURL(href);
-      setToast("CSV F960 descargado");
+      setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspeccion descargado");
     });
   }
 
@@ -347,10 +360,13 @@ export function App() {
 
         {view === "exports" && can(user, "ADMIN") && (
           <ExportPanel
-            period={exportPeriod}
-            busy={busy === "export-f960"}
-            onPeriodChange={setExportPeriod}
-            onDownload={downloadF960Csv}
+            startDate={exportStartDate}
+            endDate={exportEndDate}
+            preview={exportPreview}
+            busy={busy}
+            onStartDateChange={setExportStartDate}
+            onEndDateChange={setExportEndDate}
+            onDownload={downloadF960}
           />
         )}
 
@@ -371,36 +387,97 @@ export function App() {
 }
 
 function ExportPanel({
-  period,
+  startDate,
+  endDate,
+  preview,
   busy,
-  onPeriodChange,
+  onStartDateChange,
+  onEndDateChange,
   onDownload
 }: {
-  period: string;
-  busy: boolean;
-  onPeriodChange: (period: string) => void;
-  onDownload: () => Promise<void>;
+  startDate: string;
+  endDate: string;
+  preview: F960Preview;
+  busy: string;
+  onStartDateChange: (date: string) => void;
+  onEndDateChange: (date: string) => void;
+  onDownload: (format: "csv" | "xlsx") => Promise<void>;
 }) {
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
         <div>
-          <h2>F960 CSV</h2>
+          <h2>F960</h2>
           <p>Documentos aceptados del periodo.</p>
         </div>
         <FileSpreadsheet size={20} />
       </div>
       <div className="export-controls">
         <label>
-          <span>Periodo</span>
-          <input value={period} onChange={(event) => onPeriodChange(event.target.value)} type="month" />
+          <span>Desde</span>
+          <input value={startDate} onChange={(event) => onStartDateChange(event.target.value)} type="date" />
         </label>
-        <button className="primary" disabled={busy} onClick={() => void onDownload()}>
+        <label>
+          <span>Hasta</span>
+          <input value={endDate} onChange={(event) => onEndDateChange(event.target.value)} type="date" />
+        </label>
+        <button className="primary" disabled={busy === "export-csv"} onClick={() => void onDownload("csv")}>
           <Download size={16} />
-          {busy ? "Preparando" : "Descargar CSV"}
+          {busy === "export-csv" ? "Preparando" : "Descargar CSV"}
+        </button>
+        <button disabled={busy === "export-xlsx"} onClick={() => void onDownload("xlsx")}>
+          <FileSpreadsheet size={16} />
+          {busy === "export-xlsx" ? "Preparando" : "XLSX inspeccion"}
         </button>
       </div>
+      <div className="export-summary">
+        <strong>{preview.rowCount}</strong>
+        <span>registros</span>
+        <strong>${preview.amountTotal}</strong>
+        <span>total</span>
+      </div>
+      <F960PreviewTable rows={preview.rows} />
     </section>
+  );
+}
+
+function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
+  return (
+    <div className="table-scroll export-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Fecha</th>
+            <th>Donante</th>
+            <th>Documento</th>
+            <th>Monto</th>
+            <th>Periodo</th>
+            <th>Codigo generacion</th>
+            <th>Sello</th>
+            <th>Control</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.codigoGeneracion}>
+              <td>{row.fechaEmision}</td>
+              <td>{row.nombre}<span>{row.correo}</span></td>
+              <td className="mono">{row.nit || row.dui || "N/D"}</td>
+              <td>${row.monto}</td>
+              <td className="mono">{row.periodo}</td>
+              <td className="mono">{shortCode(row.codigoGeneracion)}</td>
+              <td className="mono">{shortCode(row.sello)}</td>
+              <td className="mono">{row.numeroControl}</td>
+            </tr>
+          ))}
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan={8}>Sin datos para este rango.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -803,9 +880,21 @@ function subtitleFor(view: View): string {
   return "Operaciones administrativas y trazabilidad.";
 }
 
-function currentMonthValue(): string {
+function currentMonthStartValue(): string {
   const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function todayDateValue(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+function exportParams(startDate: string, endDate: string): URLSearchParams {
+  const params = new URLSearchParams();
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
+  return params;
 }
 
 function filenameFromDisposition(disposition: string | null, fallback: string): string {
@@ -839,6 +928,27 @@ interface CredentialFormInput {
   emailApiUrl: string;
   emailApiKey: string;
   emailFrom: string;
+}
+
+interface F960Preview {
+  rows: F960PreviewRow[];
+  rowCount: number;
+  amountTotal: string;
+}
+
+interface F960PreviewRow {
+  nit: string;
+  nombre: string;
+  codigoActividad: string;
+  tipoDonacion: string;
+  sello: string;
+  codigoGeneracion: string;
+  monto: string;
+  dui: string;
+  periodo: string;
+  fechaEmision: string;
+  numeroControl: string;
+  correo: string;
 }
 
 function emptyCredentialInput(environment: CredentialFormInput["environment"]): CredentialFormInput {

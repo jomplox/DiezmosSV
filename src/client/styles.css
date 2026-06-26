@@ -311,15 +311,12 @@ select,
   margin-bottom: 16px;
 }
 
-.export-panel {
-  max-width: 640px;
-}
-
 .export-controls {
   display: grid;
-  grid-template-columns: minmax(180px, 260px) max-content;
+  grid-template-columns: repeat(2, minmax(170px, 220px)) max-content max-content;
   gap: 12px;
   align-items: end;
+  margin-bottom: 14px;
 }
 
 .export-controls label {
@@ -331,6 +328,38 @@ select,
   color: #52656c;
   font-size: 12px;
   font-weight: 650;
+}
+
+.export-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: #52656c;
+  font-size: 12px;
+  margin-bottom: 12px;
+}
+
+.export-summary strong {
+  color: #1b2328;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.export-table table {
+  min-width: 1120px;
+}
+
+.export-table tbody tr {
+  cursor: default;
+}
+
+.export-table td span {
+  display: block;
+  margin-top: 2px;
+}
+
+.export-table td:first-child {
+  min-width: 88px;
 }
 
 .credential-layout {

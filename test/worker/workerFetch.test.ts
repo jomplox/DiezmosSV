@@ -213,11 +213,25 @@ describe("document email resend", () => {
 });
 
 describe("F960 CSV export", () => {
-  it("returns accepted CDEs in the real F960 semicolon format", async () => {
+  it("returns accepted CDEs for a date range in the real F960 semicolon format", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
     db.documents.push(
       testDocument(),
+      {
+        ...testDocument(),
+        id: "doc_may",
+        codigo_generacion: "1E9A4B17-C473-4B75-B2C7-E5B06D076D3B",
+        numero_control: "DTE-15-M001P004-000000000000008",
+        issued_at: "2026-05-31T23:30:00.000Z",
+        accepted_at: "2026-05-31T23:31:00.000Z",
+        plain_json: JSON.stringify({
+          emisor: { nombre: "ExamplePerson1" },
+          receptor: { nombre: "Outside Range", correo: "outside@example.org", tipoDocumento: "13", numDocumento: "100000043" },
+          resumen: { valorTotal: 50 },
+          identificacion: { fecEmi: "2026-05-31", horEmi: "17:30:00", codigoGeneracion: "1E9A4B17-C473-4B75-B2C7-E5B06D076D3B" }
+        })
+      },
       {
         ...testDocument(),
         id: "doc_failed",
@@ -229,7 +243,7 @@ describe("F960 CSV export", () => {
     );
 
     const response = await worker.fetch(
-      new Request("https://example.org/api/exports/f960.csv?period=2026-06", {
+      new Request("https://example.org/api/exports/f960.csv?startDate=2026-06-01&endDate=2026-06-30", {
         headers: { Authorization: "Bearer test-token" }
       }),
       env(db)
@@ -237,10 +251,65 @@ describe("F960 CSV export", () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
-    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-062026.csv"');
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-20260601-20260630.csv"');
     await expect(response.text()).resolves.toBe(
       "1;;Example Person;9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;100000001;062026\r\n"
     );
+  });
+
+  it("returns preview rows for the selected date range", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960?startDate=2026-06-01&endDate=2026-06-30", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      rowCount: 1,
+      amountTotal: "100.00",
+      rows: [
+        {
+          nit: "",
+          nombre: "Example Person",
+          codigoActividad: "9300",
+          tipoDonacion: "4",
+          sello: "20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE",
+          codigoGeneracion: "6CAE5F7EA59045738EF2FE48B14796C4",
+          monto: "100.00",
+          dui: "100000001",
+          periodo: "062026"
+        }
+      ]
+    });
+  });
+
+  it("returns an Excel inspection workbook with headers for the selected rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960.xlsx?startDate=2026-06-01&endDate=2026-06-30", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-inspeccion-20260601-20260630.xlsx"');
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect(new TextDecoder().decode(bytes.slice(0, 2))).toBe("PK");
+    const workbookText = new TextDecoder().decode(bytes);
+    expect(workbookText).toContain("Nombre donante");
+    expect(workbookText).toContain("Example Person");
+    expect(workbookText).toContain("Codigo generacion");
   });
 
   it("requires an admin role", async () => {
