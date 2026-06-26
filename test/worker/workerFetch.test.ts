@@ -366,6 +366,81 @@ describe("F960 CSV export", () => {
   });
 });
 
+describe("advanced CDE generation", () => {
+  it("stores a schema-valid advanced CDE draft and queues it for transmission", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ draft: advancedCdeDraft() })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, queued: true });
+    expect(db.documents).toHaveLength(1);
+    const generated = JSON.parse(db.documents[0].plain_json);
+    expect(generated.identificacion).toMatchObject({
+      version: 2,
+      ambiente: "00",
+      tipoDte: "15",
+      numeroControl: "DTE-15-M001P004-000000000000001",
+      tipoOperacion: 1,
+      tipoMoneda: "USD"
+    });
+    expect(generated.identificacion.codigoGeneracion).toMatch(/^[A-F0-9-]{36}$/);
+    expect(generated.receptor.nombre).toBe("Example Person Advanced");
+    expect(generated.cuerpoDocumento[0].descripcion).toBe("Diezmo avanzado");
+    expect(db.documents[0]).toMatchObject({
+      donor_email: "advanced@example.org",
+      donor_name: "Example Person Advanced",
+      amount_cents: 12345,
+      status: "PENDING"
+    });
+    expect(queued).toEqual([{ advancedDocumentId: db.documents[0].id }]);
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_CREATED", entity_type: "dte_document" }));
+  });
+
+  it("rejects an advanced CDE draft that does not match the CDE schema", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ draft: { receptor: { nombre: "Sin estructura" } } })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_advanced_cde" });
+    expect(db.documents).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+  });
+});
+
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
     const db = new InMemoryD1();
@@ -459,6 +534,8 @@ class InMemoryD1 {
   readonly audits: Array<Record<string, unknown>> = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
+  readonly wompiEvents: Array<Record<string, unknown>> = [];
+  nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
 
   prepare(sql: string): Statement {
@@ -491,6 +568,15 @@ class Statement {
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
+      return (this.db.wompiEvents.find((event) => event.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT * FROM wompi_events WHERE transaction_id = ?")) {
+      return (this.db.wompiEvents.find((event) => event.transaction_id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("UPDATE document_sequences")) {
+      return { value: this.db.nextSequence++ } as T;
     }
     return null;
   }
@@ -556,6 +642,56 @@ class Statement {
         sent_at: sentAt
       });
     }
+    if (this.sql.includes("INSERT INTO wompi_events")) {
+      const [id, transactionId, environment, result, amountCents, donorEmail, donorName, rawBody, headersJson] = this.args;
+      this.db.wompiEvents.push({
+        id,
+        transaction_id: transactionId,
+        environment,
+        result,
+        amount_cents: amountCents,
+        donor_email: donorEmail,
+        donor_name: donorName,
+        raw_body: rawBody,
+        headers_json: headersJson,
+        received_at: "2026-06-26T01:46:47.015Z",
+        processed_at: null,
+        created_document_id: null
+      });
+    }
+    if (this.sql.includes("INSERT INTO dte_documents")) {
+      const [id, wompiEventId, environment, codigoGeneracion, numeroControl, status, plainJson, donorEmail, donorName, amountCents, issuedAt, contingencyPeriodId] = this.args;
+      this.db.documents.push({
+        id: String(id),
+        wompi_event_id: String(wompiEventId),
+        tipo_dte: "15",
+        environment: environment === "01" ? "01" : "00",
+        codigo_generacion: String(codigoGeneracion),
+        numero_control: String(numeroControl),
+        status: String(status),
+        plain_json: String(plainJson),
+        signed_jws: null,
+        sello_recibido: null,
+        mh_estado: null,
+        mh_observaciones_json: "[]",
+        donor_email: donorEmail === null ? null : String(donorEmail),
+        donor_name: donorName === null ? null : String(donorName),
+        amount_cents: Number(amountCents),
+        issued_at: String(issuedAt),
+        accepted_at: null,
+        contingency_period_id: contingencyPeriodId === null ? null : String(contingencyPeriodId),
+        created_at: String(issuedAt),
+        updated_at: String(issuedAt)
+      });
+    }
+    if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
+      const [documentId, processedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      if (event) {
+        event.created_document_id = documentId;
+        event.processed_at = processedAt;
+      }
+    }
     return {};
   }
 }
@@ -587,5 +723,129 @@ function testDocument(): DteDocumentRecord {
     contingency_period_id: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z"
+  };
+}
+
+function advancedCdeDraft(): Record<string, unknown> {
+  return {
+    identificacion: {
+      version: 2,
+      ambiente: "00",
+      tipoDte: "15",
+      numeroControl: "DTE-15-M001P004-000000000000999",
+      codigoGeneracion: "11111111-1111-4111-8111-111111111111",
+      tipoModelo: 1,
+      tipoOperacion: 1,
+      fecEmi: "2026-06-26",
+      horEmi: "09:00:00",
+      tipoMoneda: "USD"
+    },
+    emisor: {
+      tipoDocumento: "36",
+      numDocumento: "10000003520015",
+      nrc: "2400001",
+      nombre: "MISION EXAMPLEORGANIZATION",
+      codActividad: "94910",
+      descActividad: "ACTIVIDADES DE ORGANIZACIONES RELIGIOSAS",
+      nombreComercial: "MISION EXAMPLEORGANIZATION",
+      direccion: {
+        departamento: "06",
+        municipio: "22",
+        distrito: "01",
+        complemento: "AVENIDA EJEMPLO 100, COLONIA EJEMPLO, SAN SALVADOR."
+      },
+      telefono: "70000002",
+      correo: "legacy-contact-4@example.com",
+      codEstable: "0002",
+      codPuntoVenta: "0002"
+    },
+    receptor: {
+      tipoDocumento: "13",
+      numDocumento: "100000001",
+      nrc: null,
+      nombre: "Example Person Advanced",
+      codActividad: null,
+      descActividad: null,
+      direccion: {
+        departamento: "06",
+        municipio: "22",
+        distrito: "01",
+        complemento: "SAN SALVADOR"
+      },
+      telefono: "70000001",
+      correo: "advanced@example.org",
+      codDomiciliado: 1,
+      codPais: "SV"
+    },
+    otrosDocumentos: [
+      {
+        codDocAsociado: 1,
+        descDocumento: "Referencia avanzada",
+        detalleDocumento: "ADVANCED-TEST"
+      }
+    ],
+    cuerpoDocumento: [
+      {
+        numItem: 1,
+        tipoDonacion: 4,
+        cantidad: 1,
+        codigo: "DIEZMO",
+        uniMedida: 99,
+        descripcion: "Diezmo avanzado",
+        tipoDepreciacion: 0,
+        valorUni: 123.45,
+        valor: 123.45
+      }
+    ],
+    resumen: {
+      valorTotal: 123.45,
+      totalLetras: null,
+      pagos: [
+        {
+          codigo: "01",
+          montoPago: 123.45,
+          referencia: "ADVANCED"
+        }
+      ]
+    },
+    apendice: [
+      { campo: "Origen", etiqueta: "Origen", valor: "DTE avanzado" }
+    ]
+  };
+}
+
+function emisorConfig() {
+  return {
+    tipoDocumento: "36",
+    numDocumento: "10000003520015",
+    nrc: "2400001",
+    nombre: "MISION EXAMPLEORGANIZATION",
+    codActividad: "94910",
+    descActividad: "ACTIVIDADES DE ORGANIZACIONES RELIGIOSAS",
+    nombreComercial: "MISION EXAMPLEORGANIZATION",
+    direccion: {
+      departamento: "06",
+      municipio: "22",
+      distrito: "01",
+      complemento: "AVENIDA EJEMPLO 100, COLONIA EJEMPLO, SAN SALVADOR."
+    },
+    telefono: "70000002",
+    correo: "legacy-contact-4@example.com",
+    codEstable: "0002",
+    codEstableMH: "M001",
+    codPuntoVenta: "0002",
+    codPuntoVentaMH: "P004",
+    controlPrefix: "M001P004",
+    defaultReceptorTipoDocumento: "13",
+    defaultCodPais: "SV",
+    defaultDonationType: 4,
+    defaultUnidadMedida: 99,
+    paymentMethodCode: "01",
+    responsable: {
+      nombre: "Example Person",
+      tipoDocumento: "13",
+      numeroDocumento: "100000001",
+      tipoEstablecimiento: "02"
+    }
   };
 }

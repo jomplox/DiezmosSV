@@ -305,6 +305,83 @@ select,
   white-space: nowrap;
 }
 
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(17, 35, 39, 0.42);
+}
+
+.advanced-dte-modal {
+  width: min(980px, 100%);
+  max-height: min(880px, calc(100vh - 44px));
+  display: grid;
+  grid-template-rows: auto auto minmax(320px, 1fr) auto auto;
+  gap: 12px;
+  padding: 18px;
+  background: #ffffff;
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  box-shadow: 0 18px 54px rgba(17, 35, 39, 0.22);
+}
+
+.advanced-dte-modal header,
+.advanced-dte-modal footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.advanced-dte-modal footer {
+  justify-content: flex-end;
+}
+
+.advanced-dte-modal h2 {
+  margin-bottom: 4px;
+}
+
+.advanced-dte-modal p {
+  color: #52656c;
+  font-size: 12px;
+}
+
+.advanced-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.advanced-fields span {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  color: #1b383d;
+  background: #eef8f7;
+  border: 1px solid #c8ebe7;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.json-editor {
+  width: 100%;
+  min-height: 320px;
+  resize: vertical;
+  padding: 12px;
+  color: #1b2328;
+  background: #f7f9fa;
+  border: 1px solid #d8e0e3;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 .user-create {
   display: grid;
   grid-template-columns: repeat(4, minmax(140px, 1fr)) max-content;
@@ -900,6 +977,22 @@ pre {
   .test-grid button {
     flex-basis: 100%;
     width: 100%;
+  }
+
+  .modal-backdrop {
+    align-items: stretch;
+    padding: 10px;
+  }
+
+  .advanced-dte-modal {
+    max-height: calc(100vh - 20px);
+    grid-template-rows: auto auto minmax(260px, 1fr) auto auto;
+  }
+
+  .advanced-dte-modal header,
+  .advanced-dte-modal footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .stats {

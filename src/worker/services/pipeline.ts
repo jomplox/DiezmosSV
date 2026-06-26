@@ -1,5 +1,5 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
-import { buildCdeDocument, buildContingenciaEvent } from "../domain/dteBuilder";
+import { buildCdeDocument, buildContingenciaEvent, cdeDocumentSummary } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, ambienteFromWompi, donorName, isApprovedDonation } from "../domain/wompi";
 import { Repository } from "../storage/repository";
@@ -97,6 +97,61 @@ export class IssuancePipeline {
       });
       await this.repo.createAudit({
         action: "DTE_FAILED",
+        entityType: "dte_document",
+        entityId: record.id,
+        summary: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
+    let record = await this.repo.getDteDocument(documentId);
+    if (!record) {
+      throw new Error(`DTE document ${documentId} not found`);
+    }
+    const document = JSON.parse(record.plain_json) as Record<string, unknown>;
+    const summary = cdeDocumentSummary(document);
+    try {
+      const signedJws = record.signed_jws ?? await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+      if (!record.signed_jws) {
+        await this.repo.updateDocumentSigned(record.id, signedJws);
+      }
+      const mhResult = await this.mh.transmitDte({
+        ambiente: summary.environment,
+        version: 2,
+        tipoDte: "15",
+        codigoGeneracion: summary.codigoGeneracion,
+        signedJws
+      });
+      await this.repo.updateDocumentMhResult(record.id, {
+        status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
+        sello: mhResult.selloRecibido,
+        mhEstado: mhResult.estado,
+        observaciones: mhResult.observaciones,
+        acceptedAt: mhResult.accepted ? nowIso() : null
+      });
+      record = (await this.repo.getDteDocument(record.id)) ?? record;
+      await this.repo.createAudit({
+        action: mhResult.accepted ? "ADVANCED_CDE_ACCEPTED" : "ADVANCED_CDE_REJECTED",
+        entityType: "dte_document",
+        entityId: record.id,
+        summary: `${record.numero_control} ${mhResult.estado}`,
+        metadata: mhResult.raw
+      });
+      if (mhResult.accepted) {
+        await this.emailReceipt(record);
+      }
+      return record;
+    } catch (error) {
+      await this.repo.updateDocumentMhResult(record.id, {
+        status: "FAILED",
+        sello: null,
+        mhEstado: "ADVANCED_PIPELINE_ERROR",
+        observaciones: [error instanceof Error ? error.message : String(error)]
+      });
+      await this.repo.createAudit({
+        action: "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
         summary: error instanceof Error ? error.message : String(error)

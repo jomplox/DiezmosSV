@@ -10,6 +10,12 @@ interface CdeBuildOptions {
   contingency?: boolean;
 }
 
+interface AdvancedCdeBuildOptions {
+  sequence: number;
+  environment?: Ambiente;
+  issuedAt?: Date;
+}
+
 export interface InvalidationInput {
   tipoAnulacion: 1 | 2 | 3;
   motivoAnulacion: string;
@@ -119,6 +125,53 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   };
   validateCde(document);
   return document;
+}
+
+export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, options: AdvancedCdeBuildOptions): Record<string, unknown> {
+  if (!isRecord(draft)) {
+    throw new Error("Advanced CDE draft must be a JSON object");
+  }
+  const document = cloneJsonObject(draft);
+  const issuedAt = options.issuedAt ?? new Date();
+  const { date, time } = mhDateTime(issuedAt);
+  const currentIdentification = isRecord(document.identificacion) ? document.identificacion : {};
+  const ambiente = options.environment ?? ambienteValue(currentIdentification.ambiente) ?? "00";
+  document.identificacion = {
+    ...currentIdentification,
+    version: 2,
+    ambiente,
+    tipoDte: "15",
+    numeroControl: numeroControl(config.controlPrefix, options.sequence),
+    codigoGeneracion: generationCode(),
+    tipoModelo: currentIdentification.tipoModelo === 2 ? 2 : 1,
+    tipoOperacion: 1,
+    fecEmi: date,
+    horEmi: time,
+    tipoMoneda: "USD"
+  };
+  validateCde(document);
+  return document;
+}
+
+export function cdeDocumentSummary(document: Record<string, unknown>): {
+  environment: Ambiente;
+  codigoGeneracion: string;
+  numeroControl: string;
+  donorEmail: string | null;
+  donorName: string | null;
+  amountCents: number;
+} {
+  const identificacion = isRecord(document.identificacion) ? document.identificacion : {};
+  const receptor = isRecord(document.receptor) ? document.receptor : {};
+  const resumen = isRecord(document.resumen) ? document.resumen : {};
+  return {
+    environment: ambienteValue(identificacion.ambiente) ?? "00",
+    codigoGeneracion: stringValue(identificacion.codigoGeneracion, "codigoGeneracion"),
+    numeroControl: stringValue(identificacion.numeroControl, "numeroControl"),
+    donorEmail: cleanNullable(valueAsString(receptor.correo)),
+    donorName: cleanNullable(valueAsString(receptor.nombre)),
+    amountCents: amountToCents(resumen.valorTotal)
+  };
 }
 
 export function buildInvalidacionEvent(
@@ -240,6 +293,37 @@ function centsToAmount(cents: number): number {
 function cleanNullable(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function ambienteValue(value: unknown): Ambiente | null {
+  return value === "01" ? "01" : value === "00" ? "00" : null;
+}
+
+function valueAsString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function stringValue(value: unknown, label: string): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error(`Missing CDE ${label}`);
+  }
+  return value;
+}
+
+function amountToCents(value: unknown): number {
+  const amount = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("CDE resumen.valorTotal must be a positive number");
+  }
+  return Math.round(amount * 100);
 }
 
 function mhEventCodes(numeroControl: string | null | undefined, config: EmisorConfig): { codEstableMH: string; codPuntoVentaMH: string } {

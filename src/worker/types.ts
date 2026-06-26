@@ -40,7 +40,8 @@ export interface Env {
 }
 
 export interface IssuanceMessage {
-  wompiEventId: string;
+  wompiEventId?: string;
+  advancedDocumentId?: string;
 }
 
 export interface WompiWebhook {

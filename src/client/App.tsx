@@ -10,6 +10,7 @@ import {
   FileSpreadsheet,
   FileText,
   FlaskConical,
+  Braces,
   History,
   KeyRound,
   Lock,
@@ -21,6 +22,7 @@ import {
   RotateCcw,
   Search,
   ShieldCheck,
+  X,
   Users
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -57,6 +59,9 @@ export function App() {
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState("");
+  const [advancedDteOpen, setAdvancedDteOpen] = useState(false);
+  const [advancedDteDraft, setAdvancedDteDraft] = useState("");
+  const [advancedDteError, setAdvancedDteError] = useState("");
   const [exportStartDate, setExportStartDate] = useState(currentMonthStartValue);
   const [exportEndDate, setExportEndDate] = useState(todayDateValue);
   const [exportPreview, setExportPreview] = useState<F960Preview>({
@@ -153,6 +158,33 @@ export function App() {
     await runAction("test-dte", async () => {
       await api("/api/test/dte", token, { method: "POST", body: testInput });
       setToast("DTE de prueba enviado a cola");
+      await delay(2500);
+      await refresh();
+    });
+  }
+
+  async function openAdvancedDte() {
+    await runAction("advanced-template", async () => {
+      const result = await api<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", token, { method: "POST", body: testInput });
+      setAdvancedDteDraft(JSON.stringify(result.draft, null, 2));
+      setAdvancedDteError("");
+      setAdvancedDteOpen(true);
+    });
+  }
+
+  async function createAdvancedDte() {
+    let draft: unknown;
+    try {
+      draft = JSON.parse(advancedDteDraft);
+    } catch {
+      setAdvancedDteError("JSON invalido");
+      return;
+    }
+    setAdvancedDteError("");
+    await runAction("advanced-dte", async () => {
+      await api("/api/test/dte/advanced", token, { method: "POST", body: { draft } });
+      setToast("DTE avanzado enviado a cola");
+      setAdvancedDteOpen(false);
       await delay(2500);
       await refresh();
     });
@@ -291,7 +323,14 @@ export function App() {
         {(view === "documents" || view === "failures") && (
           <>
             {view === "documents" && can(user, "OPERATOR") && (
-              <TestDtePanel input={testInput} busy={busy === "test-dte"} onChange={setTestInput} onSubmit={createTestDte} />
+              <TestDtePanel
+                input={testInput}
+                busy={busy === "test-dte"}
+                advancedBusy={busy === "advanced-template"}
+                onChange={setTestInput}
+                onSubmit={createTestDte}
+                onAdvanced={openAdvancedDte}
+              />
             )}
             <section className="document-layout">
               <div className="table-panel">
@@ -384,6 +423,17 @@ export function App() {
           />
         )}
       </main>
+      {advancedDteOpen && (
+        <AdvancedDteModal
+          draft={advancedDteDraft}
+          error={advancedDteError}
+          busy={busy === "advanced-dte" || busy === "advanced-template"}
+          onChange={setAdvancedDteDraft}
+          onClose={() => setAdvancedDteOpen(false)}
+          onReload={openAdvancedDte}
+          onSubmit={createAdvancedDte}
+        />
+      )}
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
     </div>
   );
@@ -709,18 +759,22 @@ function CredentialsPanel({
 function TestDtePanel({
   input,
   busy,
+  advancedBusy,
   onChange,
-  onSubmit
+  onSubmit,
+  onAdvanced
 }: {
   input: TestDteInput;
   busy: boolean;
+  advancedBusy: boolean;
   onChange: (input: TestDteInput) => void;
   onSubmit: () => Promise<void>;
+  onAdvanced: () => Promise<void>;
 }) {
   return (
     <section className="test-panel">
       <div>
-        <h2>Generar DTE de prueba</h2>
+        <h2>DTE Rápido</h2>
         <p>Ambiente 00 desde una donacion Wompi simulada.</p>
       </div>
       <div className="test-grid">
@@ -731,10 +785,70 @@ function TestDtePanel({
         <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Telefono" />
         <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
           <FlaskConical size={16} />
-          {busy ? "Generando" : "Generar prueba"}
+          {busy ? "Generando" : "Generar rápido"}
+        </button>
+        <button disabled={advancedBusy} onClick={() => void onAdvanced()}>
+          <Braces size={16} />
+          {advancedBusy ? "Preparando" : "DTE avanzado"}
         </button>
       </div>
     </section>
+  );
+}
+
+function AdvancedDteModal({
+  draft,
+  error,
+  busy,
+  onChange,
+  onClose,
+  onReload,
+  onSubmit
+}: {
+  draft: string;
+  error: string;
+  busy: boolean;
+  onChange: (draft: string) => void;
+  onClose: () => void;
+  onReload: () => Promise<void>;
+  onSubmit: () => Promise<void>;
+}) {
+  return (
+    <div className="modal-backdrop">
+      <section className="advanced-dte-modal" role="dialog" aria-modal="true" aria-labelledby="advanced-dte-title">
+        <header>
+          <div>
+            <h2 id="advanced-dte-title">DTE avanzado</h2>
+            <p>CDE completo v2, ambiente 00.</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Cerrar">
+            <X size={17} />
+          </button>
+        </header>
+        <div className="advanced-fields" aria-label="Secciones CDE">
+          {["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"].map((field) => (
+            <span key={field}>{field}</span>
+          ))}
+        </div>
+        <textarea
+          className="json-editor"
+          value={draft}
+          onChange={(event) => onChange(event.target.value)}
+          spellCheck={false}
+        />
+        {error && <p className="error">{error}</p>}
+        <footer>
+          <button disabled={busy} onClick={() => void onReload()}>
+            <RefreshCw size={16} />
+            Recargar plantilla
+          </button>
+          <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
+            <FlaskConical size={16} />
+            {busy ? "Generando" : "Generar avanzado"}
+          </button>
+        </footer>
+      </section>
+    </div>
   );
 }
 

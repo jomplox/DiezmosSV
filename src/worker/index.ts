@@ -1,5 +1,5 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
-import { buildInvalidacionEvent, type InvalidationInput } from "./domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
 import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
 import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader } from "./domain/wompi";
@@ -41,7 +41,13 @@ export default {
     const pipeline = new IssuancePipeline(env);
     for (const message of batch.messages) {
       try {
-        await pipeline.processWompiEvent(message.body.wompiEventId);
+        if (message.body.advancedDocumentId) {
+          await pipeline.processDteDocument(message.body.advancedDocumentId);
+        } else if (message.body.wompiEventId) {
+          await pipeline.processWompiEvent(message.body.wompiEventId);
+        } else {
+          throw new Error("Issuance message did not include a target id");
+        }
         message.ack();
       } catch (error) {
         console.error("Issuance message failed", error);
@@ -177,7 +183,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
-    if ((env.APP_ENV ?? "local").toLowerCase() === "production") {
+    if (isProduction(env)) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
     const input = (await request.json().catch(() => ({}))) as TestWompiInput;
@@ -208,6 +214,68 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ ok: true, wompiEventId: record.id, queued: inserted, transactionId: payload.IdTransaccion }, { status: inserted ? 202 : 200 });
   }
 
+  if (url.pathname === "/api/test/dte/advanced-template" && request.method === "POST") {
+    requireRole(user, "OPERATOR");
+    if (isProduction(env)) {
+      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+    }
+    const input = (await request.json().catch(() => ({}))) as TestWompiInput;
+    try {
+      const payload = buildTestWompiPayload(input);
+      const draft = buildCdeDocument(payload, getEmisorConfig(env), { sequence: 1 });
+      return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
+    } catch (error) {
+      return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
+  }
+
+  if (url.pathname === "/api/test/dte/advanced" && request.method === "POST") {
+    const actor = requireRole(user, "OPERATOR");
+    if (isProduction(env)) {
+      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+    }
+    const body = (await request.json().catch(() => ({}))) as { draft?: unknown };
+    const config = getEmisorConfig(env);
+    let document: Record<string, unknown>;
+    try {
+      buildAdvancedCdeDocument(body.draft, config, { sequence: 1, environment: "00" });
+      const sequence = await repo.nextControlSequence("00", config.controlPrefix);
+      document = buildAdvancedCdeDocument(body.draft, config, { sequence, environment: "00" });
+    } catch (error) {
+      return jsonResponse({ error: "invalid_advanced_cde", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
+    const summary = cdeDocumentSummary(document);
+    const syntheticWompi = advancedCdeWompiPayload(document, summary);
+    const { record: wompiEvent } = await repo.insertWompiEvent(
+      syntheticWompi,
+      JSON.stringify(syntheticWompi),
+      { source: "admin_advanced_generation" },
+      summary.environment
+    );
+    const dte = await repo.createDteDocument({
+      wompiEventId: wompiEvent.id,
+      environment: summary.environment,
+      codigoGeneracion: summary.codigoGeneracion,
+      numeroControl: summary.numeroControl,
+      plainJson: document,
+      donorEmail: summary.donorEmail,
+      donorName: summary.donorName,
+      amountCents: summary.amountCents,
+      issuedAt: nowIso()
+    });
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "ADVANCED_CDE_CREATED",
+      entityType: "dte_document",
+      entityId: dte.id,
+      summary: dte.numero_control,
+      metadata: { source: "admin_advanced_generation" }
+    });
+    await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
+    return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
+  }
+
   if (url.pathname === "/api/users" && request.method === "GET") {
     requireRole(user, "ADMIN");
     return jsonResponse({ users: await repo.listUsers() });
@@ -231,6 +299,64 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   return notFound();
+}
+
+function isProduction(env: Env): boolean {
+  return (env.APP_ENV ?? "local").toLowerCase() === "production";
+}
+
+function advancedCdeWompiPayload(
+  document: Record<string, unknown>,
+  summary: ReturnType<typeof cdeDocumentSummary>
+): WompiWebhook {
+  const receptor = isRecord(document.receptor) ? document.receptor : {};
+  const direccion = isRecord(receptor.direccion) ? receptor.direccion : {};
+  const firstItem = Array.isArray(document.cuerpoDocumento) && isRecord(document.cuerpoDocumento[0]) ? document.cuerpoDocumento[0] : {};
+  return {
+    IdCuenta: "example-worker-advanced",
+    FechaTransaccion: new Date().toISOString(),
+    Monto: (summary.amountCents / 100).toFixed(2),
+    IdTransaccion: `ADV-${crypto.randomUUID()}`,
+    ResultadoTransaccion: "ExitosaAprobada",
+    CodigoAutorizacion: "ADVANCED",
+    IdIntentoPago: crypto.randomUUID(),
+    Cantidad: numberValue(firstItem.cantidad, 1),
+    EsProductiva: summary.environment === "01",
+    Aplicativo: {
+      Nombre: "DiezmosSV DTE Avanzado",
+      Url: "https://worker.example.invalid/",
+      Id: "example-worker-advanced"
+    },
+    EnlacePago: {
+      Id: 1,
+      IdentificadorEnlaceComercio: "DTE Avanzado",
+      NombreProducto: stringValue(firstItem.descripcion) ?? "DTE avanzado",
+      DescripcionProducto: "Generacion avanzada desde panel"
+    },
+    Cliente: {
+      DocumentoIdentidad: stringValue(receptor.numDocumento) ?? "SIN-DOCUMENTO",
+      Nombre: summary.donorName ?? "Donante",
+      Apellidos: "",
+      Direccion: stringValue(direccion.complemento) ?? "",
+      EMail: summary.donorEmail ?? "",
+      Celular: stringValue(receptor.telefono) ?? "",
+      CodigoPais: stringValue(receptor.codPais) ?? "SV"
+    },
+    EsInternacional: stringValue(receptor.codPais) !== "SV",
+    IdExterno: summary.codigoGeneracion
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
 async function handleCredentialsRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
