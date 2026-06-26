@@ -665,11 +665,6 @@ select,
   cursor: default;
 }
 
-.export-table td span {
-  display: block;
-  margin-top: 2px;
-}
-
 .export-table td:first-child {
   min-width: 88px;
 }
@@ -885,6 +880,7 @@ td {
   padding: 12px 10px;
   border-bottom: 1px solid #edf1f2;
   vertical-align: middle;
+  line-height: 1.28;
 }
 
 tbody tr {
@@ -900,6 +896,23 @@ tbody tr.selected {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+.numeric {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.stacked-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.stacked-cell .secondary {
+  color: #60747c;
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .status {

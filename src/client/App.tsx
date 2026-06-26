@@ -711,10 +711,10 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
         <tbody>
           {rows.map((row) => (
             <tr key={row.codigoGeneracion}>
-              <td>{row.fechaEmision}</td>
-              <td>{row.nombre}<span>{row.correo}</span></td>
+              <td className="numeric">{row.fechaEmision}</td>
+              <td><StackedCell primary={row.nombre} secondary={row.correo} /></td>
               <td className="mono">{row.nit || row.dui || "N/D"}</td>
-              <td>${row.monto}</td>
+              <td className="numeric">${row.monto}</td>
               <td className="mono">{row.periodo}</td>
               <td className="mono">{shortCode(row.codigoGeneracion)}</td>
               <td className="mono">{shortCode(row.sello)}</td>
@@ -1246,15 +1246,24 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
             <tr key={document.id} className={selectedId === document.id ? "selected" : ""} onClick={() => onSelect(document.id)}>
               <td><StatusPill status={document.status} /></td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
-              <td>{document.donor_name ?? "N/D"}<span>{document.donor_email}</span></td>
-              <td>${(document.amount_cents / 100).toFixed(2)}</td>
+              <td><StackedCell primary={document.donor_name ?? "N/D"} secondary={document.donor_email ?? ""} /></td>
+              <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
               <td className="mono">{document.sello_recibido ? shortCode(document.sello_recibido) : "N/D"}</td>
-              <td>{new Date(document.created_at).toLocaleDateString()}</td>
+              <td className="numeric">{new Date(document.created_at).toLocaleDateString()}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function StackedCell({ primary, secondary }: { primary: string; secondary?: string | null }) {
+  return (
+    <span className="stacked-cell">
+      <span>{primary}</span>
+      {secondary && <span className="secondary">{secondary}</span>}
+    </span>
   );
 }
 
@@ -1410,23 +1419,27 @@ function InvalidationConfirmDialog({
 
 function AuditTable({ rows }: { rows: AuditRow[] }) {
   return (
-    <table>
-      <thead><tr><th>Accion</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
-      <tbody>
-        {rows.map((row) => (
-          <tr key={row.id}><td>{row.action}</td><td>{row.entity_type}</td><td>{row.summary}</td><td>{new Date(row.created_at).toLocaleString()}</td></tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="table-scroll">
+      <table>
+        <thead><tr><th>Accion</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.id}><td>{row.action}</td><td>{row.entity_type}</td><td>{row.summary}</td><td className="numeric">{new Date(row.created_at).toLocaleString()}</td></tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
 function UserTable({ users }: { users: User[] }) {
   return (
-    <table>
-      <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th></tr></thead>
-      <tbody>{users.map((user) => <tr key={user.id}><td>{user.name}</td><td>{user.email}</td><td>{user.role}</td></tr>)}</tbody>
-    </table>
+    <div className="table-scroll">
+      <table>
+        <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th></tr></thead>
+        <tbody>{users.map((user) => <tr key={user.id}><td>{user.name}</td><td>{user.email}</td><td>{user.role}</td></tr>)}</tbody>
+      </table>
+    </div>
   );
 }
 
