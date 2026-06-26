@@ -28,6 +28,7 @@ import {
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { CAT020_COUNTRIES, isCat020CountryCode, normalizeCat020CountryCode } from "../shared/catalogs";
 import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
@@ -915,7 +916,7 @@ function AdvancedDteModal({
                   </select>
                 </AdvancedField>
                 <AdvancedField label="Pais">
-                  <input value={form.codPais} onChange={(event) => update({ codPais: event.target.value.toUpperCase() })} maxLength={2} />
+                  <CountrySelect value={form.codPais} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
               </div>
             )}
@@ -931,7 +932,7 @@ function AdvancedDteModal({
                   <input value={form.distrito} onChange={(event) => update({ distrito: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Pais direccion">
-                  <input value={form.codPais} onChange={(event) => update({ codPais: event.target.value.toUpperCase() })} maxLength={2} />
+                  <CountrySelect value={form.codPais} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
                 <AdvancedField label="Complemento / direccion completa" span>
                   <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} rows={4} />
@@ -1039,6 +1040,18 @@ function AdvancedField({ label, span, children }: { label: string; span?: boolea
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+function CountrySelect({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <select value={value} onChange={(event) => onChange(event.target.value)}>
+      {CAT020_COUNTRIES.map((country) => (
+        <option key={country.code} value={country.code}>
+          {country.code} - {country.label}
+        </option>
+      ))}
+    </select>
   );
 }
 
@@ -1424,6 +1437,7 @@ function advancedFormFromDraft(draft: Record<string, unknown>): AdvancedCdeFormI
   const documento = firstRecord(draft.otrosDocumentos);
   const apendice = firstRecord(draft.apendice);
   const fallback = defaultAdvancedCdeForm();
+  const countryCode = normalizeCat020CountryCode(textValue(receptor.codPais, fallback.codPais));
   return {
     donorName: textValue(receptor.nombre, fallback.donorName),
     donorTipoDocumento: textValue(receptor.tipoDocumento, fallback.donorTipoDocumento),
@@ -1434,7 +1448,7 @@ function advancedFormFromDraft(draft: Record<string, unknown>): AdvancedCdeFormI
     donorEmail: textValue(receptor.correo),
     donorPhone: textValue(receptor.telefono),
     codDomiciliado: textValue(receptor.codDomiciliado, fallback.codDomiciliado),
-    codPais: textValue(receptor.codPais, fallback.codPais),
+    codPais: isCat020CountryCode(countryCode) ? countryCode : fallback.codPais,
     departamento: textValue(direccion.departamento),
     municipio: textValue(direccion.municipio),
     distrito: textValue(direccion.distrito),
@@ -1558,7 +1572,7 @@ function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
     const duiError = duiValidationMessage(form.donorDocument);
     if (duiError) return duiError;
   }
-  if (cleanText(form.codPais).length !== 2) return "Pais debe usar codigo ISO de 2 letras";
+  if (!isCat020CountryCode(form.codPais)) return "Pais debe existir en CAT-020";
   if (decimalValue(form.cantidad, 0) <= 0) return "Cantidad debe ser mayor que cero";
   if (decimalValue(form.valorUni, 0) <= 0) return "Valor unitario debe ser mayor que cero";
   if (decimalValue(form.valorTotal, 0) <= 0) return "Valor total debe ser mayor que cero";

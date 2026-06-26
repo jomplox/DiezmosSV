@@ -1,6 +1,7 @@
 import type { Ambiente, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
 import { mhDateTime } from "../utils/dates";
 import { generationCode, numeroControl } from "../utils/ids";
+import { isCat020CountryCode } from "../../shared/catalogs";
 import { assertValidDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
@@ -125,6 +126,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     ]
   };
   validateCdeDui(document);
+  validateCdeCountry(document);
   validateCde(document);
   return document;
 }
@@ -152,6 +154,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     tipoMoneda: "USD"
   };
   validateCdeDui(document);
+  validateCdeCountry(document);
   validateCde(document);
   return document;
 }
@@ -293,6 +296,14 @@ function validateCdeDui(document: Record<string, unknown>): void {
   const receptor = isRecord(document.receptor) ? document.receptor : {};
   if (isDuiDocumentType(receptor.tipoDocumento)) {
     assertValidDui(valueAsString(receptor.numDocumento));
+  }
+}
+
+function validateCdeCountry(document: Record<string, unknown>): void {
+  const receptor = isRecord(document.receptor) ? document.receptor : {};
+  const countryCode = valueAsString(receptor.codPais);
+  if (!isCat020CountryCode(countryCode)) {
+    throw new Error(`CDE receptor.codPais must exist in CAT-020 Pais: ${countryCode ?? "missing"}`);
   }
 }
 

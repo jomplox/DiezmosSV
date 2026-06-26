@@ -66,6 +66,19 @@ describe("DTE builders", () => {
     ).toThrow(/DUI.*digito verificador/i);
   });
 
+  it("rejects country codes outside CAT-020 before building a CDE for MH", () => {
+    expect(() =>
+      buildCdeDocument(
+        { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00000000-0", CodigoPais: "ZZ" } } as WompiWebhook,
+        emisorConfig,
+        {
+          sequence: 1,
+          issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+        }
+      )
+    ).toThrow(/CAT-020/i);
+  });
+
   it("builds a schema-valid contingency event for queued CDEs", () => {
     const event = buildContingenciaEvent(emisorConfig, {
       ambiente: "00",
