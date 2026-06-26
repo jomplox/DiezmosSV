@@ -25,7 +25,7 @@ import {
   X,
   Users
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
 
@@ -60,7 +60,9 @@ export function App() {
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState("");
   const [advancedDteOpen, setAdvancedDteOpen] = useState(false);
-  const [advancedDteDraft, setAdvancedDteDraft] = useState("");
+  const [advancedDteTemplate, setAdvancedDteTemplate] = useState<Record<string, unknown> | null>(null);
+  const [advancedDteForm, setAdvancedDteForm] = useState(defaultAdvancedCdeForm);
+  const [advancedDteStep, setAdvancedDteStep] = useState(0);
   const [advancedDteError, setAdvancedDteError] = useState("");
   const [exportStartDate, setExportStartDate] = useState(currentMonthStartValue);
   const [exportEndDate, setExportEndDate] = useState(todayDateValue);
@@ -166,20 +168,25 @@ export function App() {
   async function openAdvancedDte() {
     await runAction("advanced-template", async () => {
       const result = await api<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", token, { method: "POST", body: testInput });
-      setAdvancedDteDraft(JSON.stringify(result.draft, null, 2));
+      setAdvancedDteTemplate(result.draft);
+      setAdvancedDteForm(advancedFormFromDraft(result.draft));
+      setAdvancedDteStep(0);
       setAdvancedDteError("");
       setAdvancedDteOpen(true);
     });
   }
 
   async function createAdvancedDte() {
-    let draft: unknown;
-    try {
-      draft = JSON.parse(advancedDteDraft);
-    } catch {
-      setAdvancedDteError("JSON invalido");
+    const validationError = validateAdvancedCdeForm(advancedDteForm);
+    if (validationError) {
+      setAdvancedDteError(validationError);
       return;
     }
+    if (!advancedDteTemplate) {
+      setAdvancedDteError("Recargue la plantilla avanzada");
+      return;
+    }
+    const draft = advancedDraftFromForm(advancedDteTemplate, advancedDteForm);
     setAdvancedDteError("");
     await runAction("advanced-dte", async () => {
       await api("/api/test/dte/advanced", token, { method: "POST", body: { draft } });
@@ -425,12 +432,15 @@ export function App() {
       </main>
       {advancedDteOpen && (
         <AdvancedDteModal
-          draft={advancedDteDraft}
+          form={advancedDteForm}
+          preview={JSON.stringify(advancedDraftFromForm(advancedDteTemplate, advancedDteForm), null, 2)}
+          step={advancedDteStep}
           error={advancedDteError}
           busy={busy === "advanced-dte" || busy === "advanced-template"}
-          onChange={setAdvancedDteDraft}
+          onChange={setAdvancedDteForm}
           onClose={() => setAdvancedDteOpen(false)}
           onReload={openAdvancedDte}
+          onStepChange={setAdvancedDteStep}
           onSubmit={createAdvancedDte}
         />
       )}
@@ -797,51 +807,210 @@ function TestDtePanel({
 }
 
 function AdvancedDteModal({
-  draft,
+  form,
+  preview,
+  step,
   error,
   busy,
   onChange,
   onClose,
   onReload,
+  onStepChange,
   onSubmit
 }: {
-  draft: string;
+  form: AdvancedCdeFormInput;
+  preview: string;
+  step: number;
   error: string;
   busy: boolean;
-  onChange: (draft: string) => void;
+  onChange: (form: AdvancedCdeFormInput) => void;
   onClose: () => void;
   onReload: () => Promise<void>;
+  onStepChange: (step: number) => void;
   onSubmit: () => Promise<void>;
 }) {
+  const activeStep = Math.max(0, Math.min(step, advancedCdeSteps.length - 1));
+  const active = advancedCdeSteps[activeStep];
+  const update = (patch: Partial<AdvancedCdeFormInput>) => onChange({ ...form, ...patch });
   return (
     <div className="modal-backdrop">
       <section className="advanced-dte-modal" role="dialog" aria-modal="true" aria-labelledby="advanced-dte-title">
         <header>
           <div>
-            <h2 id="advanced-dte-title">DTE avanzado</h2>
-            <p>CDE completo v2, ambiente 00.</p>
+            <h2 id="advanced-dte-title">Crear CDE avanzado</h2>
+            <p>CDE v2 en ambiente 00 con datos editables antes de transmitir.</p>
           </div>
           <button className="icon-button" onClick={onClose} title="Cerrar">
             <X size={17} />
           </button>
         </header>
-        <div className="advanced-fields" aria-label="Secciones CDE">
-          {["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"].map((field) => (
-            <span key={field}>{field}</span>
-          ))}
+        <div className="advanced-dte-body">
+          <nav className="advanced-steps" aria-label="Pasos CDE avanzado">
+            {advancedCdeSteps.map((item, index) => (
+              <button
+                key={item.id}
+                className={index === activeStep ? "active" : ""}
+                type="button"
+                onClick={() => onStepChange(index)}
+              >
+                <span>{index + 1}</span>
+                <strong>{item.label}</strong>
+              </button>
+            ))}
+          </nav>
+          <div className="advanced-step-panel">
+            <div className="advanced-step-head">
+              <div>
+                <h3>{active.label}</h3>
+                <p>{active.description}</p>
+              </div>
+              <span>{active.id}</span>
+            </div>
+            {active.id === "receptor" && (
+              <div className="advanced-form-grid">
+                <AdvancedField label="Nombre del donante">
+                  <input value={form.donorName} onChange={(event) => update({ donorName: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Tipo documento">
+                  <select value={form.donorTipoDocumento} onChange={(event) => update({ donorTipoDocumento: event.target.value })}>
+                    <option value="13">DUI</option>
+                    <option value="36">NIT</option>
+                    <option value="37">Otro</option>
+                  </select>
+                </AdvancedField>
+                <AdvancedField label="Numero documento">
+                  <input value={form.donorDocument} onChange={(event) => update({ donorDocument: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="NRC">
+                  <input value={form.donorNrc} onChange={(event) => update({ donorNrc: event.target.value })} placeholder="Opcional" />
+                </AdvancedField>
+                <AdvancedField label="Codigo actividad">
+                  <input value={form.donorCodActividad} onChange={(event) => update({ donorCodActividad: event.target.value })} placeholder="Opcional" />
+                </AdvancedField>
+                <AdvancedField label="Actividad economica">
+                  <input value={form.donorDescActividad} onChange={(event) => update({ donorDescActividad: event.target.value })} placeholder="Opcional" />
+                </AdvancedField>
+                <AdvancedField label="Correo">
+                  <input value={form.donorEmail} onChange={(event) => update({ donorEmail: event.target.value })} type="email" />
+                </AdvancedField>
+                <AdvancedField label="Telefono">
+                  <input value={form.donorPhone} onChange={(event) => update({ donorPhone: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Domicilio fiscal">
+                  <select value={form.codDomiciliado} onChange={(event) => update({ codDomiciliado: event.target.value })}>
+                    <option value="1">Domiciliado</option>
+                    <option value="2">No domiciliado</option>
+                  </select>
+                </AdvancedField>
+                <AdvancedField label="Pais">
+                  <input value={form.codPais} onChange={(event) => update({ codPais: event.target.value.toUpperCase() })} maxLength={2} />
+                </AdvancedField>
+              </div>
+            )}
+            {active.id === "direccion" && (
+              <div className="advanced-form-grid">
+                <AdvancedField label="Departamento">
+                  <input value={form.departamento} onChange={(event) => update({ departamento: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Municipio">
+                  <input value={form.municipio} onChange={(event) => update({ municipio: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Distrito">
+                  <input value={form.distrito} onChange={(event) => update({ distrito: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Pais direccion">
+                  <input value={form.codPais} onChange={(event) => update({ codPais: event.target.value.toUpperCase() })} maxLength={2} />
+                </AdvancedField>
+                <AdvancedField label="Complemento / direccion completa" span>
+                  <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} rows={4} />
+                </AdvancedField>
+              </div>
+            )}
+            {active.id === "donacion" && (
+              <div className="advanced-form-grid">
+                <AdvancedField label="Tipo donacion">
+                  <input value={form.tipoDonacion} onChange={(event) => update({ tipoDonacion: event.target.value })} inputMode="numeric" />
+                </AdvancedField>
+                <AdvancedField label="Cantidad">
+                  <input value={form.cantidad} onChange={(event) => update({ cantidad: event.target.value })} inputMode="decimal" />
+                </AdvancedField>
+                <AdvancedField label="Codigo">
+                  <input value={form.codigo} onChange={(event) => update({ codigo: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Unidad medida">
+                  <input value={form.uniMedida} onChange={(event) => update({ uniMedida: event.target.value })} inputMode="numeric" />
+                </AdvancedField>
+                <AdvancedField label="Tipo depreciacion">
+                  <input value={form.tipoDepreciacion} onChange={(event) => update({ tipoDepreciacion: event.target.value })} inputMode="numeric" />
+                </AdvancedField>
+                <AdvancedField label="Valor unitario">
+                  <input value={form.valorUni} onChange={(event) => update({ valorUni: event.target.value })} inputMode="decimal" />
+                </AdvancedField>
+                <AdvancedField label="Valor total">
+                  <input value={form.valorTotal} onChange={(event) => update({ valorTotal: event.target.value })} inputMode="decimal" />
+                </AdvancedField>
+                <AdvancedField label="Descripcion" span>
+                  <textarea value={form.descripcion} onChange={(event) => update({ descripcion: event.target.value })} rows={3} />
+                </AdvancedField>
+              </div>
+            )}
+            {active.id === "pago" && (
+              <div className="advanced-form-grid">
+                <AdvancedField label="Codigo pago">
+                  <input value={form.pagoCodigo} onChange={(event) => update({ pagoCodigo: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Referencia pago">
+                  <input value={form.pagoReferencia} onChange={(event) => update({ pagoReferencia: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Total en letras" span>
+                  <input value={form.totalLetras} onChange={(event) => update({ totalLetras: event.target.value })} placeholder="Opcional" />
+                </AdvancedField>
+                <AdvancedField label="Documento asociado">
+                  <input value={form.documentoDesc} onChange={(event) => update({ documentoDesc: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Detalle documento">
+                  <input value={form.documentoDetalle} onChange={(event) => update({ documentoDetalle: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Apendice campo">
+                  <input value={form.apendiceCampo} onChange={(event) => update({ apendiceCampo: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Apendice etiqueta">
+                  <input value={form.apendiceEtiqueta} onChange={(event) => update({ apendiceEtiqueta: event.target.value })} />
+                </AdvancedField>
+                <AdvancedField label="Apendice valor" span>
+                  <input value={form.apendiceValor} onChange={(event) => update({ apendiceValor: event.target.value })} />
+                </AdvancedField>
+              </div>
+            )}
+            {active.id === "revision" && (
+              <div className="advanced-review">
+                <dl>
+                  <div><dt>Donante</dt><dd>{form.donorName || "N/D"}</dd></div>
+                  <div><dt>Documento</dt><dd>{form.donorDocument || "N/D"}</dd></div>
+                  <div><dt>Correo</dt><dd>{form.donorEmail || "N/D"}</dd></div>
+                  <div><dt>Total</dt><dd>${form.valorTotal || "0.00"}</dd></div>
+                </dl>
+                <pre className="advanced-json-preview">{preview}</pre>
+              </div>
+            )}
+          </div>
         </div>
-        <textarea
-          className="json-editor"
-          value={draft}
-          onChange={(event) => onChange(event.target.value)}
-          spellCheck={false}
-        />
         {error && <p className="error">{error}</p>}
         <footer>
           <button disabled={busy} onClick={() => void onReload()}>
             <RefreshCw size={16} />
             Recargar plantilla
           </button>
+          <div className="wizard-actions">
+            <button disabled={busy || activeStep === 0} onClick={() => onStepChange(activeStep - 1)}>
+              <ChevronLeft size={16} />
+              Anterior
+            </button>
+            <button disabled={busy || activeStep === advancedCdeSteps.length - 1} onClick={() => onStepChange(activeStep + 1)}>
+              Siguiente
+              <ChevronRight size={16} />
+            </button>
+          </div>
           <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
             <FlaskConical size={16} />
             {busy ? "Generando" : "Generar avanzado"}
@@ -849,6 +1018,15 @@ function AdvancedDteModal({
         </footer>
       </section>
     </div>
+  );
+}
+
+function AdvancedField({ label, span, children }: { label: string; span?: boolean; children: ReactNode }) {
+  return (
+    <label className={span ? "span-2" : ""}>
+      <span>{label}</span>
+      {children}
+    </label>
   );
 }
 
@@ -1147,6 +1325,264 @@ function exportParams(startDate: string, endDate: string): URLSearchParams {
 function filenameFromDisposition(disposition: string | null, fallback: string): string {
   const match = disposition?.match(/filename="([^"]+)"/);
   return match?.[1] ?? fallback;
+}
+
+const advancedCdeSteps = [
+  { id: "receptor", label: "Donante", description: "Datos fiscales y contacto del receptor." },
+  { id: "direccion", label: "Direccion", description: "Ubicacion declarada para el CDE." },
+  { id: "donacion", label: "Donacion", description: "Detalle del bien o aporte emitido." },
+  { id: "pago", label: "Pago y anexos", description: "Referencia, documento asociado y apendice." },
+  { id: "revision", label: "Revision", description: "Resumen final antes de generar el CDE." }
+] as const;
+
+interface AdvancedCdeFormInput {
+  donorName: string;
+  donorTipoDocumento: string;
+  donorDocument: string;
+  donorNrc: string;
+  donorCodActividad: string;
+  donorDescActividad: string;
+  donorEmail: string;
+  donorPhone: string;
+  codDomiciliado: string;
+  codPais: string;
+  departamento: string;
+  municipio: string;
+  distrito: string;
+  direccionComplemento: string;
+  tipoDonacion: string;
+  cantidad: string;
+  codigo: string;
+  uniMedida: string;
+  descripcion: string;
+  tipoDepreciacion: string;
+  valorUni: string;
+  valorTotal: string;
+  totalLetras: string;
+  pagoCodigo: string;
+  pagoReferencia: string;
+  documentoDesc: string;
+  documentoDetalle: string;
+  apendiceCampo: string;
+  apendiceEtiqueta: string;
+  apendiceValor: string;
+}
+
+function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
+  return {
+    donorName: "Donante de Prueba",
+    donorTipoDocumento: "13",
+    donorDocument: "SIN-DOCUMENTO",
+    donorNrc: "",
+    donorCodActividad: "",
+    donorDescActividad: "",
+    donorEmail: "donante@example.org",
+    donorPhone: "00000000",
+    codDomiciliado: "1",
+    codPais: "SV",
+    departamento: "",
+    municipio: "",
+    distrito: "",
+    direccionComplemento: "Direccion de prueba",
+    tipoDonacion: "1",
+    cantidad: "1",
+    codigo: "DONACION",
+    uniMedida: "59",
+    descripcion: "Donacion de prueba",
+    tipoDepreciacion: "0",
+    valorUni: "1.00",
+    valorTotal: "1.00",
+    totalLetras: "",
+    pagoCodigo: "01",
+    pagoReferencia: "STAGING",
+    documentoDesc: "Referencia Wompi",
+    documentoDetalle: "DTE avanzado",
+    apendiceCampo: "Aplicativo",
+    apendiceEtiqueta: "Aplicativo",
+    apendiceValor: "DiezmosSV Staging"
+  };
+}
+
+function advancedFormFromDraft(draft: Record<string, unknown>): AdvancedCdeFormInput {
+  const receptor = recordValue(draft.receptor);
+  const direccion = recordValue(receptor.direccion);
+  const item = firstRecord(draft.cuerpoDocumento);
+  const resumen = recordValue(draft.resumen);
+  const pago = firstRecord(resumen.pagos);
+  const documento = firstRecord(draft.otrosDocumentos);
+  const apendice = firstRecord(draft.apendice);
+  const fallback = defaultAdvancedCdeForm();
+  return {
+    donorName: textValue(receptor.nombre, fallback.donorName),
+    donorTipoDocumento: textValue(receptor.tipoDocumento, fallback.donorTipoDocumento),
+    donorDocument: textValue(receptor.numDocumento, fallback.donorDocument),
+    donorNrc: textValue(receptor.nrc),
+    donorCodActividad: textValue(receptor.codActividad),
+    donorDescActividad: textValue(receptor.descActividad),
+    donorEmail: textValue(receptor.correo),
+    donorPhone: textValue(receptor.telefono),
+    codDomiciliado: textValue(receptor.codDomiciliado, fallback.codDomiciliado),
+    codPais: textValue(receptor.codPais, fallback.codPais),
+    departamento: textValue(direccion.departamento),
+    municipio: textValue(direccion.municipio),
+    distrito: textValue(direccion.distrito),
+    direccionComplemento: textValue(direccion.complemento, fallback.direccionComplemento),
+    tipoDonacion: textValue(item.tipoDonacion, fallback.tipoDonacion),
+    cantidad: textValue(item.cantidad, fallback.cantidad),
+    codigo: textValue(item.codigo, fallback.codigo),
+    uniMedida: textValue(item.uniMedida, fallback.uniMedida),
+    descripcion: textValue(item.descripcion, fallback.descripcion),
+    tipoDepreciacion: textValue(item.tipoDepreciacion, fallback.tipoDepreciacion),
+    valorUni: textValue(item.valorUni, fallback.valorUni),
+    valorTotal: textValue(item.valor, textValue(resumen.valorTotal, fallback.valorTotal)),
+    totalLetras: textValue(resumen.totalLetras),
+    pagoCodigo: textValue(pago.codigo, fallback.pagoCodigo),
+    pagoReferencia: textValue(pago.referencia, fallback.pagoReferencia),
+    documentoDesc: textValue(documento.descDocumento, fallback.documentoDesc),
+    documentoDetalle: textValue(documento.detalleDocumento, fallback.documentoDetalle),
+    apendiceCampo: textValue(apendice.campo, fallback.apendiceCampo),
+    apendiceEtiqueta: textValue(apendice.etiqueta, fallback.apendiceEtiqueta),
+    apendiceValor: textValue(apendice.valor, fallback.apendiceValor)
+  };
+}
+
+function advancedDraftFromForm(template: Record<string, unknown> | null, form: AdvancedCdeFormInput): Record<string, unknown> {
+  const draft = cloneRecord(template);
+  const receptor = recordValue(draft.receptor);
+  const item = firstRecord(draft.cuerpoDocumento);
+  const resumen = recordValue(draft.resumen);
+  const pago = firstRecord(resumen.pagos);
+  const documento = firstRecord(draft.otrosDocumentos);
+  const cantidad = decimalValue(form.cantidad, 1);
+  const valorUni = decimalValue(form.valorUni, 1);
+  const valorTotal = decimalValue(form.valorTotal, Number((cantidad * valorUni).toFixed(2)));
+
+  draft.receptor = {
+    ...receptor,
+    tipoDocumento: cleanText(form.donorTipoDocumento) || "13",
+    numDocumento: cleanText(form.donorDocument) || "SIN-DOCUMENTO",
+    nrc: nullableText(form.donorNrc),
+    nombre: cleanText(form.donorName) || "Donante de Prueba",
+    codActividad: nullableText(form.donorCodActividad),
+    descActividad: nullableText(form.donorDescActividad),
+    direccion: {
+      departamento: cleanText(form.departamento),
+      municipio: cleanText(form.municipio),
+      distrito: cleanText(form.distrito),
+      complemento: cleanText(form.direccionComplemento)
+    },
+    telefono: nullableText(form.donorPhone),
+    correo: nullableText(form.donorEmail),
+    codDomiciliado: integerValue(form.codDomiciliado, 1),
+    codPais: cleanText(form.codPais).toUpperCase() || "SV"
+  };
+
+  draft.cuerpoDocumento = [
+    {
+      ...item,
+      numItem: 1,
+      tipoDonacion: integerValue(form.tipoDonacion, 1),
+      cantidad,
+      codigo: cleanText(form.codigo) || "DONACION",
+      uniMedida: integerValue(form.uniMedida, 59),
+      descripcion: cleanText(form.descripcion) || "Donacion de prueba",
+      tipoDepreciacion: integerValue(form.tipoDepreciacion, 0),
+      valorUni,
+      valor: valorTotal
+    }
+  ];
+
+  draft.resumen = {
+    ...resumen,
+    valorTotal,
+    totalLetras: nullableText(form.totalLetras),
+    pagos: [
+      {
+        ...pago,
+        codigo: cleanText(form.pagoCodigo) || "01",
+        montoPago: valorTotal,
+        referencia: cleanText(form.pagoReferencia) || "STAGING"
+      }
+    ]
+  };
+
+  draft.otrosDocumentos = [
+    {
+      ...documento,
+      codDocAsociado: 1,
+      descDocumento: cleanText(form.documentoDesc) || "Referencia avanzada",
+      detalleDocumento: cleanText(form.documentoDetalle) || cleanText(form.pagoReferencia) || "DTE avanzado"
+    }
+  ];
+
+  const hasApendice = cleanText(form.apendiceCampo) || cleanText(form.apendiceEtiqueta) || cleanText(form.apendiceValor);
+  draft.apendice = hasApendice
+    ? [
+        {
+          campo: cleanText(form.apendiceCampo) || "Nota",
+          etiqueta: cleanText(form.apendiceEtiqueta) || "Nota",
+          valor: cleanText(form.apendiceValor) || "DTE avanzado"
+        }
+      ]
+    : null;
+
+  return draft;
+}
+
+function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
+  const requiredFields: Array<[string, string]> = [
+    [form.donorName, "Nombre del donante"],
+    [form.donorDocument, "Numero documento"],
+    [form.departamento, "Departamento"],
+    [form.municipio, "Municipio"],
+    [form.distrito, "Distrito"],
+    [form.direccionComplemento, "Direccion completa"],
+    [form.descripcion, "Descripcion"],
+    [form.pagoReferencia, "Referencia pago"]
+  ];
+  const missing = requiredFields.find(([value]) => !cleanText(value));
+  if (missing) return `${missing[1]} es requerido`;
+  if (cleanText(form.codPais).length !== 2) return "Pais debe usar codigo ISO de 2 letras";
+  if (decimalValue(form.cantidad, 0) <= 0) return "Cantidad debe ser mayor que cero";
+  if (decimalValue(form.valorUni, 0) <= 0) return "Valor unitario debe ser mayor que cero";
+  if (decimalValue(form.valorTotal, 0) <= 0) return "Valor total debe ser mayor que cero";
+  return null;
+}
+
+function cloneRecord(value: Record<string, unknown> | null): Record<string, unknown> {
+  return value ? (JSON.parse(JSON.stringify(value)) as Record<string, unknown>) : {};
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function firstRecord(value: unknown): Record<string, unknown> {
+  return Array.isArray(value) ? recordValue(value[0]) : {};
+}
+
+function textValue(value: unknown, fallback = ""): string {
+  if (value === null || value === undefined) return fallback;
+  return String(value);
+}
+
+function cleanText(value: string): string {
+  return value.trim();
+}
+
+function nullableText(value: string): string | null {
+  const cleaned = cleanText(value);
+  return cleaned ? cleaned : null;
+}
+
+function integerValue(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function decimalValue(value: string, fallback: number): number {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : fallback;
 }
 
 interface TestDteInput {

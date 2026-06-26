@@ -229,6 +229,8 @@ h2 {
 .test-panel input,
 .user-create input,
 .export-controls input,
+.advanced-form-grid input,
+.advanced-form-grid textarea,
 .credential-fields input,
 .credential-fields textarea,
 select {
@@ -244,6 +246,8 @@ select,
 .test-panel input,
 .user-create input,
 .export-controls input,
+.advanced-form-grid input,
+.advanced-form-grid textarea,
 .credential-fields input,
 .credential-fields textarea {
   border: 1px solid #d8e0e3;
@@ -316,10 +320,10 @@ select,
 }
 
 .advanced-dte-modal {
-  width: min(980px, 100%);
+  width: min(1040px, 100%);
   max-height: min(880px, calc(100vh - 44px));
   display: grid;
-  grid-template-rows: auto auto minmax(320px, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: 12px;
   padding: 18px;
   background: #ffffff;
@@ -340,6 +344,12 @@ select,
   justify-content: flex-end;
 }
 
+.wizard-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .advanced-dte-modal h2 {
   margin-bottom: 4px;
 }
@@ -349,29 +359,147 @@ select,
   font-size: 12px;
 }
 
-.advanced-fields {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+.advanced-dte-body {
+  min-height: 500px;
+  display: grid;
+  grid-template-columns: 178px minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
 }
 
-.advanced-fields span {
-  min-height: 28px;
+.advanced-steps {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.advanced-steps button {
+  min-height: 44px;
+  justify-content: flex-start;
+  padding: 0 10px;
+  color: #52656c;
+}
+
+.advanced-steps button.active {
+  color: #ffffff;
+  background: #1b383d;
+  border-color: #26484e;
+}
+
+.advanced-steps button span {
+  width: 22px;
+  height: 22px;
   display: inline-flex;
   align-items: center;
-  padding: 0 9px;
+  justify-content: center;
+  border-radius: 50%;
+  background: #eef8f7;
+  color: #00756f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.advanced-steps button.active span {
+  background: #69c5bd;
+  color: #112327;
+}
+
+.advanced-step-panel {
+  min-width: 0;
+  overflow: auto;
+  border: 1px solid #e0e7e9;
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.advanced-step-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.advanced-step-head h3 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.advanced-step-head span {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
   color: #1b383d;
   background: #eef8f7;
-  border: 1px solid #c8ebe7;
-  border-radius: 6px;
+  border-radius: 999px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.advanced-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.advanced-form-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.advanced-form-grid label span {
+  color: #52656c;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.advanced-form-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.advanced-form-grid textarea {
+  min-height: 96px;
+  padding: 10px;
+  resize: vertical;
+}
+
+.advanced-review {
+  display: grid;
+  gap: 14px;
+}
+
+.advanced-review dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.advanced-review dl div {
+  padding: 10px;
+  background: #f7f9fa;
+  border: 1px solid #e0e7e9;
+  border-radius: 6px;
+}
+
+.advanced-review dt {
+  color: #61737a;
   font-size: 12px;
 }
 
-.json-editor {
+.advanced-review dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 750;
+}
+
+.advanced-json-preview {
   width: 100%;
-  min-height: 320px;
-  resize: vertical;
+  max-height: 340px;
+  overflow: auto;
   padding: 12px;
   color: #1b2328;
   background: #f7f9fa;
@@ -986,13 +1114,35 @@ pre {
 
   .advanced-dte-modal {
     max-height: calc(100vh - 20px);
-    grid-template-rows: auto auto minmax(260px, 1fr) auto auto;
   }
 
   .advanced-dte-modal header,
   .advanced-dte-modal footer {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .wizard-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .advanced-dte-body {
+    min-height: 420px;
+    grid-template-columns: 1fr;
+    overflow: auto;
+  }
+
+  .advanced-steps {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(126px, 1fr);
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+
+  .advanced-form-grid,
+  .advanced-review dl {
+    grid-template-columns: 1fr;
   }
 
   .stats {
