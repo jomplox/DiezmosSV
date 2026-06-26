@@ -1,4 +1,4 @@
-import { getEmisorConfig, requireSecret } from "../config";
+import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
 import { buildCdeDocument, buildContingenciaEvent } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, ambienteFromWompi, donorName, isApprovedDonation } from "../domain/wompi";
@@ -57,7 +57,7 @@ export class IssuancePipeline {
     });
 
     try {
-      const signedJws = await signMhDocument(normalDocument, requireSecret(this.env, "MH_CERT_XML"), requireSecret(this.env, "MH_CERT_PASSWORD"));
+      const signedJws = await signMhDocument(normalDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
       await this.repo.updateDocumentSigned(record.id, signedJws);
       const mhResult = await this.mh.transmitDte({
         ambiente: environment,
@@ -127,7 +127,7 @@ export class IssuancePipeline {
       tipoContingencia: Number(open.tipo_contingencia ?? 1),
       motivoContingencia: String(open.reason)
     });
-    const eventJws = await signMhDocument(eventDocument, requireSecret(this.env, "MH_CERT_XML"), requireSecret(this.env, "MH_CERT_PASSWORD"));
+    const eventJws = await signMhDocument(eventDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     const eventId = await this.repo.createDteEvent({
       documentId: null,
       eventType: "CONTINGENCIA",
@@ -187,7 +187,7 @@ export class IssuancePipeline {
     const config = getEmisorConfig(this.env);
     const contingencyDocument = buildCdeDocument(payload, config, { sequence, contingency: true });
     const identifiers = extractCdeIdentifiers(contingencyDocument);
-    const signedJws = await signMhDocument(contingencyDocument, requireSecret(this.env, "MH_CERT_XML"), requireSecret(this.env, "MH_CERT_PASSWORD"));
+    const signedJws = await signMhDocument(contingencyDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     await this.repo.replaceDocumentPayload(record.id, {
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,

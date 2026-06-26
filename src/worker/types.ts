@@ -8,6 +8,8 @@ export interface Env {
   MOCK_EXTERNAL_SERVICES?: string;
   WOMPI_API_SECRET?: string;
   MH_CERT_XML?: string;
+  MH_CERT_XML_PART_1?: string;
+  MH_CERT_XML_PART_2?: string;
   MH_CERT_PASSWORD?: string;
   MH_USER?: string;
   MH_PASSWORD?: string;

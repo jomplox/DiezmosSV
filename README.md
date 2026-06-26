@@ -188,6 +188,8 @@ A starter `.dev.vars` looks like this — use **separate** MH credentials for te
 WOMPI_API_SECRET="..."
 MH_CERT_PASSWORD="..."
 MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
+# Remote Cloudflare deploys can use MH_CERT_XML_PART_1 and MH_CERT_XML_PART_2
+# when the certificate XML is over the 5 KB Worker variable limit.
 
 MH_USER_TEST="..."
 MH_PASSWORD_TEST="..."
@@ -247,7 +249,8 @@ npx wrangler queues create diezmossv-staging-issuance-example
 # 3 - Set TEST/staging secrets
 npx wrangler secret put WOMPI_API_SECRET --env staging
 npx wrangler secret put MH_CERT_PASSWORD --env staging
-npx wrangler secret put MH_CERT_XML --env staging
+npx wrangler secret put MH_CERT_XML_PART_1 --env staging
+npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
 npx wrangler secret put EMAIL_API_KEY --env staging
@@ -291,7 +294,8 @@ npx wrangler queues create diezmossv-production-issuance-example
 # 2 - Set production secrets
 npx wrangler secret put WOMPI_API_SECRET --env production
 npx wrangler secret put MH_CERT_PASSWORD --env production
-npx wrangler secret put MH_CERT_XML --env production
+npx wrangler secret put MH_CERT_XML_PART_1 --env production
+npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
 npx wrangler secret put EMAIL_API_KEY --env production
@@ -318,7 +322,8 @@ Do one controlled low-value production issuance with live monitoring before enab
 | Variable | Purpose |
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
-| `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). |
+| `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). Works locally and remotely only when it fits Cloudflare's 5 KB Worker variable limit. |
+| `MH_CERT_XML_PART_1` / `MH_CERT_XML_PART_2` | Split form of the same certificate XML for Cloudflare Workers when `MH_CERT_XML` is over the per-variable limit. |
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |

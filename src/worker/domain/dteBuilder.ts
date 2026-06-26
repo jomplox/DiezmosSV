@@ -129,6 +129,7 @@ export function buildInvalidacionEvent(
 ): Record<string, unknown> {
   const original = JSON.parse(record.plain_json) as CdeDocumentShape;
   const { date, time } = mhDateTime(emittedAt);
+  const eventCodes = mhEventCodes(record.numero_control, config);
   const document = {
     identificacion: {
       version: 3,
@@ -141,9 +142,9 @@ export function buildInvalidacionEvent(
     emisor: {
       nit: config.numDocumento,
       nombre: config.nombre,
-      codEstableMH: config.codEstableMH,
+      codEstableMH: eventCodes.codEstableMH,
       codEstable: config.codEstable,
-      codPuntoVentaMH: config.codPuntoVentaMH,
+      codPuntoVentaMH: eventCodes.codPuntoVentaMH,
       codPuntoVenta: config.codPuntoVenta,
       telefono: config.telefono,
       correo: config.correo
@@ -180,6 +181,7 @@ export function buildContingenciaEvent(config: EmisorConfig, input: ContingencyI
   const emitted = mhDateTime(emittedAt);
   const start = mhDateTime(input.startedAt);
   const end = mhDateTime(input.endedAt);
+  const eventCodes = mhEventCodes(null, config);
   const document = {
     identificacion: {
       version: 4,
@@ -195,8 +197,8 @@ export function buildContingenciaEvent(config: EmisorConfig, input: ContingencyI
       tipoDocResponsable: config.responsable.tipoDocumento,
       numeroDocResponsable: config.responsable.numeroDocumento,
       tipoEstablecimiento: config.responsable.tipoEstablecimiento,
-      codEstableMH: config.codEstableMH,
-      codPuntoVentaMH: config.codPuntoVentaMH,
+      codEstableMH: eventCodes.codEstableMH,
+      codPuntoVentaMH: eventCodes.codPuntoVentaMH,
       telefono: config.telefono,
       correo: config.correo
     },
@@ -238,6 +240,25 @@ function centsToAmount(cents: number): number {
 function cleanNullable(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+function mhEventCodes(numeroControl: string | null | undefined, config: EmisorConfig): { codEstableMH: string; codPuntoVentaMH: string } {
+  const controlPrefix = numeroControl?.split("-")[2];
+  return mhCodesFromControlPrefix(controlPrefix) ?? mhCodesFromControlPrefix(config.controlPrefix) ?? {
+    codEstableMH: config.codEstableMH,
+    codPuntoVentaMH: config.codPuntoVentaMH
+  };
+}
+
+function mhCodesFromControlPrefix(prefix: string | null | undefined): { codEstableMH: string; codPuntoVentaMH: string } | null {
+  const match = prefix?.match(/^([MBSP]\d{3})(P\d{3})$/);
+  if (!match) {
+    return null;
+  }
+  return {
+    codEstableMH: match[1],
+    codPuntoVentaMH: match[2]
+  };
 }
 
 interface CdeDocumentShape {

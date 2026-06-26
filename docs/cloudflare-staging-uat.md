@@ -33,7 +33,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    ```bash
    npx wrangler secret put WOMPI_API_SECRET --env staging
    npx wrangler secret put MH_CERT_PASSWORD --env staging
-   npx wrangler secret put MH_CERT_XML --env staging
+   npx wrangler secret put MH_CERT_XML_PART_1 --env staging
+   npx wrangler secret put MH_CERT_XML_PART_2 --env staging
    npx wrangler secret put MH_USER_TEST --env staging
    npx wrangler secret put MH_PASSWORD_TEST --env staging
    npx wrangler secret put EMAIL_API_KEY --env staging
@@ -41,6 +42,10 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npx wrangler secret put EMAIL_FROM --env staging
    npx wrangler secret put EMISOR_CONFIG_JSON --env staging
    ```
+
+   Local dev may keep the certificate in one `MH_CERT_XML` value. Cloudflare Workers limit each
+   variable/secret to 5 KB, so staging and production should split larger MH certificate XML values
+   across `MH_CERT_XML_PART_1` and `MH_CERT_XML_PART_2`.
 
 6. Apply the schema and deploy:
 

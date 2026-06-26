@@ -18,6 +18,7 @@ const ROLE_RANK: Record<Role, number> = {
   ADMIN: 3,
   OWNER: 4
 };
+const PASSWORD_PBKDF2_ITERATIONS = 100_000;
 
 export class AuthService {
   private readonly repo: Repository;
@@ -106,7 +107,7 @@ export async function hashPassword(password: string, salt?: string): Promise<{ h
     {
       name: "PBKDF2",
       salt: utf8Bytes(effectiveSalt),
-      iterations: 150_000,
+      iterations: PASSWORD_PBKDF2_ITERATIONS,
       hash: "SHA-256"
     },
     key,

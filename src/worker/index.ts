@@ -1,4 +1,4 @@
-import { getEmisorConfig, requireSecret } from "./config";
+import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildInvalidacionEvent, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
 import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
@@ -18,10 +18,10 @@ export default {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/")) {
-        return handleApi(request, env, url);
+        return await handleApi(request, env, url);
       }
       if (url.pathname === "/webhooks/wompi") {
-        return handleWompiWebhook(request, env);
+        return await handleWompiWebhook(request, env);
       }
       return env.ASSETS.fetch(request);
     } catch (error) {
@@ -291,7 +291,7 @@ async function handleDocumentRoute(
       codigoGeneracionR: body.codigoGeneracionR ?? null
     };
     const eventDocument = buildInvalidacionEvent(document, config, input);
-    const signedJws = await signMhDocument(eventDocument, requireSecret(env, "MH_CERT_XML"), requireSecret(env, "MH_CERT_PASSWORD"));
+    const signedJws = await signMhDocument(eventDocument, getMhCertificateXml(env), requireSecret(env, "MH_CERT_PASSWORD"));
     const eventId = await repo.createDteEvent({
       documentId: document.id,
       eventType: "INVALIDACION",

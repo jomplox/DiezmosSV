@@ -19,7 +19,7 @@ describe("MH live TEST integration", () => {
     const reference = JSON.parse(fs.readFileSync(referencePath, "utf8")) as ReferenceCde;
     const mode = process.env.MH_LIVE_DOCUMENT_MODE ?? "reference";
     const testDocument = mode === "builder" ? buildBuilderDocument(reference, envVars) : buildReferenceDocument(reference);
-    const signedJws = await signMhDocument(testDocument, required(envVars, "MH_CERT_XML"), required(envVars, "MH_CERT_PASSWORD"));
+    const signedJws = await signMhDocument(testDocument, mhCertificateXml(envVars), required(envVars, "MH_CERT_PASSWORD"));
     const mh = new MhClient(testEnv(envVars));
     const result = await mh.transmitDte({
       ambiente: "00",
@@ -192,6 +192,16 @@ function required(env: Record<string, string>, key: string): string {
     throw new Error(`${key} is required`);
   }
   return value;
+}
+
+function mhCertificateXml(env: Record<string, string>): string {
+  if (env.MH_CERT_XML) {
+    return env.MH_CERT_XML;
+  }
+  if (env.MH_CERT_XML_PART_1 && env.MH_CERT_XML_PART_2) {
+    return `${env.MH_CERT_XML_PART_1}${env.MH_CERT_XML_PART_2}`;
+  }
+  throw new Error("MH_CERT_XML is required");
 }
 
 function testEnv(envVars: Record<string, string>): Env {

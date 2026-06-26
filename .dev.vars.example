@@ -1,6 +1,10 @@
 WOMPI_API_SECRET="replace-with-wompi-secret"
 MH_CERT_PASSWORD="replace-with-mh-private-key-password"
 MH_CERT_XML="paste-ministerio-hacienda-certificado-xml-here"
+# Cloudflare Workers secrets are capped at 5 KB. For remote deploys with a larger certificate,
+# split the same XML across MH_CERT_XML_PART_1 and MH_CERT_XML_PART_2 instead.
+# MH_CERT_XML_PART_1="first-half-of-certificado-xml"
+# MH_CERT_XML_PART_2="second-half-of-certificado-xml"
 MH_USER_TEST="replace-with-mh-test-api-user"
 MH_PASSWORD_TEST="replace-with-mh-test-api-password"
 MH_USER_PROD="replace-with-mh-production-api-user"
