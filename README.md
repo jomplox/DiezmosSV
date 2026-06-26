@@ -200,6 +200,9 @@ MH_PASSWORD_TEST="..."
 MH_USER_PROD="..."
 MH_PASSWORD_PROD="..."
 
+# Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
+# EMAIL_API_URL="https://email-provider.example/send"
+# EMAIL_API_KEY="..."
 EMAIL_FROM="dte@example.org"
 
 EMISOR_CONFIG_JSON="{...}"
@@ -258,6 +261,8 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
+npx wrangler secret put EMAIL_API_URL --env staging   # optional fallback
+npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
@@ -305,6 +310,8 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
+npx wrangler secret put EMAIL_API_URL --env production   # optional fallback
+npx wrangler secret put EMAIL_API_KEY --env production   # optional fallback
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
 
@@ -335,6 +342,7 @@ Do one controlled low-value production issuance with live monitoring before enab
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
+| `EMAIL_API_URL` / `EMAIL_API_KEY` | Optional fallback transactional provider used when Cloudflare Email Service rejects arbitrary donor recipients. |
 | `EMAIL_FROM` | Sender address for Cloudflare Email Service. The sender domain must be onboarded in Cloudflare Email Sending. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
@@ -350,19 +358,21 @@ Do one controlled low-value production issuance with live monitoring before enab
 | `MOCK_EXTERNAL_SERVICES` | `"true"` stubs MH + email (great for local dev). |
 | `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
 | `EMAIL` | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. |
+| `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker after Cloudflare Email Sending is confirmed to send to external donor addresses. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in `.dev.vars`; set the real remote value as a Cloudflare secret. |
 
-Remote staging/production email delivery uses Cloudflare Email Service, not a separate HTTP email
-provider. The binding is declared as `send_email` in `wrangler.toml` and is restricted to the
-configured `EMAIL_FROM` sender. To send receipts to arbitrary donor addresses, the Cloudflare account
-must have Email Sending enabled for the sender domain; otherwise Cloudflare may only permit delivery
-to verified destination addresses.
+Remote staging/production email delivery uses Cloudflare Email Service first. The binding is declared
+as `send_email` in `wrangler.toml` and is restricted to the configured `EMAIL_FROM` sender. To send
+receipts to arbitrary donor addresses, the Cloudflare account must have Email Sending enabled for the
+sender domain; otherwise Cloudflare may only permit delivery to verified destination addresses. If
+Cloudflare returns `destination address is not a verified address`, the Worker can fall back to
+`EMAIL_API_URL` / `EMAIL_API_KEY` so donors do not need to be pre-verified in Cloudflare.
 
 The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
 credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
-sender address. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
+sender/fallback settings. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
 `CLOUDFLARE_API_TOKEN` is missing, the screen remains read-only and tells the owner that the

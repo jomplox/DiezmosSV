@@ -43,28 +43,90 @@ export class EmailService {
       return { mock: true, toEmail, subject };
     }
     if (this.env.EMAIL) {
-      const result = await this.env.EMAIL.send({
-        from,
-        to: toEmail,
-        subject,
-        text: payload.text,
-        attachments: [
-          {
-            filename: pdfAttachment.filename,
-            type: pdfAttachment.contentType,
-            disposition: "attachment",
-            content: pdfAttachment.contentBase64
-          },
-          {
-            filename: jsonAttachment.filename,
-            type: jsonAttachment.contentType,
-            disposition: "attachment",
-            content: jsonAttachment.contentBase64
-          }
-        ]
-      });
-      return { provider: "cloudflare-email", messageId: result.messageId };
+      try {
+        const result = await this.env.EMAIL.send({
+          from,
+          to: toEmail,
+          subject,
+          text: payload.text,
+          attachments: [
+            {
+              filename: pdfAttachment.filename,
+              type: pdfAttachment.contentType,
+              disposition: "attachment",
+              content: pdfAttachment.contentBase64
+            },
+            {
+              filename: jsonAttachment.filename,
+              type: jsonAttachment.contentType,
+              disposition: "attachment",
+              content: jsonAttachment.contentBase64
+            }
+          ]
+        });
+        return { provider: "cloudflare-email", messageId: result.messageId };
+      } catch (error) {
+        if (hasHttpProvider(this.env)) {
+          return sendViaHttpProvider(this.env, payload, error);
+        }
+        throw error;
+      }
     }
-    throw new Error("Cloudflare EMAIL binding is required when mock mode is disabled");
+    if (hasHttpProvider(this.env)) {
+      return sendViaHttpProvider(this.env, payload);
+    }
+    throw new Error("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled");
+  }
+}
+
+async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareError?: unknown): Promise<unknown> {
+  const response = await fetch(env.EMAIL_API_URL!, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.EMAIL_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+  const responseBody = await response.text();
+  const parsed = parseProviderResponse(responseBody);
+  if (!response.ok) {
+    throw new Error(`Email provider failed: ${response.status} ${responseBody}`);
+  }
+  return {
+    provider: "http-email",
+    ...(cloudflareError ? { fallbackFrom: "cloudflare-email", cloudflareError: errorMessage(cloudflareError) } : {}),
+    response: parsed
+  };
+}
+
+interface EmailPayload {
+  from: string;
+  to: string;
+  subject: string;
+  text: string;
+  attachments: Array<{
+    filename: string;
+    contentType: string;
+    contentBase64: string;
+  }>;
+}
+
+function hasHttpProvider(env: Env): boolean {
+  return Boolean(env.EMAIL_API_URL?.trim() && env.EMAIL_API_KEY?.trim());
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function parseProviderResponse(responseBody: string): unknown {
+  if (!responseBody) {
+    return { ok: true };
+  }
+  try {
+    return JSON.parse(responseBody) as unknown;
+  } catch {
+    return { text: responseBody };
   }
 }

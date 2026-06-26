@@ -41,6 +41,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npx wrangler secret put MH_USER_TEST --env staging
    npx wrangler secret put MH_PASSWORD_TEST --env staging
    npx wrangler secret put EMAIL_FROM --env staging
+   npx wrangler secret put EMAIL_API_URL --env staging   # optional fallback
+   npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
    npx wrangler secret put EMISOR_CONFIG_JSON --env staging
    ```
 
@@ -55,7 +57,9 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    Before expecting donor delivery, onboard the sender domain under Cloudflare Email Sending and set
    `EMAIL_FROM` to an address on that domain. If Cloudflare returns `destination address is not a
    verified address`, the Worker is reaching Email Service but the account/domain is still limited to
-   verified destination addresses rather than arbitrary donor recipients.
+   verified destination addresses rather than arbitrary donor recipients. Configure
+   `EMAIL_API_URL` / `EMAIL_API_KEY` for a transactional fallback provider if donor delivery must work
+   before Cloudflare Email Sending is enabled for arbitrary recipients.
 
 6. Apply the schema and deploy:
 
@@ -127,6 +131,8 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
    - The staging Worker name and app environment are visible.
    - MH test, MH production, signer, issuer, Wompi, and email statuses show configured or pending.
    - Correo shows the Cloudflare `EMAIL` binding and `EMAIL_FROM` as configured.
+   - If Cloudflare Email Service is still destination-limited, Correo shows the fallback email
+     provider as configured.
    - Blank fields are understood as "leave unchanged".
    - If the Cloudflare writer token is not configured, the save action fails visibly instead of
      storing secrets in D1.

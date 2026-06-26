@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("Worker fetch error handling", () => {
   it("converts async API auth errors into JSON responses", async () => {
@@ -114,6 +118,58 @@ describe("document email resend", () => {
       to_email: "legacy-contact-2@example.com",
       status: "SENT",
       provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-1" })
+    }));
+  });
+
+  it("falls back to an HTTP email provider when Cloudflare requires verified destinations", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_http_1" }), { status: 202 })
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL_API_URL: "https://mail.example/send",
+        EMAIL_API_KEY: "email-api-key",
+        EMAIL: {
+          send: async () => {
+            throw new Error("destination address is not a verified address");
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(providerFetch).toHaveBeenCalledWith("https://mail.example/send", expect.objectContaining({
+      method: "POST",
+      headers: expect.objectContaining({
+        Authorization: "Bearer email-api-key",
+        "Content-Type": "application/json"
+      })
+    }));
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "SENT",
+      provider_response_json: JSON.stringify({
+        provider: "http-email",
+        fallbackFrom: "cloudflare-email",
+        cloudflareError: "destination address is not a verified address",
+        response: { id: "email_http_1" }
+      })
     }));
   });
 

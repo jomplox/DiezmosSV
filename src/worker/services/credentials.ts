@@ -10,6 +10,8 @@ export interface CredentialUpdateInput {
   certificatePassword?: string;
   emisorConfigJson?: string;
   wompiSecret?: string;
+  emailApiUrl?: string;
+  emailApiKey?: string;
   emailFrom?: string;
 }
 
@@ -75,10 +77,17 @@ export function credentialStatus(env: Env): CredentialStatus {
   const wompi = group("Wompi", [
     item(env, "WOMPI_API_SECRET", "Webhook HMAC")
   ]);
-  const email = group("Correo", [
-    { name: "EMAIL", label: "Cloudflare Email Service binding", configured: Boolean(env.EMAIL) },
-    item(env, "EMAIL_FROM", "Remitente")
-  ]);
+  const emailFrom = item(env, "EMAIL_FROM", "Remitente");
+  const email = {
+    label: "Correo",
+    ready: emailFrom.configured && (isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) || hasHttpProvider(env)),
+    items: [
+      { name: "EMAIL", label: "Cloudflare Email Service binding", configured: Boolean(env.EMAIL) },
+      { name: "EMAIL_ARBITRARY_RECIPIENTS", label: "Cloudflare a donantes externos", configured: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) },
+      { name: "EMAIL_API_URL + EMAIL_API_KEY", label: "Fallback HTTP sin verificacion de destinatario", configured: hasHttpProvider(env) },
+      emailFrom
+    ]
+  };
 
   return {
     target: {
@@ -100,6 +109,8 @@ export function buildCredentialSecretPatch(input: CredentialUpdateInput): Secret
   putIfPresent(patch, "MH_CERT_PASSWORD", input.certificatePassword);
   putIfPresent(patch, "EMISOR_CONFIG_JSON", input.emisorConfigJson);
   putIfPresent(patch, "WOMPI_API_SECRET", input.wompiSecret);
+  putIfPresent(patch, "EMAIL_API_URL", input.emailApiUrl);
+  putIfPresent(patch, "EMAIL_API_KEY", input.emailApiKey);
   putIfPresent(patch, "EMAIL_FROM", input.emailFrom);
 
   const certificateXml = trim(input.certificateXml);
@@ -154,6 +165,14 @@ function hasSignerCertificate(env: Env): boolean {
 
 function hasCloudflareWriter(env: Env): boolean {
   return nonEmpty(env.CLOUDFLARE_ACCOUNT_ID) && nonEmpty(env.CLOUDFLARE_SCRIPT_NAME) && nonEmpty(env.CLOUDFLARE_API_TOKEN);
+}
+
+function hasHttpProvider(env: Env): boolean {
+  return nonEmpty(env.EMAIL_API_URL) && nonEmpty(env.EMAIL_API_KEY);
+}
+
+function isTrue(value: unknown): boolean {
+  return typeof value === "string" && value.trim().toLowerCase() === "true";
 }
 
 function putIfPresent(patch: SecretPatch, name: string, value: string | undefined): void {
