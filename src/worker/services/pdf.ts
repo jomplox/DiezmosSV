@@ -1,54 +1,140 @@
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
+import { ELIM_LOGO_PNG_BASE64 } from "./orgLogo";
 import type { DteDocumentRecord } from "../types";
 
 export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Array> {
-  const document = JSON.parse(record.plain_json) as {
-    emisor: { nombre: string };
-    receptor: { nombre: string; correo: string | null };
-    resumen: { valorTotal: number };
-    identificacion: { fecEmi: string; horEmi: string };
-  };
+  const document = JSON.parse(record.plain_json) as CdePdfJson;
+  const emisor = document.emisor ?? document.donatario ?? {};
+  const receptor = document.receptor ?? document.donante ?? {};
+  const item = document.cuerpoDocumento?.[0] ?? {};
+  const amount = numberValue(document.resumen?.valorTotal, record.amount_cents / 100);
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([612, 792]);
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const charcoal = rgb(0.12, 0.16, 0.18);
-  const teal = rgb(0.0, 0.45, 0.43);
+  const logo = await pdf.embedPng(base64ToBytes(ELIM_LOGO_PNG_BASE64));
+  const black = rgb(0, 0, 0);
+  const grayFill = rgb(0.88, 0.88, 0.88);
+  const green = rgb(0.0, 0.46, 0.07);
 
-  page.drawText("Comprobante de Donacion Electronico", { x: 54, y: 720, size: 20, font: bold, color: charcoal });
-  page.drawText(document.emisor.nombre, { x: 54, y: 694, size: 12, font: regular, color: teal });
-  page.drawText(`Codigo de generacion: ${record.codigo_generacion}`, { x: 54, y: 650, size: 10, font: regular, color: charcoal });
-  page.drawText(`Numero de control: ${record.numero_control}`, { x: 54, y: 632, size: 10, font: regular, color: charcoal });
-  page.drawText(`Sello de recepcion: ${record.sello_recibido ?? "TRANSITORIO"}`, { x: 54, y: 614, size: 10, font: regular, color: charcoal });
-  page.drawText(`Donante: ${document.receptor.nombre}`, { x: 54, y: 574, size: 12, font: bold, color: charcoal });
-  page.drawText(`Correo: ${document.receptor.correo ?? "N/D"}`, { x: 54, y: 554, size: 10, font: regular, color: charcoal });
-  page.drawText(`Monto: $${document.resumen.valorTotal.toFixed(2)}`, { x: 54, y: 526, size: 14, font: bold, color: teal });
-  page.drawText(`Emision: ${document.identificacion.fecEmi} ${document.identificacion.horEmi}`, { x: 54, y: 506, size: 10, font: regular, color: charcoal });
+  drawOrganizationLogo(page, logo);
+  drawCentered(page, "DOCUMENTO TRIBUTARIO ELECTRÓNICO", 769, 9, bold, 190, 230);
+  drawCentered(page, "COMPROBANTE DE DONACIÓN", 744, 14, bold, 170, 275);
+  drawQr(page, buildQrPayload(record), 508, 690, 82);
 
-  drawQr(page, buildQrPayload(record), 412, 592, 112);
-  page.drawText("Escanee para consultar el comprobante", { x: 390, y: 574, size: 8, font: regular, color: charcoal });
+  page.drawRectangle({ x: 18, y: 682, width: 294, height: 40, color: grayFill });
+  drawKeyValue(page, "Código de generación:", record.codigo_generacion, 24, 708, 84, regular, bold, 7.6, black);
+  drawKeyValue(page, "Número de control:", record.numero_control, 24, 696, 84, regular, bold, 7.6, black);
+  drawKeyValue(page, "Sello de recepción:", record.sello_recibido ?? "TRANSITORIO", 24, 684, 84, regular, bold, 7.6, green);
 
-  page.drawLine({ start: { x: 54, y: 474 }, end: { x: 558, y: 474 }, thickness: 1, color: rgb(0.86, 0.88, 0.9) });
-  page.drawText("Este documento fue generado automaticamente a partir de una donacion Wompi aprobada.", {
-    x: 54,
-    y: 446,
-    size: 9,
-    font: regular,
-    color: charcoal
+  page.drawText(`TIPO DE MODELO: v${document.identificacion?.version ?? ""}`, { x: 318, y: 708, size: 7.7, font: regular, color: black });
+  page.drawText(`PREVIO / TIPO DTE: ${record.tipo_dte}`, { x: 404, y: 708, size: 7.7, font: regular, color: black });
+  page.drawText(`TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 696, size: 7.7, font: regular, color: black });
+  page.drawText(`FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 684, size: 7.7, font: bold, color: black });
+  page.drawText("Moneda:", { x: 424, y: 684, size: 7.7, font: regular, color: black });
+  page.drawText(document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 684, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
+
+  drawCentered(page, "EMISOR:", 675, 7.5, bold, 18, 294);
+  drawCentered(page, "RECEPTOR:", 675, 7.5, bold, 318, 276);
+  drawPartyBox(page, {
+    x: 18,
+    y: 574,
+    width: 294,
+    height: 97,
+    regular,
+    bold,
+    nameLabel: "Nombre o razón social:",
+    name: emisor.nombre,
+    activity: emisor.descActividad,
+    nrc: formatNrc(emisor.nrc),
+    documentLabel: "NIT:",
+    documentNumber: formatDocument(emisor.numDocumento),
+    addressLines: emisorLines(emisor)
   });
-  page.drawText("Conserve el JSON firmado y esta representacion grafica para sus registros.", {
-    x: 54,
-    y: 430,
-    size: 9,
-    font: regular,
-    color: charcoal
+  drawPartyBox(page, {
+    x: 318,
+    y: 574,
+    width: 276,
+    height: 97,
+    regular,
+    bold,
+    nameLabel: "Cliente:",
+    name: safeUpper(receptor.nombre),
+    activity: receptor.descActividad ?? "Empleados",
+    nrc: formatNrc(receptor.nrc),
+    documentLabel: "NIT:",
+    documentNumber: formatDocument(receptor.numDocumento),
+    addressLines: [receptorContactLine(receptor)]
   });
+
+  drawItemsTable(page, item, amount, regular, bold);
+  drawTotals(page, amount, document.resumen?.totalLetras, regular, bold);
 
   return pdf.save();
 }
 
-function drawQr(page: PDFPageLike, text: string, x: number, y: number, size: number): void {
+function drawOrganizationLogo(page: PDFPage, logo: PDFImage): void {
+  page.drawImage(logo, { x: 24, y: 727, width: 144, height: 50.4 });
+}
+
+function drawPartyBox(
+  page: PDFPage,
+  options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    regular: PDFFont;
+    bold: PDFFont;
+    nameLabel: string;
+    name?: string | null;
+    activity?: string | null;
+    nrc?: string | null;
+    documentLabel: string;
+    documentNumber?: string | null;
+    addressLines: string[];
+  }
+): void {
+  const black = rgb(0, 0, 0);
+  page.drawRectangle({ x: options.x, y: options.y, width: options.width, height: options.height, borderColor: black, borderWidth: 0.8 });
+  const left = options.x + 6;
+  const valueX = options.x + (options.width > 285 ? 91 : 82);
+  const docX = options.x + (options.width > 285 ? 106 : 86);
+  drawKeyValue(page, options.nameLabel, clean(options.name), left, options.y + options.height - 16, valueX - left, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, "Actividad económica:", clean(options.activity), left, options.y + options.height - 38, valueX - left, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, "NRC:", options.nrc ?? "", left, options.y + options.height - 60, 26, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, options.documentLabel, options.documentNumber ?? "", docX, options.y + options.height - 60, 22, options.regular, options.bold, 7.2, black);
+  options.addressLines.slice(0, 3).forEach((line, index) => {
+    page.drawText(line, { x: left, y: options.y + 26 - index * 10.5, size: 7.1, font: options.regular, color: black });
+  });
+}
+
+function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont, bold: PDFFont): void {
+  const black = rgb(0, 0, 0);
+  page.drawRectangle({ x: 18, y: 550, width: 576, height: 22, color: black });
+  page.drawText("CANTIDAD", { x: 24, y: 557, size: 8.3, font: regular, color: rgb(1, 1, 1) });
+  drawCentered(page, "DESCRIPCIÓN", 557, 8.3, regular, 145, 280, rgb(1, 1, 1));
+  drawRightAligned(page, "VALOR", 557, 8.3, regular, 588, rgb(1, 1, 1));
+
+  page.drawText(formatQuantity(numberValue(item.cantidad, 1)), { x: 24, y: 540, size: 8.2, font: regular, color: black });
+  page.drawText(clean(item.descripcion) || "DONACIÓN", { x: 75, y: 540, size: 8.2, font: regular, color: black });
+  drawRightAligned(page, formatMoney(numberValue(item.valor, amount), false), 540, 8.2, regular, 588, black);
+}
+
+function drawTotals(page: PDFPage, amount: number, totalLetras: string | null | undefined, regular: PDFFont, bold: PDFFont): void {
+  const black = rgb(0, 0, 0);
+  page.drawRectangle({ x: 18, y: 26, width: 354, height: 62, borderColor: rgb(0.45, 0.45, 0.45), borderWidth: 0.7 });
+  page.drawText(`Valor en Letras:  ${amountInWords(amount, totalLetras)}`, { x: 24, y: 73, size: 7.9, font: regular, color: black });
+  page.drawText("Observaciones:", { x: 24, y: 46, size: 7.9, font: regular, color: black });
+
+  page.drawRectangle({ x: 378, y: 26, width: 216, height: 28, borderColor: black, borderWidth: 1.2 });
+  page.drawText("Total de la Donación", { x: 384, y: 36, size: 8.4, font: bold, color: black });
+  page.drawText("$", { x: 482, y: 36, size: 8.4, font: regular, color: black });
+  drawRightAligned(page, formatMoney(amount, false), 36, 8.4, bold, 588, black);
+}
+
+function drawQr(page: PDFPage, text: string, x: number, y: number, size: number): void {
   const qr = QRCode.create(text, { errorCorrectionLevel: "M" }) as unknown as { modules: { size: number; data: Uint8Array } };
   const moduleSize = size / qr.modules.size;
   qr.modules.data.forEach((enabled, index) => {
@@ -62,9 +148,33 @@ function drawQr(page: PDFPageLike, text: string, x: number, y: number, size: num
       y: y + size - (row + 1) * moduleSize,
       width: moduleSize,
       height: moduleSize,
-      color: rgb(0.08, 0.12, 0.14)
+      color: rgb(0, 0, 0)
     });
   });
+}
+
+function drawKeyValue(
+  page: PDFPage,
+  label: string,
+  value: string,
+  x: number,
+  y: number,
+  labelWidth: number,
+  regular: PDFFont,
+  bold: PDFFont,
+  size: number,
+  valueColor = rgb(0, 0, 0)
+): void {
+  page.drawText(label, { x, y, size, font: bold, color: rgb(0, 0, 0) });
+  page.drawText(value, { x: x + labelWidth, y, size, font: regular, color: valueColor });
+}
+
+function drawCentered(page: PDFPage, text: string, y: number, size: number, font: PDFFont, x = 0, width = 612, color = rgb(0, 0, 0)): void {
+  page.drawText(text, { x: x + (width - font.widthOfTextAtSize(text, size)) / 2, y, size, font, color });
+}
+
+function drawRightAligned(page: PDFPage, text: string, y: number, size: number, font: PDFFont, rightX: number, color = rgb(0, 0, 0)): void {
+  page.drawText(text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
 }
 
 function buildQrPayload(record: DteDocumentRecord): string {
@@ -77,6 +187,182 @@ function buildQrPayload(record: DteDocumentRecord): string {
   return `https://admin.factura.gob.sv/consultaPublica?${params.toString()}`;
 }
 
-interface PDFPageLike {
-  drawRectangle(options: { x: number; y: number; width: number; height: number; color: ReturnType<typeof rgb> }): void;
+function emisorLines(emisor: Party): string[] {
+  const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
+  const address = [clean(emisor.direccion?.complemento), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
+  return [establishment, `• ${address} /`, `email.: ${emisor.correo ?? ""}`].filter(Boolean);
+}
+
+function receptorContactLine(receptor: Party): string {
+  return [clean(receptor.direccion?.complemento), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `email.: ${receptor.correo}` : ""]
+    .filter(Boolean)
+    .join(" / ");
+}
+
+function transmissionLabel(tipoOperacion: number | undefined): string {
+  return tipoOperacion === 2 ? "CONTINGENCIA" : "NORMAL";
+}
+
+function formatDate(value: string | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const [year, month, day] = value.split("-");
+  return year && month && day ? `${day}/${month}/${year}` : value;
+}
+
+function formatMoney(value: number, withSymbol = true): string {
+  return `${withSymbol ? "$" : ""}${value.toFixed(2)}`;
+}
+
+function formatQuantity(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function formatNrc(value: string | null | undefined): string {
+  const digits = onlyDigits(value);
+  return digits.length === 7 ? `${digits.slice(0, 6)}-${digits.slice(6)}` : value ?? "";
+}
+
+function formatDocument(value: string | null | undefined): string {
+  const digits = onlyDigits(value);
+  if (digits.length === 14) {
+    return `${digits.slice(0, 4)}-${digits.slice(4, 10)}-${digits.slice(10, 13)}-${digits.slice(13)}`;
+  }
+  if (digits.length === 9) {
+    return `${digits.slice(0, 8)}-${digits.slice(8)}`;
+  }
+  return value ?? "";
+}
+
+function onlyDigits(value: string | null | undefined): string {
+  return (value ?? "").replace(/\D/g, "");
+}
+
+function clean(value: string | null | undefined): string {
+  return (value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function safeUpper(value: string | null | undefined): string {
+  return clean(value).toUpperCase();
+}
+
+function numberValue(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = atob(value.replace(/\s+/g, ""));
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function amountInWords(amount: number, provided: string | null | undefined): string {
+  const integer = Math.floor(Math.abs(amount));
+  const cents = Math.round((Math.abs(amount) - integer) * 100);
+  const words = cleanProvidedWords(provided) || integerToSpanish(integer);
+  return `${words} DOLARES ${String(cents).padStart(2, "0")}/100 CTVS.`;
+}
+
+function cleanProvidedWords(value: string | null | undefined): string {
+  return clean(value)
+    .replace(/\s+\d{2}\s*\/\s*100.*$/i, "")
+    .replace(/\s+DOLARES.*$/i, "")
+    .trim();
+}
+
+function integerToSpanish(value: number): string {
+  if (value === 0) {
+    return "CERO";
+  }
+  if (value < 1000) {
+    return hundredsToSpanish(value);
+  }
+  if (value < 1_000_000) {
+    const thousands = Math.floor(value / 1000);
+    const remainder = value % 1000;
+    const prefix = thousands === 1 ? "MIL" : `${hundredsToSpanish(thousands)} MIL`;
+    return remainder === 0 ? prefix : `${prefix} ${hundredsToSpanish(remainder)}`;
+  }
+  return String(value);
+}
+
+function hundredsToSpanish(value: number): string {
+  const hundreds = ["", "CIENTO", "DOSCIENTOS", "TRESCIENTOS", "CUATROCIENTOS", "QUINIENTOS", "SEISCIENTOS", "SETECIENTOS", "OCHOCIENTOS", "NOVECIENTOS"];
+  if (value === 100) {
+    return "CIEN";
+  }
+  const hundred = Math.floor(value / 100);
+  const remainder = value % 100;
+  return [hundreds[hundred], tensToSpanish(remainder)].filter(Boolean).join(" ");
+}
+
+function tensToSpanish(value: number): string {
+  const units = ["", "UNO", "DOS", "TRES", "CUATRO", "CINCO", "SEIS", "SIETE", "OCHO", "NUEVE"];
+  const specials: Record<number, string> = {
+    10: "DIEZ",
+    11: "ONCE",
+    12: "DOCE",
+    13: "TRECE",
+    14: "CATORCE",
+    15: "QUINCE",
+    20: "VEINTE"
+  };
+  if (value < 10) {
+    return units[value];
+  }
+  if (specials[value]) {
+    return specials[value];
+  }
+  if (value < 20) {
+    return `DIECI${units[value - 10]}`;
+  }
+  if (value < 30) {
+    return `VEINTI${units[value - 20]}`;
+  }
+  const tens = ["", "", "", "TREINTA", "CUARENTA", "CINCUENTA", "SESENTA", "SETENTA", "OCHENTA", "NOVENTA"];
+  const ten = Math.floor(value / 10);
+  const unit = value % 10;
+  return unit === 0 ? tens[ten] : `${tens[ten]} Y ${units[unit]}`;
+}
+
+interface CdePdfJson {
+  identificacion?: {
+    version?: number;
+    tipoOperacion?: number;
+    fecEmi?: string;
+    tipoMoneda?: string;
+  };
+  emisor?: Party;
+  donatario?: Party;
+  receptor?: Party;
+  donante?: Party;
+  cuerpoDocumento?: CdeItem[];
+  resumen?: {
+    valorTotal?: number;
+    totalLetras?: string | null;
+  };
+}
+
+interface Party {
+  numDocumento?: string | null;
+  nrc?: string | null;
+  nombre?: string | null;
+  descActividad?: string | null;
+  nombreComercial?: string | null;
+  direccion?: {
+    complemento?: string | null;
+  } | null;
+  telefono?: string | null;
+  correo?: string | null;
+  codEstable?: string | null;
+}
+
+interface CdeItem {
+  cantidad?: number;
+  descripcion?: string;
+  valor?: number;
 }
