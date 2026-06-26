@@ -969,6 +969,34 @@ dd {
   overflow-wrap: anywhere;
 }
 
+.editable-readonly {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.editable-readonly .icon-button {
+  width: 32px;
+  min-height: 32px;
+  flex: 0 0 auto;
+}
+
+.inline-edit {
+  display: grid;
+  gap: 8px;
+}
+
+.inline-edit input {
+  width: 100%;
+}
+
+.inline-edit button {
+  width: 100%;
+  min-height: 34px;
+  font-size: 12px;
+}
+
 .legal-box {
   display: flex;
   gap: 10px;
@@ -1030,6 +1058,19 @@ dd {
   padding: 0 8px;
   font-size: 12px;
   min-width: 0;
+}
+
+.json-preview-head {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 8px;
+  color: #1c2b32;
+  font-size: 13px;
+}
+
+.json-preview-head span {
+  color: #61737a;
+  font-size: 12px;
 }
 
 .danger {

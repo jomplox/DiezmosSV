@@ -16,6 +16,7 @@ import {
   Lock,
   LogOut,
   Mail,
+  Pencil,
   Settings,
   UserPlus,
   RefreshCw,
@@ -91,6 +92,8 @@ export function App() {
   const [busy, setBusy] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
+  const [emailEditingId, setEmailEditingId] = useState<string | null>(null);
+  const [emailDraft, setEmailDraft] = useState("");
   const [advancedDteOpen, setAdvancedDteOpen] = useState(false);
   const [advancedDteTemplate, setAdvancedDteTemplate] = useState<Record<string, unknown> | null>(null);
   const [advancedDteForm, setAdvancedDteForm] = useState(defaultAdvancedCdeForm);
@@ -189,6 +192,8 @@ export function App() {
     setDocuments([]);
     setSelectedId(null);
     setPendingInvalidationId(null);
+    setEmailEditingId(null);
+    setEmailDraft("");
   }
 
   async function createTestDte() {
@@ -248,9 +253,25 @@ export function App() {
         ? { tipoAnulacion: 2, motivoAnulacion: "Invalidacion solicitada desde panel" }
         : {};
     await runAction(action, async () => {
-      await api(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
-      setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : "Invalidacion transmitida");
+      const result = await api<{ accepted?: boolean; result?: { estado?: string } }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
+      setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
       if (action === "invalidate") setPendingInvalidationId(null);
+      await refresh();
+    });
+  }
+
+  async function saveDocumentEmail(target = selected) {
+    if (!target) return;
+    const email = emailDraft.trim();
+    if (!isValidEmail(email)) {
+      setToast("Ingrese un correo valido");
+      return;
+    }
+    await runAction("email", async () => {
+      await api(`/api/documents/${target.id}/email`, token, { method: "PATCH", body: { email } });
+      setToast("Correo de envio actualizado");
+      setEmailEditingId(null);
+      setEmailDraft("");
       await refresh();
     });
   }
@@ -413,6 +434,18 @@ export function App() {
                 onAction={documentAction}
                 onInvalidateRequest={setPendingInvalidationId}
                 onDownload={downloadDocument}
+                emailEditingId={emailEditingId}
+                emailDraft={emailDraft}
+                onStartEmailEdit={(document) => {
+                  setEmailEditingId(document.id);
+                  setEmailDraft(document.donor_email ?? "");
+                }}
+                onEmailDraftChange={setEmailDraft}
+                onCancelEmailEdit={() => {
+                  setEmailEditingId(null);
+                  setEmailDraft("");
+                }}
+                onSaveEmail={saveDocumentEmail}
               />
             </section>
           </>
@@ -1231,7 +1264,13 @@ function DetailPanel({
   now,
   onAction,
   onInvalidateRequest,
-  onDownload
+  onDownload,
+  emailEditingId,
+  emailDraft,
+  onStartEmailEdit,
+  onEmailDraftChange,
+  onCancelEmailEdit,
+  onSaveEmail
 }: {
   selected?: DteDocument;
   busy: string;
@@ -1239,12 +1278,20 @@ function DetailPanel({
   onAction: (action: "resend" | "retry" | "invalidate") => void;
   onInvalidateRequest: (id: string) => void;
   onDownload: (format: "pdf" | "json") => void;
+  emailEditingId: string | null;
+  emailDraft: string;
+  onStartEmailEdit: (document: DteDocument) => void;
+  onEmailDraftChange: (value: string) => void;
+  onCancelEmailEdit: () => void;
+  onSaveEmail: (document: DteDocument) => void;
 }) {
   if (!selected) {
     return <aside className="detail-panel empty">Sin documentos.</aside>;
   }
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
+  const emailEditing = emailEditingId === selected.id;
+  const canRetry = isRetryableDocumentStatus(selected.status);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
   return (
     <aside className="detail-panel">
@@ -1259,8 +1306,26 @@ function DetailPanel({
         <dd className="mono">{selected.sello_recibido ?? "Pendiente"}</dd>
         <dt>Donante</dt>
         <dd>{selected.donor_name ?? "N/D"}</dd>
-        <dt>Correo</dt>
-        <dd>{selected.donor_email ?? "N/D"}</dd>
+        <dt>Correo envio</dt>
+        <dd>
+          {emailEditing ? (
+            <form className="inline-edit" onSubmit={(event) => {
+              event.preventDefault();
+              onSaveEmail(selected);
+            }}>
+              <input type="email" value={emailDraft} onChange={(event) => onEmailDraftChange(event.target.value)} placeholder="legacy-email-104@example.com" />
+              <button type="submit" disabled={busy === "email"}><CheckCircle2 size={15} />Guardar</button>
+              <button type="button" disabled={busy === "email"} onClick={onCancelEmailEdit}><X size={15} />Cancelar</button>
+            </form>
+          ) : (
+            <span className="editable-readonly">
+              <span>{selected.donor_email ?? "N/D"}</span>
+              <button className="icon-button" onClick={() => onStartEmailEdit(selected)} title="Editar correo de envio">
+                <Pencil size={15} />
+              </button>
+            </span>
+          )}
+        </dd>
         <dt>Ambiente</dt>
         <dd>{selected.environment === "01" ? "Produccion" : "Pruebas"}</dd>
       </dl>
@@ -1274,12 +1339,16 @@ function DetailPanel({
       </div>
       <div className="actions">
         <button disabled={busy === "resend"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar</button>
-        <button disabled={busy === "retry"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
+        <button disabled={!canRetry || busy === "retry"} title={canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
         <button className="danger" disabled={!invalidationWindow.canInvalidate || busy === "invalidate"} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
-      <pre>{JSON.stringify(plain.resumen, null, 2)}</pre>
+      <div className="json-preview-head">
+        <strong>JSON DTE</strong>
+        <span>Vista completa del documento emitido.</span>
+      </div>
+      <pre>{JSON.stringify(plain, null, 2)}</pre>
     </aside>
   );
 }
@@ -1393,6 +1462,21 @@ function UserCreateForm({
 
 function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status.toLowerCase()}`}>{status}</span>;
+}
+
+function invalidationToast(result: { accepted?: boolean; result?: { estado?: string } }): string {
+  if (result.accepted) {
+    return `Invalidacion aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}`;
+  }
+  return "Invalidacion enviada a MH";
+}
+
+function isRetryableDocumentStatus(status: string): boolean {
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+}
+
+function isValidEmail(value: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 async function api<T>(path: string, token: string, options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {

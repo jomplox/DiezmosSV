@@ -173,6 +173,10 @@ export class Repository {
     await this.db.prepare("UPDATE dte_documents SET status = 'INVALIDATED', updated_at = ? WHERE id = ?").bind(nowIso(), id).run();
   }
 
+  async updateDocumentDonorEmail(id: string, email: string): Promise<void> {
+    await this.db.prepare("UPDATE dte_documents SET donor_email = ?, updated_at = ? WHERE id = ?").bind(email, nowIso(), id).run();
+  }
+
   async createAudit(input: {
     actorType?: "SYSTEM" | "USER";
     actorId?: string | null;

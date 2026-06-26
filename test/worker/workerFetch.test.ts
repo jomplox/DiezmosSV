@@ -251,6 +251,80 @@ describe("document email resend", () => {
   });
 });
 
+describe("document contact email", () => {
+  it("updates the delivery email without mutating the legal DTE JSON", async () => {
+    const db = new InMemoryD1();
+    const document = testDocument();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/email", {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: "nuevo@example.org" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(db.documents[0].donor_email).toBe("nuevo@example.org");
+    expect(JSON.parse(db.documents[0].plain_json)).toMatchObject({
+      receptor: { correo: "legacy-contact-2@example.com" }
+    });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "DTE_EMAIL_UPDATED", entity_id: "doc_1" }));
+  });
+});
+
+describe("document JSON download", () => {
+  it("returns valid plain DTE JSON even when a signed JWS exists", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push({
+      ...testDocument(),
+      signed_jws: "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/json", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/json");
+    await expect(response.json()).resolves.toMatchObject({
+      receptor: { correo: "legacy-contact-2@example.com" }
+    });
+  });
+});
+
+describe("document retry", () => {
+  it("rejects retry for an accepted or invalidated DTE", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push({ ...testDocument(), status: "INVALIDATED" });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "document_not_retryable",
+      message: expect.stringContaining("no tiene fallos")
+    });
+  });
+});
+
 describe("document invalidation", () => {
   it("returns a conflict when MH rejects the invalidation event", async () => {
     const db = new InMemoryD1();
@@ -780,6 +854,14 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents SET donor_email")) {
+      const [email, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.donor_email = String(email);
+        document.updated_at = String(updatedAt);
       }
     }
     return {};

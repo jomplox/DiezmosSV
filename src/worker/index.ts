@@ -365,6 +365,18 @@ function mhRejectionMessage(result: MhResponse): string {
   return result.estado || "Invalidacion rechazada por MH";
 }
 
+function isRetryableDocumentStatus(status: string): boolean {
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+}
+
+function normalizeEmail(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const email = value.trim();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
+
 function stringValue(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -441,12 +453,32 @@ async function handleDocumentRoute(
 
   if (action === "json" && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return new Response(document.signed_jws ?? document.plain_json, {
+    return new Response(document.plain_json, {
       headers: {
-        "Content-Type": document.signed_jws ? "application/jose" : "application/json",
+        "Content-Type": "application/json",
         "Content-Disposition": `attachment; filename="${document.codigo_generacion}.json"`
       }
     });
+  }
+
+  if (action === "email" && request.method === "PATCH") {
+    const actor = requireRole(user, "OPERATOR");
+    const body = (await request.json()) as { email?: string };
+    const email = normalizeEmail(body.email);
+    if (!email) {
+      return jsonResponse({ error: "invalid_email", message: "Ingrese un correo valido." }, { status: 400 });
+    }
+    await repo.updateDocumentDonorEmail(document.id, email);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "DTE_EMAIL_UPDATED",
+      entityType: "dte_document",
+      entityId: document.id,
+      summary: `Delivery email updated to ${email}`,
+      metadata: { previousEmail: document.donor_email, email }
+    });
+    return jsonResponse({ document: await repo.getDteDocument(document.id) });
   }
 
   if (action === "resend" && request.method === "POST") {
@@ -479,6 +511,15 @@ async function handleDocumentRoute(
 
   if (action === "retry" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
+    if (!isRetryableDocumentStatus(document.status)) {
+      return jsonResponse(
+        {
+          error: "document_not_retryable",
+          message: "Este DTE no tiene fallos pendientes para reintentar."
+        },
+        { status: 409 }
+      );
+    }
     if (!document.signed_jws) {
       await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Retry queued" });
