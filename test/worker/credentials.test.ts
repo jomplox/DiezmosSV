@@ -1,9 +1,9 @@
-import { describe, expect, it } from "vitest";
-import { buildCredentialSecretPatch, credentialStatus } from "../../src/worker/services/credentials";
+import { describe, expect, it, vi } from "vitest";
+import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, credentialStatus } from "../../src/worker/services/credentials";
 import type { Env } from "../../src/worker/types";
 
 describe("credential status", () => {
-  it("reports test and production MH credential readiness without revealing values", () => {
+  it("reports readiness, exposes inspectable config values, and protects secrets", () => {
     const status = credentialStatus(env({
       APP_ENV: "staging",
       CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
@@ -16,26 +16,56 @@ describe("credential status", () => {
       MH_CERT_XML_PART_1: "<CertificadoMH>",
       MH_CERT_XML_PART_2: "</CertificadoMH>",
       MH_CERT_PASSWORD: "cert-password",
-      EMISOR_CONFIG_JSON: "{}",
+      EMISOR_CONFIG_JSON: "{\"nombre\":\"Iglesia Ejemplo\"}",
       WOMPI_API_SECRET: "wompi-secret",
       EMAIL: { send: async () => ({ messageId: "message-1" }) } as SendEmail,
       EMAIL_ARBITRARY_RECIPIENTS: "true",
+      EMAIL_API_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-key",
       EMAIL_FROM: "dte@example.org"
     }));
 
     expect(status.target).toEqual({
       appEnv: "staging",
       scriptName: "diezmossv-staging-resource-example",
-      writerConfigured: true
+      writerConfigured: true,
+      writerMissing: []
     });
     expect(status.groups.mhTest.ready).toBe(true);
     expect(status.groups.mhProduction.ready).toBe(true);
     expect(status.groups.signer.ready).toBe(true);
     expect(status.groups.issuer.ready).toBe(true);
     expect(status.groups.email.ready).toBe(true);
+    expect(status.groups.mhTest.items).toContainEqual({
+      name: "MH_USER_TEST",
+      label: "Usuario API TEST",
+      configured: true,
+      displayValue: "0614"
+    });
+    expect(status.groups.issuer.items).toContainEqual({
+      name: "EMISOR_CONFIG_JSON",
+      label: "Configuración JSON",
+      configured: true,
+      displayValue: "{\"nombre\":\"Iglesia Ejemplo\"}"
+    });
+    expect(status.groups.email.items).toContainEqual({
+      name: "EMAIL_API_URL",
+      label: "Endpoint POST JSON de respaldo",
+      configured: true,
+      displayValue: "https://mail.example/send"
+    });
+    expect(status.groups.email.items).toContainEqual({
+      name: "EMAIL_FROM",
+      label: "Remitente",
+      configured: true,
+      displayValue: "dte@example.org"
+    });
     expect(JSON.stringify(status)).not.toContain("secret-token");
     expect(JSON.stringify(status)).not.toContain("test-password");
     expect(JSON.stringify(status)).not.toContain("cert-password");
+    expect(JSON.stringify(status)).not.toContain("<CertificadoMH>");
+    expect(JSON.stringify(status)).not.toContain("wompi-secret");
+    expect(JSON.stringify(status)).not.toContain("email-key");
   });
 });
 
@@ -83,6 +113,48 @@ describe("credential secret patch", () => {
       EMAIL_API_KEY: { type: "secret_text", name: "EMAIL_API_KEY", text: "email-key" },
       EMAIL_FROM: { type: "secret_text", name: "EMAIL_FROM", text: "dte@example.org" }
     });
+  });
+});
+
+describe("credential writer bootstrap", () => {
+  it("stores the Cloudflare writer token using the supplied token for authorization", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true }), {
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await bootstrapCloudflareWriterToken(
+        env({
+          CLOUDFLARE_ACCOUNT_ID: "account-id",
+          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+          CLOUDFLARE_API_BASE_URL: "https://cf.test"
+        }),
+        "cf-writer-token"
+      );
+
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-resource-example/secrets-bulk");
+      expect(init.method).toBe("PATCH");
+      expect(init.headers).toMatchObject({
+        Authorization: "Bearer cf-writer-token",
+        "Content-Type": "application/json"
+      });
+      expect(JSON.parse(String(init.body))).toEqual({
+        secrets: {
+          CLOUDFLARE_API_TOKEN: {
+            type: "secret_text",
+            name: "CLOUDFLARE_API_TOKEN",
+            text: "cf-writer-token"
+          }
+        }
+      });
+      expect(result).toEqual({ updated: ["CLOUDFLARE_API_TOKEN"], deleted: [] });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

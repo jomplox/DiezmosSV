@@ -11,11 +11,11 @@ export interface ParsedMhCertificate {
 export async function signMhDocument(document: unknown, certXml: string, password: string): Promise<string> {
   const certificate = await parseMhCertificate(certXml);
   if (!certificate.active) {
-    throw new Error("MH certificate is not active");
+    throw new Error("El certificado MH no está activo");
   }
   const passwordHash = await sha512Hex(password);
   if (passwordHash !== certificate.privateKeyPasswordHash.toLowerCase()) {
-    throw new Error("MH certificate private-key password does not match");
+    throw new Error("La contraseña de la llave privada MH no coincide");
   }
 
   const header = base64UrlFromString(JSON.stringify({ alg: "RS512" }));

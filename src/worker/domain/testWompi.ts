@@ -9,8 +9,8 @@ export interface TestWompiInput {
   donorAddress?: string;
 }
 
-export function buildTestWompiPayload(input: TestWompiInput = {}): WompiWebhook {
-  const amount = normalizeAmount(input.amount);
+export function buildTestWompiPayload(input: TestWompiInput = {}, options: { defaultAmount?: string | number } = {}): WompiWebhook {
+  const amount = normalizeAmount(input.amount ?? options.defaultAmount);
   const fullName = clean(input.donorName) ?? "Donante de Prueba";
   const { firstName, lastName } = splitName(fullName);
   const now = new Date();
@@ -31,15 +31,15 @@ export function buildTestWompiPayload(input: TestWompiInput = {}): WompiWebhook 
     },
     EnlacePago: {
       Id: 1,
-      IdentificadorEnlaceComercio: "DTE Test",
-      NombreProducto: "Donacion de prueba",
-      DescripcionProducto: "Prueba controlada de integracion DTE"
+      IdentificadorEnlaceComercio: "DTE de prueba",
+      NombreProducto: "Donación de prueba",
+      DescripcionProducto: "Prueba controlada de integración DTE"
     },
     Cliente: {
       DocumentoIdentidad: clean(input.donorDocument) ?? "00000000-0",
       Nombre: firstName,
       Apellidos: lastName,
-      Direccion: clean(input.donorAddress) ?? "Direccion de prueba",
+      Direccion: clean(input.donorAddress) ?? "Dirección de prueba",
       EMail: clean(input.donorEmail) ?? "donante@example.org",
       Celular: clean(input.donorPhone) ?? "00000000",
       NombreRegion: "San Salvador",
@@ -53,9 +53,9 @@ export function buildTestWompiPayload(input: TestWompiInput = {}): WompiWebhook 
 }
 
 function normalizeAmount(value: string | number | undefined): string {
-  const parsed = typeof value === "number" ? value : Number.parseFloat(value ?? "1.00");
+  const parsed = typeof value === "number" ? value : Number.parseFloat(value ?? "");
   if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error("Test amount must be a positive number");
+    throw new Error("El monto debe ser mayor que cero");
   }
   return parsed.toFixed(2);
 }

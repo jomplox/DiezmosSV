@@ -23,6 +23,10 @@ describe("admin test Wompi payload", () => {
   });
 
   it("rejects non-positive test amounts before queueing", () => {
-    expect(() => buildTestWompiPayload({ amount: "0", donorDocument: "100000035" })).toThrow(/positive number/);
+    expect(() => buildTestWompiPayload({ amount: "0", donorDocument: "100000035" })).toThrow(/monto debe ser mayor que cero/);
+  });
+
+  it("rejects a missing test amount before queueing", () => {
+    expect(() => buildTestWompiPayload({ donorDocument: "100000035" })).toThrow(/monto debe ser mayor que cero/);
   });
 });

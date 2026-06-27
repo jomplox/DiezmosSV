@@ -1442,6 +1442,10 @@ export const CAT022_DOCUMENT_TYPES = [
   { code: "02", label: "Carnet de Residente" },
 ] as const satisfies readonly CatalogOption[];
 
+export const CAT022_ISSUER_DOCUMENT_TYPES = [
+  { code: "36", label: "NIT" },
+] as const satisfies readonly CatalogOption[];
+
 export const CAT026_DONATION_TYPES = [
   { code: "1", label: "Efectivo" },
   { code: "2", label: "Bien" },
@@ -1525,6 +1529,10 @@ export function isCat021AssociatedDocumentCode(value: unknown): boolean {
 
 export function isCat022DocumentTypeCode(value: unknown): boolean {
   return isCatalogCode(CAT022_DOCUMENT_TYPES, value);
+}
+
+export function isCat022IssuerDocumentTypeCode(value: unknown): boolean {
+  return isCatalogCode(CAT022_ISSUER_DOCUMENT_TYPES, value);
 }
 
 export function isCat026DonationTypeCode(value: unknown): boolean {

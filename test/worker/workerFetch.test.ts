@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
+import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("Worker fetch error handling", () => {
@@ -65,6 +67,138 @@ describe("owner bootstrap", () => {
   });
 });
 
+describe("user administration", () => {
+  it("updates a user's profile, email, role, and disabled state", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: "Operations Lead",
+          email: "ops@example.org",
+          role: "ADMIN",
+          disabled: true
+        })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      user: {
+        id: "user_operator",
+        name: "Operations Lead",
+        email: "ops@example.org",
+        role: "ADMIN"
+      }
+    });
+    expect(db.users[0]).toMatchObject({
+      name: "Operations Lead",
+      email: "ops@example.org",
+      role: "ADMIN"
+    });
+    expect(db.users[0].disabled_at).toBeTruthy();
+    expect(db.audits.at(-1)).toMatchObject({
+      action: "USER_UPDATED",
+      entity_type: "user",
+      entity_id: "user_operator"
+    });
+  });
+
+  it("resets a user's password and revokes active sessions", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "token-hash", revoked_at: null });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator/password", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ password: "New-long-password1!" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(db.users[0].password_hash).not.toBe("old-hash");
+    expect(db.users[0].password_salt).not.toBe("old-salt");
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(db.audits.at(-1)).toMatchObject({
+      action: "USER_PASSWORD_RESET",
+      entity_type: "user",
+      entity_id: "user_operator"
+    });
+  });
+
+  it("rejects weak password resets without changing the user or sessions", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "token-hash", revoked_at: null });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator/password", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ password: "weakpassword" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_user_password" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+    expect(db.users[0].password_salt).toBe("old-salt");
+    expect(db.sessions[0].revoked_at).toBeNull();
+    expect(db.audits).toHaveLength(0);
+  });
+});
+
 describe("document email resend", () => {
   it("sends receipts through the Cloudflare Email Service binding", async () => {
     const db = new InMemoryD1();
@@ -99,7 +233,7 @@ describe("document email resend", () => {
     expect(sentMessages[0]).toMatchObject({
       from: "legacy-contact-6@example.com",
       to: "legacy-contact-2@example.com",
-      subject: "Comprobante DTE por donacion",
+      subject: "Comprobante DTE por donación",
       text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       attachments: [
         expect.objectContaining({
@@ -239,7 +373,7 @@ describe("document email resend", () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: "email_send_failed",
-      message: expect.stringContaining("Cloudflare EMAIL binding")
+      message: expect.stringContaining("Configure el servicio de correo")
     });
     expect(db.emailDeliveries).toHaveLength(1);
     expect(db.emailDeliveries[0]).toMatchObject({
@@ -321,6 +455,294 @@ describe("document retry", () => {
     await expect(response.json()).resolves.toMatchObject({
       error: "document_not_retryable",
       message: expect.stringContaining("no tiene fallos")
+    });
+  });
+});
+
+describe("contingency administration", () => {
+  it("opens a manual contingency period and returns dashboard-ready state", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const openResponse = await worker.fetch(
+      new Request("https://example.org/api/contingency/open", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          environment: "00",
+          tipoContingencia: 2,
+          reason: "MH TEST no disponible"
+        })
+      }),
+      env(db)
+    );
+
+    expect(openResponse.status).toBe(201);
+    const opened = (await openResponse.json()) as {
+      contingency: {
+        active: { id: string; status: string; reason: string; tipo_contingencia: number };
+        summary: { open: number; pending: number };
+      };
+    };
+    expect(opened.contingency.active).toMatchObject({
+      status: "OPEN",
+      reason: "MH TEST no disponible",
+      tipo_contingencia: 2
+    });
+    expect(opened.contingency.summary).toMatchObject({ open: 1, pending: 0 });
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "CONTINGENCY_OPENED",
+      entity_type: "contingency_period",
+      entity_id: opened.contingency.active.id
+    }));
+
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_contingency",
+      status: "CONTINGENCY_PENDING",
+      sello_recibido: null,
+      mh_estado: "CONTINGENCY_PENDING",
+      accepted_at: null,
+      contingency_period_id: opened.contingency.active.id
+    });
+
+    const stateResponse = await worker.fetch(
+      new Request("https://example.org/api/contingency", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(stateResponse.status).toBe(200);
+    await expect(stateResponse.json()).resolves.toMatchObject({
+      contingency: {
+        active: {
+          id: opened.contingency.active.id,
+          status: "OPEN",
+          event_deadline_at: null
+        },
+        pendingDocuments: [
+          {
+            id: "doc_contingency",
+            status: "CONTINGENCY_PENDING"
+          }
+        ],
+        periods: [
+          {
+            id: opened.contingency.active.id,
+            status: "OPEN"
+          }
+        ],
+        summary: {
+          pending: 1,
+          open: 1,
+          eventAccepted: 0,
+          closed: 0,
+          failed: 0
+        }
+      }
+    });
+  });
+
+  it("requires a reason when opening contingency type 5", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/contingency/open", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          environment: "00",
+          tipoContingencia: 5,
+          reason: ""
+        })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "missing_contingency_reason" });
+  });
+
+  it("submits contingency CDEs through a lote after the event is accepted", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.contingencies.push({
+      id: "cont_1",
+      environment: "00",
+      status: "OPEN",
+      reason: "MH TEST no disponible",
+      tipo_contingencia: 2,
+      started_at: "2026-06-26T01:00:00.000Z",
+      ended_at: null,
+      event_id: null,
+      event_sello: null,
+      transmit_deadline_at: null,
+      created_at: "2026-06-26T01:00:00.000Z"
+    });
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_contingency",
+      status: "CONTINGENCY_PENDING",
+      signed_jws: "signed-cde-jws",
+      sello_recibido: null,
+      mh_estado: "CONTINGENCY_PENDING",
+      accepted_at: null,
+      contingency_period_id: "cont_1"
+    });
+    const certPassword = "correct horse battery staple";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", selloRecibido: "EVENT-SEAL", observaciones: [] }))
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", codigoLote: "LOTE-TEST-1", observaciones: [] }))
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ procesados: [{ codigoGeneracion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4", selloRecibido: "DTE-SEAL" }], rechazados: [] }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/contingency/sweep", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        MH_CERT_XML: await generatedCertificateXml(certPassword),
+        MH_CERT_PASSWORD: certPassword,
+        MH_USER_TEST: "10000003520015",
+        MH_PASSWORD_TEST: "test-password",
+        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+        MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+        MH_CONTINGENCIA_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
+    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcionlote");
+    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcion/consultadtelote/LOTE-TEST-1");
+    expect(requestedUrls).not.toContain("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
+    const loteRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/recepcionlote"))?.[1];
+    expect(JSON.parse(String(loteRequest?.body))).toMatchObject({
+      ambiente: "00",
+      version: 2,
+      nitEmisor: "10000003520015",
+      documentos: ["signed-cde-jws"]
+    });
+  });
+
+  it("returns contingency lote rows and line counts for the dashboard", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.contingencies.push({
+      id: "cont_1",
+      environment: "00",
+      status: "EVENT_ACCEPTED",
+      reason: "MH TEST no disponible",
+      tipo_contingencia: 2,
+      started_at: "2026-06-26T01:00:00.000Z",
+      ended_at: null,
+      event_id: "event_1",
+      event_sello: "EVENT-SEAL",
+      transmit_deadline_at: "2026-06-29T01:00:00.000Z",
+      created_at: "2026-06-26T01:00:00.000Z"
+    });
+    db.contingencyBatches.push({
+      id: "batch_1",
+      contingency_period_id: "cont_1",
+      environment: "00",
+      id_envio: "BATCH-SEND-1",
+      status: "PROCESSING",
+      codigo_lote: "LOTE-TEST-1",
+      request_json: "{}",
+      response_json: "{}",
+      last_error: null,
+      line_count: 2,
+      accepted_count: 1,
+      rejected_count: 0,
+      pending_count: 1,
+      created_at: "2026-06-26T01:10:00.000Z",
+      submitted_at: "2026-06-26T01:11:00.000Z",
+      last_polled_at: "2026-06-26T01:12:00.000Z",
+      updated_at: "2026-06-26T01:12:00.000Z"
+    });
+    db.contingencyBatchLines.push(
+      {
+        id: "line_1",
+        batch_id: "batch_1",
+        contingency_period_id: "cont_1",
+        document_id: "doc_1",
+        line_no: 1,
+        status: "ACCEPTED",
+        codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
+        tipo_dte: "15",
+        signed_jws: "signed-cde-jws-1",
+        sello_recibido: "DTE-SEAL-1",
+        mh_estado: "PROCESADO",
+        mh_observaciones_json: "[]",
+        last_error: null,
+        created_at: "2026-06-26T01:10:00.000Z",
+        updated_at: "2026-06-26T01:12:00.000Z"
+      },
+      {
+        id: "line_2",
+        batch_id: "batch_1",
+        contingency_period_id: "cont_1",
+        document_id: "doc_2",
+        line_no: 2,
+        status: "BATCH_SENT",
+        codigo_generacion: "8C2A5D5F-1111-4111-8111-1111119E416F",
+        tipo_dte: "15",
+        signed_jws: "signed-cde-jws-2",
+        sello_recibido: null,
+        mh_estado: null,
+        mh_observaciones_json: "[]",
+        last_error: null,
+        created_at: "2026-06-26T01:10:00.000Z",
+        updated_at: "2026-06-26T01:11:00.000Z"
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/contingency", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      contingency: {
+        batches: [
+          {
+            id: "batch_1",
+            status: "PROCESSING",
+            codigo_lote: "LOTE-TEST-1",
+            line_count: 2,
+            accepted_count: 1,
+            pending_count: 1
+          }
+        ],
+        batchLines: [
+          { id: "line_1", batch_id: "batch_1", status: "ACCEPTED", sello_recibido: "DTE-SEAL-1" },
+          { id: "line_2", batch_id: "batch_1", status: "BATCH_SENT" }
+        ],
+        summary: {
+          batches: 1,
+          batchAccepted: 1,
+          batchPending: 1,
+          batchRejected: 0
+        }
+      }
     });
   });
 });
@@ -478,7 +900,8 @@ describe("F960 CSV export", () => {
     const workbookText = new TextDecoder().decode(bytes);
     expect(workbookText).toContain("Nombre donante");
     expect(workbookText).toContain("Example Person");
-    expect(workbookText).toContain("Codigo generacion");
+    expect(workbookText).toContain("Código generación");
+    expect(workbookText).toContain("Aceptado");
   });
 
   it("requires an admin role", async () => {
@@ -498,6 +921,51 @@ describe("F960 CSV export", () => {
 });
 
 describe("advanced CDE generation", () => {
+  it("uses the UI-selected emission environment when creating quick DTE records", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const settingsResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/emission-environment", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ environment: "01" })
+      }),
+      env(db)
+    );
+
+    expect(settingsResponse.status).toBe(200);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          amount: "1.00",
+          donorName: "Example Person",
+          donorDocument: "100000001",
+          donorEmail: "donor@example.org",
+          donorPhone: "70000005"
+        })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.wompiEvents[0]).toMatchObject({ environment: "01" });
+    expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
+  });
+
   it("stores a schema-valid advanced CDE draft and queues it for transmission", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
@@ -605,6 +1073,151 @@ describe("advanced CDE generation", () => {
   });
 });
 
+describe("Wompi webhook integration", () => {
+  it("accepts a signed official Wompi webhook and queues approved payments", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_doc_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      cliente: {
+        DocumentoIdentidad: "10000000-1",
+        Nombre: "Example",
+        Apellidos: "Person",
+        EMail: "donor@example.org",
+        Celular: "70000005",
+        CodigoPais: "SV",
+        CodigoRegion: "06"
+      },
+      enlacePago: {
+        IdentificadorEnlaceComercio: "DONACION-123"
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          wompi_hash: await signWompiBody(rawBody, secret)
+        },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, inserted: true, queued: true });
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      transaction_id: "wompi_doc_tx_1",
+      environment: "00",
+      result: "ExitosaAprobada",
+      amount_cents: 2500,
+      donor_email: "donor@example.org",
+      donor_name: "Example Person"
+    });
+    expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
+  });
+
+  it("normalizes the stored raw Wompi body before generating the queued CDE", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_pipeline_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      cliente: {
+        DocumentoIdentidad: "10000000-1",
+        Nombre: "Example",
+        Apellidos: "Person",
+        EMail: "donor@example.org",
+        Celular: "70000005",
+        CodigoPais: "SV",
+        CodigoRegion: "06"
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          wompi_hash: await signWompiBody(rawBody, secret)
+        },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+    const body = await response.json() as { wompiEventId: string };
+    const certificateXml = await generatedCertificateXml("cert-password");
+
+    const record = await new IssuancePipeline(env(db, {
+      EMISOR_CONFIG_JSON: JSON.stringify({ ...emisorConfig(), defaultDonationType: 1 }),
+      MH_CERT_XML: certificateXml,
+      MH_CERT_PASSWORD: "cert-password"
+    })).processWompiEvent(body.wompiEventId);
+
+    expect(record).toMatchObject({
+      donor_email: "donor@example.org",
+      donor_name: "Example Person",
+      amount_cents: 2500,
+      status: "ACCEPTED"
+    });
+    const cde = JSON.parse(record!.plain_json) as { receptor: { nombre: string; correo: string; telefono: string } };
+    expect(cde.receptor).toMatchObject({
+      nombre: "Example Person",
+      correo: "donor@example.org",
+      telefono: "70000005"
+    });
+  });
+
+  it("returns a clear 400 for signed webhook payloads Wompi cannot map to a transaction", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      ResultadoTransaccion: "ExitosaAprobada",
+      Monto: "25.00",
+      EsProductiva: false
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          wompi_hash: await signWompiBody(rawBody, secret)
+        },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_wompi_payload",
+      message: expect.stringContaining("IdTransaccion")
+    });
+    expect(db.wompiEvents).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+  });
+});
+
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
     const db = new InMemoryD1();
@@ -621,7 +1234,8 @@ describe("credential administration", () => {
         MH_PASSWORD_TEST: "test-password",
         MH_CERT_XML_PART_1: "<CertificadoMH>",
         MH_CERT_XML_PART_2: "</CertificadoMH>",
-        MH_CERT_PASSWORD: "cert-password"
+        MH_CERT_PASSWORD: "cert-password",
+        WOMPI_API_SECRET: "wompi-secret"
       })
     );
 
@@ -632,16 +1246,29 @@ describe("credential administration", () => {
         target: {
           appEnv: "staging",
           scriptName: "diezmossv-staging-resource-example",
-          writerConfigured: false
+          writerConfigured: false,
+          writerMissing: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
         },
         groups: {
           mhTest: { ready: true },
-          signer: { ready: true }
+          signer: { ready: true },
+          wompi: {
+            label: "Webhook entrante de Wompi",
+            ready: true,
+            items: [
+              {
+                name: "WOMPI_API_SECRET",
+                label: "Firma del webhook entrante",
+                configured: true
+              }
+            ]
+          }
         }
       }
     });
     expect(JSON.stringify(data)).not.toContain("test-password");
     expect(JSON.stringify(data)).not.toContain("cert-password");
+    expect(JSON.stringify(data)).not.toContain("wompi-secret");
   });
 
   it("returns a clear error when credential update is not configured", async () => {
@@ -666,6 +1293,56 @@ describe("credential administration", () => {
     });
     expect(db.audits).toHaveLength(0);
   });
+
+  it("lets owners bootstrap the Cloudflare writer token without echoing it", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ success: true }), {
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/credentials/writer-token", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ token: "cf-writer-token" })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_ACCOUNT_ID: "account-id",
+        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+        CLOUDFLARE_API_BASE_URL: "https://cf.test"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as Record<string, unknown>;
+    expect(data).toMatchObject({
+      ok: true,
+      updated: ["CLOUDFLARE_API_TOKEN"],
+      credentials: {
+        target: {
+          writerConfigured: true,
+          writerMissing: []
+        }
+      }
+    });
+    expect(JSON.stringify(data)).not.toContain("cf-writer-token");
+    expect(JSON.stringify(db.audits)).not.toContain("cf-writer-token");
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "CLOUDFLARE_WRITER_ENABLED",
+      entity_id: "diezmossv-staging-resource-example"
+    }));
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-resource-example/secrets-bulk");
+    expect(init.headers).toMatchObject({ Authorization: "Bearer cf-writer-token" });
+  });
 });
 
 function bootstrapRequest(options: { token?: string } = {}): Request {
@@ -679,7 +1356,7 @@ function bootstrapRequest(options: { token?: string } = {}): Request {
     body: JSON.stringify({
       email: "legacy-contact-3@example.com",
       name: "Example Person",
-      password: "long-enough-password"
+      password: "Long-enough1!"
     })
   });
 }
@@ -694,11 +1371,17 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
 }
 
 class InMemoryD1 {
-  readonly users: Array<Record<string, string>> = [];
+  readonly users: Array<Record<string, unknown>> = [];
+  readonly sessions: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
+  readonly contingencies: Array<Record<string, unknown>> = [];
+  readonly contingencyBatches: Array<Record<string, unknown>> = [];
+  readonly contingencyBatchLines: Array<Record<string, unknown>> = [];
+  readonly dteEvents: Array<Record<string, unknown>> = [];
+  readonly settings: Array<Record<string, unknown>> = [];
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
 
@@ -739,6 +1422,24 @@ class Statement {
     if (this.sql.includes("SELECT * FROM wompi_events WHERE transaction_id = ?")) {
       return (this.db.wompiEvents.find((event) => event.transaction_id === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+      return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("FROM contingency_periods WHERE environment = ?")) {
+      const environment = String(this.args[0]);
+      return (
+        this.db.contingencies
+          .filter((period) => period.environment === environment && ["OPEN", "EVENT_ACCEPTED"].includes(String(period.status)))
+          .sort((left, right) => String(right.started_at).localeCompare(String(left.started_at)))[0] ?? null
+      ) as T | null;
+    }
+    if (this.sql.includes("FROM contingency_periods WHERE status IN")) {
+      return (
+        this.db.contingencies
+          .filter((period) => ["OPEN", "EVENT_ACCEPTED"].includes(String(period.status)))
+          .sort((left, right) => String(right.started_at).localeCompare(String(left.started_at)))[0] ?? null
+      ) as T | null;
+    }
     if (this.sql.includes("UPDATE document_sequences")) {
       return { value: this.db.nextSequence++ } as T;
     }
@@ -746,11 +1447,37 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("FROM contingency_batches")) {
+      let batches = [...this.db.contingencyBatches];
+      if (this.sql.includes("WHERE contingency_period_id = ?")) {
+        batches = batches.filter((batch) => batch.contingency_period_id === this.args[0]);
+      }
+      batches.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)));
+      return { results: batches as T[] };
+    }
+    if (this.sql.includes("FROM contingency_batch_lines")) {
+      let lines = [...this.db.contingencyBatchLines];
+      if (this.sql.includes("WHERE batch_id = ?")) {
+        lines = lines.filter((line) => line.batch_id === this.args[0]);
+      }
+      if (this.sql.includes("WHERE contingency_period_id = ?")) {
+        lines = lines.filter((line) => line.contingency_period_id === this.args[0]);
+      }
+      lines.sort((left, right) => Number(left.line_no ?? 0) - Number(right.line_no ?? 0));
+      return { results: lines as T[] };
+    }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
       if (this.sql.includes("status = ?")) {
         const status = String(this.args[0]);
         documents = documents.filter((document) => document.status === status);
+      }
+      if (this.sql.includes("contingency_period_id = ?")) {
+        const periodId = String(this.args[0]);
+        documents = documents.filter((document) => document.contingency_period_id === periodId && document.status === "CONTINGENCY_PENDING");
+      }
+      if (this.sql.includes("status = 'CONTINGENCY_PENDING'")) {
+        documents = documents.filter((document) => document.status === "CONTINGENCY_PENDING");
       }
       if (this.sql.includes("status = 'ACCEPTED'")) {
         documents = documents.filter((document) => document.status === "ACCEPTED");
@@ -765,6 +1492,30 @@ class Statement {
       }
       documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at));
       return { results: documents as T[] };
+    }
+    if (this.sql.includes("FROM contingency_periods")) {
+      const limit = Number(this.args[0] ?? 100);
+      const periods = [...this.db.contingencies]
+        .sort((left, right) => String(right.started_at).localeCompare(String(left.started_at)))
+        .slice(0, limit);
+      return { results: periods as T[] };
+    }
+    if (this.sql.includes("FROM dte_events")) {
+      const eventType = String(this.args[0]);
+      const limit = Number(this.args[1] ?? 100);
+      const events = this.db.dteEvents
+        .filter((event) => event.event_type === eventType)
+        .sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)))
+        .slice(0, limit);
+      return { results: events as T[] };
+    }
+    if (this.sql.includes("FROM audit_logs")) {
+      let audits = [...this.db.audits];
+      if (this.sql.includes("WHERE entity_type = ? AND entity_id = ?")) {
+        audits = audits.filter((audit) => audit.entity_type === this.args[0] && audit.entity_id === this.args[1]);
+      }
+      audits.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+      return { results: audits as T[] };
     }
     return { results: [] };
   }
@@ -792,8 +1543,20 @@ class Statement {
         entity_type: entityType,
         entity_id: entityId,
         summary,
-        metadata_json: metadataJson
+        metadata_json: metadataJson,
+        created_at: "2026-06-26T01:46:47.015Z"
       });
+    }
+    if (this.sql.includes("INSERT INTO app_settings")) {
+      const [key, value, updatedBy, updatedAt] = this.args;
+      const setting = this.db.settings.find((row) => row.key === key);
+      if (setting) {
+        setting.value = value;
+        setting.updated_by = updatedBy;
+        setting.updated_at = updatedAt;
+      } else {
+        this.db.settings.push({ key, value, updated_by: updatedBy, updated_at: updatedAt });
+      }
     }
     if (this.sql.includes("INSERT INTO email_deliveries")) {
       const [id, documentId, toEmail, status, providerResponseJson, sentAt] = this.args;
@@ -848,6 +1611,84 @@ class Statement {
         updated_at: String(issuedAt)
       });
     }
+    if (this.sql.includes("INSERT INTO dte_events")) {
+      const [id, documentId, eventType, environment, codigoGeneracion, status, plainJson, signedJws, legalDeadlineAt, createdBy] = this.args;
+      this.db.dteEvents.push({
+        id,
+        document_id: documentId,
+        event_type: eventType,
+        environment,
+        codigo_generacion: codigoGeneracion,
+        status,
+        plain_json: plainJson,
+        signed_jws: signedJws,
+        sello_recibido: null,
+        mh_estado: null,
+        mh_observaciones_json: "[]",
+        legal_deadline_at: legalDeadlineAt,
+        created_by: createdBy,
+        created_at: "2026-06-26T01:46:47.015Z",
+        accepted_at: null
+      });
+    }
+    if (this.sql.includes("INSERT INTO contingency_periods")) {
+      const [id, environment, reason, tipoContingencia, startedAt] = this.args;
+      this.db.contingencies.push({
+        id,
+        environment,
+        status: "OPEN",
+        reason,
+        tipo_contingencia: Number(tipoContingencia),
+        started_at: startedAt,
+        ended_at: null,
+        event_id: null,
+        event_sello: null,
+        transmit_deadline_at: null,
+        created_at: startedAt
+      });
+    }
+    if (this.sql.includes("INSERT INTO contingency_batches")) {
+      const [id, periodId, environment, idEnvio, lineCount, pendingCount] = this.args;
+      this.db.contingencyBatches.push({
+        id,
+        contingency_period_id: periodId,
+        environment,
+        id_envio: idEnvio,
+        status: "DRAFT",
+        codigo_lote: null,
+        request_json: "{}",
+        response_json: "{}",
+        last_error: null,
+        line_count: Number(lineCount),
+        accepted_count: 0,
+        rejected_count: 0,
+        pending_count: Number(pendingCount),
+        created_at: "2026-06-26T01:46:47.015Z",
+        submitted_at: null,
+        last_polled_at: null,
+        updated_at: "2026-06-26T01:46:47.015Z"
+      });
+    }
+    if (this.sql.includes("INSERT INTO contingency_batch_lines")) {
+      const [id, batchId, periodId, documentId, lineNo, codigoGeneracion, tipoDte, signedJws] = this.args;
+      this.db.contingencyBatchLines.push({
+        id,
+        batch_id: batchId,
+        contingency_period_id: periodId,
+        document_id: documentId,
+        line_no: Number(lineNo),
+        status: "LOCAL_ISSUED",
+        codigo_generacion: codigoGeneracion,
+        tipo_dte: tipoDte,
+        signed_jws: signedJws,
+        sello_recibido: null,
+        mh_estado: null,
+        mh_observaciones_json: "[]",
+        last_error: null,
+        created_at: "2026-06-26T01:46:47.015Z",
+        updated_at: "2026-06-26T01:46:47.015Z"
+      });
+    }
     if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
       const [documentId, processedAt, wompiEventId] = this.args;
       const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
@@ -861,6 +1702,167 @@ class Statement {
       const document = this.db.documents.find((row) => row.id === documentId);
       if (document) {
         document.donor_email = String(email);
+        document.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE users SET name = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")) {
+      const [name, role, disabledAt, updatedAt, userId] = this.args;
+      const user = this.db.users.find((row) => row.id === userId);
+      if (user) {
+        user.name = name;
+        user.role = role;
+        user.disabled_at = disabledAt;
+        user.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")) {
+      const [name, email, role, disabledAt, updatedAt, userId] = this.args;
+      const user = this.db.users.find((row) => row.id === userId);
+      if (user) {
+        user.name = name;
+        user.email = email;
+        user.role = role;
+        user.disabled_at = disabledAt;
+        user.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")) {
+      const [passwordHash, passwordSalt, updatedAt, userId] = this.args;
+      const user = this.db.users.find((row) => row.id === userId);
+      if (user) {
+        user.password_hash = passwordHash;
+        user.password_salt = passwordSalt;
+        user.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE sessions SET revoked_at = ? WHERE user_id = ?")) {
+      const [revokedAt, userId] = this.args;
+      for (const session of this.db.sessions.filter((row) => row.user_id === userId && !row.revoked_at)) {
+        session.revoked_at = revokedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_events")) {
+      const [status, sello, mhEstado, observacionesJson, acceptedAt, eventId] = this.args;
+      const event = this.db.dteEvents.find((row) => row.id === eventId);
+      if (event) {
+        event.status = status;
+        event.sello_recibido = sello;
+        event.mh_estado = mhEstado;
+        event.mh_observaciones_json = observacionesJson;
+        event.accepted_at = acceptedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET status = ?")) {
+      const [status, sello, mhEstado, observacionesJson, acceptedAt, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.status = String(status);
+        document.sello_recibido = sello === null ? null : String(sello);
+        document.mh_estado = String(mhEstado);
+        document.mh_observaciones_json = String(observacionesJson);
+        document.accepted_at = acceptedAt === null ? document.accepted_at : String(acceptedAt);
+        document.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batches") && this.sql.includes("SET status = 'SUBMITTED'")) {
+      const [codigoLote, requestJson, responseJson, submittedAt, updatedAt, batchId] = this.args;
+      const batch = this.db.contingencyBatches.find((row) => row.id === batchId);
+      if (batch) {
+        batch.status = "SUBMITTED";
+        batch.codigo_lote = codigoLote;
+        batch.request_json = requestJson;
+        batch.response_json = responseJson;
+        batch.last_error = null;
+        batch.submitted_at = batch.submitted_at ?? submittedAt;
+        batch.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batch_lines SET status = 'BATCH_SENT'")) {
+      const [updatedAt, batchId] = this.args;
+      for (const line of this.db.contingencyBatchLines.filter((row) => row.batch_id === batchId && row.status === "LOCAL_ISSUED")) {
+        line.status = "BATCH_SENT";
+        line.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batches") && this.sql.includes("SET status = 'PROCESSING'")) {
+      const [responseJson, polledAt, updatedAt, batchId] = this.args;
+      const batch = this.db.contingencyBatches.find((row) => row.id === batchId);
+      if (batch) {
+        batch.status = "PROCESSING";
+        batch.response_json = responseJson;
+        batch.last_polled_at = polledAt;
+        batch.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batches") && this.sql.includes("SET status = 'FAILED'")) {
+      const [responseJson, message, updatedAt, batchId] = this.args;
+      const batch = this.db.contingencyBatches.find((row) => row.id === batchId);
+      if (batch) {
+        batch.status = "FAILED";
+        batch.response_json = responseJson;
+        batch.last_error = message;
+        batch.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batch_lines") && this.sql.includes("SET status = 'ACCEPTED'")) {
+      const [sello, mhEstado, observacionesJson, updatedAt, lineId] = this.args;
+      const line = this.db.contingencyBatchLines.find((row) => row.id === lineId);
+      if (line) {
+        line.status = "ACCEPTED";
+        line.sello_recibido = sello;
+        line.mh_estado = mhEstado;
+        line.mh_observaciones_json = observacionesJson;
+        line.last_error = null;
+        line.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batch_lines") && this.sql.includes("SET status = 'REJECTED'")) {
+      const [mhEstado, observacionesJson, message, updatedAt, lineId] = this.args;
+      const line = this.db.contingencyBatchLines.find((row) => row.id === lineId);
+      if (line) {
+        line.status = "REJECTED";
+        line.mh_estado = mhEstado;
+        line.mh_observaciones_json = observacionesJson;
+        line.last_error = message;
+        line.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_batches") && this.sql.includes("SET status = ?, line_count = ?")) {
+      const [status, lineCount, acceptedCount, rejectedCount, pendingCount, updatedAt, batchId] = this.args;
+      const batch = this.db.contingencyBatches.find((row) => row.id === batchId);
+      if (batch) {
+        batch.status = status;
+        batch.line_count = lineCount;
+        batch.accepted_count = acceptedCount;
+        batch.rejected_count = rejectedCount;
+        batch.pending_count = pendingCount;
+        batch.updated_at = updatedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_periods") && this.sql.includes("SET status = 'EVENT_ACCEPTED'")) {
+      const [eventId, sello, deadlineAt, periodId] = this.args;
+      const period = this.db.contingencies.find((row) => row.id === periodId);
+      if (period) {
+        period.status = "EVENT_ACCEPTED";
+        period.event_id = eventId;
+        period.event_sello = sello;
+        period.transmit_deadline_at = deadlineAt;
+      }
+    }
+    if (this.sql.includes("UPDATE contingency_periods") && this.sql.includes("SET status = 'CLOSED'")) {
+      const [endedAt, periodId] = this.args;
+      const period = this.db.contingencies.find((row) => row.id === periodId);
+      if (period) {
+        period.status = "CLOSED";
+        period.ended_at = period.ended_at ?? endedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents SET status = 'CONTINGENCY_PENDING'")) {
+      const [periodId, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.status = "CONTINGENCY_PENDING";
+        document.contingency_period_id = String(periodId);
         document.updated_at = String(updatedAt);
       }
     }
@@ -993,6 +1995,12 @@ function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+async function signWompiBody(body: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", utf8Bytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8Bytes(body)));
+  return hexFromBytes(digest);
+}
+
 async function generatedCertificateXml(password: string): Promise<string> {
   const pair = (await crypto.subtle.generateKey(
     {
@@ -1034,7 +2042,7 @@ function emisorConfig() {
     controlPrefix: "M001P004",
     defaultReceptorTipoDocumento: "13",
     defaultCodPais: "SV",
-    defaultDonationType: 4,
+    defaultDonationType: 1,
     defaultUnidadMedida: 99,
     paymentMethodCode: "01",
     responsable: {

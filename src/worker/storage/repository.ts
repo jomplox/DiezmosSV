@@ -1,10 +1,26 @@
-import type { Ambiente, DteDocumentRecord, WompiEventRecord, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DteDocumentRecord, WompiEventRecord, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 
 export class Repository {
   constructor(private readonly db: D1Database) {}
+
+  async getSetting(key: string): Promise<string | null> {
+    const row = await this.db.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first<{ value: string }>();
+    return row?.value ?? null;
+  }
+
+  async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO app_settings (key, value, updated_by, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`
+      )
+      .bind(key, value, updatedBy ?? null, nowIso())
+      .run();
+  }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
     const existing = await this.getWompiEventByTransaction(payload.IdTransaccion);
@@ -32,7 +48,7 @@ export class Repository {
       .run();
     const record = await this.getWompiEventById(id);
     if (!record) {
-      throw new Error("Failed to read inserted Wompi event");
+      throw new Error("No se pudo leer el evento Wompi creado");
     }
     return { record, inserted: true };
   }
@@ -55,7 +71,7 @@ export class Repository {
       .bind(environment, controlPrefix)
       .first<{ value: number }>();
     if (!row) {
-      throw new Error("Could not allocate control sequence");
+      throw new Error("No se pudo asignar la secuencia de control");
     }
     return row.value;
   }
@@ -99,7 +115,7 @@ export class Repository {
     await this.db.prepare("UPDATE wompi_events SET created_document_id = ?, processed_at = ? WHERE id = ?").bind(id, nowIso(), input.wompiEventId).run();
     const record = await this.getDteDocument(id);
     if (!record) {
-      throw new Error("Failed to read inserted DTE document");
+      throw new Error("No se pudo leer el documento DTE creado");
     }
     return record;
   }
@@ -290,12 +306,180 @@ export class Repository {
       .first<Record<string, unknown>>();
   }
 
+  async listContingencyPeriods(limit = 20): Promise<Array<Record<string, unknown>>> {
+    return this.db
+      .prepare("SELECT * FROM contingency_periods ORDER BY started_at DESC LIMIT ?")
+      .bind(Math.min(limit, 100))
+      .all<Record<string, unknown>>()
+      .then((result) => result.results ?? []);
+  }
+
   async listContingencyDocuments(periodId: string): Promise<DteDocumentRecord[]> {
     return this.db
       .prepare("SELECT * FROM dte_documents WHERE contingency_period_id = ? AND status = 'CONTINGENCY_PENDING' ORDER BY created_at ASC")
       .bind(periodId)
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
+  }
+
+  async listContingencyBatches(periodId?: string): Promise<ContingencyBatchRecord[]> {
+    if (periodId) {
+      return this.db
+        .prepare("SELECT * FROM contingency_batches WHERE contingency_period_id = ? ORDER BY created_at ASC")
+        .bind(periodId)
+        .all<ContingencyBatchRecord>()
+        .then((result) => result.results ?? []);
+    }
+    return this.db
+      .prepare("SELECT * FROM contingency_batches ORDER BY created_at DESC LIMIT 100")
+      .all<ContingencyBatchRecord>()
+      .then((result) => result.results ?? []);
+  }
+
+  async listContingencyBatchLines(input: { periodId?: string; batchId?: string } = {}): Promise<ContingencyBatchLineRecord[]> {
+    if (input.batchId) {
+      return this.db
+        .prepare("SELECT * FROM contingency_batch_lines WHERE batch_id = ? ORDER BY line_no ASC")
+        .bind(input.batchId)
+        .all<ContingencyBatchLineRecord>()
+        .then((result) => result.results ?? []);
+    }
+    if (input.periodId) {
+      return this.db
+        .prepare("SELECT * FROM contingency_batch_lines WHERE contingency_period_id = ? ORDER BY created_at ASC, line_no ASC")
+        .bind(input.periodId)
+        .all<ContingencyBatchLineRecord>()
+        .then((result) => result.results ?? []);
+    }
+    return this.db
+      .prepare("SELECT * FROM contingency_batch_lines ORDER BY created_at DESC LIMIT 500")
+      .all<ContingencyBatchLineRecord>()
+      .then((result) => result.results ?? []);
+  }
+
+  async createContingencyBatch(input: { periodId: string; environment: Ambiente; idEnvio: string; documents: DteDocumentRecord[] }): Promise<string> {
+    const id = newId("batch");
+    await this.db
+      .prepare(
+        `INSERT INTO contingency_batches (
+          id, contingency_period_id, environment, id_envio, status, line_count, pending_count
+        ) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?)`
+      )
+      .bind(id, input.periodId, input.environment, input.idEnvio, input.documents.length, input.documents.length)
+      .run();
+    for (const [index, document] of input.documents.entries()) {
+      await this.db
+        .prepare(
+          `INSERT INTO contingency_batch_lines (
+            id, batch_id, contingency_period_id, document_id, line_no, status,
+            codigo_generacion, tipo_dte, signed_jws
+          ) VALUES (?, ?, ?, ?, ?, 'LOCAL_ISSUED', ?, ?, ?)`
+        )
+        .bind(
+          newId("batch_line"),
+          id,
+          input.periodId,
+          document.id,
+          index + 1,
+          document.codigo_generacion,
+          document.tipo_dte,
+          document.signed_jws
+        )
+        .run();
+    }
+    return id;
+  }
+
+  async markContingencyBatchSubmitted(batchId: string, input: { codigoLote: string; request: unknown; response: unknown }): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE contingency_batches
+         SET status = 'SUBMITTED', codigo_lote = ?, request_json = ?, response_json = ?, last_error = NULL,
+             submitted_at = COALESCE(submitted_at, ?), updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(input.codigoLote, JSON.stringify(input.request), JSON.stringify(input.response), nowIso(), nowIso(), batchId)
+      .run();
+    await this.db
+      .prepare("UPDATE contingency_batch_lines SET status = 'BATCH_SENT', updated_at = ? WHERE batch_id = ? AND status = 'LOCAL_ISSUED'")
+      .bind(nowIso(), batchId)
+      .run();
+    await this.syncContingencyBatchCounts(batchId);
+  }
+
+  async markContingencyBatchProcessing(batchId: string, response: unknown): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE contingency_batches
+         SET status = 'PROCESSING', response_json = ?, last_polled_at = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(JSON.stringify(response), nowIso(), nowIso(), batchId)
+      .run();
+    await this.syncContingencyBatchCounts(batchId, "PROCESSING");
+  }
+
+  async markContingencyBatchFailed(batchId: string, message: string, response?: unknown): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE contingency_batches
+         SET status = 'FAILED', response_json = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(JSON.stringify(response ?? { error: message }), message, nowIso(), batchId)
+      .run();
+  }
+
+  async markContingencyBatchLineAccepted(input: { lineId: string; documentId: string; sello: string | null; mhEstado: string; observaciones: string[]; response: unknown }): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE contingency_batch_lines
+         SET status = 'ACCEPTED', sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?,
+             last_error = NULL, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(input.sello, input.mhEstado, JSON.stringify(input.observaciones), nowIso(), input.lineId)
+      .run();
+    await this.updateDocumentMhResult(input.documentId, {
+      status: "ACCEPTED",
+      sello: input.sello,
+      mhEstado: input.mhEstado,
+      observaciones: input.observaciones,
+      acceptedAt: nowIso()
+    });
+  }
+
+  async markContingencyBatchLineRejected(input: { lineId: string; documentId: string; mhEstado: string; observaciones: string[]; message: string }): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE contingency_batch_lines
+         SET status = 'REJECTED', mh_estado = ?, mh_observaciones_json = ?, last_error = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(input.mhEstado, JSON.stringify(input.observaciones), input.message, nowIso(), input.lineId)
+      .run();
+    await this.updateDocumentMhResult(input.documentId, {
+      status: "REJECTED",
+      sello: null,
+      mhEstado: input.mhEstado,
+      observaciones: input.observaciones.length ? input.observaciones : [input.message]
+    });
+  }
+
+  async syncContingencyBatchCounts(batchId: string, forcedStatus?: string): Promise<void> {
+    const lines = await this.listContingencyBatchLines({ batchId });
+    const accepted = lines.filter((line) => line.status === "ACCEPTED").length;
+    const rejected = lines.filter((line) => line.status === "REJECTED" || line.status === "MANUAL_REVIEW").length;
+    const pending = Math.max(lines.length - accepted - rejected, 0);
+    const status = forcedStatus ?? (pending > 0 ? "PROCESSING" : rejected > 0 ? (accepted > 0 ? "PARTIAL" : "REJECTED") : "DONE");
+    await this.db
+      .prepare(
+        `UPDATE contingency_batches
+         SET status = ?, line_count = ?, accepted_count = ?, rejected_count = ?, pending_count = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(status, lines.length, accepted, rejected, pending, nowIso(), batchId)
+      .run();
   }
 
   async attachDocumentToContingency(documentId: string, periodId: string): Promise<void> {
@@ -314,6 +498,21 @@ export class Repository {
       )
       .bind(input.eventId, input.sello, input.deadlineAt, periodId)
       .run();
+  }
+
+  async listDteEventsByType(eventType: "INVALIDACION" | "CONTINGENCIA", limit = 20): Promise<Array<Record<string, unknown>>> {
+    return this.db
+      .prepare(
+        `SELECT id, document_id, event_type, environment, codigo_generacion, status, sello_recibido,
+                mh_estado, mh_observaciones_json, legal_deadline_at, created_by, created_at, accepted_at
+         FROM dte_events
+         WHERE event_type = ?
+         ORDER BY created_at DESC
+         LIMIT ?`
+      )
+      .bind(eventType, Math.min(limit, 100))
+      .all<Record<string, unknown>>()
+      .then((result) => result.results ?? []);
   }
 
   async closeContingency(periodId: string): Promise<void> {
@@ -356,7 +555,7 @@ export class Repository {
       .bind(id)
       .first<Record<string, unknown>>();
     if (!user) {
-      throw new Error("Failed to read inserted user");
+      throw new Error("No se pudo leer el usuario creado");
     }
     return user;
   }
@@ -392,24 +591,37 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
-  async updateUser(id: string, input: { role?: string; disabled?: boolean; name?: string }): Promise<void> {
-    const existing = await this.db.prepare("SELECT id, name, role, disabled_at FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
+  async updateUser(id: string, input: { role?: string; disabled?: boolean; name?: string; email?: string }): Promise<Record<string, unknown>> {
+    const existing = await this.db.prepare("SELECT id, email, name, role, disabled_at FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
     if (!existing) {
-      throw new Error("User not found");
+      throw new Error("Usuario no encontrado");
     }
     await this.db
-      .prepare("UPDATE users SET name = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")
+      .prepare("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")
       .bind(
         input.name ?? existing.name,
+        String(input.email ?? existing.email).toLowerCase(),
         input.role ?? existing.role,
         input.disabled === undefined ? existing.disabled_at : input.disabled ? nowIso() : null,
         nowIso(),
         id
       )
       .run();
+    const updated = await this.db
+      .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
+      .bind(id)
+      .first<Record<string, unknown>>();
+    if (!updated) {
+      throw new Error("No se pudo leer el usuario actualizado");
+    }
+    return updated;
   }
 
   async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
+    const existing = await this.db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first<Record<string, unknown>>();
+    if (!existing) {
+      throw new Error("Usuario no encontrado");
+    }
     await this.db
       .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
       .bind(passwordHash, passwordSalt, nowIso(), userId)

@@ -1,0 +1,34 @@
+import { describe, expect, it } from "vitest";
+import { auditActionLabel, catalogOptionLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+
+describe("client display text", () => {
+  it("localizes internal status values for user-facing badges", () => {
+    expect(statusLabel("ACCEPTED")).toBe("Aceptado");
+    expect(statusLabel("INVALIDATED")).toBe("Invalidado");
+    expect(statusLabel("CONTINGENCY_PENDING")).toBe("Contingencia");
+    expect(statusLabel("EVENT_ACCEPTED")).toBe("Evento aceptado");
+    expect(statusLabel("BATCH_SENT")).toBe("Lote enviado");
+  });
+
+  it("localizes roles and environments without changing stored values", () => {
+    expect(roleLabel("VIEWER")).toBe("Consulta");
+    expect(roleLabel("OPERATOR")).toBe("Operador");
+    expect(roleLabel("ADMIN")).toBe("Administrador");
+    expect(roleLabel("OWNER")).toBe("Propietario");
+    expect(environmentLabel("01")).toBe("Producción");
+  });
+
+  it("localizes audit action codes and common backend errors", () => {
+    expect(auditActionLabel("USER_PASSWORD_RESET")).toBe("Contraseña restablecida");
+    expect(auditActionLabel("DTE_INVALIDATION_REJECTED")).toBe("Invalidación rechazada");
+    expect(userFacingErrorMessage("Invalid credentials")).toBe("Credenciales inválidas");
+    expect(userFacingErrorMessage("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled")).toBe("Configure el servicio de correo antes de enviar comprobantes.");
+  });
+
+  it("normalizes catalog option capitalization without changing acronyms", () => {
+    expect(catalogOptionLabel("SAN SALVADOR ESTE")).toBe("San Salvador Este");
+    expect(catalogOptionLabel("AGUILARES")).toBe("Aguilares");
+    expect(catalogOptionLabel("NIT")).toBe("NIT");
+    expect(catalogOptionLabel("Médico (solo aplica para contribuyentes obligados a la presentación de F-958)")).toBe("Médico (Solo Aplica para Contribuyentes Obligados a la Presentación de F-958)");
+  });
+});

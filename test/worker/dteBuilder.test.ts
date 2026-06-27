@@ -107,7 +107,7 @@ describe("DTE builders", () => {
         environment: "00",
         issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
       })
-    ).toThrow(/catalog/i);
+    ).toThrow(/catálogo/i);
   });
 
   it("builds a schema-valid contingency event for queued CDEs", () => {

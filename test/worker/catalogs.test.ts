@@ -7,6 +7,7 @@ import {
   CAT019_ACTIVITIES,
   CAT021_ASSOCIATED_DOCUMENTS,
   CAT022_DOCUMENT_TYPES,
+  CAT022_ISSUER_DOCUMENT_TYPES,
   CAT026_DONATION_TYPES,
   CAT032_DOMICILE,
   CAT020_COUNTRIES,
@@ -19,6 +20,7 @@ describe("MH catalog options", () => {
     expect(CAT012_DEPARTMENTS).toContainEqual({ code: "06", label: "San Salvador" });
     expect(CAT020_COUNTRIES).toContainEqual({ code: "SV", label: "El Salvador" });
     expect(CAT022_DOCUMENT_TYPES).toContainEqual({ code: "03", label: "Pasaporte" });
+    expect(CAT022_ISSUER_DOCUMENT_TYPES).toEqual([{ code: "36", label: "NIT" }]);
     expect(CAT026_DONATION_TYPES).toContainEqual({ code: "1", label: "Efectivo" });
     expect(CAT014_UNITS).toContainEqual({ code: "59", label: "Unidad" });
     expect(CAT017_PAYMENT_FORMS).toContainEqual({ code: "05", label: "Transferencia-Depósito Bancario" });

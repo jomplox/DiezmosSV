@@ -5,6 +5,8 @@ import {
   ChevronRight,
   Cloud,
   Clock,
+  CircleHelp,
+  Copy,
   Download,
   EyeOff,
   FileSpreadsheet,
@@ -16,8 +18,11 @@ import {
   Lock,
   LogOut,
   Mail,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Settings,
+  Upload,
   UserPlus,
   RefreshCw,
   RotateCcw,
@@ -26,10 +31,12 @@ import {
   X,
   Users
 } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { AuditRow, CredentialStatus, DteDocument, User } from "./types";
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DteDocument, EmissionEnvironmentState, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
+import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
   CAT012_DEPARTMENTS,
   CAT014_UNITS,
@@ -38,6 +45,7 @@ import {
   CAT020_COUNTRIES,
   CAT021_ASSOCIATED_DOCUMENTS,
   CAT022_DOCUMENT_TYPES,
+  CAT022_ISSUER_DOCUMENT_TYPES,
   CAT026_DONATION_TYPES,
   CAT032_DOMICILE,
   type CatalogOption,
@@ -67,7 +75,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Clock },
-  { id: "audit", label: "Auditoria", icon: History },
+  { id: "audit", label: "Auditoría", icon: History },
   { id: "users", label: "Usuarios", icon: Users },
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
   { id: "credentials", label: "Credenciales", icon: Settings, minRole: "OWNER" }
@@ -85,10 +93,13 @@ export function App() {
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [users, setUsers] = useState<User[]>([]);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
-  const [contingency, setContingency] = useState<Record<string, unknown> | null>(null);
+  const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
+  const [contingency, setContingency] = useState<ContingencyState | null>(null);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<string>("");
   const [toast, setToast] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [busy, setBusy] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
@@ -107,7 +118,7 @@ export function App() {
     amountTotal: "0.00"
   });
   const [testInput, setTestInput] = useState<TestDteInput>({
-    amount: "1.00",
+    amount: "",
     donorName: "",
     donorEmail: "",
     donorDocument: "",
@@ -119,9 +130,17 @@ export function App() {
     role: "VIEWER",
     password: ""
   });
+  const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
+  const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
+  const [contingencyInput, setContingencyInput] = useState<ContingencyOpenInput>({
+    environment: "00",
+    tipoContingencia: "2",
+    reason: "MH no disponible"
+  });
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
+  const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
   const pendingInvalidation = useMemo(() => documents.find((document) => document.id === pendingInvalidationId) ?? null, [documents, pendingInvalidationId]);
   const filteredStatus = view === "failures" ? "FAILED" : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
@@ -135,7 +154,7 @@ export function App() {
     if (!token) {
       return;
     }
-    void refresh();
+    void refresh().catch(handleApiFailure);
   }, [token, filteredStatus, query, view, exportStartDate, exportEndDate]);
 
   async function refresh() {
@@ -145,7 +164,7 @@ export function App() {
     const docs = await api<{ documents: DteDocument[] }>(`/api/documents?${params}`, token);
     setDocuments(docs.documents);
     if (!selectedId && docs.documents[0]) setSelectedId(docs.documents[0].id);
-    const contingencyResult = await api<{ contingency: Record<string, unknown> | null }>("/api/contingency", token);
+    const contingencyResult = await api<{ contingency: ContingencyState }>("/api/contingency", token);
     setContingency(contingencyResult.contingency);
     if (view === "audit") {
       setAudit((await api<{ audit: AuditRow[] }>("/api/audit", token)).audit);
@@ -154,7 +173,12 @@ export function App() {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials);
+      const [credentialResult, environmentResult] = await Promise.all([
+        api<{ credentials: CredentialStatus }>("/api/credentials", token),
+        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+      ]);
+      setCredentials(credentialResult.credentials);
+      setEmissionEnvironment(environmentResult.emissionEnvironment);
     }
     if (view === "exports" && can(user, "ADMIN")) {
       if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
@@ -173,6 +197,7 @@ export function App() {
     localStorage.setItem("diezmos_user", JSON.stringify(result.user));
     setToken(result.token);
     setUser(result.user);
+    setAuthNotice("");
   }
 
   async function bootstrap(email: string, name: string, password: string, setupToken: string) {
@@ -189,14 +214,22 @@ export function App() {
     localStorage.removeItem("diezmos_user");
     setToken("");
     setUser(null);
+    setAuthNotice("");
     setDocuments([]);
     setSelectedId(null);
+    setSelectedUserId(null);
+    setUserSettings(emptyUserSettings());
     setPendingInvalidationId(null);
     setEmailEditingId(null);
     setEmailDraft("");
   }
 
   async function createTestDte() {
+    const amountError = testAmountValidationMessage(testInput.amount);
+    if (amountError) {
+      setToast(amountError);
+      return;
+    }
     if (!testInput.donorDocument.trim()) {
       setToast("Ingrese documento del donante para la prueba");
       return;
@@ -250,7 +283,7 @@ export function App() {
     if (!target) return;
     const body =
       action === "invalidate"
-        ? { tipoAnulacion: 2, motivoAnulacion: "Invalidacion solicitada desde panel" }
+        ? { tipoAnulacion: 2, motivoAnulacion: "Invalidación solicitada desde panel" }
         : {};
     await runAction(action, async () => {
       const result = await api<{ accepted?: boolean; result?: { estado?: string } }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
@@ -264,12 +297,12 @@ export function App() {
     if (!target) return;
     const email = emailDraft.trim();
     if (!isValidEmail(email)) {
-      setToast("Ingrese un correo valido");
+      setToast("Ingrese un correo válido");
       return;
     }
     await runAction("email", async () => {
       await api(`/api/documents/${target.id}/email`, token, { method: "PATCH", body: { email } });
-      setToast("Correo de envio actualizado");
+      setToast("Correo de envío actualizado");
       setEmailEditingId(null);
       setEmailDraft("");
       await refresh();
@@ -312,16 +345,79 @@ export function App() {
       link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `f960.${format}`);
       link.click();
       URL.revokeObjectURL(href);
-      setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspeccion descargado");
+      setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
     });
   }
 
   async function createUser() {
+    const passwordError = passwordPolicyMessage(newUser.password);
+    if (passwordError) {
+      setToast(passwordError);
+      return;
+    }
     await runAction("create-user", async () => {
       const created = await api<{ user: User }>("/api/users", token, { method: "POST", body: newUser });
       setToast(`Usuario creado: ${created.user.email}`);
       setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
       await refresh();
+    });
+  }
+
+  function openUserSettings(target: User) {
+    setSelectedUserId(target.id);
+    setUserSettings({
+      name: target.name,
+      email: target.email,
+      role: target.role,
+      disabled: Boolean(target.disabled_at),
+      password: ""
+    });
+  }
+
+  function closeUserSettings() {
+    setSelectedUserId(null);
+    setUserSettings(emptyUserSettings());
+  }
+
+  async function saveUserSettings() {
+    if (!selectedUserId) return;
+    const name = userSettings.name.trim();
+    const email = userSettings.email.trim();
+    if (!name || !email) {
+      setToast("Ingrese nombre y correo del usuario");
+      return;
+    }
+    await runAction("user-settings", async () => {
+      const result = await api<{ user: User }>(`/api/users/${selectedUserId}`, token, {
+        method: "PATCH",
+        body: {
+          name,
+          email,
+          role: userSettings.role,
+          disabled: userSettings.disabled
+        }
+      });
+      setUsers((current) => current.map((candidate) => candidate.id === result.user.id ? result.user : candidate));
+      if (user?.id === result.user.id) {
+        setUser(result.user);
+        localStorage.setItem("diezmos_user", JSON.stringify(result.user));
+      }
+      setUserSettings({ ...userSettingsFromUser(result.user), password: "" });
+      setToast(`Usuario actualizado: ${result.user.email}`);
+    });
+  }
+
+  async function resetUserPassword() {
+    if (!selectedUserId) return;
+    const passwordError = passwordPolicyMessage(userSettings.password);
+    if (passwordError) {
+      setToast(passwordError);
+      return;
+    }
+    await runAction("user-password", async () => {
+      await api(`/api/users/${selectedUserId}/password`, token, { method: "POST", body: { password: userSettings.password } });
+      setUserSettings((current) => ({ ...current, password: "" }));
+      setToast("Contraseña restablecida");
     });
   }
 
@@ -334,45 +430,150 @@ export function App() {
     });
   }
 
+  async function updateEmissionEnvironment(environment: EmissionEnvironmentState["environment"]) {
+    if (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting") {
+      return;
+    }
+    await runAction("emission-environment", async () => {
+      const result = await api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token, {
+        method: "PUT",
+        body: { environment }
+      });
+      setEmissionEnvironment(result.emissionEnvironment);
+      setToast(`Ambiente de emisión cambiado a ${environmentLabel(environment)}`);
+    });
+  }
+
+  async function bootstrapCredentialWriter(cloudflareToken: string): Promise<boolean> {
+    setBusy("credential-writer");
+    try {
+      const result = await api<{ updated: string[]; credentials: CredentialStatus }>("/api/credentials/writer-token", token, {
+        method: "POST",
+        body: { token: cloudflareToken }
+      });
+      setCredentials(result.credentials);
+      setToast("Guardado de credenciales habilitado");
+      return true;
+    } catch (error) {
+      handleApiFailure(error);
+      return false;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function openContingency() {
+    const reason = contingencyInput.reason.trim();
+    if (!reason) {
+      setToast("Ingrese motivo de contingencia");
+      return;
+    }
+    await runAction("contingency-open", async () => {
+      const result = await api<{ contingency: ContingencyState }>("/api/contingency/open", token, {
+        method: "POST",
+        body: {
+          environment: contingencyInput.environment,
+          tipoContingencia: Number(contingencyInput.tipoContingencia),
+          reason
+        }
+      });
+      setContingency(result.contingency);
+      setToast(result.contingency.active ? "Contingencia abierta" : "Contingencia actualizada");
+      await refresh();
+    });
+  }
+
+  async function runContingencySweep() {
+    await runAction("contingency-sweep", async () => {
+      const result = await api<{ transmitted: number; periodId: string | null }>("/api/contingency/sweep", token, { method: "POST" });
+      setToast(result.periodId ? `Barrido ejecutado: ${result.transmitted} DTE aceptado(s)` : "Sin contingencia abierta");
+      await refresh();
+    });
+  }
+
+  async function refreshContingency() {
+    await runAction("contingency-refresh", refresh);
+  }
+
   async function runAction(name: string, action: () => Promise<void>) {
     setBusy(name);
     try {
       await action();
     } catch (error) {
-      setToast(error instanceof Error ? error.message : String(error));
+      handleApiFailure(error);
     } finally {
       setBusy("");
     }
   }
 
   if (!token || !user) {
-    return <AuthScreen onLogin={login} onBootstrap={bootstrap} />;
+    return <AuthScreen notice={authNotice} onLogin={login} onBootstrap={bootstrap} />;
+  }
+
+  function handleApiFailure(error: unknown) {
+    if (isApiError(error) && error.status === 401) {
+      expireSession();
+      return;
+    }
+    setToast(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+  }
+
+  function expireSession() {
+    localStorage.removeItem("diezmos_token");
+    localStorage.removeItem("diezmos_user");
+    setToken("");
+    setUser(null);
+    setDocuments([]);
+    setSelectedId(null);
+    setAudit([]);
+    setUsers([]);
+    setCredentials(null);
+    setAuthNotice("Su sesión expiró. Inicie sesión de nuevo.");
+  }
+
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => {
+      const next = !current;
+      localStorage.setItem("diezmos_sidebar_collapsed", next ? "true" : "false");
+      return next;
+    });
   }
 
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <ShieldCheck size={24} />
-          <div>
-            <strong>ExamplePerson1</strong>
-            <span>DTE CDE</span>
+    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+      <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
+        <div className="sidebar-head">
+          <div className="brand">
+            <ShieldCheck size={24} />
+            <div className="brand-text">
+              <strong>ExamplePerson1</strong>
+              <span>DTE CDE</span>
+            </div>
           </div>
+          <button
+            className="sidebar-toggle"
+            type="button"
+            onClick={toggleSidebar}
+            aria-label={sidebarCollapsed ? "Expandir menú lateral" : "Contraer menú lateral"}
+            title={sidebarCollapsed ? "Expandir menú lateral" : "Contraer menú lateral"}
+          >
+            {sidebarCollapsed ? <PanelLeftOpen size={18} /> : <PanelLeftClose size={18} />}
+          </button>
         </div>
         <nav>
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)}>
+              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)} aria-label={item.label} title={item.label}>
                 <Icon size={18} />
-                {item.label}
+                <span className="nav-label">{item.label}</span>
               </button>
             );
           })}
         </nav>
         <div className="profile">
           <span>{user.name}</span>
-          <strong>{user.role}</strong>
+          <strong>{roleLabel(user.role)}</strong>
         </div>
       </aside>
 
@@ -383,11 +584,11 @@ export function App() {
             <p>{subtitleFor(view)}</p>
           </div>
           <div className="topbar-actions">
-            <div className={contingency ? "contingency-banner open" : "contingency-banner"}>
+            <div className={contingency?.active ? "contingency-banner open" : "contingency-banner"}>
               <Clock size={16} />
-              {contingency ? `Contingencia ${String(contingency.status)}` : "Sin contingencia abierta"}
+              {contingency?.active ? `Contingencia ${statusLabel(contingency.active.status).toLowerCase()}` : "Sin contingencia abierta"}
             </div>
-            <button className="icon-button" onClick={logout} title="Cerrar sesion">
+            <button className="icon-button" onClick={logout} title="Cerrar sesión">
               <LogOut size={17} />
             </button>
           </div>
@@ -410,7 +611,7 @@ export function App() {
               <div className="toolbar">
                 <label className="search">
                   <Search size={16} />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar codigo, donante o correo" />
+                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar código, donante o correo" />
                 </label>
                 <select value={status} onChange={(event) => setStatus(event.target.value)} disabled={view === "failures"}>
                   <option value="">Todos</option>
@@ -452,14 +653,16 @@ export function App() {
         )}
 
         {view === "contingency" && (
-          <section className="single-panel">
-            <h2>Estado de contingencia</h2>
-            <pre>{JSON.stringify(contingency ?? { status: "CLOSED" }, null, 2)}</pre>
-            <button className="primary" onClick={async () => { await api("/api/contingency/sweep", token, { method: "POST" }); await refresh(); }}>
-              <RefreshCw size={16} />
-              Ejecutar barrido
-            </button>
-          </section>
+          <ContingencyPanel
+            state={contingency}
+            input={contingencyInput}
+            busy={busy}
+            canManage={can(user, "ADMIN")}
+            onInputChange={setContingencyInput}
+            onOpen={openContingency}
+            onSweep={runContingencySweep}
+            onRefresh={refreshContingency}
+          />
         )}
 
         {view === "audit" && (
@@ -479,7 +682,18 @@ export function App() {
             {can(user, "ADMIN") ? (
               <>
                 <UserCreateForm input={newUser} busy={busy === "create-user"} onChange={setNewUser} onSubmit={createUser} />
-                <UserTable users={users} />
+                <UserTable users={users} selectedId={selectedUserId} onSelect={openUserSettings} />
+                {selectedUser && (
+                  <UserSettingsModal
+                    user={selectedUser}
+                    input={userSettings}
+                    busy={busy}
+                    onChange={setUserSettings}
+                    onClose={closeUserSettings}
+                    onSave={saveUserSettings}
+                    onResetPassword={resetUserPassword}
+                  />
+                )}
               </>
             ) : (
               <p>No tiene permisos para administrar usuarios.</p>
@@ -502,11 +716,23 @@ export function App() {
         {view === "credentials" && (
           <CredentialsPanel
             status={credentials}
+            emissionEnvironment={emissionEnvironment}
             input={credentialInput}
             busy={busy === "credentials"}
+            emissionBusy={busy === "emission-environment"}
+            writerBusy={busy === "credential-writer"}
             onChange={setCredentialInput}
             onSubmit={updateCredentials}
-            onRefresh={async () => setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials)}
+            onEmissionEnvironmentChange={updateEmissionEnvironment}
+            onBootstrapWriter={bootstrapCredentialWriter}
+            onRefresh={async () => {
+              const [credentialResult, environmentResult] = await Promise.all([
+                api<{ credentials: CredentialStatus }>("/api/credentials", token),
+                api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+              ]);
+              setCredentials(credentialResult.credentials);
+              setEmissionEnvironment(environmentResult.emissionEnvironment);
+            }}
           />
         )}
       </main>
@@ -534,6 +760,343 @@ export function App() {
         />
       )}
       {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
+    </div>
+  );
+}
+
+function ContingencyPanel({
+  state,
+  input,
+  busy,
+  canManage,
+  onInputChange,
+  onOpen,
+  onSweep,
+  onRefresh
+}: {
+  state: ContingencyState | null;
+  input: ContingencyOpenInput;
+  busy: string;
+  canManage: boolean;
+  onInputChange: (input: ContingencyOpenInput) => void;
+  onOpen: () => Promise<void>;
+  onSweep: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+}) {
+  const active = state?.active ?? null;
+  const pendingDocuments = state?.pendingDocuments ?? [];
+  const batches = state?.batches ?? [];
+  const batchLines = state?.batchLines ?? [];
+  const periods = state?.periods ?? [];
+  const events = state?.events ?? [];
+  const audit = state?.audit ?? [];
+  const summary = state?.summary ?? {
+    pending: 0,
+    open: 0,
+    eventAccepted: 0,
+    closed: 0,
+    failed: 0,
+    eventsAccepted: 0,
+    eventsRejected: 0,
+    batches: 0,
+    batchAccepted: 0,
+    batchPending: 0,
+    batchRejected: 0
+  };
+  const deadline = contingencyDeadline(active);
+
+  return (
+    <section className="contingency-dashboard">
+      <div className="contingency-grid">
+        <div className="contingency-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Estado actual</h2>
+              <p>{active ? active.reason : "No hay periodo abierto."}</p>
+            </div>
+            <StatusPill status={active?.status ?? "CLOSED"} />
+          </div>
+          <dl className="contingency-facts">
+            <dt>Ambiente</dt>
+            <dd>{active ? environmentLabel(active.environment) : "N/D"}</dd>
+            <dt>Tipo</dt>
+            <dd>{active ? contingencyTypeLabel(active.tipo_contingencia) : "N/D"}</dd>
+            <dt>Inicio</dt>
+            <dd>{formatDateTime(active?.started_at)}</dd>
+            <dt>Cierre</dt>
+            <dd>{formatDateTime(active?.ended_at)}</dd>
+            <dt>Sello evento</dt>
+            <dd className="mono">{active?.event_sello ? shortCode(active.event_sello) : "Pendiente"}</dd>
+          </dl>
+          <div className={`contingency-deadline ${deadline.tone}`}>
+            <Clock size={18} />
+            <div>
+              <strong>{deadline.title}</strong>
+              <span>{deadline.detail}</span>
+            </div>
+          </div>
+        </div>
+
+        <form
+          className="contingency-panel contingency-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onOpen();
+          }}
+        >
+          <div className="panel-head">
+            <div>
+              <h2>Apertura manual</h2>
+              <p>{canManage ? "Tipo y motivo exigidos antes de emitir en contingencia." : "Requiere rol Administrador o Propietario."}</p>
+            </div>
+            <Cloud size={20} />
+          </div>
+          <div className="contingency-form-grid">
+            <label>
+              <span>Ambiente</span>
+              <select
+                value={input.environment}
+                disabled={!canManage || Boolean(active)}
+                onChange={(event) => onInputChange({ ...input, environment: event.target.value as "00" | "01" })}
+              >
+                <option value="00">Pruebas</option>
+                <option value="01">Producción</option>
+              </select>
+            </label>
+            <label>
+              <span>Tipo</span>
+              <select
+                value={input.tipoContingencia}
+                disabled={!canManage || Boolean(active)}
+                onChange={(event) => onInputChange({ ...input, tipoContingencia: event.target.value })}
+              >
+                {contingencyTypeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="span-2">
+              <span>Motivo</span>
+              <textarea
+                value={input.reason}
+                disabled={!canManage || Boolean(active)}
+                onChange={(event) => onInputChange({ ...input, reason: event.target.value })}
+              />
+            </label>
+          </div>
+          <div className="contingency-actions">
+            <button type="button" onClick={() => void onRefresh()} disabled={busy === "contingency-refresh"}>
+              <RefreshCw size={16} />
+              Actualizar
+            </button>
+            <button type="button" onClick={() => void onSweep()} disabled={!active || busy === "contingency-sweep"}>
+              <RefreshCw size={16} />
+              Ejecutar barrido
+            </button>
+            <button className="primary" type="submit" disabled={!canManage || Boolean(active) || busy === "contingency-open"}>
+              <CheckCircle2 size={16} />
+              Abrir contingencia
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="stats contingency-stats">
+        <Metric label="Pendientes" value={summary.pending} tone="warn" />
+        <Metric label="Lotes MH" value={summary.batches} tone="neutral" />
+        <Metric label="CDE aceptados" value={summary.batchAccepted} tone="ok" />
+        <Metric label="CDE en lote" value={summary.batchPending} tone="warn" />
+        <Metric label="CDE rechazados" value={summary.batchRejected} tone="bad" />
+      </div>
+
+      <section className="contingency-panel">
+        <div className="panel-head">
+          <div>
+            <h2>DTE pendientes</h2>
+            <p>Documentos locales emitidos para reenvío después del evento.</p>
+          </div>
+          <FileText size={20} />
+        </div>
+        {pendingDocuments.length > 0 ? (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Estado</th>
+                  <th>Código</th>
+                  <th>Donante</th>
+                  <th>Monto</th>
+                  <th>Fecha</th>
+                </tr>
+              </thead>
+              <tbody>
+                {pendingDocuments.map((document) => (
+                  <tr key={document.id}>
+                    <td><StatusPill status={document.status} /></td>
+                    <td className="mono">{shortCode(document.codigo_generacion)}</td>
+                    <td><StackedCell primary={document.donor_name ?? "N/D"} secondary={document.donor_email ?? ""} /></td>
+                    <td className="numeric">{formatMoneyCents(document.amount_cents)}</td>
+                    <td className="numeric">{formatDateTime(document.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState icon={<CheckCircle2 size={18} />} text="No hay DTE pendientes de contingencia." />
+        )}
+      </section>
+
+      <section className="contingency-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Lotes MH</h2>
+            <p>Envío por /recepcionlote y consulta por código de lote.</p>
+          </div>
+          <FileText size={20} />
+        </div>
+        {batches.length > 0 ? (
+          <div className="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Estado</th>
+                  <th>Código lote</th>
+                  <th>ID envío</th>
+                  <th>CDE</th>
+                  <th>Consulta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {batches.map((batch) => (
+                  <tr key={batch.id}>
+                    <td><StatusPill status={batch.status} /></td>
+                    <td className="mono">{batch.codigo_lote ? shortCode(batch.codigo_lote) : "Pendiente"}</td>
+                    <td className="mono">{shortCode(batch.id_envio)}</td>
+                    <td>
+                      <StackedCell
+                        primary={`${batch.accepted_count}/${batch.line_count} aceptados`}
+                        secondary={`${batch.pending_count} pendientes, ${batch.rejected_count} rechazados`}
+                      />
+                    </td>
+                    <td className="numeric">{formatDateTime(batch.last_polled_at ?? batch.submitted_at ?? batch.created_at)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState icon={<Clock size={18} />} text="Sin lotes enviados para el periodo activo." />
+        )}
+        {batchLines.length > 0 && (
+          <div className="batch-line-list">
+            {batchLines.slice(0, 12).map((line) => (
+              <div key={line.id} className="batch-line-row">
+                <StatusPill status={line.status} />
+                <span className="mono">{shortCode(line.codigo_generacion)}</span>
+                <span className="mono">{line.sello_recibido ? shortCode(line.sello_recibido) : "Sin sello DTE"}</span>
+                    <span>{line.last_error ? userFacingErrorMessage(line.last_error) : line.mh_estado ?? "Pendiente de consulta"}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <div className="contingency-grid">
+        <section className="contingency-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Eventos MH</h2>
+              <p>Transmisiones reales a /contingencia.</p>
+            </div>
+            <History size={20} />
+          </div>
+          {events.length > 0 ? (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Estado</th>
+                    <th>Código</th>
+                    <th>Sello</th>
+                    <th>Fecha</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {events.map((event) => (
+                    <tr key={event.id}>
+                      <td><StatusPill status={event.status} /></td>
+                      <td className="mono">{shortCode(event.codigo_generacion)}</td>
+                      <td className="mono">{event.sello_recibido ? shortCode(event.sello_recibido) : "Pendiente"}</td>
+                      <td className="numeric">{formatDateTime(event.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <EmptyState icon={<Clock size={18} />} text="Sin eventos de contingencia transmitidos." />
+          )}
+        </section>
+
+        <section className="contingency-panel">
+          <div className="panel-head">
+            <div>
+              <h2>Periodos</h2>
+              <p>Ventanas abiertas, selladas, cerradas o fallidas.</p>
+            </div>
+            <Clock size={20} />
+          </div>
+          {periods.length > 0 ? (
+            <div className="contingency-periods">
+              {periods.map((period) => (
+                <div key={period.id} className="contingency-period-row">
+                  <StatusPill status={period.status} />
+                  <div>
+                    <strong>{contingencyTypeLabel(period.tipo_contingencia)}</strong>
+                    <span>{period.reason}</span>
+                  </div>
+                  <span className="numeric">{formatDateTime(period.started_at)}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <EmptyState icon={<Clock size={18} />} text="Sin periodos registrados." />
+          )}
+        </section>
+      </div>
+
+      <section className="contingency-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Auditoría del periodo</h2>
+            <p>Acciones registradas para la contingencia activa.</p>
+          </div>
+          <History size={20} />
+        </div>
+        {audit.length > 0 ? (
+          <div className="contingency-audit-list">
+            {audit.slice(0, 8).map((row) => (
+              <div key={row.id}>
+                <strong>{auditActionLabel(row.action)}</strong>
+                <span>{auditSummaryLabel(row.summary)}</span>
+                <time>{formatDateTime(row.created_at)}</time>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState icon={<AlertTriangle size={18} />} text="Sin auditoría para el periodo activo." />
+        )}
+      </section>
+    </section>
+  );
+}
+
+function EmptyState({ icon, text }: { icon: ReactNode; text: string }) {
+  return (
+    <div className="empty-state">
+      {icon}
+      <span>{text}</span>
     </div>
   );
 }
@@ -623,7 +1186,7 @@ function ExportPanel({
         </button>
         <button disabled={busy === "export-xlsx"} onClick={() => void onDownload("xlsx")}>
           <FileSpreadsheet size={16} />
-          {busy === "export-xlsx" ? "Preparando" : "XLSX inspeccion"}
+          {busy === "export-xlsx" ? "Preparando" : "XLSX de inspección"}
         </button>
       </div>
       <div className="export-summary">
@@ -703,7 +1266,7 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
             <th>Documento</th>
             <th>Monto</th>
             <th>Periodo</th>
-            <th>Codigo generacion</th>
+            <th>Código de generación</th>
             <th>Sello</th>
             <th>Control</th>
           </tr>
@@ -734,20 +1297,101 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
 
 function CredentialsPanel({
   status,
+  emissionEnvironment,
   input,
   busy,
+  emissionBusy,
+  writerBusy,
   onChange,
   onSubmit,
+  onEmissionEnvironmentChange,
+  onBootstrapWriter,
   onRefresh
 }: {
   status: CredentialStatus | null;
+  emissionEnvironment: EmissionEnvironmentState | null;
   input: CredentialFormInput;
   busy: boolean;
+  emissionBusy: boolean;
+  writerBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
   onSubmit: () => Promise<void>;
+  onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
+  onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
   onRefresh: () => Promise<void>;
 }) {
   const groups = status ? Object.entries(status.groups) : [];
+  const mhUserSecret = input.environment === "test" ? "MH_USER_TEST" : "MH_USER_PROD";
+  const mhPasswordSecret = input.environment === "test" ? "MH_PASSWORD_TEST" : "MH_PASSWORD_PROD";
+  const activeMhGroup = input.environment === "test" ? status?.groups.mhTest : status?.groups.mhProduction;
+  const webhookUrl = typeof window === "undefined" ? "/webhooks/wompi" : new URL("/webhooks/wompi", window.location.origin).toString();
+  const writerConfigured = status?.target.writerConfigured === true;
+  const writerMissing = status?.target.writerMissing ?? [];
+  const writerNeedsOnlyToken = writerMissing.length === 1 && writerMissing[0] === "CLOUDFLARE_API_TOKEN";
+  const signerConfigured = credentialConfigured(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2");
+  const [certificateFileError, setCertificateFileError] = useState("");
+  const [webhookCopied, setWebhookCopied] = useState(false);
+  const [writerCommandCopied, setWriterCommandCopied] = useState(false);
+  const [writerToken, setWriterToken] = useState("");
+  const [writerTokenError, setWriterTokenError] = useState("");
+  const writerSetupCommand = `wrangler secret put CLOUDFLARE_API_TOKEN --env ${status?.target.appEnv || "staging"}`;
+  const writerMessage = writerConfigured
+    ? "Guardado seguro de credenciales habilitado"
+    : writerMissing.length > 0
+      ? `No se pueden guardar cambios todavía. Falta ${credentialWriterMissingLabel(writerMissing)}.`
+      : "No se pueden guardar cambios todavía.";
+  const activeEnvironmentLabel = input.environment === "test" ? "Pruebas 00" : "Producción 01";
+  const runtimeEnvironment = credentialRuntimeEnvironment(emissionEnvironment, status?.target.appEnv);
+  async function handleCertificateFile(file: File | undefined): Promise<void> {
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const trimmed = text.trim();
+      if (!trimmed) {
+        setCertificateFileError("El archivo seleccionado está vacío.");
+        return;
+      }
+      if (!trimmed.startsWith("<") || !trimmed.includes("CertificadoMH")) {
+        setCertificateFileError("El archivo no parece ser el certificado .crt/.xml de MH para firma.");
+        return;
+      }
+      setCertificateFileError("");
+      onChange({ ...input, certificateXml: text, certificateFileName: file.name });
+    } catch {
+      setCertificateFileError("No se pudo leer el archivo seleccionado.");
+    }
+  }
+  async function copyWebhookUrl(): Promise<void> {
+    try {
+      await copyText(webhookUrl);
+      setWebhookCopied(true);
+      window.setTimeout(() => setWebhookCopied(false), 1600);
+    } catch {
+      setWebhookCopied(false);
+    }
+  }
+  async function copyWriterSetupCommand(): Promise<void> {
+    try {
+      await copyText(writerSetupCommand);
+      setWriterCommandCopied(true);
+      window.setTimeout(() => setWriterCommandCopied(false), 1600);
+    } catch {
+      setWriterCommandCopied(false);
+    }
+  }
+  async function submitWriterToken(event: FormEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    const trimmed = writerToken.trim();
+    if (!trimmed) {
+      setWriterTokenError("Ingrese el token API de Cloudflare.");
+      return;
+    }
+    setWriterTokenError("");
+    const saved = await onBootstrapWriter(trimmed);
+    if (saved) {
+      setWriterToken("");
+    }
+  }
   return (
     <section className="credential-layout">
       <div className="credential-status-panel">
@@ -760,10 +1404,65 @@ function CredentialsPanel({
             <RefreshCw size={17} />
           </button>
         </div>
-        <div className={status?.target.writerConfigured ? "writer-state ready" : "writer-state"}>
+        <div className={writerConfigured ? "writer-state ready" : "writer-state"}>
           <Cloud size={17} />
-          <span>{status?.target.writerConfigured ? "Actualizacion directa activa" : "Falta token Cloudflare para guardar desde aqui"}</span>
+          <div>
+            <span>{writerMessage}</span>
+            {writerConfigured ? (
+              <small>Puede actualizar credenciales desde esta pantalla; se guardarán como secretos del Worker en Cloudflare.</small>
+            ) : (
+              <small>Las credenciales actuales siguen funcionando; solo falta habilitar cambios desde esta pantalla.</small>
+            )}
+          </div>
         </div>
+        {!writerConfigured && (
+          <div className="writer-remedy">
+            <div>
+              <h3>Habilitar edición desde UI</h3>
+              {writerNeedsOnlyToken ? (
+                <p>
+                  Pegue el token API de Cloudflare una sola vez para que el Worker lo guarde como secreto y pueda rotar credenciales desde esta pantalla.
+                  El token no se muestra ni se guarda en D1.
+                </p>
+              ) : (
+                <p>Antes de activar esta edición faltan datos del Worker: {credentialWriterMissingLabel(writerMissing)}.</p>
+              )}
+            </div>
+            {writerNeedsOnlyToken && (
+              <form className="writer-token-form" onSubmit={(event) => void submitWriterToken(event)}>
+                <label>
+                  <span>Token API de Cloudflare</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={writerToken}
+                    onChange={(event) => {
+                      setWriterToken(event.target.value);
+                      setWriterTokenError("");
+                    }}
+                    placeholder="Pegar token API"
+                  />
+                </label>
+                <button className="primary" type="submit" disabled={writerBusy || !writerToken.trim()}>
+                  <KeyRound size={15} />
+                  {writerBusy ? "Activando..." : "Activar edición"}
+                </button>
+                {writerTokenError && <small className="field-error">{writerTokenError}</small>}
+              </form>
+            )}
+            <details className="writer-terminal-fallback">
+              <summary>Usar Wrangler en terminal</summary>
+              <div className="writer-command-row">
+                <code>{writerSetupCommand}</code>
+                <button type="button" onClick={() => void copyWriterSetupCommand()} title="Copiar comando para configurar token">
+                  <Copy size={15} />
+                  {writerCommandCopied ? "Copiado" : "Copiar"}
+                </button>
+              </div>
+              <small>Ejecute el comando desde la carpeta del proyecto y pegue el token solo en el prompt seguro de Wrangler.</small>
+            </details>
+          </div>
+        )}
         <div className="credential-groups">
           {groups.map(([id, group]) => (
             <div className="credential-group" key={id}>
@@ -774,7 +1473,10 @@ function CredentialsPanel({
               <ul>
                 {group.items.map((item) => (
                   <li key={item.name}>
-                    <span>{item.label}</span>
+                    <span>
+                      {item.label}
+                      {item.displayValue && <small>{credentialStatusDisplayValue(item)}</small>}
+                    </span>
                     <strong className={item.configured ? "configured" : ""}>{item.configured ? "Configurado" : "Pendiente"}</strong>
                   </li>
                 ))}
@@ -794,58 +1496,153 @@ function CredentialsPanel({
         <div className="panel-head">
           <div>
             <h2>Actualizar secretos</h2>
-            <p>Los valores son write-only en Cloudflare; deje campos en blanco para conservarlos.</p>
+            <p>Los valores activos se muestran cuando no son secretos; los protegidos solo se reemplazan.</p>
           </div>
           <Lock size={20} />
         </div>
+        <div className="credential-runtime-env">
+          <div>
+            <span>Ambiente activo de emisión</span>
+            <strong>{runtimeEnvironment.label}</strong>
+          </div>
+          <p>{runtimeEnvironment.help}</p>
+          <div className="segmented credential-runtime-selector" aria-label="Ambiente activo de emisión">
+            <button
+              type="button"
+              className={runtimeEnvironment.environment === "00" ? "active" : ""}
+              disabled={emissionBusy}
+              onClick={() => void onEmissionEnvironmentChange("00")}
+            >
+              Pruebas 00
+            </button>
+            <button
+              type="button"
+              className={runtimeEnvironment.environment === "01" ? "active" : ""}
+              disabled={emissionBusy}
+              onClick={() => void onEmissionEnvironmentChange("01")}
+            >
+              Producción 01
+            </button>
+          </div>
+          <small>Este cambio afecta únicamente los DTE nuevos. Los documentos ya emitidos conservan su ambiente original.</small>
+        </div>
+        <div className="credential-env-heading">
+          <span>Usuario y contraseña MH a editar</span>
+          <small>Este selector no cambia el ambiente activo; solo escoge cuál par de credenciales MH desea revisar o rotar.</small>
+        </div>
         <div className="segmented credential-env">
           <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-          <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Produccion 01</button>
+          <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+        </div>
+        <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
+          {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+          <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
         </div>
         <div className="credential-fields">
+          <div className="credential-section-title span-2">
+            <h3>Credenciales API MH ({activeEnvironmentLabel})</h3>
+            <p>Estos dos campos son los únicos que cambian con el selector de ambiente.</p>
+          </div>
           <label>
-            <span>Usuario MH API</span>
-            <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={input.environment === "test" ? "MH_USER_TEST" : "MH_USER_PROD"} autoComplete="off" />
+            <CredentialFieldLabel label="Usuario MH API" configured={credentialConfigured(status, mhUserSecret)} />
+            <CredentialActiveValue status={status} name={mhUserSecret} />
+            <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhUserSecret, "Nuevo usuario MH API")} autoComplete="off" />
           </label>
           <label>
-            <span>Password MH API</span>
-            <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={input.environment === "test" ? "MH_PASSWORD_TEST" : "MH_PASSWORD_PROD"} type="password" autoComplete="new-password" />
+            <CredentialFieldLabel label="Contraseña MH API" configured={credentialConfigured(status, mhPasswordSecret)} />
+            <CredentialActiveValue status={status} name={mhPasswordSecret} />
+            <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña MH API")} type="password" autoComplete="new-password" />
           </label>
+          <div className="credential-section-title span-2">
+            <h3>Firmador MH</h3>
+            <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
+          </div>
+          <div className="credential-field-block span-2">
+            <CredentialFieldLabel label="Certificado firmador MH (.crt/.xml)" configured={signerConfigured} />
+            <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
+            <div className="credential-file-row">
+              <label className="file-upload-button">
+                <Upload size={16} />
+                Reemplazar certificado
+                <input
+                  className="file-input-hidden"
+                  type="file"
+                  accept=".crt,.xml,text/xml,application/xml,text/plain"
+                  onChange={(event) => void handleCertificateFile(event.currentTarget.files?.[0])}
+                />
+              </label>
+              <span className="credential-file-status">
+                {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
+              </span>
+            </div>
+            <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml de MH o cargue el archivo")} spellCheck={false} />
+            <small>Este campo es para reemplazar el certificado que MH entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
+            {certificateFileError && <small className="field-error">{certificateFileError}</small>}
+          </div>
+          <label>
+            <CredentialFieldLabel label="Contraseña de llave privada" configured={credentialConfigured(status, "MH_CERT_PASSWORD")} />
+            <CredentialActiveValue status={status} name="MH_CERT_PASSWORD" />
+            <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_PASSWORD", "Nueva contraseña de llave privada")} type="password" autoComplete="new-password" />
+          </label>
+          <div className="credential-section-title span-2">
+            <h3>Wompi</h3>
+            <p>Configuración del webhook que Wompi invoca cuando aprueba un pago.</p>
+          </div>
           <label className="span-2">
-            <span>Certificado XML firmador</span>
-            <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value })} placeholder="Se divide automaticamente para Cloudflare" spellCheck={false} />
+            <CredentialFieldLabel label="Secreto de firma del webhook Wompi" configured={credentialConfigured(status, "WOMPI_API_SECRET")} />
+            <CredentialActiveValue status={status} name="WOMPI_API_SECRET" />
+            <input value={input.wompiSecret} onChange={(event) => onChange({ ...input, wompiSecret: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "WOMPI_API_SECRET", "Nuevo secreto de firma Wompi")} type="password" autoComplete="new-password" />
+          </label>
+          <div className="credential-field-block span-2">
+            <span className="plain-field-label">URL del webhook de Wompi</span>
+            <div className="credential-readonly-row">
+              <div className="credential-readonly-endpoint">
+                <code>{webhookUrl}</code>
+              </div>
+              <button className="endpoint-copy-button" type="button" onClick={() => void copyWebhookUrl()} title="Copiar URL del webhook de Wompi">
+                <Copy size={15} />
+                {webhookCopied ? "Copiado" : "Copiar"}
+              </button>
+            </div>
+            <small>Wompi debe hacer POST aquí cuando aprueba un pago; este Worker valida la firma con el secreto anterior.</small>
+          </div>
+          <div className="credential-section-title span-2">
+            <h3>Emisor</h3>
+            <p>Datos fiscales y valores por defecto usados para construir cada CDE.</p>
+          </div>
+          <IssuerConfigEditor status={status} input={input} onChange={onChange} />
+          <div className="credential-section-title span-2">
+            <h3>Correo Cloudflare y respaldo HTTP</h3>
+            <p>
+              El envío principal usa Cloudflare Email Workers. El respaldo es un endpoint HTTPS con POST JSON y
+              Authorization: Bearer; se usa solo si Cloudflare Email no puede entregar el comprobante.
+            </p>
+          </div>
+          <label>
+            <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
+            <CredentialActiveValue status={status} name="EMAIL_API_URL" />
+            <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
+            <small>Recibe from, to, subject, text y adjuntos PDF/JSON en base64.</small>
           </label>
           <label>
-            <span>Password llave privada</span>
-            <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder="MH_CERT_PASSWORD" type="password" autoComplete="new-password" />
+            <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
+            <CredentialActiveValue status={status} name="EMAIL_API_KEY" />
+            <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_KEY", "Nuevo token bearer")} type="password" autoComplete="new-password" />
+            <small>Se envía como Authorization: Bearer.</small>
           </label>
           <label>
-            <span>Wompi webhook HMAC</span>
-            <input value={input.wompiSecret} onChange={(event) => onChange({ ...input, wompiSecret: event.target.value })} placeholder="WOMPI_API_SECRET" type="password" autoComplete="new-password" />
-          </label>
-          <label className="span-2">
-            <span>Emisor config JSON</span>
-            <textarea value={input.emisorConfigJson} onChange={(event) => onChange({ ...input, emisorConfigJson: event.target.value })} placeholder="EMISOR_CONFIG_JSON" spellCheck={false} />
-          </label>
-          <label>
-            <span>Fallback email HTTP URL</span>
-            <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder="EMAIL_API_URL" type="url" />
-          </label>
-          <label>
-            <span>Fallback email API key</span>
-            <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder="EMAIL_API_KEY" type="password" autoComplete="new-password" />
-          </label>
-          <label>
-            <span>Email remitente</span>
-            <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder="EMAIL_FROM" type="email" />
+            <CredentialFieldLabel label="Correo remitente" configured={credentialConfigured(status, "EMAIL_FROM")} />
+            <CredentialActiveValue status={status} name="EMAIL_FROM" />
+            <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_FROM", "Nuevo correo remitente")} type="email" />
+            <small>Usado como remitente tanto en Cloudflare Email como en el respaldo.</small>
           </label>
         </div>
         <div className="credential-actions">
           <div>
             <EyeOff size={16} />
-            <span>Los valores enviados no se muestran ni se guardan en D1.</span>
+            <span>{writerConfigured ? "Los valores protegidos no se muestran después de guardarse." : "Configure un token API de Cloudflare para guardar cambios desde esta pantalla."}</span>
           </div>
-          <button className="primary" disabled={busy} type="submit">
+          <button className="primary" disabled={busy || !writerConfigured} type="submit">
             <KeyRound size={16} />
             {busy ? "Guardando" : "Guardar secretos"}
           </button>
@@ -853,6 +1650,294 @@ function CredentialsPanel({
       </form>
     </section>
   );
+}
+
+async function copyText(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
+}
+
+function IssuerConfigEditor({
+  status,
+  input,
+  onChange
+}: {
+  status: CredentialStatus | null;
+  input: CredentialFormInput;
+  onChange: (input: CredentialFormInput) => void;
+}) {
+  const activeJson = credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue ?? "";
+  const form = useMemo(() => issuerFormFromConfigJson(input.emisorConfigJson || activeJson), [activeJson, input.emisorConfigJson]);
+  const municipalityOptions = getCat013Municipalities(form.departamento);
+  const districtOptions = getCat008Districts(form.departamento);
+  const configured = credentialConfigured(status, "EMISOR_CONFIG_JSON");
+  const update = (patch: Partial<IssuerConfigFormInput>) => {
+    const next = { ...form, ...patch };
+    onChange({ ...input, emisorConfigJson: issuerConfigJsonFromForm(next) });
+  };
+  const updateDepartment = (departamento: string) => {
+    const municipalities = getCat013Municipalities(departamento);
+    const districts = getCat008Districts(departamento);
+    update({
+      departamento,
+      municipio: catalogSelectValue(municipalities, form.municipio) || municipalities[0]?.code || "",
+      distrito: catalogSelectValue(districts, form.distrito) || districts[0]?.code || ""
+    });
+  };
+  const updateActivity = (codActividad: string) => {
+    update({
+      codActividad,
+      descActividad: findCatalogOption(CAT019_ACTIVITIES, codActividad)?.label ?? form.descActividad
+    });
+  };
+  return (
+    <div className="issuer-config-editor span-2">
+      <CredentialFieldLabel label="Configuración del emisor" configured={configured} />
+      <div className={configured ? "issuer-config-status ready" : "issuer-config-status"}>
+        {configured ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+        <span>{configured ? "Datos activos cargados en campos editables" : "Complete los datos del emisor para habilitar emisión real"}</span>
+      </div>
+      <div className="issuer-config-grid">
+        <div className="credential-subsection span-2">
+          <h4>Identificación fiscal</h4>
+          <p>Información legal del emisor ante MH.</p>
+        </div>
+        <label>
+          <span>Tipo documento del emisor</span>
+          <CatalogSelect value={form.tipoDocumento} options={CAT022_ISSUER_DOCUMENT_TYPES} onChange={(tipoDocumento) => update({ tipoDocumento })} />
+          <small>Para emitir CDE, el emisor se identifica con NIT de contribuyente.</small>
+        </label>
+        <label>
+          <span>Número documento</span>
+          <input value={form.numDocumento} onChange={(event) => update({ numDocumento: event.target.value })} placeholder="NIT del emisor" inputMode="numeric" maxLength={14} />
+        </label>
+        <label>
+          <span>NRC</span>
+          <input value={form.nrc} onChange={(event) => update({ nrc: event.target.value })} placeholder="Opcional" inputMode="numeric" maxLength={8} />
+        </label>
+        <label>
+          <span>Nombre legal</span>
+          <input value={form.nombre} onChange={(event) => update({ nombre: event.target.value })} placeholder="Nombre registrado" />
+        </label>
+        <label>
+          <span>Nombre comercial</span>
+          <input value={form.nombreComercial} onChange={(event) => update({ nombreComercial: event.target.value })} placeholder="Opcional" />
+        </label>
+        <label>
+          <span>Actividad económica</span>
+          <CatalogSelect value={form.codActividad} options={CAT019_ACTIVITIES} onChange={updateActivity} />
+        </label>
+        <label className="span-2">
+          <span>Descripción actividad</span>
+          <input value={form.descActividad} onChange={(event) => update({ descActividad: event.target.value })} placeholder="Se completa desde CAT-019 al elegir actividad" />
+        </label>
+
+        <div className="credential-subsection span-2">
+          <h4>Dirección fiscal</h4>
+          <p>Ubicación declarada para el emisor.</p>
+        </div>
+        <label>
+          <span>Departamento</span>
+          <CatalogSelect value={form.departamento} options={CAT012_DEPARTMENTS} onChange={updateDepartment} />
+        </label>
+        <label>
+          <span>Municipio</span>
+          <CatalogSelect value={form.municipio} options={municipalityOptions} onChange={(municipio) => update({ municipio })} />
+        </label>
+        <label>
+          <span>Distrito</span>
+          <CatalogSelect value={form.distrito} options={districtOptions} onChange={(distrito) => update({ distrito })} />
+        </label>
+        <label className="span-2">
+          <span>Complemento de dirección</span>
+          <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} placeholder="Dirección completa" />
+        </label>
+
+        <div className="credential-subsection span-2">
+          <h4>Contacto y control</h4>
+          <p>Códigos de establecimiento, punto de venta y numeración CDE.</p>
+        </div>
+        <label>
+          <span>Teléfono</span>
+          <input value={form.telefono} onChange={(event) => update({ telefono: event.target.value })} placeholder="Teléfono del emisor" />
+        </label>
+        <label>
+          <span>Correo</span>
+          <input value={form.correo} onChange={(event) => update({ correo: event.target.value })} placeholder="Correo del emisor" type="email" />
+        </label>
+        <label>
+          <span>Código establecimiento MH</span>
+          <input value={form.codEstableMH} onChange={(event) => update({ codEstableMH: event.target.value })} placeholder="M001" />
+        </label>
+        <label>
+          <span>Código punto venta MH</span>
+          <input value={form.codPuntoVentaMH} onChange={(event) => update({ codPuntoVentaMH: event.target.value })} placeholder="P004" />
+        </label>
+        <label>
+          <span>Código establecimiento interno</span>
+          <input value={form.codEstable} onChange={(event) => update({ codEstable: event.target.value })} placeholder="Opcional" />
+        </label>
+        <label>
+          <span>Código punto venta interno</span>
+          <input value={form.codPuntoVenta} onChange={(event) => update({ codPuntoVenta: event.target.value })} placeholder="Opcional" />
+        </label>
+        <label className="span-2">
+          <span>Prefijo número de control</span>
+          <input value={form.controlPrefix} onChange={(event) => update({ controlPrefix: event.target.value })} placeholder="M001P004" />
+        </label>
+
+        <div className="credential-subsection span-2">
+          <h4>Valores por defecto CDE</h4>
+          <p>Se aplican a DTE rápido y a campos no especificados en flujos automáticos.</p>
+        </div>
+        <label>
+          <span>Documento receptor por defecto</span>
+          <CatalogSelect value={form.defaultReceptorTipoDocumento} options={CAT022_DOCUMENT_TYPES} onChange={(defaultReceptorTipoDocumento) => update({ defaultReceptorTipoDocumento })} />
+        </label>
+        <label>
+          <span>País receptor por defecto</span>
+          <CatalogSelect value={form.defaultCodPais} options={CAT020_COUNTRIES} onChange={(defaultCodPais) => update({ defaultCodPais })} />
+        </label>
+        <label>
+          <span>Tipo donación por defecto</span>
+          <CatalogSelect value={form.defaultDonationType} options={CAT026_DONATION_TYPES} onChange={(defaultDonationType) => update({ defaultDonationType })} />
+        </label>
+        <label>
+          <span>Unidad medida por defecto</span>
+          <CatalogSelect value={form.defaultUnidadMedida} options={CAT014_UNITS} onChange={(defaultUnidadMedida) => update({ defaultUnidadMedida })} />
+        </label>
+        <label className="span-2">
+          <span>Forma de pago por defecto</span>
+          <CatalogSelect value={form.paymentMethodCode} options={CAT017_PAYMENT_FORMS} onChange={(paymentMethodCode) => update({ paymentMethodCode })} />
+        </label>
+
+        <div className="credential-subsection span-2">
+          <h4>Responsable</h4>
+          <p>Persona usada en eventos administrativos como contingencia e invalidación.</p>
+        </div>
+        <label>
+          <span>Nombre responsable</span>
+          <input value={form.responsableNombre} onChange={(event) => update({ responsableNombre: event.target.value })} />
+        </label>
+        <label>
+          <span>Tipo documento responsable</span>
+          <CatalogSelect value={form.responsableTipoDocumento} options={CAT022_DOCUMENT_TYPES} onChange={(responsableTipoDocumento) => update({ responsableTipoDocumento })} />
+        </label>
+        <label>
+          <span>Número documento responsable</span>
+          <input value={form.responsableNumeroDocumento} onChange={(event) => update({ responsableNumeroDocumento: event.target.value })} />
+        </label>
+        <label>
+          <span>Tipo establecimiento</span>
+          <input value={form.responsableTipoEstablecimiento} onChange={(event) => update({ responsableTipoEstablecimiento: event.target.value })} placeholder="Casa Matriz, sucursal, etc." />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function credentialWriterMissingLabel(names: string[]): string {
+  const labels: Record<string, string> = {
+    CLOUDFLARE_ACCOUNT_ID: "ID de cuenta Cloudflare (CLOUDFLARE_ACCOUNT_ID)",
+    CLOUDFLARE_SCRIPT_NAME: "nombre del Worker (CLOUDFLARE_SCRIPT_NAME)",
+    CLOUDFLARE_API_TOKEN: "token API de Cloudflare (CLOUDFLARE_API_TOKEN)"
+  };
+  return names.map((name) => labels[name] ?? name).join(", ");
+}
+
+function credentialRuntimeEnvironment(
+  state: EmissionEnvironmentState | null,
+  appEnv: string | null | undefined
+): { environment: "00" | "01"; label: string; help: string } {
+  const fallbackEnvironment = appEnv?.toLowerCase().trim() === "production" ? "01" : "00";
+  const environment = state?.environment ?? fallbackEnvironment;
+  const label = environmentLabel(environment);
+  const source = state?.source ?? "deployment_default";
+  return {
+    environment,
+    label,
+    help: source === "setting"
+      ? `Los próximos CDE se emitirán contra MH ${label}. Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
+      : `Usando ${label} como valor inicial. Guarde una selección aquí para controlar el ambiente activo desde la UI.`
+  };
+}
+
+function CredentialFieldLabel({ label, configured }: { label: string; configured: boolean }) {
+  return (
+    <span className="credential-field-label">
+      <span>{label}</span>
+      <strong className={configured ? "configured" : ""}>{configured ? "Configurado" : "Pendiente"}</strong>
+    </span>
+  );
+}
+
+function CredentialActiveValue({ status, name, multiline = false }: { status: CredentialStatus | null; name: string; multiline?: boolean }) {
+  const item = credentialItem(status, name);
+  if (!item?.configured) return null;
+  if (item.displayValue) {
+    const value = credentialDisplayValue(item, multiline);
+    return (
+      <div className={multiline ? "credential-active-value multiline" : "credential-active-value"}>
+        <span>Valor activo</span>
+        {multiline ? <pre>{value}</pre> : <code>{value}</code>}
+      </div>
+    );
+  }
+  return (
+    <div className="credential-protected-value">
+      <EyeOff size={18} />
+      <span>Valor protegido configurado; ingrese uno nuevo solo para reemplazarlo.</span>
+    </div>
+  );
+}
+
+function credentialItem(status: CredentialStatus | null, name: string): CredentialStatusItem | null {
+  if (!status) return null;
+  for (const group of Object.values(status.groups)) {
+    const item = group.items.find((candidate) => candidate.name === name);
+    if (item) return item;
+  }
+  return null;
+}
+
+function credentialConfigured(status: CredentialStatus | null, name: string): boolean {
+  return credentialItem(status, name)?.configured === true;
+}
+
+function credentialReplacementPlaceholder(status: CredentialStatus | null, name: string, fallback: string): string {
+  return credentialConfigured(status, name) ? "Nuevo valor opcional; deje vacío para conservar" : fallback;
+}
+
+function credentialDisplayValue(item: CredentialStatusItem, multiline: boolean): string {
+  const value = item.displayValue ?? "";
+  if (!multiline) return value;
+  try {
+    return JSON.stringify(JSON.parse(value), null, 2);
+  } catch {
+    return value;
+  }
+}
+
+function credentialStatusDisplayValue(item: CredentialStatusItem): string {
+  if (item.name === "EMISOR_CONFIG_JSON") {
+    const form = issuerFormFromConfigJson(item.displayValue ?? "");
+    const summary = [form.nombre, form.numDocumento, form.controlPrefix].map((part) => part.trim()).filter(Boolean).join(" · ");
+    return summary || "Datos del emisor configurados";
+  }
+  const value = credentialDisplayValue(item, item.name === "EMISOR_CONFIG_JSON");
+  const compact = value.replace(/\s+/g, " ").trim();
+  return compact.length > 72 ? `${compact.slice(0, 69)}...` : compact;
 }
 
 function TestDtePanel({
@@ -874,14 +1959,14 @@ function TestDtePanel({
     <section className="test-panel">
       <div>
         <h2>DTE Rápido</h2>
-        <p>Ambiente 00 desde una donacion Wompi simulada.</p>
+        <p>Crea un CDE con los datos básicos de la donación.</p>
       </div>
       <div className="test-grid">
         <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
         <input value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Donante" />
         <input value={input.donorDocument} onChange={(event) => onChange({ ...input, donorDocument: event.target.value })} placeholder="Documento" />
         <input value={input.donorEmail} onChange={(event) => onChange({ ...input, donorEmail: event.target.value })} placeholder="Correo" type="email" />
-        <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Telefono" />
+        <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Teléfono" />
         <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
           <FlaskConical size={16} />
           {busy ? "Generando" : "Generar rápido"}
@@ -981,7 +2066,7 @@ function AdvancedDteModal({
                 <AdvancedField label="Tipo documento">
                   <CatalogSelect value={form.donorTipoDocumento} options={CAT022_DOCUMENT_TYPES} onChange={(donorTipoDocumento) => update({ donorTipoDocumento })} />
                 </AdvancedField>
-                <AdvancedField label="Numero documento">
+                <AdvancedField label="Número documento">
                   <input
                     value={form.donorDocument}
                     onChange={(event) => update({ donorDocument: event.target.value })}
@@ -992,19 +2077,19 @@ function AdvancedDteModal({
                 <AdvancedField label="NRC">
                   <input value={form.donorNrc} onChange={(event) => update({ donorNrc: event.target.value })} placeholder="Opcional" />
                 </AdvancedField>
-                <AdvancedField label="Actividad economica" span>
+                <AdvancedField label="Actividad económica" span>
                   <CatalogSelect value={form.donorCodActividad} options={CAT019_ACTIVITIES} onChange={updateActivity} placeholder="No aplica" />
                 </AdvancedField>
                 <AdvancedField label="Correo">
                   <input value={form.donorEmail} onChange={(event) => update({ donorEmail: event.target.value })} type="email" />
                 </AdvancedField>
-                <AdvancedField label="Telefono">
+                <AdvancedField label="Teléfono">
                   <input value={form.donorPhone} onChange={(event) => update({ donorPhone: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Domicilio fiscal">
                   <CatalogSelect value={form.codDomiciliado} options={CAT032_DOMICILE} onChange={(codDomiciliado) => update({ codDomiciliado })} />
                 </AdvancedField>
-                <AdvancedField label="Pais">
+                <AdvancedField label="País">
                   <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
               </div>
@@ -1020,29 +2105,29 @@ function AdvancedDteModal({
                 <AdvancedField label="Distrito">
                   <CatalogSelect value={form.distrito} options={districtOptions} onChange={(distrito) => update({ distrito })} placeholder="Seleccione" />
                 </AdvancedField>
-                <AdvancedField label="Pais direccion">
+                <AdvancedField label="País dirección">
                   <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
-                <AdvancedField label="Complemento / direccion completa" span>
+                <AdvancedField label="Complemento / dirección completa" span>
                   <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} rows={4} />
                 </AdvancedField>
               </div>
             )}
             {active.id === "donacion" && (
               <div className="advanced-form-grid">
-                <AdvancedField label="Tipo donacion">
+                <AdvancedField label="Tipo donación">
                   <CatalogSelect value={form.tipoDonacion} options={CAT026_DONATION_TYPES} onChange={(tipoDonacion) => update({ tipoDonacion })} />
                 </AdvancedField>
                 <AdvancedField label="Cantidad">
                   <input value={form.cantidad} onChange={(event) => update({ cantidad: event.target.value })} inputMode="decimal" />
                 </AdvancedField>
-                <AdvancedField label="Codigo">
+                <AdvancedField label="Código">
                   <input value={form.codigo} onChange={(event) => update({ codigo: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Unidad medida">
                   <CatalogSelect value={form.uniMedida} options={CAT014_UNITS} onChange={(uniMedida) => update({ uniMedida })} />
                 </AdvancedField>
-                <AdvancedField label="Tipo depreciacion">
+                <AdvancedField label="Tipo depreciación">
                   <input value={form.tipoDepreciacion} onChange={(event) => update({ tipoDepreciacion: event.target.value })} inputMode="numeric" />
                 </AdvancedField>
                 <AdvancedField label="Valor unitario">
@@ -1051,14 +2136,14 @@ function AdvancedDteModal({
                 <AdvancedField label="Valor total">
                   <input value={form.valorTotal} onChange={(event) => update({ valorTotal: event.target.value })} inputMode="decimal" />
                 </AdvancedField>
-                <AdvancedField label="Descripcion" span>
+                <AdvancedField label="Descripción" span>
                   <textarea value={form.descripcion} onChange={(event) => update({ descripcion: event.target.value })} rows={3} />
                 </AdvancedField>
               </div>
             )}
             {active.id === "pago" && (
               <div className="advanced-form-grid">
-                <AdvancedField label="Codigo pago">
+                <AdvancedField label="Código pago">
                   <CatalogSelect value={form.pagoCodigo} options={CAT017_PAYMENT_FORMS} onChange={(pagoCodigo) => update({ pagoCodigo })} />
                 </AdvancedField>
                 <AdvancedField label="Referencia pago">
@@ -1070,19 +2155,19 @@ function AdvancedDteModal({
                 <AdvancedField label="Documento asociado">
                   <CatalogSelect value={form.documentoCodigo} options={CAT021_ASSOCIATED_DOCUMENTS} onChange={(documentoCodigo) => update({ documentoCodigo })} />
                 </AdvancedField>
-                <AdvancedField label="Identificacion documento">
+                <AdvancedField label="Identificación documento">
                   <input value={form.documentoDesc} onChange={(event) => update({ documentoDesc: event.target.value })} />
                 </AdvancedField>
                 <AdvancedField label="Detalle documento">
                   <input value={form.documentoDetalle} onChange={(event) => update({ documentoDetalle: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apendice campo">
+                <AdvancedField label="Apéndice campo">
                   <input value={form.apendiceCampo} onChange={(event) => update({ apendiceCampo: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apendice etiqueta">
+                <AdvancedField label="Apéndice etiqueta">
                   <input value={form.apendiceEtiqueta} onChange={(event) => update({ apendiceEtiqueta: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apendice valor" span>
+                <AdvancedField label="Apéndice valor" span>
                   <input value={form.apendiceValor} onChange={(event) => update({ apendiceValor: event.target.value })} />
                 </AdvancedField>
               </div>
@@ -1152,7 +2237,7 @@ function CatalogSelect({
       {(placeholder || !selectedValue) && <option value="">{placeholder ?? "Seleccione"}</option>}
       {options.map((option) => (
         <option key={`${option.code}-${option.label}`} value={option.code}>
-          {option.code} - {option.label}
+          {option.code} - {catalogOptionLabel(option.label)}
         </option>
       ))}
     </select>
@@ -1164,7 +2249,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
   return options.some((option) => option.code === code) ? code : "";
 }
 
-function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void> }) {
+function AuthScreen({ notice, onLogin, onBootstrap }: { notice?: string; onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void> }) {
   const [mode, setMode] = useState<"login" | "bootstrap">("login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -1182,7 +2267,7 @@ function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, passwor
             if (mode === "bootstrap") await onBootstrap(email, name, password, setupToken);
             else await onLogin(email, password);
           } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
+            setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
           }
         }}
       >
@@ -1190,12 +2275,13 @@ function AuthScreen({ onLogin, onBootstrap }: { onLogin: (email: string, passwor
         <h1>ExamplePerson1</h1>
         <div className="segmented">
           <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>
-          <button type="button" className={mode === "bootstrap" ? "active" : ""} onClick={() => setMode("bootstrap")}>Crear owner</button>
+          <button type="button" className={mode === "bootstrap" ? "active" : ""} onClick={() => setMode("bootstrap")}>Crear propietario</button>
         </div>
         {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" />}
         <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />
-        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Contrasena" type="password" />
-        {mode === "bootstrap" && <input value={setupToken} onChange={(event) => setSetupToken(event.target.value)} placeholder="Token de setup" type="password" />}
+        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Contraseña" type="password" />
+        {mode === "bootstrap" && <input value={setupToken} onChange={(event) => setSetupToken(event.target.value)} placeholder="Token de configuración" type="password" />}
+        {notice && !error && <p className="auth-notice">{notice}</p>}
         {error && <p className="error">{error}</p>}
         <button className="primary" type="submit">
           <KeyRound size={16} />
@@ -1234,7 +2320,7 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
         <thead>
           <tr>
             <th>Estado</th>
-            <th>Codigo</th>
+            <th>Código</th>
             <th>Donante</th>
             <th>Monto</th>
             <th>Sello</th>
@@ -1309,13 +2395,13 @@ function DetailPanel({
         <strong>{selected.numero_control}</strong>
       </div>
       <dl>
-        <dt>Codigo generacion</dt>
+        <dt>Código de generación</dt>
         <dd className="mono">{selected.codigo_generacion}</dd>
         <dt>Sello</dt>
         <dd className="mono">{selected.sello_recibido ?? "Pendiente"}</dd>
         <dt>Donante</dt>
         <dd>{selected.donor_name ?? "N/D"}</dd>
-        <dt>Correo envio</dt>
+        <dt>Correo de envío</dt>
         <dd>
           {emailEditing ? (
             <form className="inline-edit" onSubmit={(event) => {
@@ -1329,21 +2415,21 @@ function DetailPanel({
           ) : (
             <span className="editable-readonly">
               <span>{selected.donor_email ?? "N/D"}</span>
-              <button className="icon-button" onClick={() => onStartEmailEdit(selected)} title="Editar correo de envio">
+              <button className="icon-button" onClick={() => onStartEmailEdit(selected)} title="Editar correo de envío">
                 <Pencil size={15} />
               </button>
             </span>
           )}
         </dd>
         <dt>Ambiente</dt>
-        <dd>{selected.environment === "01" ? "Produccion" : "Pruebas"}</dd>
+        <dd>{environmentLabel(selected.environment)}</dd>
       </dl>
       <div className={`legal-box ${invalidationWindow.tone}`}>
         <LegalIcon size={17} />
         <div>
-          <strong>Ventana de invalidacion CDE</strong>
+          <strong>Ventana de invalidación CDE</strong>
           <span>{invalidationWindow.remainingLabel}</span>
-          {invalidationWindow.deadlineLabel && <small>Limite: {invalidationWindow.deadlineLabel} hora El Salvador</small>}
+          {invalidationWindow.deadlineLabel && <small>Límite: {invalidationWindow.deadlineLabel} hora El Salvador</small>}
         </div>
       </div>
       <div className="actions">
@@ -1381,8 +2467,8 @@ function InvalidationConfirmDialog({
       <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="invalidation-confirm-title">
         <header>
           <div>
-            <h2 id="invalidation-confirm-title">Confirmar invalidacion</h2>
-            <p>Esta accion transmite un evento de invalidacion al MH y no se puede deshacer desde el panel.</p>
+            <h2 id="invalidation-confirm-title">Confirmar invalidación</h2>
+            <p>Esta acción transmite un evento de invalidación al MH y no se puede deshacer desde el panel.</p>
           </div>
           <button className="icon-button" onClick={onCancel} disabled={busy} title="Cerrar">
             <X size={17} />
@@ -1392,13 +2478,13 @@ function InvalidationConfirmDialog({
           <AlertTriangle size={17} />
           <div>
             <strong>{windowInfo.remainingLabel}</strong>
-            {windowInfo.deadlineLabel && <small>Limite: {windowInfo.deadlineLabel} hora El Salvador</small>}
+            {windowInfo.deadlineLabel && <small>Límite: {windowInfo.deadlineLabel} hora El Salvador</small>}
           </div>
         </div>
         <dl className="confirm-facts">
           <dt>Control</dt>
           <dd className="mono">{document.numero_control}</dd>
-          <dt>Codigo generacion</dt>
+          <dt>Código de generación</dt>
           <dd className="mono">{document.codigo_generacion}</dd>
           <dt>Sello</dt>
           <dd className="mono">{document.sello_recibido ?? "Pendiente"}</dd>
@@ -1409,7 +2495,7 @@ function InvalidationConfirmDialog({
           <button onClick={onCancel} disabled={busy}>Cancelar</button>
           <button className="danger solid" onClick={onConfirm} disabled={busy || !windowInfo.canInvalidate}>
             <AlertTriangle size={16} />
-            {busy ? "Invalidando" : "Confirmar invalidacion"}
+            {busy ? "Invalidando" : "Confirmar invalidación"}
           </button>
         </footer>
       </section>
@@ -1421,10 +2507,10 @@ function AuditTable({ rows }: { rows: AuditRow[] }) {
   return (
     <div className="table-scroll">
       <table>
-        <thead><tr><th>Accion</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
+        <thead><tr><th>Acción</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id}><td>{row.action}</td><td>{row.entity_type}</td><td>{row.summary}</td><td className="numeric">{new Date(row.created_at).toLocaleString()}</td></tr>
+            <tr key={row.id}><td>{auditActionLabel(row.action)}</td><td>{entityLabel(row.entity_type)}</td><td>{auditSummaryLabel(row.summary)}</td><td className="numeric">{new Date(row.created_at).toLocaleString()}</td></tr>
           ))}
         </tbody>
       </table>
@@ -1432,14 +2518,167 @@ function AuditTable({ rows }: { rows: AuditRow[] }) {
   );
 }
 
-function UserTable({ users }: { users: User[] }) {
+function UserTable({ users, selectedId, onSelect }: { users: User[]; selectedId: string | null; onSelect: (user: User) => void }) {
   return (
     <div className="table-scroll">
       <table>
-        <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th></tr></thead>
-        <tbody>{users.map((user) => <tr key={user.id}><td>{user.name}</td><td>{user.email}</td><td>{user.role}</td></tr>)}</tbody>
+        <thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Estado</th><th></th></tr></thead>
+        <tbody>
+          {users.map((user) => (
+            <tr
+              key={user.id}
+              className={selectedId === user.id ? "selected user-row" : "user-row"}
+              tabIndex={0}
+              onClick={() => onSelect(user)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelect(user);
+                }
+              }}
+            >
+              <td>{user.name}</td>
+              <td>{user.email}</td>
+              <td>{roleLabel(user.role)}</td>
+              <td><span className={user.disabled_at ? "status invalidated" : "status accepted"}>{user.disabled_at ? "INACTIVA" : "ACTIVA"}</span></td>
+              <td className="numeric">
+                <button className="table-action" onClick={(event) => { event.stopPropagation(); onSelect(user); }}>
+                  <Settings size={15} />
+                  Ajustes
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
       </table>
     </div>
+  );
+}
+
+function UserSettingsModal({
+  user,
+  input,
+  busy,
+  onChange,
+  onClose,
+  onSave,
+  onResetPassword
+}: {
+  user: User;
+  input: UserSettingsInput;
+  busy: string;
+  onChange: (input: UserSettingsInput | ((current: UserSettingsInput) => UserSettingsInput)) => void;
+  onClose: () => void;
+  onSave: () => Promise<void>;
+  onResetPassword: () => Promise<void>;
+}) {
+  const saving = busy === "user-settings";
+  const resetting = busy === "user-password";
+  const passwordReady = passwordPolicySatisfied(input.password);
+  return (
+    <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="user-settings-title">
+      <section className="confirm-modal user-settings-modal">
+        <header>
+          <div>
+            <h2 id="user-settings-title">Ajustes de usuario</h2>
+            <p>{user.email}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} title="Cerrar">
+            <X size={17} />
+          </button>
+        </header>
+
+        <div className="user-settings-grid">
+          <label>
+            <span>Nombre</span>
+            <input value={input.name} onChange={(event) => onChange({ ...input, name: event.target.value })} />
+          </label>
+          <label>
+            <span>Correo</span>
+            <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} type="email" />
+          </label>
+          <div className="form-field">
+            <div className="field-label-row">
+              <span>Rol</span>
+              <RoleHelpTooltip />
+            </div>
+            <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })}>
+	              <option value="VIEWER">{roleLabel("VIEWER")}</option>
+	              <option value="OPERATOR">{roleLabel("OPERATOR")}</option>
+	              <option value="ADMIN">{roleLabel("ADMIN")}</option>
+	              <option value="OWNER">{roleLabel("OWNER")}</option>
+            </select>
+          </div>
+          <label className="checkbox-line">
+            <input type="checkbox" checked={input.disabled} onChange={(event) => onChange({ ...input, disabled: event.target.checked })} />
+            <span>Cuenta inactiva</span>
+          </label>
+        </div>
+
+        <div className="user-password-box">
+          <div>
+	            <strong>Restablecer contraseña</strong>
+	            <span>Mínimo 10 caracteres, mayúscula, minúscula, número y símbolo. Las sesiones activas se revocan.</span>
+          </div>
+          <div className="user-password-row">
+            <input
+              value={input.password}
+              onChange={(event) => onChange({ ...input, password: event.target.value })}
+	              placeholder="Nueva contraseña"
+              type="password"
+              aria-describedby="user-password-policy"
+            />
+            <button disabled={resetting || !passwordReady} onClick={() => void onResetPassword()}>
+              <KeyRound size={16} />
+              {resetting ? "Restableciendo" : "Restablecer"}
+            </button>
+          </div>
+          <PasswordPolicyList value={input.password} />
+        </div>
+
+        <footer>
+          <button onClick={onClose}>Cancelar</button>
+          <button className="primary" disabled={saving} onClick={() => void onSave()}>
+            <ShieldCheck size={16} />
+            {saving ? "Guardando" : "Guardar cambios"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function PasswordPolicyList({ value }: { value: string }) {
+  const failures = new Set(passwordPolicyFailures(value).map((failure) => failure.id));
+  return (
+    <ul className="password-policy-list" id="user-password-policy">
+      {PASSWORD_POLICY_REQUIREMENTS.map((requirement) => {
+        const met = value.length > 0 && !failures.has(requirement.id);
+        return (
+          <li key={requirement.id} className={met ? "met" : ""}>
+            <CheckCircle2 size={13} />
+            {requirement.label}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function RoleHelpTooltip() {
+  return (
+    <span className="help-tooltip">
+      <button type="button" aria-label="Ver permisos de roles">
+        <CircleHelp size={14} />
+      </button>
+      <span className="help-tooltip-panel" role="tooltip">
+        <strong>Permisos por rol</strong>
+	        <span><b>{roleLabel("VIEWER")}</b>: consulta documentos, auditoría y archivos PDF/JSON.</span>
+	        <span><b>{roleLabel("OPERATOR")}</b>: genera, reenvía, reintenta, invalida y ejecuta barridos.</span>
+	        <span><b>{roleLabel("ADMIN")}</b>: administra usuarios, exportaciones y apertura de contingencia.</span>
+	        <span><b>{roleLabel("OWNER")}</b>: todo lo anterior y gestión de credenciales.</span>
+      </span>
+    </span>
   );
 }
 
@@ -1458,13 +2697,22 @@ function UserCreateForm({
     <div className="user-create">
       <input value={input.name} onChange={(event) => onChange({ ...input, name: event.target.value })} placeholder="Nombre" />
       <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} placeholder="Correo" type="email" />
-      <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })}>
-        <option value="VIEWER">VIEWER</option>
-        <option value="OPERATOR">OPERATOR</option>
-        <option value="ADMIN">ADMIN</option>
-        <option value="OWNER">OWNER</option>
-      </select>
-      <input value={input.password} onChange={(event) => onChange({ ...input, password: event.target.value })} placeholder="Contrasena inicial" type="password" />
+      <div className="role-create-field">
+        <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })} aria-label="Rol">
+	          <option value="VIEWER">{roleLabel("VIEWER")}</option>
+	          <option value="OPERATOR">{roleLabel("OPERATOR")}</option>
+	          <option value="ADMIN">{roleLabel("ADMIN")}</option>
+	          <option value="OWNER">{roleLabel("OWNER")}</option>
+        </select>
+        <RoleHelpTooltip />
+      </div>
+      <input
+        value={input.password}
+        onChange={(event) => onChange({ ...input, password: event.target.value })}
+	        placeholder="Contraseña inicial"
+	        title="10+ caracteres, mayúscula, minúscula, número y símbolo"
+        type="password"
+      />
       <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
         <UserPlus size={16} />
         Crear usuario
@@ -1474,14 +2722,14 @@ function UserCreateForm({
 }
 
 function StatusPill({ status }: { status: string }) {
-  return <span className={`status ${status.toLowerCase()}`}>{status}</span>;
+  return <span className={`status ${status.toLowerCase()}`}>{statusLabel(status).toUpperCase()}</span>;
 }
 
 function invalidationToast(result: { accepted?: boolean; result?: { estado?: string } }): string {
   if (result.accepted) {
-    return `Invalidacion aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}`;
+    return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}`;
   }
-  return "Invalidacion enviada a MH";
+  return "Invalidación enviada a MH";
 }
 
 function isRetryableDocumentStatus(status: string): boolean {
@@ -1490,6 +2738,12 @@ function isRetryableDocumentStatus(status: string): boolean {
 
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+function passwordPolicyMessage(password: string): string {
+  const failures = passwordPolicyFailures(password);
+  if (failures.length === 0) return "";
+  return `La contraseña debe cumplir: ${failures.map((failure) => failure.label).join(", ")}`;
 }
 
 async function api<T>(path: string, token: string, options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
@@ -1504,9 +2758,20 @@ async function api<T>(path: string, token: string, options: { method?: string; b
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+    throw new ApiError(response.status, userFacingErrorMessage(String(data.message ?? data.error ?? `HTTP ${response.status}`)));
   }
   return data as T;
+}
+
+class ApiError extends Error {
+  constructor(readonly status: number, message: string) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function isApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
 }
 
 function countByStatus(documents: DteDocument[]): Record<string, number> {
@@ -1530,10 +2795,65 @@ function delay(ms: number): Promise<void> {
 }
 
 function subtitleFor(view: View): string {
-  if (view === "documents") return "Emision, sello, correo y acciones legales por CDE.";
+  if (view === "documents") return "Emisión, sello, correo y acciones legales por CDE.";
+  if (view === "contingency") return "Eventos, pendientes, plazos y trazabilidad.";
   if (view === "credentials") return "Secretos MH, Wompi y correo para el Worker actual.";
-  if (view === "exports") return "Archivos CSV para declaracion y control.";
+  if (view === "exports") return "Archivos CSV para declaración y control.";
   return "Operaciones administrativas y trazabilidad.";
+}
+
+function contingencyTypeLabel(value: number | string): string {
+  const option = contingencyTypeOptions.find((item) => item.value === String(value));
+  return option?.label ?? `${value}`;
+}
+
+function contingencyDeadline(active: ContingencyState["active"]): { title: string; detail: string; tone: "idle" | "warn" | "ok" | "bad" } {
+  if (!active) {
+    return {
+      title: "Sin ventana activa",
+      detail: "No hay DTE pendientes bajo contingencia.",
+      tone: "idle"
+    };
+  }
+  if (active.status === "FAILED") {
+    return {
+      title: "Requiere revisión",
+      detail: "El periodo está marcado como fallido.",
+      tone: "bad"
+    };
+  }
+  if (active.event_sello && active.transmit_deadline_at) {
+    return {
+      title: "Evento sellado por MH",
+      detail: `Reenvío DTE hasta ${formatDateTime(active.transmit_deadline_at)} hora El Salvador.`,
+      tone: "ok"
+    };
+  }
+  if (active.event_deadline_at) {
+    return {
+      title: "Evento pendiente de sello",
+      detail: `Evento vence ${formatDateTime(active.event_deadline_at)} hora El Salvador.`,
+      tone: "warn"
+    };
+  }
+  return {
+    title: "Contingencia abierta",
+    detail: "Sin vencimiento final hasta cierre operativo del periodo.",
+    tone: "warn"
+  };
+}
+
+function formatDateTime(value?: string | null): string {
+  if (!value) return "N/D";
+  return new Intl.DateTimeFormat("es-SV", {
+    dateStyle: "short",
+    timeStyle: "short",
+    timeZone: "America/El_Salvador"
+  }).format(new Date(value));
+}
+
+function formatMoneyCents(value: number): string {
+  return `$${(value / 100).toFixed(2)}`;
 }
 
 function currentMonthStartValue(): string {
@@ -1591,11 +2911,25 @@ function filenameFromDisposition(disposition: string | null, fallback: string): 
 
 const advancedCdeSteps = [
   { id: "receptor", label: "Donante", description: "Datos fiscales y contacto del receptor." },
-  { id: "direccion", label: "Direccion", description: "Ubicacion declarada para el CDE." },
-  { id: "donacion", label: "Donacion", description: "Detalle del bien o aporte emitido." },
-  { id: "pago", label: "Pago y anexos", description: "Referencia, documento asociado y apendice." },
-  { id: "revision", label: "Revision", description: "Resumen final antes de generar el CDE." }
+  { id: "direccion", label: "Dirección", description: "Ubicación declarada para el CDE." },
+  { id: "donacion", label: "Donación", description: "Detalle del bien o aporte emitido." },
+  { id: "pago", label: "Pago y anexos", description: "Referencia, documento asociado y apéndice." },
+  { id: "revision", label: "Revisión", description: "Resumen final antes de generar el CDE." }
 ] as const;
+
+const contingencyTypeOptions = [
+  { value: "1", label: "1 - Internet del emisor" },
+  { value: "2", label: "2 - Servicios MH no disponibles" },
+  { value: "3", label: "3 - Sistema del emisor" },
+  { value: "4", label: "4 - Firmador no disponible" },
+  { value: "5", label: "5 - Otro" }
+];
+
+interface ContingencyOpenInput {
+  environment: "00" | "01";
+  tipoContingencia: string;
+  reason: string;
+}
 
 interface AdvancedCdeFormInput {
   donorName: string;
@@ -1646,12 +2980,12 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
     departamento: "06",
     municipio: "22",
     distrito: "01",
-    direccionComplemento: "Direccion de prueba",
+    direccionComplemento: "Dirección de prueba",
     tipoDonacion: "1",
     cantidad: "1",
     codigo: "DONACION",
     uniMedida: "59",
-    descripcion: "Donacion de prueba",
+    descripcion: "Donación de prueba",
     tipoDepreciacion: "0",
     valorUni: "1.00",
     valorTotal: "1.00",
@@ -1755,7 +3089,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
       cantidad,
       codigo: cleanText(form.codigo) || "DONACION",
       uniMedida: integerValue(form.uniMedida, 59),
-      descripcion: cleanText(form.descripcion) || "Donacion de prueba",
+      descripcion: cleanText(form.descripcion) || "Donación de prueba",
       tipoDepreciacion: integerValue(form.tipoDepreciacion, 0),
       valorUni,
       valor: valorTotal
@@ -1802,12 +3136,12 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
 function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
   const requiredFields: Array<[string, string]> = [
     [form.donorName, "Nombre del donante"],
-    [form.donorDocument, "Numero documento"],
+    [form.donorDocument, "Número documento"],
     [form.departamento, "Departamento"],
     [form.municipio, "Municipio"],
     [form.distrito, "Distrito"],
-    [form.direccionComplemento, "Direccion completa"],
-    [form.descripcion, "Descripcion"],
+    [form.direccionComplemento, "Dirección completa"],
+    [form.descripcion, "Descripción"],
     [form.pagoReferencia, "Referencia pago"]
   ];
   const missing = requiredFields.find(([value]) => !cleanText(value));
@@ -1817,15 +3151,15 @@ function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
     if (duiError) return duiError;
   }
   if (!isCat022DocumentTypeCode(form.donorTipoDocumento)) return "Tipo documento debe existir en CAT-022";
-  if (cleanText(form.donorCodActividad) && !isCat019ActivityCode(form.donorCodActividad)) return "Actividad economica debe existir en CAT-019";
+  if (cleanText(form.donorCodActividad) && !isCat019ActivityCode(form.donorCodActividad)) return "Actividad económica debe existir en CAT-019";
   if (!isCat032DomicileCode(form.codDomiciliado)) return "Domicilio fiscal debe existir en CAT-032";
-  if (!isCat020CountryCode(form.codPais)) return "Pais debe existir en CAT-020";
+  if (!isCat020CountryCode(form.codPais)) return "País debe existir en CAT-020";
   if (!isCat012DepartmentCode(form.departamento)) return "Departamento debe existir en CAT-012";
   if (!isCat013MunicipalityCode(form.municipio, form.departamento)) return "Municipio debe existir en CAT-013";
   if (!isCat008DistrictCode(form.distrito, form.departamento)) return "Distrito debe existir en CAT-008";
-  if (!isCat026DonationTypeCode(form.tipoDonacion)) return "Tipo donacion debe existir en CAT-026";
+  if (!isCat026DonationTypeCode(form.tipoDonacion)) return "Tipo donación debe existir en CAT-026";
   if (!isCat014UnitCode(form.uniMedida)) return "Unidad medida debe existir en CAT-014";
-  if (!isCat017PaymentFormCode(form.pagoCodigo)) return "Codigo pago debe existir en CAT-017";
+  if (!isCat017PaymentFormCode(form.pagoCodigo)) return "Código pago debe existir en CAT-017";
   if (!isCat021AssociatedDocumentCode(form.documentoCodigo)) return "Documento asociado debe existir en CAT-021";
   if (decimalValue(form.cantidad, 0) <= 0) return "Cantidad debe ser mayor que cero";
   if (decimalValue(form.valorUni, 0) <= 0) return "Valor unitario debe ser mayor que cero";
@@ -1836,9 +3170,127 @@ function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
 function duiValidationMessage(value: string): string {
   const raw = cleanText(value);
   if (!raw) return "";
-  if (cleanDui(raw).length !== 9) return "DUI debe tener 9 digitos";
-  if (!isValidDui(raw)) return "DUI con digito verificador invalido";
+  if (cleanDui(raw).length !== 9) return "DUI debe tener 9 dígitos";
+  if (!isValidDui(raw)) return "DUI con dígito verificador inválido";
   return "";
+}
+
+function defaultIssuerConfigForm(): IssuerConfigFormInput {
+  return {
+    tipoDocumento: "36",
+    numDocumento: "",
+    nrc: "",
+    nombre: "",
+    codActividad: "94910",
+    descActividad: findCatalogOption(CAT019_ACTIVITIES, "94910")?.label ?? "",
+    nombreComercial: "",
+    departamento: "06",
+    municipio: "22",
+    distrito: "01",
+    direccionComplemento: "",
+    telefono: "",
+    correo: "",
+    codEstable: "",
+    codEstableMH: "M001",
+    codPuntoVenta: "",
+    codPuntoVentaMH: "P004",
+    controlPrefix: "M001P004",
+    defaultReceptorTipoDocumento: "13",
+    defaultCodPais: "SV",
+    defaultDonationType: "1",
+    defaultUnidadMedida: "59",
+    paymentMethodCode: "01",
+    responsableNombre: "",
+    responsableTipoDocumento: "36",
+    responsableNumeroDocumento: "",
+    responsableTipoEstablecimiento: ""
+  };
+}
+
+function issuerFormFromConfigJson(value: string): IssuerConfigFormInput {
+  const fallback = defaultIssuerConfigForm();
+  if (!value.trim()) return fallback;
+  try {
+    const parsed = recordValue(JSON.parse(value));
+    const direccion = recordValue(parsed.direccion);
+    const responsable = recordValue(parsed.responsable);
+    const departmentCode = catalogSelectValue(CAT012_DEPARTMENTS, textValue(direccion.departamento, fallback.departamento)) || fallback.departamento;
+    const municipalityOptions = getCat013Municipalities(departmentCode);
+    const districtOptions = getCat008Districts(departmentCode);
+    const activityCode = catalogSelectValue(CAT019_ACTIVITIES, textValue(parsed.codActividad, fallback.codActividad)) || fallback.codActividad;
+    const countryCode = normalizeCat020CountryCode(textValue(parsed.defaultCodPais, fallback.defaultCodPais));
+    return {
+      tipoDocumento: catalogSelectValue(CAT022_ISSUER_DOCUMENT_TYPES, textValue(parsed.tipoDocumento, fallback.tipoDocumento)) || fallback.tipoDocumento,
+      numDocumento: textValue(parsed.numDocumento, fallback.numDocumento),
+      nrc: textValue(parsed.nrc),
+      nombre: textValue(parsed.nombre, fallback.nombre),
+      codActividad: activityCode,
+      descActividad: textValue(parsed.descActividad, findCatalogOption(CAT019_ACTIVITIES, activityCode)?.label ?? fallback.descActividad),
+      nombreComercial: textValue(parsed.nombreComercial),
+      departamento: departmentCode,
+      municipio: catalogSelectValue(municipalityOptions, textValue(direccion.municipio, fallback.municipio)) || municipalityOptions[0]?.code || fallback.municipio,
+      distrito: catalogSelectValue(districtOptions, textValue(direccion.distrito, fallback.distrito)) || districtOptions[0]?.code || fallback.distrito,
+      direccionComplemento: textValue(direccion.complemento, fallback.direccionComplemento),
+      telefono: textValue(parsed.telefono, fallback.telefono),
+      correo: textValue(parsed.correo, fallback.correo),
+      codEstable: textValue(parsed.codEstable),
+      codEstableMH: textValue(parsed.codEstableMH, fallback.codEstableMH),
+      codPuntoVenta: textValue(parsed.codPuntoVenta),
+      codPuntoVentaMH: textValue(parsed.codPuntoVentaMH, fallback.codPuntoVentaMH),
+      controlPrefix: textValue(parsed.controlPrefix, fallback.controlPrefix),
+      defaultReceptorTipoDocumento: catalogSelectValue(CAT022_DOCUMENT_TYPES, textValue(parsed.defaultReceptorTipoDocumento, fallback.defaultReceptorTipoDocumento)) || fallback.defaultReceptorTipoDocumento,
+      defaultCodPais: isCat020CountryCode(countryCode) ? countryCode : fallback.defaultCodPais,
+      defaultDonationType: catalogSelectValue(CAT026_DONATION_TYPES, textValue(parsed.defaultDonationType, fallback.defaultDonationType)) || fallback.defaultDonationType,
+      defaultUnidadMedida: catalogSelectValue(CAT014_UNITS, textValue(parsed.defaultUnidadMedida, fallback.defaultUnidadMedida)) || fallback.defaultUnidadMedida,
+      paymentMethodCode: catalogSelectValue(CAT017_PAYMENT_FORMS, textValue(parsed.paymentMethodCode, fallback.paymentMethodCode)) || fallback.paymentMethodCode,
+      responsableNombre: textValue(responsable.nombre, fallback.responsableNombre),
+      responsableTipoDocumento: catalogSelectValue(CAT022_DOCUMENT_TYPES, textValue(responsable.tipoDocumento, fallback.responsableTipoDocumento)) || fallback.responsableTipoDocumento,
+      responsableNumeroDocumento: textValue(responsable.numeroDocumento, fallback.responsableNumeroDocumento),
+      responsableTipoEstablecimiento: textValue(responsable.tipoEstablecimiento, fallback.responsableTipoEstablecimiento)
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function issuerConfigJsonFromForm(form: IssuerConfigFormInput): string {
+  return JSON.stringify(
+    {
+      tipoDocumento: cleanText(form.tipoDocumento),
+      numDocumento: cleanText(form.numDocumento),
+      nrc: nullableText(form.nrc),
+      nombre: cleanText(form.nombre),
+      codActividad: cleanText(form.codActividad),
+      descActividad: cleanText(form.descActividad) || findCatalogOption(CAT019_ACTIVITIES, form.codActividad)?.label || "",
+      nombreComercial: nullableText(form.nombreComercial),
+      direccion: {
+        departamento: cleanText(form.departamento),
+        municipio: cleanText(form.municipio),
+        distrito: cleanText(form.distrito),
+        complemento: cleanText(form.direccionComplemento)
+      },
+      telefono: cleanText(form.telefono),
+      correo: cleanText(form.correo),
+      codEstable: nullableText(form.codEstable),
+      codEstableMH: cleanText(form.codEstableMH),
+      codPuntoVenta: nullableText(form.codPuntoVenta),
+      codPuntoVentaMH: cleanText(form.codPuntoVentaMH),
+      controlPrefix: cleanText(form.controlPrefix),
+      defaultReceptorTipoDocumento: cleanText(form.defaultReceptorTipoDocumento),
+      defaultCodPais: cleanText(form.defaultCodPais),
+      defaultDonationType: integerValue(form.defaultDonationType, 1),
+      defaultUnidadMedida: integerValue(form.defaultUnidadMedida, 59),
+      paymentMethodCode: nullableText(form.paymentMethodCode),
+      responsable: {
+        nombre: cleanText(form.responsableNombre),
+        tipoDocumento: cleanText(form.responsableTipoDocumento),
+        numeroDocumento: cleanText(form.responsableNumeroDocumento),
+        tipoEstablecimiento: cleanText(form.responsableTipoEstablecimiento)
+      }
+    },
+    null,
+    2
+  );
 }
 
 function cloneRecord(value: Record<string, unknown> | null): Record<string, unknown> {
@@ -1877,6 +3329,11 @@ function decimalValue(value: string, fallback: number): number {
   return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : fallback;
 }
 
+function testAmountValidationMessage(value: string): string {
+  const parsed = Number.parseFloat(value.trim());
+  return Number.isFinite(parsed) && parsed > 0 ? "" : "Ingrese monto mayor que cero";
+}
+
 interface TestDteInput {
   amount: string;
   donorName: string;
@@ -1892,11 +3349,70 @@ interface CreateUserInput {
   password: string;
 }
 
+interface UserSettingsInput {
+  name: string;
+  email: string;
+  role: Role;
+  disabled: boolean;
+  password: string;
+}
+
+function emptyUserSettings(): UserSettingsInput {
+  return {
+    name: "",
+    email: "",
+    role: "VIEWER",
+    disabled: false,
+    password: ""
+  };
+}
+
+function userSettingsFromUser(user: User): UserSettingsInput {
+  return {
+    name: user.name,
+    email: user.email,
+    role: user.role,
+    disabled: Boolean(user.disabled_at),
+    password: ""
+  };
+}
+
+interface IssuerConfigFormInput {
+  tipoDocumento: string;
+  numDocumento: string;
+  nrc: string;
+  nombre: string;
+  codActividad: string;
+  descActividad: string;
+  nombreComercial: string;
+  departamento: string;
+  municipio: string;
+  distrito: string;
+  direccionComplemento: string;
+  telefono: string;
+  correo: string;
+  codEstable: string;
+  codEstableMH: string;
+  codPuntoVenta: string;
+  codPuntoVentaMH: string;
+  controlPrefix: string;
+  defaultReceptorTipoDocumento: string;
+  defaultCodPais: string;
+  defaultDonationType: string;
+  defaultUnidadMedida: string;
+  paymentMethodCode: string;
+  responsableNombre: string;
+  responsableTipoDocumento: string;
+  responsableNumeroDocumento: string;
+  responsableTipoEstablecimiento: string;
+}
+
 interface CredentialFormInput {
   environment: "test" | "production";
   mhUser: string;
   mhPassword: string;
   certificateXml: string;
+  certificateFileName: string;
   certificatePassword: string;
   emisorConfigJson: string;
   wompiSecret: string;
@@ -1932,6 +3448,7 @@ function emptyCredentialInput(environment: CredentialFormInput["environment"]): 
     mhUser: "",
     mhPassword: "",
     certificateXml: "",
+    certificateFileName: "",
     certificatePassword: "",
     emisorConfigJson: "",
     wompiSecret: "",

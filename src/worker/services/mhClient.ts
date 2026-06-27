@@ -1,5 +1,5 @@
 import { isMockMode, mhEndpoint, requireSecret } from "../config";
-import type { Ambiente, Env, MhResponse } from "../types";
+import type { Ambiente, Env, MhLoteConsultaResponse, MhLoteSubmitResponse, MhResponse } from "../types";
 import { nowIso } from "../utils/dates";
 import { generationCode } from "../utils/ids";
 
@@ -60,6 +60,49 @@ export class MhClient {
     return parseMhResponse(response);
   }
 
+  async transmitLote(input: { ambiente: Ambiente; idEnvio: string; nitEmisor: string; documentos: string[] }): Promise<MhLoteSubmitResponse> {
+    if (isMockMode(this.env)) {
+      return {
+        accepted: true,
+        estado: "PROCESADO",
+        codigoLote: `MOCK-${input.idEnvio}`,
+        observaciones: [],
+        raw: { mock: true }
+      };
+    }
+    const token = await this.getToken(input.ambiente);
+    const response = await fetch(loteReceptionEndpoint(this.env, input.ambiente), {
+      method: "POST",
+      headers: this.jsonHeaders(token),
+      body: JSON.stringify({
+        ambiente: input.ambiente,
+        idEnvio: input.idEnvio,
+        version: 2,
+        nitEmisor: input.nitEmisor,
+        documentos: input.documentos
+      })
+    });
+    return parseLoteSubmitResponse(response);
+  }
+
+  async consultarLote(input: { ambiente: Ambiente; codigoLote: string }): Promise<MhLoteConsultaResponse> {
+    if (isMockMode(this.env)) {
+      return {
+        estado: "PROCESADO",
+        procesados: [],
+        rechazados: [],
+        observaciones: [],
+        raw: { mock: true }
+      };
+    }
+    const token = await this.getToken(input.ambiente);
+    const response = await fetch(loteConsultaEndpoint(this.env, input.ambiente, input.codigoLote), {
+      method: "GET",
+      headers: this.jsonHeaders(token)
+    });
+    return parseLoteConsultaResponse(response);
+  }
+
   private async getToken(ambiente: Ambiente): Promise<string> {
     const cached = await this.env.DB.prepare("SELECT token, token_type, expires_at FROM mh_tokens WHERE environment = ?")
       .bind(ambiente)
@@ -111,7 +154,7 @@ export class MhClient {
       body: form
     });
     if (!response.ok) {
-      throw new Error(`MH auth failed: ${response.status} ${await response.text()}`);
+      throw new Error(`Falló la autenticación con MH: ${response.status} ${await response.text()}`);
     }
     return (await response.json()) as MhAuthResponse;
   }
@@ -136,6 +179,14 @@ export class MhClient {
       password: this.env.MH_PASSWORD_TEST ?? requireSecret(this.env, "MH_PASSWORD")
     };
   }
+}
+
+function loteReceptionEndpoint(env: Env, ambiente: Ambiente): string {
+  return mhEndpoint(env, "recepcion", ambiente).replace(/\/recepciondte\/?$/, "/recepcionlote");
+}
+
+function loteConsultaEndpoint(env: Env, ambiente: Ambiente, codigoLote: string): string {
+  return mhEndpoint(env, "recepcion", ambiente).replace(/\/recepciondte\/?$/, `/recepcion/consultadtelote/${codigoLote}`);
 }
 
 interface MhAuthResponse {
@@ -176,6 +227,61 @@ async function parseMhResponse(response: Response): Promise<MhResponse> {
     observaciones,
     raw
   };
+}
+
+async function parseLoteSubmitResponse(response: Response): Promise<MhLoteSubmitResponse> {
+  const raw = await safeJson(response);
+  if (!response.ok) {
+    if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
+      throw new MhUnavailableError(`MH unavailable: ${response.status}`);
+    }
+    return {
+      accepted: false,
+      estado: `HTTP_${response.status}`,
+      codigoLote: null,
+      observaciones: [JSON.stringify(raw)],
+      raw
+    };
+  }
+  const body = raw as Record<string, unknown>;
+  const estado = String(body.estado ?? body.status ?? "RECIBIDO");
+  const codigoLote = typeof body.codigoLote === "string" ? body.codigoLote : null;
+  const observaciones = Array.isArray(body.observaciones) ? body.observaciones.map(String) : [];
+  return {
+    accepted: Boolean(codigoLote) && !estado.toUpperCase().includes("RECHAZ"),
+    estado,
+    codigoLote,
+    observaciones,
+    raw
+  };
+}
+
+async function parseLoteConsultaResponse(response: Response): Promise<MhLoteConsultaResponse> {
+  const raw = await safeJson(response);
+  if (!response.ok) {
+    if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
+      throw new MhUnavailableError(`MH unavailable: ${response.status}`);
+    }
+    return {
+      estado: `HTTP_${response.status}`,
+      procesados: [],
+      rechazados: [],
+      observaciones: [JSON.stringify(raw)],
+      raw
+    };
+  }
+  const body = raw as Record<string, unknown>;
+  return {
+    estado: String(body.estado ?? body.status ?? "PROCESADO"),
+    procesados: Array.isArray(body.procesados) ? body.procesados.filter(isRecord) : [],
+    rechazados: Array.isArray(body.rechazados) ? body.rechazados.filter(isRecord) : [],
+    observaciones: Array.isArray(body.observaciones) ? body.observaciones.map(String) : [],
+    raw
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 async function safeJson(response: Response): Promise<unknown> {

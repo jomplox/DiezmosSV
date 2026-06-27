@@ -2,6 +2,7 @@ import { Repository } from "../storage/repository";
 import type { Env } from "../types";
 import { addDays } from "../utils/dates";
 import { base64UrlFromBytes, hexFromBytes, timingSafeEqual, utf8Bytes } from "../utils/encoding";
+import { passwordPolicyError } from "../../shared/passwordPolicy";
 
 export type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 
@@ -30,7 +31,7 @@ export class AuthService {
   async bootstrapOwner(input: { email: string; name: string; password: string }): Promise<AuthUser> {
     const count = await this.repo.countUsers();
     if (count > 0) {
-      throw new Error("Owner bootstrap is only available before the first user exists");
+      throw new Error("La creación del propietario inicial solo está disponible antes de que exista el primer usuario");
     }
     const hashed = await hashPassword(input.password);
     const user = await this.repo.createUser({
@@ -55,14 +56,19 @@ export class AuthService {
     return publicUser(user);
   }
 
+  async resetUserPassword(userId: string, password: string): Promise<void> {
+    const hashed = await hashPassword(password);
+    await this.repo.setUserPassword(userId, hashed.hash, hashed.salt);
+  }
+
   async login(email: string, password: string): Promise<{ user: AuthUser; token: string; expiresAt: string }> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
-      throw new Error("Invalid credentials");
+      throw new Error("Credenciales inválidas");
     }
-    const computed = await hashPassword(password, row.password_salt);
+    const computed = await hashPassword(password, row.password_salt, { enforcePolicy: false });
     if (!timingSafeEqual(computed.hash, row.password_hash)) {
-      throw new Error("Invalid credentials");
+      throw new Error("Credenciales inválidas");
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = addDays(new Date().toISOString(), 1);
@@ -83,10 +89,10 @@ export class AuthService {
 
 export function requireRole(user: AuthUser | null, role: Role): AuthUser {
   if (!user) {
-    throw new AuthError("Authentication required", 401);
+    throw new AuthError("Debe iniciar sesión", 401);
   }
   if (ROLE_RANK[user.role] < ROLE_RANK[role]) {
-    throw new AuthError("Insufficient role", 403);
+    throw new AuthError("Su usuario no tiene permisos suficientes", 403);
   }
   return user;
 }
@@ -97,9 +103,12 @@ export class AuthError extends Error {
   }
 }
 
-export async function hashPassword(password: string, salt?: string): Promise<{ hash: string; salt: string }> {
-  if (password.length < 10) {
-    throw new Error("Password must be at least 10 characters");
+export async function hashPassword(password: string, salt?: string, options: { enforcePolicy?: boolean } = {}): Promise<{ hash: string; salt: string }> {
+  if (options.enforcePolicy ?? true) {
+    const policyError = passwordPolicyError(password);
+    if (policyError) {
+      throw new Error(policyError);
+    }
   }
   const effectiveSalt = salt ?? base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(16)));
   const key = await crypto.subtle.importKey("raw", utf8Bytes(password), "PBKDF2", false, ["deriveBits"]);

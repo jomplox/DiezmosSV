@@ -20,6 +20,7 @@ import { amountCents, ambienteFromWompi, donorName } from "./wompi";
 
 interface CdeBuildOptions {
   sequence: number;
+  environment?: Ambiente;
   issuedAt?: Date;
   contingency?: boolean;
 }
@@ -59,7 +60,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   const donorEmail = payload.Cliente?.EMail?.trim() || null;
   const donorPhone = cleanNullable(payload.Cliente?.Celular);
   const donorDocument = cleanNullable(payload.Cliente?.DocumentoIdentidad) ?? "SIN-DOCUMENTO";
-  const ambiente = ambienteFromWompi(payload);
+  const ambiente = options.environment ?? ambienteFromWompi(payload);
   const document = {
     identificacion: {
       version: 2,
@@ -133,7 +134,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     },
     apendice: [
       { campo: "IdTransaccion", etiqueta: "Wompi", valor: payload.IdTransaccion },
-      { campo: "Autorizacion", etiqueta: "Codigo autorizacion", valor: payload.CodigoAutorizacion ?? "N/D" },
+      { campo: "Autorizacion", etiqueta: "Código de autorización", valor: payload.CodigoAutorizacion ?? "N/D" },
       { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" }
     ]
   };
@@ -145,7 +146,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
 
 export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, options: AdvancedCdeBuildOptions): Record<string, unknown> {
   if (!isRecord(draft)) {
-    throw new Error("Advanced CDE draft must be a JSON object");
+    throw new Error("El borrador CDE avanzado debe ser un objeto JSON");
   }
   const document = cloneJsonObject(draft);
   const issuedAt = options.issuedAt ?? new Date();
@@ -345,7 +346,7 @@ function validateCdeCatalogs(document: Record<string, unknown>): void {
 
 function assertCatalogField(label: string, catalogName: string, value: unknown, isValid: (value: unknown) => boolean): void {
   if (!isValid(value)) {
-    throw new Error(`CDE ${label} must exist in catalog ${catalogName}: ${displayValue(value)}`);
+    throw new Error(`CDE ${label} debe existir en el catálogo ${catalogName}: ${displayValue(value)}`);
   }
 }
 
@@ -391,7 +392,7 @@ function valueAsString(value: unknown): string | null {
 
 function stringValue(value: unknown, label: string): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`Missing CDE ${label}`);
+    throw new Error(`Falta CDE ${label}`);
   }
   return value;
 }
@@ -399,7 +400,7 @@ function stringValue(value: unknown, label: string): string {
 function amountToCents(value: unknown): number {
   const amount = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("CDE resumen.valorTotal must be a positive number");
+    throw new Error("CDE resumen.valorTotal debe ser un número positivo");
   }
   return Math.round(amount * 100);
 }

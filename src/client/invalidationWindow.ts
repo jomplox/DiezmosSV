@@ -27,7 +27,7 @@ export function invalidationWindowInfo(document: DteDocument, reference: Date = 
       canInvalidate: false,
       deadlineIso,
       deadlineLabel,
-      remainingLabel: "La ventana legal de invalidacion ya cerro.",
+      remainingLabel: "La ventana legal de invalidación ya cerró.",
       tone: "expired"
     };
   }
@@ -46,8 +46,8 @@ function formatRemainingTime(milliseconds: number): string {
   const totalHours = Math.max(0, Math.floor(milliseconds / (60 * 60 * 1000)));
   const days = Math.floor(totalHours / 24);
   const hours = totalHours % 24;
-  if (days > 0 && hours > 0) return `${days} ${plural(days, "dia", "dias")} y ${hours} ${plural(hours, "hora", "horas")}`;
-  if (days > 0) return `${days} ${plural(days, "dia", "dias")}`;
+  if (days > 0 && hours > 0) return `${days} ${plural(days, "día", "días")} y ${hours} ${plural(hours, "hora", "horas")}`;
+  if (days > 0) return `${days} ${plural(days, "día", "días")}`;
   if (hours > 0) return `${hours} ${plural(hours, "hora", "horas")}`;
   const minutes = Math.max(1, Math.ceil(milliseconds / (60 * 1000)));
   return `${minutes} ${plural(minutes, "minuto", "minutos")}`;

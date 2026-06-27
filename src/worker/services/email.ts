@@ -9,7 +9,7 @@ export class EmailService {
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
     const pdfBytes = await renderDtePdf(record);
     const jsonBytes = new TextEncoder().encode(record.plain_json);
-    const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donacion" : "Comprobante DTE por donacion";
+    const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donación" : "Comprobante DTE por donación";
     const from = this.env.EMAIL_FROM ?? "dte@example.org";
     const pdfAttachment = {
       filename: `${record.codigo_generacion}.pdf`,
@@ -25,7 +25,7 @@ export class EmailService {
       from,
       to: toEmail,
       subject,
-      text: `Adjuntamos su Comprobante de Donacion Electronico ${record.numero_control}.`,
+      text: `Adjuntamos su Comprobante de Donación Electrónico ${record.numero_control}.`,
       attachments: [
         {
           filename: pdfAttachment.filename,
@@ -76,7 +76,7 @@ export class EmailService {
     if (hasHttpProvider(this.env)) {
       return sendViaHttpProvider(this.env, payload);
     }
-    throw new Error("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled");
+    throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
   }
 }
 
@@ -92,7 +92,7 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareEr
   const responseBody = await response.text();
   const parsed = parseProviderResponse(responseBody);
   if (!response.ok) {
-    throw new Error(`Email provider failed: ${response.status} ${responseBody}`);
+    throw new Error(`Falló el proveedor de correo: ${response.status} ${responseBody}`);
   }
   return {
     provider: "http-email",

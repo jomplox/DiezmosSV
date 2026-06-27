@@ -19,6 +19,8 @@ export interface SecretStatusItem {
   name: string;
   label: string;
   configured: boolean;
+  displayValue?: string;
+  protected?: boolean;
 }
 
 export interface SecretStatusGroup {
@@ -32,6 +34,7 @@ export interface CredentialStatus {
     appEnv: string;
     scriptName: string | null;
     writerConfigured: boolean;
+    writerMissing: string[];
   };
   groups: {
     mhTest: SecretStatusGroup;
@@ -52,39 +55,43 @@ interface SecretText {
 export type SecretPatch = Record<string, SecretText | null>;
 
 export class CredentialWriterConfigError extends Error {
-  constructor(message = "Cloudflare secret writer is not configured for this Worker") {
+  constructor(message = "El escritor de secretos de Cloudflare no está configurado para este Worker") {
     super(message);
     this.name = "CredentialWriterConfigError";
   }
 }
 
 export function credentialStatus(env: Env): CredentialStatus {
+  const writerMissing = cloudflareWriterMissing(env);
   const mhTest = group("MH ambiente de pruebas", [
-    item(env, "MH_USER_TEST", "Usuario API TEST"),
-    item(env, "MH_PASSWORD_TEST", "Password API TEST")
+    visibleItem(env, "MH_USER_TEST", "Usuario API TEST"),
+    protectedItem(env, "MH_PASSWORD_TEST", "Contraseña API TEST")
   ]);
-  const mhProduction = group("MH ambiente produccion", [
-    item(env, "MH_USER_PROD", "Usuario API PROD"),
-    item(env, "MH_PASSWORD_PROD", "Password API PROD")
+  const mhProduction = group("MH ambiente producción", [
+    visibleItem(env, "MH_USER_PROD", "Usuario API PROD"),
+    protectedItem(env, "MH_PASSWORD_PROD", "Contraseña API PROD")
   ]);
-  const signer = group("Certificado firmador", [
-    { name: "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", label: "Certificado XML", configured: hasSignerCertificate(env) },
-    item(env, "MH_CERT_PASSWORD", "Password llave privada")
+  const signer = group("Certificado firmador MH", [
+    { name: "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", label: "Archivo .crt/.xml", configured: hasSignerCertificate(env), protected: true },
+    protectedItem(env, "MH_CERT_PASSWORD", "Contraseña de llave privada")
   ]);
   const issuer = group("Emisor", [
-    item(env, "EMISOR_CONFIG_JSON", "Config JSON")
+    visibleItem(env, "EMISOR_CONFIG_JSON", "Configuración JSON")
   ]);
-  const wompi = group("Wompi", [
-    item(env, "WOMPI_API_SECRET", "Webhook HMAC")
+  const wompi = group("Webhook entrante de Wompi", [
+    protectedItem(env, "WOMPI_API_SECRET", "Firma del webhook entrante")
   ]);
-  const emailFrom = item(env, "EMAIL_FROM", "Remitente");
+  const emailApiUrl = visibleItem(env, "EMAIL_API_URL", "Endpoint POST JSON de respaldo");
+  const emailApiKey = protectedItem(env, "EMAIL_API_KEY", "Token bearer de respaldo");
+  const emailFrom = visibleItem(env, "EMAIL_FROM", "Remitente");
   const email = {
     label: "Correo",
     ready: emailFrom.configured && (isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) || hasHttpProvider(env)),
     items: [
-      { name: "EMAIL", label: "Cloudflare Email Service binding", configured: Boolean(env.EMAIL) },
-      { name: "EMAIL_ARBITRARY_RECIPIENTS", label: "Cloudflare a donantes externos", configured: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) },
-      { name: "EMAIL_API_URL + EMAIL_API_KEY", label: "Fallback HTTP sin verificacion de destinatario", configured: hasHttpProvider(env) },
+      { name: "EMAIL", label: "Vinculación de correo Cloudflare", configured: Boolean(env.EMAIL) },
+      { name: "EMAIL_ARBITRARY_RECIPIENTS", label: "Cloudflare a donantes externos", configured: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS), displayValue: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) ? "true" : undefined },
+      emailApiUrl,
+      emailApiKey,
       emailFrom
     ]
   };
@@ -93,7 +100,8 @@ export function credentialStatus(env: Env): CredentialStatus {
     target: {
       appEnv: env.APP_ENV ?? "unknown",
       scriptName: nonEmpty(env.CLOUDFLARE_SCRIPT_NAME) ? env.CLOUDFLARE_SCRIPT_NAME.trim() : null,
-      writerConfigured: hasCloudflareWriter(env)
+      writerConfigured: writerMissing.length === 0,
+      writerMissing
     },
     groups: { mhTest, mhProduction, signer, issuer, wompi, email }
   };
@@ -128,10 +136,26 @@ export async function patchCloudflareWorkerSecrets(env: Env, patch: SecretPatch)
   if (!hasCloudflareWriter(env)) {
     throw new CredentialWriterConfigError();
   }
+  return patchCloudflareWorkerSecretsWithToken(env, patch, env.CLOUDFLARE_API_TOKEN!.trim());
+}
+
+export async function bootstrapCloudflareWriterToken(env: Env, token: string): Promise<{ updated: string[]; deleted: string[] }> {
+  const trimmed = token.trim();
+  if (!trimmed) {
+    throw new CredentialWriterConfigError("Ingrese el token API de Cloudflare.");
+  }
+  const missing = cloudflareWriterTargetMissing(env);
+  if (missing.length > 0) {
+    throw new CredentialWriterConfigError(`Faltan ${missing.join(", ")} para guardar secretos en Cloudflare.`);
+  }
+  return patchCloudflareWorkerSecretsWithToken(env, { CLOUDFLARE_API_TOKEN: secret("CLOUDFLARE_API_TOKEN", trimmed) }, trimmed);
+}
+
+async function patchCloudflareWorkerSecretsWithToken(env: Env, patch: SecretPatch, apiToken: string): Promise<{ updated: string[]; deleted: string[] }> {
   const response = await fetch(`${env.CLOUDFLARE_API_BASE_URL ?? "https://api.cloudflare.com/client/v4"}/accounts/${encodeURIComponent(env.CLOUDFLARE_ACCOUNT_ID!.trim())}/workers/scripts/${encodeURIComponent(env.CLOUDFLARE_SCRIPT_NAME!.trim())}/secrets-bulk`, {
     method: "PATCH",
     headers: {
-      Authorization: `Bearer ${env.CLOUDFLARE_API_TOKEN!.trim()}`,
+      Authorization: `Bearer ${apiToken}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify({ secrets: patch })
@@ -139,7 +163,7 @@ export async function patchCloudflareWorkerSecrets(env: Env, patch: SecretPatch)
   const body = (await response.json().catch(() => ({}))) as { success?: boolean; errors?: Array<{ message?: string }> };
   if (!response.ok || body.success !== true) {
     const detail = body.errors?.map((error) => error.message).filter(Boolean).join("; ");
-    throw new Error(`Cloudflare secret update failed: ${detail || response.status}`);
+    throw new Error(`Falló la actualización de secretos en Cloudflare: ${detail || response.status}`);
   }
   return {
     updated: Object.entries(patch).filter(([, value]) => value !== null).map(([name]) => name),
@@ -155,8 +179,19 @@ function group(label: string, items: SecretStatusItem[]): SecretStatusGroup {
   };
 }
 
-function item(env: Env, name: keyof Env, label: string): SecretStatusItem {
-  return { name: String(name), label, configured: nonEmpty(env[name]) };
+function protectedItem(env: Env, name: keyof Env, label: string): SecretStatusItem {
+  return { name: String(name), label, configured: nonEmpty(env[name]), protected: true };
+}
+
+function visibleItem(env: Env, name: keyof Env, label: string): SecretStatusItem {
+  const value = env[name];
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return {
+    name: String(name),
+    label,
+    configured: trimmed.length > 0,
+    displayValue: trimmed.length > 0 ? trimmed : undefined
+  };
 }
 
 function hasSignerCertificate(env: Env): boolean {
@@ -164,7 +199,20 @@ function hasSignerCertificate(env: Env): boolean {
 }
 
 function hasCloudflareWriter(env: Env): boolean {
-  return nonEmpty(env.CLOUDFLARE_ACCOUNT_ID) && nonEmpty(env.CLOUDFLARE_SCRIPT_NAME) && nonEmpty(env.CLOUDFLARE_API_TOKEN);
+  return cloudflareWriterMissing(env).length === 0;
+}
+
+function cloudflareWriterMissing(env: Env): string[] {
+  const missing = cloudflareWriterTargetMissing(env);
+  if (!nonEmpty(env.CLOUDFLARE_API_TOKEN)) missing.push("CLOUDFLARE_API_TOKEN");
+  return missing;
+}
+
+function cloudflareWriterTargetMissing(env: Env): string[] {
+  const missing: string[] = [];
+  if (!nonEmpty(env.CLOUDFLARE_ACCOUNT_ID)) missing.push("CLOUDFLARE_ACCOUNT_ID");
+  if (!nonEmpty(env.CLOUDFLARE_SCRIPT_NAME)) missing.push("CLOUDFLARE_SCRIPT_NAME");
+  return missing;
 }
 
 function hasHttpProvider(env: Env): boolean {

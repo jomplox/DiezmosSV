@@ -139,6 +139,44 @@ export interface DteDocumentRecord {
   updated_at: string;
 }
 
+export interface ContingencyBatchRecord {
+  id: string;
+  contingency_period_id: string;
+  environment: Ambiente;
+  id_envio: string;
+  status: string;
+  codigo_lote: string | null;
+  request_json: string;
+  response_json: string;
+  last_error: string | null;
+  line_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  pending_count: number;
+  created_at: string;
+  submitted_at: string | null;
+  last_polled_at: string | null;
+  updated_at: string;
+}
+
+export interface ContingencyBatchLineRecord {
+  id: string;
+  batch_id: string;
+  contingency_period_id: string;
+  document_id: string;
+  line_no: number;
+  status: string;
+  codigo_generacion: string;
+  tipo_dte: "15";
+  signed_jws: string | null;
+  sello_recibido: string | null;
+  mh_estado: string | null;
+  mh_observaciones_json: string;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface WompiEventRecord {
   id: string;
   transaction_id: string;
@@ -158,6 +196,22 @@ export interface MhResponse {
   accepted: boolean;
   estado: string;
   selloRecibido: string | null;
+  observaciones: string[];
+  raw: unknown;
+}
+
+export interface MhLoteSubmitResponse {
+  accepted: boolean;
+  estado: string;
+  codigoLote: string | null;
+  observaciones: string[];
+  raw: unknown;
+}
+
+export interface MhLoteConsultaResponse {
+  estado: string;
+  procesados: Array<Record<string, unknown>>;
+  rechazados: Array<Record<string, unknown>>;
   observaciones: string[];
   raw: unknown;
 }

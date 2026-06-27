@@ -13,6 +13,7 @@ DTE/dte-firmador/
 DTE/svfe-api-firmador/
 DTE/*.pdf
 DTE/*.xlsx
+DTE/*.csv
 DTE/*_OCR.md
 DTE/*_by_PaddleOCR*.md
 
@@ -20,3 +21,5 @@ DTE/*_by_PaddleOCR*.md
 WompiWebhookSample.json
 PRD_CDE_DTE_Wompi_ElSalvador*.md
 GOAL.md
+examples/DTE-*.json
+examples/DTE-*.pdf

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { getMhCertificateXml } from "../../src/worker/config";
+import { getEmisorConfig, getMhCertificateXml } from "../../src/worker/config";
 import type { Env } from "../../src/worker/types";
+import { emisorConfig } from "./fixtures";
 
 describe("worker config", () => {
   it("uses the single MH certificate secret when present", () => {
@@ -12,7 +13,28 @@ describe("worker config", () => {
   });
 
   it("requires both split certificate parts", () => {
-    expect(() => getMhCertificateXml(env({ MH_CERT_XML_PART_1: "first" }))).toThrow(/PART_1 and MH_CERT_XML_PART_2/);
+    expect(() => getMhCertificateXml(env({ MH_CERT_XML_PART_1: "first" }))).toThrow(/PART_1 y MH_CERT_XML_PART_2/);
+  });
+
+  it("accepts a schema-shaped CDE issuer configuration", () => {
+    expect(getEmisorConfig(env({ EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig) }))).toEqual(emisorConfig);
+  });
+
+  it("rejects non-NIT document types for the issuer", () => {
+    expect(() => getEmisorConfig(env({ EMISOR_CONFIG_JSON: JSON.stringify({ ...emisorConfig, tipoDocumento: "03" }) }))).toThrow(/emisor\.tipoDocumento.*NIT/i);
+  });
+
+  it("rejects issuer municipality values outside the authoritative catalog", () => {
+    expect(() =>
+      getEmisorConfig(
+        env({
+          EMISOR_CONFIG_JSON: JSON.stringify({
+            ...emisorConfig,
+            direccion: { ...emisorConfig.direccion, departamento: "06", municipio: "99", distrito: "01" }
+          })
+        })
+      )
+    ).toThrow(/CAT-013/i);
   });
 });
 

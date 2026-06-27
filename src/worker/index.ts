@@ -2,9 +2,9 @@ import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
 import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
-import { ambienteFromWompi, isApprovedDonation, verifyWompiHash, wompiHashHeader } from "./domain/wompi";
+import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
-import { buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
+import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
@@ -12,11 +12,12 @@ import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
-import { cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
+import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { timingSafeEqual } from "./utils/encoding";
 import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
 
 const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
+const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -70,9 +71,23 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   if (!valid) {
     return jsonResponse({ error: "invalid_wompi_hash" }, { status: 401 });
   }
-  const payload = JSON.parse(rawBody) as WompiWebhook;
+  let parsedPayload: unknown;
+  try {
+    parsedPayload = JSON.parse(rawBody);
+  } catch {
+    return jsonResponse({ error: "invalid_wompi_payload", message: "El webhook Wompi no contiene JSON válido" }, { status: 400 });
+  }
+  let payload: WompiWebhook;
+  try {
+    payload = normalizeWompiWebhook(parsedPayload);
+  } catch (error) {
+    if (error instanceof WompiPayloadError) {
+      return jsonResponse({ error: "invalid_wompi_payload", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
   const repo = new Repository(env.DB);
-  const environment = ambienteFromWompi(payload);
+  const environment = await activeEmissionEnvironment(repo, env);
   const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   await repo.createAudit({
@@ -128,6 +143,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleCredentialsRoute(request, env, repo, user);
   }
 
+  if (url.pathname === "/api/credentials/writer-token") {
+    return handleCredentialWriterTokenRoute(request, env, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/emission-environment") {
+    return handleEmissionEnvironmentRoute(request, env, repo, user);
+  }
+
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {
     requireRole(user, "ADMIN");
     const selection = await f960Selection(repo, url);
@@ -173,7 +196,36 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/contingency" && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return jsonResponse({ contingency: await repo.getOpenContingency() });
+    return jsonResponse({ contingency: await contingencyState(repo) });
+  }
+
+  if (url.pathname === "/api/contingency/open" && request.method === "POST") {
+    const actor = requireRole(user, "ADMIN");
+    const body = (await request.json().catch(() => ({}))) as { environment?: unknown; tipoContingencia?: unknown; reason?: unknown };
+    const environment = body.environment === "01" ? "01" : body.environment === "00" ? "00" : null;
+    if (!environment) {
+      return jsonResponse({ error: "invalid_contingency_environment" }, { status: 400 });
+    }
+    const tipoContingencia = Number(body.tipoContingencia);
+    if (!Number.isInteger(tipoContingencia) || tipoContingencia < 1 || tipoContingencia > 5) {
+      return jsonResponse({ error: "invalid_contingency_type" }, { status: 400 });
+    }
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!reason) {
+      return jsonResponse({ error: "missing_contingency_reason", message: "Configure el tipo y motivo de contingencia antes de emitir DTE en contingencia." }, { status: 400 });
+    }
+    const existing = await repo.getOpenContingency(environment);
+    const periodId = await repo.openContingency(environment, reason, tipoContingencia);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: existing ? "CONTINGENCY_OPEN_REUSED" : "CONTINGENCY_OPENED",
+      entityType: "contingency_period",
+      entityId: periodId,
+      summary: reason,
+      metadata: { environment, tipoContingencia }
+    });
+    return jsonResponse({ contingency: await contingencyState(repo) }, { status: existing ? 200 : 201 });
   }
 
   if (url.pathname === "/api/contingency/sweep" && request.method === "POST") {
@@ -198,7 +250,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "invalid_test_payload", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
     }
     const rawBody = JSON.stringify(payload);
-    const environment = ambienteFromWompi(payload);
+    const environment = await activeEmissionEnvironment(repo, env);
     const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, { source: "admin_test_generation" }, environment);
     await repo.createAudit({
       actorType: "USER",
@@ -221,8 +273,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     const input = (await request.json().catch(() => ({}))) as TestWompiInput;
     try {
-      const payload = buildTestWompiPayload(input);
-      const draft = buildCdeDocument(payload, getEmisorConfig(env), { sequence: 1 });
+      const payload = buildTestWompiPayload(input, { defaultAmount: "1.00" });
+      const environment = await activeEmissionEnvironment(repo, env);
+      const draft = buildCdeDocument(payload, getEmisorConfig(env), { sequence: 1, environment });
       return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
     } catch (error) {
       return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
@@ -236,11 +289,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     const body = (await request.json().catch(() => ({}))) as { draft?: unknown };
     const config = getEmisorConfig(env);
+    const environment = await activeEmissionEnvironment(repo, env);
     let document: Record<string, unknown>;
     try {
-      buildAdvancedCdeDocument(body.draft, config, { sequence: 1, environment: "00" });
-      const sequence = await repo.nextControlSequence("00", config.controlPrefix);
-      document = buildAdvancedCdeDocument(body.draft, config, { sequence, environment: "00" });
+      buildAdvancedCdeDocument(body.draft, config, { sequence: 1, environment });
+      const sequence = await repo.nextControlSequence(environment, config.controlPrefix);
+      document = buildAdvancedCdeDocument(body.draft, config, { sequence, environment });
     } catch (error) {
       return jsonResponse({ error: "invalid_advanced_cde", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
     }
@@ -289,13 +343,31 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ user: created }, { status: 201 });
   }
 
+  const passwordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+  if (passwordMatch && request.method === "POST") {
+    const actor = requireRole(user, "ADMIN");
+    const body = (await request.json().catch(() => ({}))) as { password?: unknown };
+    if (typeof body.password !== "string" || !body.password) {
+      return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
+    }
+    try {
+      await auth.resetUserPassword(passwordMatch[1], body.password);
+    } catch (error) {
+      return jsonResponse({ error: "invalid_user_password", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
+    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_PASSWORD_RESET", entityType: "user", entityId: passwordMatch[1], summary: "Contraseña restablecida por administrador" });
+    return jsonResponse({ ok: true });
+  }
+
   const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
   if (userMatch && request.method === "PATCH") {
     const actor = requireRole(user, "ADMIN");
-    const body = (await request.json()) as { role?: string; disabled?: boolean; name?: string };
-    await repo.updateUser(userMatch[1], body);
-    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "User updated", metadata: body });
-    return jsonResponse({ ok: true });
+    const body = (await request.json().catch(() => ({}))) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
+    const patch = userPatchInput(body);
+    if (patch instanceof Response) return patch;
+    const updated = await repo.updateUser(userMatch[1], patch);
+    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
+    return jsonResponse({ user: updated });
   }
 
   return notFound();
@@ -303,6 +375,135 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
 function isProduction(env: Env): boolean {
   return (env.APP_ENV ?? "local").toLowerCase() === "production";
+}
+
+async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method === "GET") {
+    requireRole(user, "VIEWER");
+    return jsonResponse({ emissionEnvironment: await emissionEnvironmentState(repo, env) });
+  }
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  const body = (await request.json().catch(() => ({}))) as { environment?: unknown };
+  const environment = ambienteValue(body.environment);
+  if (!environment) {
+    return jsonResponse({ error: "invalid_emission_environment", message: "Seleccione Pruebas 00 o Producción 01." }, { status: 400 });
+  }
+  await repo.setSetting(EMISSION_ENVIRONMENT_SETTING, environment, actor.id);
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "EMISSION_ENVIRONMENT_UPDATED",
+    entityType: "app_setting",
+    entityId: EMISSION_ENVIRONMENT_SETTING,
+    summary: environment === "01" ? "Ambiente de emisión cambiado a Producción 01" : "Ambiente de emisión cambiado a Pruebas 00",
+    metadata: { environment }
+  });
+  return jsonResponse({ ok: true, emissionEnvironment: await emissionEnvironmentState(repo, env) });
+}
+
+async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
+  const configured = ambienteValue(await repo.getSetting(EMISSION_ENVIRONMENT_SETTING));
+  return configured ?? defaultEmissionEnvironment(env);
+}
+
+async function emissionEnvironmentState(repo: Repository, env: Env): Promise<{ environment: "00" | "01"; source: "setting" | "deployment_default"; appEnv: string }> {
+  const configured = ambienteValue(await repo.getSetting(EMISSION_ENVIRONMENT_SETTING));
+  return {
+    environment: configured ?? defaultEmissionEnvironment(env),
+    source: configured ? "setting" : "deployment_default",
+    appEnv: env.APP_ENV ?? "local"
+  };
+}
+
+function defaultEmissionEnvironment(env: Env): "00" | "01" {
+  return isProduction(env) ? "01" : "00";
+}
+
+function ambienteValue(value: unknown): "00" | "01" | null {
+  if (value === "00" || value === "test" || value === "staging") return "00";
+  if (value === "01" || value === "production" || value === "prod") return "01";
+  return null;
+}
+
+function userPatchInput(body: { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown }): Response | { role?: Role; disabled?: boolean; name?: string; email?: string } {
+  const patch: { role?: Role; disabled?: boolean; name?: string; email?: string } = {};
+  if (body.name !== undefined) {
+    if (typeof body.name !== "string" || !body.name.trim()) {
+      return jsonResponse({ error: "invalid_user_name", message: "Ingrese nombre del usuario" }, { status: 400 });
+    }
+    patch.name = body.name.trim();
+  }
+  if (body.email !== undefined) {
+    if (typeof body.email !== "string" || !body.email.trim() || !body.email.includes("@")) {
+      return jsonResponse({ error: "invalid_user_email", message: "Ingrese correo válido" }, { status: 400 });
+    }
+    patch.email = body.email.trim().toLowerCase();
+  }
+  if (body.role !== undefined) {
+    if (!isRole(body.role)) {
+      return jsonResponse({ error: "invalid_user_role", message: "Seleccione un rol válido" }, { status: 400 });
+    }
+    patch.role = body.role;
+  }
+  if (body.disabled !== undefined) {
+    if (typeof body.disabled !== "boolean") {
+      return jsonResponse({ error: "invalid_user_disabled", message: "Estado de usuario inválido" }, { status: 400 });
+    }
+    patch.disabled = body.disabled;
+  }
+  return patch;
+}
+
+function isRole(value: unknown): value is Role {
+  return value === "VIEWER" || value === "OPERATOR" || value === "ADMIN" || value === "OWNER";
+}
+
+async function contingencyState(repo: Repository): Promise<Record<string, unknown>> {
+  const activeRaw = await repo.getOpenContingency();
+  const periodsRaw = await repo.listContingencyPeriods();
+  const pendingDocuments = activeRaw
+    ? await repo.listContingencyDocuments(String(activeRaw.id))
+    : await repo.listDteDocuments({ status: "CONTINGENCY_PENDING", limit: 100 });
+  const batches = activeRaw ? await repo.listContingencyBatches(String(activeRaw.id)) : await repo.listContingencyBatches();
+  const batchLines = activeRaw ? await repo.listContingencyBatchLines({ periodId: String(activeRaw.id) }) : await repo.listContingencyBatchLines();
+  const events = await repo.listDteEventsByType("CONTINGENCIA");
+  const periods = periodsRaw.map(contingencyPeriodView);
+  const active = activeRaw ? contingencyPeriodView(activeRaw) : null;
+  const countPeriodStatus = (status: string) => periods.filter((period) => period.status === status).length;
+  return {
+    active,
+    pendingDocuments,
+    batches,
+    batchLines,
+    periods,
+    events,
+    audit: active ? await repo.listAudit("contingency_period", String(active.id)) : [],
+    summary: {
+      pending: pendingDocuments.length,
+      open: countPeriodStatus("OPEN"),
+      eventAccepted: countPeriodStatus("EVENT_ACCEPTED"),
+      closed: countPeriodStatus("CLOSED"),
+      failed: countPeriodStatus("FAILED"),
+      eventsAccepted: events.filter((event) => event.status === "ACCEPTED").length,
+      eventsRejected: events.filter((event) => event.status === "REJECTED").length,
+      batches: batches.length,
+      batchAccepted: batchLines.filter((line) => line.status === "ACCEPTED").length,
+      batchRejected: batchLines.filter((line) => line.status === "REJECTED" || line.status === "MANUAL_REVIEW").length,
+      batchPending: batchLines.filter((line) => !["ACCEPTED", "REJECTED", "MANUAL_REVIEW"].includes(String(line.status))).length
+    }
+  };
+}
+
+function contingencyPeriodView(period: Record<string, unknown>): Record<string, unknown> {
+  const endedAt = typeof period.ended_at === "string" ? period.ended_at : null;
+  return {
+    ...period,
+    tipo_contingencia: Number(period.tipo_contingencia ?? 1),
+    event_deadline_at: endedAt ? addHours(endedAt, 24) : null
+  };
 }
 
 function advancedCdeWompiPayload(
@@ -331,7 +532,7 @@ function advancedCdeWompiPayload(
       Id: 1,
       IdentificadorEnlaceComercio: "DTE Avanzado",
       NombreProducto: stringValue(firstItem.descripcion) ?? "DTE avanzado",
-      DescripcionProducto: "Generacion avanzada desde panel"
+      DescripcionProducto: "Generación avanzada desde panel"
     },
     Cliente: {
       DocumentoIdentidad: stringValue(receptor.numDocumento) ?? "SIN-DOCUMENTO",
@@ -362,7 +563,7 @@ function mhRejectionMessage(result: MhResponse): string {
   if (result.observaciones.length > 0) {
     return result.observaciones.join("; ");
   }
-  return result.estado || "Invalidacion rechazada por MH";
+  return result.estado || "Invalidación rechazada por MH";
 }
 
 function isRetryableDocumentStatus(status: string): boolean {
@@ -410,7 +611,7 @@ async function handleCredentialsRoute(request: Request, env: Env, repo: Reposito
       action: "CREDENTIALS_UPDATED",
       entityType: "credentials",
       entityId: input.environment,
-      summary: `Updated ${input.environment} credential secrets`,
+      summary: input.environment === "production" ? "Secretos de producción actualizados" : "Secretos de pruebas actualizados",
       metadata: { updated: result.updated, deleted: result.deleted }
     });
     return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted });
@@ -419,6 +620,36 @@ async function handleCredentialsRoute(request: Request, env: Env, repo: Reposito
       return jsonResponse({ error: "credential_writer_not_configured", message: error.message }, { status: 503 });
     }
     return jsonResponse({ error: "credential_update_failed", message: error instanceof Error ? error.message : String(error) }, { status: 502 });
+  }
+}
+
+async function handleCredentialWriterTokenRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+  const actor = requireRole(user, "OWNER");
+  if (request.method !== "POST") {
+    return methodNotAllowed();
+  }
+  const body = (await request.json().catch(() => ({}))) as { token?: unknown };
+  const token = typeof body.token === "string" ? body.token.trim() : "";
+  if (!token) {
+    return jsonResponse({ error: "cloudflare_token_required", message: "Ingrese el token API de Cloudflare." }, { status: 400 });
+  }
+  try {
+    const result = await bootstrapCloudflareWriterToken(env, token);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "CLOUDFLARE_WRITER_ENABLED",
+      entityType: "credentials",
+      entityId: env.CLOUDFLARE_SCRIPT_NAME ?? "worker",
+      summary: "Edición de secretos desde UI habilitada",
+      metadata: { updated: result.updated }
+    });
+    return jsonResponse({ ok: true, updated: result.updated, credentials: credentialStatus({ ...env, CLOUDFLARE_API_TOKEN: token }) });
+  } catch (error) {
+    if (error instanceof CredentialWriterConfigError) {
+      return jsonResponse({ error: "credential_writer_not_configured", message: error.message }, { status: 503 });
+    }
+    return jsonResponse({ error: "cloudflare_token_rejected", message: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
 }
 
@@ -466,7 +697,7 @@ async function handleDocumentRoute(
     const body = (await request.json()) as { email?: string };
     const email = normalizeEmail(body.email);
     if (!email) {
-      return jsonResponse({ error: "invalid_email", message: "Ingrese un correo valido." }, { status: 400 });
+      return jsonResponse({ error: "invalid_email", message: "Ingrese un correo válido." }, { status: 400 });
     }
     await repo.updateDocumentDonorEmail(document.id, email);
     await repo.createAudit({
@@ -475,7 +706,7 @@ async function handleDocumentRoute(
       action: "DTE_EMAIL_UPDATED",
       entityType: "dte_document",
       entityId: document.id,
-      summary: `Delivery email updated to ${email}`,
+      summary: `Correo de envío actualizado a ${email}`,
       metadata: { previousEmail: document.donor_email, email }
     });
     return jsonResponse({ document: await repo.getDteDocument(document.id) });
@@ -491,7 +722,7 @@ async function handleDocumentRoute(
     try {
       const response = await new EmailService(env).sendReceipt(document, toEmail);
       await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "SENT", providerResponse: response });
-      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Resent to ${toEmail}`, metadata: response });
+      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Reenviado a ${toEmail}`, metadata: response });
       return jsonResponse({ ok: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -522,7 +753,7 @@ async function handleDocumentRoute(
     }
     if (!document.signed_jws) {
       await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });
-      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Retry queued" });
+      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }
     const result = await new MhClient(env).transmitDte({
@@ -559,7 +790,7 @@ async function handleDocumentRoute(
     const config = getEmisorConfig(env);
     const input: InvalidationInput = {
       tipoAnulacion: body.tipoAnulacion ?? 2,
-      motivoAnulacion: body.motivoAnulacion ?? "Invalidacion solicitada por operador",
+      motivoAnulacion: body.motivoAnulacion ?? "Invalidación solicitada por operador",
       nombreResponsable: body.nombreResponsable ?? config.responsable.nombre,
       tipDocResponsable: body.tipDocResponsable ?? config.responsable.tipoDocumento,
       numDocResponsable: body.numDocResponsable ?? config.responsable.numeroDocumento,
@@ -636,7 +867,7 @@ async function auditExport(repo: Repository, actor: AuthUser, action: string, fi
     action,
     entityType: "export",
     entityId: filename,
-    summary: `${rowCount} rows exported`
+    summary: `${rowCount} filas exportadas`
   });
 }
 

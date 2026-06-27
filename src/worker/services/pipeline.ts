@@ -1,9 +1,9 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
 import { buildCdeDocument, buildContingenciaEvent, cdeDocumentSummary } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
-import { amountCents, ambienteFromWompi, donorName, isApprovedDonation } from "../domain/wompi";
+import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { Repository } from "../storage/repository";
-import type { DteDocumentRecord, Env, WompiWebhook } from "../types";
+import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, WompiWebhook } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { EmailService } from "./email";
 import { MhClient, MhUnavailableError } from "./mhClient";
@@ -22,27 +22,27 @@ export class IssuancePipeline {
   async processWompiEvent(wompiEventId: string): Promise<DteDocumentRecord | null> {
     const event = await this.repo.getWompiEventById(wompiEventId);
     if (!event) {
-      throw new Error(`Wompi event ${wompiEventId} not found`);
+      throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
       return existing;
     }
-    const payload = JSON.parse(event.raw_body) as WompiWebhook;
+    const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     if (!isApprovedDonation(payload)) {
       await this.repo.createAudit({
         action: "WOMPI_IGNORED",
         entityType: "wompi_event",
         entityId: wompiEventId,
-        summary: `Ignored Wompi result ${payload.ResultadoTransaccion}`
+        summary: `Resultado Wompi ignorado: ${payload.ResultadoTransaccion}`
       });
       return null;
     }
 
     const config = getEmisorConfig(this.env);
-    const environment = ambienteFromWompi(payload);
+    const environment = event.environment;
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence });
+    const normalDocument = buildCdeDocument(payload, config, { sequence, environment });
     const identifiers = extractCdeIdentifiers(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
@@ -108,7 +108,7 @@ export class IssuancePipeline {
   async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
     let record = await this.repo.getDteDocument(documentId);
     if (!record) {
-      throw new Error(`DTE document ${documentId} not found`);
+      throw new Error(`Documento DTE ${documentId} no encontrado`);
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
@@ -172,75 +172,171 @@ export class IssuancePipeline {
       return { transmitted: 0, periodId };
     }
     const config = getEmisorConfig(this.env);
-    const startedAt = new Date(String(open.started_at));
-    const endedAt = new Date();
-    const eventDocument = buildContingenciaEvent(config, {
-      ambiente: docs[0].environment,
-      documents: docs.map((document) => ({ codigoGeneracion: document.codigo_generacion, tipoDoc: document.tipo_dte })),
-      startedAt,
-      endedAt,
-      tipoContingencia: Number(open.tipo_contingencia ?? 1),
-      motivoContingencia: String(open.reason)
-    });
-    const eventJws = await signMhDocument(eventDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-    const eventId = await this.repo.createDteEvent({
-      documentId: null,
-      eventType: "CONTINGENCIA",
-      environment: docs[0].environment,
-      codigoGeneracion: extractEventGenerationCode(eventDocument),
-      plainJson: eventDocument,
-      signedJws: eventJws
-    });
-    const eventResult = await this.mh.transmitContingencia({ ambiente: docs[0].environment, signedJws: eventJws });
-    await this.repo.updateDteEventResult(eventId, {
-      status: eventResult.accepted ? "ACCEPTED" : "REJECTED",
-      sello: eventResult.selloRecibido,
-      mhEstado: eventResult.estado,
-      observaciones: eventResult.observaciones,
-      acceptedAt: eventResult.accepted ? nowIso() : null
-    });
-    if (!eventResult.accepted) {
-      return { transmitted: 0, periodId };
+
+    if (!open.event_sello || !open.event_id) {
+      const startedAt = new Date(String(open.started_at));
+      const endedAt = new Date();
+      const eventDocument = buildContingenciaEvent(config, {
+        ambiente: docs[0].environment,
+        documents: docs.map((document) => ({ codigoGeneracion: document.codigo_generacion, tipoDoc: document.tipo_dte })),
+        startedAt,
+        endedAt,
+        tipoContingencia: Number(open.tipo_contingencia ?? 1),
+        motivoContingencia: String(open.reason)
+      });
+      const eventJws = await signMhDocument(eventDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+      const eventId = await this.repo.createDteEvent({
+        documentId: null,
+        eventType: "CONTINGENCIA",
+        environment: docs[0].environment,
+        codigoGeneracion: extractEventGenerationCode(eventDocument),
+        plainJson: eventDocument,
+        signedJws: eventJws
+      });
+      const eventResult = await this.mh.transmitContingencia({ ambiente: docs[0].environment, signedJws: eventJws });
+      await this.repo.updateDteEventResult(eventId, {
+        status: eventResult.accepted ? "ACCEPTED" : "REJECTED",
+        sello: eventResult.selloRecibido,
+        mhEstado: eventResult.estado,
+        observaciones: eventResult.observaciones,
+        acceptedAt: eventResult.accepted ? nowIso() : null
+      });
+      if (!eventResult.accepted) {
+        return { transmitted: 0, periodId };
+      }
+      await this.repo.markContingencyEventAccepted(periodId, { eventId, sello: eventResult.selloRecibido, deadlineAt: addHours(nowIso(), 72) });
     }
-    await this.repo.markContingencyEventAccepted(periodId, { eventId, sello: eventResult.selloRecibido, deadlineAt: addHours(nowIso(), 72) });
+
+    await this.ensureContingencyBatches(periodId, docs);
+    const batches = await this.repo.listContingencyBatches(periodId);
+    for (const batch of batches.filter((item) => ["DRAFT", "FAILED"].includes(item.status))) {
+      await this.submitContingencyBatch(batch, config.numDocumento);
+    }
 
     let transmitted = 0;
-    for (const document of docs) {
-      if (!document.signed_jws) {
-        continue;
+    for (const batch of await this.repo.listContingencyBatches(periodId)) {
+      if (batch.codigo_lote && !["DONE", "PARTIAL", "REJECTED"].includes(batch.status)) {
+        transmitted += await this.pollContingencyBatch(batch);
       }
-      const result = await this.mh.transmitDte({
-        ambiente: document.environment,
-        version: 2,
-        tipoDte: document.tipo_dte,
-        codigoGeneracion: document.codigo_generacion,
-        signedJws: document.signed_jws
-      });
-      await this.repo.updateDocumentMhResult(document.id, {
-        status: result.accepted ? "ACCEPTED" : "REJECTED",
-        sello: result.selloRecibido,
-        mhEstado: result.estado,
-        observaciones: result.observaciones,
-        acceptedAt: result.accepted ? nowIso() : null
-      });
-      transmitted += result.accepted ? 1 : 0;
-      await this.repo.createAudit({
-        action: result.accepted ? "CONTINGENCY_DTE_ACCEPTED" : "CONTINGENCY_DTE_REJECTED",
-        entityType: "dte_document",
-        entityId: document.id,
-        summary: result.estado,
-        metadata: result.raw
-      });
     }
-    if (transmitted === docs.length) {
+
+    const remaining = await this.repo.listContingencyDocuments(periodId);
+    if (remaining.length === 0) {
       await this.repo.closeContingency(periodId);
     }
     return { transmitted, periodId };
   }
 
+  private async ensureContingencyBatches(periodId: string, docs: DteDocumentRecord[]): Promise<void> {
+    const existingLines = await this.repo.listContingencyBatchLines({ periodId });
+    const batchedDocumentIds = new Set(existingLines.map((line) => line.document_id));
+    const candidates = docs.filter((document) => document.signed_jws && !batchedDocumentIds.has(document.id));
+    for (const chunk of chunks(candidates, 100)) {
+      await this.repo.createContingencyBatch({
+        periodId,
+        environment: chunk[0].environment,
+        idEnvio: crypto.randomUUID().toUpperCase(),
+        documents: chunk
+      });
+    }
+  }
+
+  private async submitContingencyBatch(batch: ContingencyBatchRecord, nitEmisor: string): Promise<void> {
+    const lines = await this.repo.listContingencyBatchLines({ batchId: batch.id });
+    const documentos = lines.map((line) => line.signed_jws).filter((jws): jws is string => Boolean(jws));
+    if (!documentos.length) {
+      await this.repo.markContingencyBatchFailed(batch.id, "El lote no tiene CDE firmados.");
+      return;
+    }
+    const request = {
+      ambiente: batch.environment,
+      idEnvio: batch.id_envio,
+      version: 2,
+      nitEmisor: normalizeNit(nitEmisor),
+      documentos
+    };
+    const result = await this.mh.transmitLote(request);
+    if (!result.accepted || !result.codigoLote) {
+      await this.repo.markContingencyBatchFailed(batch.id, result.observaciones.join("; ") || result.estado, result.raw);
+      return;
+    }
+    await this.repo.markContingencyBatchSubmitted(batch.id, {
+      codigoLote: result.codigoLote,
+      request,
+      response: result.raw
+    });
+    await this.repo.createAudit({
+      action: "CONTINGENCY_BATCH_SUBMITTED",
+      entityType: "contingency_period",
+      entityId: batch.contingency_period_id,
+      summary: `${result.codigoLote} ${documentos.length} CDE`,
+      metadata: result.raw
+    });
+  }
+
+  private async pollContingencyBatch(batch: ContingencyBatchRecord): Promise<number> {
+    if (!batch.codigo_lote) {
+      return 0;
+    }
+    const result = await this.mh.consultarLote({ ambiente: batch.environment, codigoLote: batch.codigo_lote });
+    const lines = await this.repo.listContingencyBatchLines({ batchId: batch.id });
+    const linesByGeneration = new Map(lines.map((line) => [line.codigo_generacion, line]));
+    let accepted = 0;
+    for (const item of result.procesados) {
+      const line = linesByGeneration.get(String(item.codigoGeneracion ?? ""));
+      if (!line || line.status === "ACCEPTED") {
+        continue;
+      }
+      await this.repo.markContingencyBatchLineAccepted({
+        lineId: line.id,
+        documentId: line.document_id,
+        sello: stringValue(item.selloRecibido),
+        mhEstado: stringValue(item.estado) ?? result.estado,
+        observaciones: arrayStrings(item.observaciones),
+        response: item
+      });
+      accepted += 1;
+      await this.repo.createAudit({
+        action: "CONTINGENCY_DTE_ACCEPTED",
+        entityType: "dte_document",
+        entityId: line.document_id,
+        summary: stringValue(item.estado) ?? result.estado,
+        metadata: item
+      });
+    }
+    for (const item of result.rechazados) {
+      const line = linesByGeneration.get(String(item.codigoGeneracion ?? ""));
+      if (!line || line.status === "REJECTED") {
+        continue;
+      }
+      const observaciones = arrayStrings(item.observaciones);
+      const message = observaciones.join("; ") || stringValue(item.descripcionMsg) || "MH rechazó el CDE en lote.";
+      await this.repo.markContingencyBatchLineRejected({
+        lineId: line.id,
+        documentId: line.document_id,
+        mhEstado: stringValue(item.estado) ?? "RECHAZADO",
+        observaciones,
+        message
+      });
+      await this.repo.createAudit({
+        action: "CONTINGENCY_DTE_REJECTED",
+        entityType: "dte_document",
+        entityId: line.document_id,
+        summary: message,
+        metadata: item
+      });
+    }
+    if (!result.procesados.length && !result.rechazados.length) {
+      await this.repo.markContingencyBatchProcessing(batch.id, result.raw);
+    } else {
+      await this.repo.syncContingencyBatchCounts(batch.id);
+    }
+    return accepted;
+  }
+
   private async moveToContingency(record: DteDocumentRecord, payload: WompiWebhook, sequence: number, reason: string): Promise<DteDocumentRecord> {
     const config = getEmisorConfig(this.env);
-    const contingencyDocument = buildCdeDocument(payload, config, { sequence, contingency: true });
+    const contingencyDocument = buildCdeDocument(payload, config, { sequence, environment: record.environment, contingency: true });
     const identifiers = extractCdeIdentifiers(contingencyDocument);
     const signedJws = await signMhDocument(contingencyDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     await this.repo.replaceDocumentPayload(record.id, {
@@ -270,7 +366,7 @@ export class IssuancePipeline {
         action: "EMAIL_SKIPPED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: "Document has no donor email"
+        summary: "Documento sin correo del donante"
       });
       return;
     }
@@ -281,7 +377,7 @@ export class IssuancePipeline {
         action: "EMAIL_SENT",
         entityType: "dte_document",
         entityId: record.id,
-        summary: `Receipt sent to ${record.donor_email}`,
+        summary: `Comprobante enviado a ${record.donor_email}`,
         metadata: response
       });
     } catch (error) {
@@ -311,4 +407,24 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
 
 function extractEventGenerationCode(document: Record<string, unknown>): string {
   return (document.identificacion as { codigoGeneracion: string }).codigoGeneracion;
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+function normalizeNit(value: string): string {
+  return value.replace(/\D/g, "");
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function arrayStrings(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : [];
 }

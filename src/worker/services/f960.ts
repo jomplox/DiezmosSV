@@ -81,18 +81,18 @@ export function buildF960Csv(selection: F960Selection): string {
 export function buildF960Xlsx(selection: F960Selection): Uint8Array {
   const rows = [
     [
-      "Tipo operacion",
+      "Tipo operación",
       "NIT",
       "Nombre donante",
-      "Codigo actividad",
-      "Tipo donacion",
+      "Código actividad",
+      "Tipo donación",
       "Sello recibido",
-      "Codigo generacion",
+      "Código generación",
       "Monto",
       "DUI",
       "Periodo",
-      "Fecha emision",
-      "Numero control",
+      "Fecha emisión",
+      "Número control",
       "Correo",
       "Estado"
     ],
@@ -110,7 +110,7 @@ export function buildF960Xlsx(selection: F960Selection): Uint8Array {
       row.fechaEmision,
       row.numeroControl,
       row.correo,
-      row.estado
+      f960StatusLabel(row.estado)
     ])
   ];
 
@@ -171,13 +171,13 @@ function normalizeFilters(filters: F960Filters): NormalizedFilters {
   const endDate = clean(filters.endDate);
   const period = clean(filters.period);
   if (startDate && !isDate(startDate)) {
-    throw new Error("startDate must use YYYY-MM-DD");
+    throw new Error("La fecha inicial debe usar el formato AAAA-MM-DD");
   }
   if (endDate && !isDate(endDate)) {
-    throw new Error("endDate must use YYYY-MM-DD");
+    throw new Error("La fecha final debe usar el formato AAAA-MM-DD");
   }
   if (startDate && endDate && startDate > endDate) {
-    throw new Error("startDate must be before or equal to endDate");
+    throw new Error("La fecha inicial debe ser anterior o igual a la fecha final");
   }
   if (startDate || endDate) {
     return {
@@ -190,7 +190,7 @@ function normalizeFilters(filters: F960Filters): NormalizedFilters {
   if (period) {
     const match = period.match(/^(\d{4})-(0[1-9]|1[0-2])$/);
     if (!match) {
-      throw new Error("period must use YYYY-MM");
+      throw new Error("El periodo debe usar el formato AAAA-MM");
     }
     return { period: `${match[2]}${match[1]}`, startDate: null, endDate: null, suffix: `${match[2]}${match[1]}` };
   }
@@ -236,6 +236,18 @@ function money(value: number | string): string {
   return Number.isFinite(amount) ? amount.toFixed(2) : "0.00";
 }
 
+function f960StatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    ACCEPTED: "Aceptado",
+    CONTINGENCY_PENDING: "Contingencia",
+    FAILED: "Fallido",
+    INVALIDATED: "Invalidado",
+    PENDING: "Pendiente",
+    REJECTED: "Rechazado"
+  };
+  return labels[status] ?? status;
+}
+
 function clean(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
@@ -267,7 +279,7 @@ function workbookXml(): string {
   return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <sheets>
-    <sheet name="F960 inspeccion" sheetId="1" r:id="rId1"/>
+    <sheet name="F960 inspección" sheetId="1" r:id="rId1"/>
   </sheets>
 </workbook>`;
 }

@@ -240,11 +240,11 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
 function emisorLines(emisor: Party): string[] {
   const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
   const address = [clean(emisor.direccion?.complemento), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
-  return [establishment, `• ${address} /`, `email.: ${emisor.correo ?? ""}`].filter(Boolean);
+  return [establishment, `• ${address} /`, `Correo: ${emisor.correo ?? ""}`].filter(Boolean);
 }
 
 function receptorContactLine(receptor: Party): string {
-  return [clean(receptor.direccion?.complemento), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `email.: ${receptor.correo}` : ""]
+  return [clean(receptor.direccion?.complemento), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
     .filter(Boolean)
     .join(" / ");
 }
