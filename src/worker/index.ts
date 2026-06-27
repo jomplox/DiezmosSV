@@ -819,8 +819,39 @@ async function handleDocumentRoute(
       observaciones: result.observaciones,
       acceptedAt: result.accepted ? nowIso() : null
     });
+    let emailSent = false;
+    let emailError: string | undefined;
     if (result.accepted) {
       await repo.markDocumentInvalidated(document.id);
+      const invalidatedDocument = (await repo.getDteDocument(document.id)) ?? { ...document, status: "INVALIDATED" };
+      if (invalidatedDocument.donor_email) {
+        try {
+          const emailResponse = await new EmailService(env).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
+          await repo.recordEmailDelivery({ documentId: document.id, toEmail: invalidatedDocument.donor_email, status: "SENT", providerResponse: emailResponse });
+          await repo.createAudit({
+            actorType: "USER",
+            actorId: actor.id,
+            action: "EMAIL_INVALIDATION_SENT",
+            entityType: "dte_document",
+            entityId: document.id,
+            summary: `Aviso de invalidación enviado a ${invalidatedDocument.donor_email}`,
+            metadata: emailResponse
+          });
+          emailSent = true;
+        } catch (error) {
+          emailError = error instanceof Error ? error.message : String(error);
+          await repo.recordEmailDelivery({ documentId: document.id, toEmail: invalidatedDocument.donor_email, status: "FAILED", providerResponse: { error: emailError } });
+          await repo.createAudit({
+            actorType: "USER",
+            actorId: actor.id,
+            action: "EMAIL_INVALIDATION_FAILED",
+            entityType: "dte_document",
+            entityId: document.id,
+            summary: emailError,
+            metadata: { toEmail: invalidatedDocument.donor_email }
+          });
+        }
+      }
     }
     await repo.createAudit({
       actorType: "USER",
@@ -831,7 +862,7 @@ async function handleDocumentRoute(
       summary: result.estado,
       metadata: result.raw
     });
-    const responseBody = { accepted: result.accepted, eventId, deadline, result };
+    const responseBody = { accepted: result.accepted, eventId, deadline, result, emailSent, ...(emailError ? { emailError } : {}) };
     if (!result.accepted) {
       return jsonResponse(
         {

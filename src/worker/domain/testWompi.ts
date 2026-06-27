@@ -10,7 +10,7 @@ export interface TestWompiInput {
 }
 
 export function buildTestWompiPayload(input: TestWompiInput = {}, options: { defaultAmount?: string | number } = {}): WompiWebhook {
-  const amount = normalizeAmount(input.amount ?? options.defaultAmount);
+  const amount = normalizeAmount(amountOrDefault(input.amount, options.defaultAmount));
   const fullName = clean(input.donorName) ?? "Donante de Prueba";
   const { firstName, lastName } = splitName(fullName);
   const now = new Date();
@@ -50,6 +50,20 @@ export function buildTestWompiPayload(input: TestWompiInput = {}, options: { def
     EsInternacional: false,
     IdExterno: "DTE-TEST"
   };
+}
+
+function amountOrDefault(value: string | number | undefined, fallback: string | number | undefined): string | number | undefined {
+  if (fallback === undefined) {
+    return value;
+  }
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : fallback;
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? value : fallback;
+  }
+  return fallback;
 }
 
 function normalizeAmount(value: string | number | undefined): string {

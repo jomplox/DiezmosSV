@@ -7,9 +7,23 @@ export class EmailService {
   constructor(private readonly env: Env) {}
 
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
+    const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donación" : "Comprobante DTE por donación";
+    return this.sendDteEmail(record, toEmail, {
+      subject,
+      text: `Adjuntamos su Comprobante de Donación Electrónico ${record.numero_control}.`
+    });
+  }
+
+  async sendInvalidationNotice(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
+    return this.sendDteEmail({ ...record, status: "INVALIDATED" }, toEmail, {
+      subject: `Invalidación de CDE ${record.numero_control}`,
+      text: `El Comprobante de Donación Electrónico ${record.numero_control} fue INVALIDADO ante MH. Adjuntamos la representación gráfica actualizada con marca INVALIDADO y el JSON del documento para sus registros.`
+    });
+  }
+
+  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, message: EmailMessage): Promise<unknown> {
     const pdfBytes = await renderDtePdf(record);
     const jsonBytes = new TextEncoder().encode(record.plain_json);
-    const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donación" : "Comprobante DTE por donación";
     const from = this.env.EMAIL_FROM ?? "dte@example.org";
     const pdfAttachment = {
       filename: `${record.codigo_generacion}.pdf`,
@@ -24,8 +38,8 @@ export class EmailService {
     const payload = {
       from,
       to: toEmail,
-      subject,
-      text: `Adjuntamos su Comprobante de Donación Electrónico ${record.numero_control}.`,
+      subject: message.subject,
+      text: message.text,
       attachments: [
         {
           filename: pdfAttachment.filename,
@@ -41,14 +55,14 @@ export class EmailService {
     };
 
     if (isMockMode(this.env)) {
-      return { mock: true, toEmail, subject };
+      return { mock: true, toEmail, subject: message.subject };
     }
     if (this.env.EMAIL) {
       try {
         const result = await this.env.EMAIL.send({
           from,
           to: toEmail,
-          subject,
+          subject: message.subject,
           text: payload.text,
           attachments: [
             {
@@ -78,6 +92,11 @@ export class EmailService {
     }
     throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
   }
+}
+
+interface EmailMessage {
+  subject: string;
+  text: string;
 }
 
 async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareError?: unknown): Promise<unknown> {

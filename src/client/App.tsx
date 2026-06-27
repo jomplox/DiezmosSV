@@ -286,7 +286,7 @@ export function App() {
         ? { tipoAnulacion: 2, motivoAnulacion: "Invalidación solicitada desde panel" }
         : {};
     await runAction(action, async () => {
-      const result = await api<{ accepted?: boolean; result?: { estado?: string } }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
+      const result = await api<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
       if (action === "invalidate") setPendingInvalidationId(null);
       await refresh();
@@ -1969,7 +1969,7 @@ function TestDtePanel({
         <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Teléfono" />
         <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
           <FlaskConical size={16} />
-          {busy ? "Generando" : "Generar rápido"}
+          {busy ? "Generando" : "Generar"}
         </button>
         <button disabled={advancedBusy} onClick={() => void onAdvanced()}>
           <Braces size={16} />
@@ -2131,10 +2131,10 @@ function AdvancedDteModal({
                   <input value={form.tipoDepreciacion} onChange={(event) => update({ tipoDepreciacion: event.target.value })} inputMode="numeric" />
                 </AdvancedField>
                 <AdvancedField label="Valor unitario">
-                  <input value={form.valorUni} onChange={(event) => update({ valorUni: event.target.value })} inputMode="decimal" />
+                  <CurrencyInput value={form.valorUni} onChange={(valorUni) => update({ valorUni })} />
                 </AdvancedField>
                 <AdvancedField label="Valor total">
-                  <input value={form.valorTotal} onChange={(event) => update({ valorTotal: event.target.value })} inputMode="decimal" />
+                  <CurrencyInput value={form.valorTotal} onChange={(valorTotal) => update({ valorTotal })} />
                 </AdvancedField>
                 <AdvancedField label="Descripción" span>
                   <textarea value={form.descripcion} onChange={(event) => update({ descripcion: event.target.value })} rows={3} />
@@ -2217,6 +2217,20 @@ function AdvancedField({ label, span, children }: { label: string; span?: boolea
       <span>{label}</span>
       {children}
     </label>
+  );
+}
+
+function CurrencyInput({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  return (
+    <span className="currency-input">
+      <span className="currency-symbol" aria-hidden="true">$</span>
+      <input
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        onBlur={() => onChange(formatCurrencyInputValue(value))}
+        inputMode="decimal"
+      />
+    </span>
   );
 }
 
@@ -2725,9 +2739,15 @@ function StatusPill({ status }: { status: string }) {
   return <span className={`status ${status.toLowerCase()}`}>{statusLabel(status).toUpperCase()}</span>;
 }
 
-function invalidationToast(result: { accepted?: boolean; result?: { estado?: string } }): string {
+function invalidationToast(result: { accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }): string {
   if (result.accepted) {
-    return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}`;
+    if (result.emailSent) {
+      return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}. Aviso enviado por correo`;
+    }
+    if (result.emailError) {
+      return `Invalidación aceptada por MH; falló el correo: ${result.emailError}`;
+    }
+    return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}. Sin correo de envío`;
   }
   return "Invalidación enviada a MH";
 }
@@ -3036,8 +3056,8 @@ function advancedFormFromDraft(draft: Record<string, unknown>): AdvancedCdeFormI
     uniMedida: catalogSelectValue(CAT014_UNITS, textValue(item.uniMedida, fallback.uniMedida)) || fallback.uniMedida,
     descripcion: textValue(item.descripcion, fallback.descripcion),
     tipoDepreciacion: textValue(item.tipoDepreciacion, fallback.tipoDepreciacion),
-    valorUni: textValue(item.valorUni, fallback.valorUni),
-    valorTotal: textValue(item.valor, textValue(resumen.valorTotal, fallback.valorTotal)),
+    valorUni: formatCurrencyInputValue(textValue(item.valorUni, fallback.valorUni)) || fallback.valorUni,
+    valorTotal: formatCurrencyInputValue(textValue(item.valor, textValue(resumen.valorTotal, fallback.valorTotal))) || fallback.valorTotal,
     totalLetras: textValue(resumen.totalLetras),
     pagoCodigo: catalogSelectValue(CAT017_PAYMENT_FORMS, textValue(pago.codigo, fallback.pagoCodigo)),
     pagoReferencia: textValue(pago.referencia, fallback.pagoReferencia),
@@ -3325,8 +3345,17 @@ function integerValue(value: string, fallback: number): number {
 }
 
 function decimalValue(value: string, fallback: number): number {
-  const parsed = Number.parseFloat(value);
+  const parsed = Number.parseFloat(normalizeDecimalText(value));
   return Number.isFinite(parsed) ? Number(parsed.toFixed(2)) : fallback;
+}
+
+function normalizeDecimalText(value: string): string {
+  return value.replace(/[$,\s]/g, "");
+}
+
+function formatCurrencyInputValue(value: string): string {
+  const parsed = Number.parseFloat(normalizeDecimalText(value));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed.toFixed(2) : "";
 }
 
 function testAmountValidationMessage(value: string): string {

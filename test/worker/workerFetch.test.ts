@@ -748,6 +748,79 @@ describe("contingency administration", () => {
 });
 
 describe("document invalidation", () => {
+  it("emails an invalidation notice when MH accepts the invalidation event", async () => {
+    const db = new InMemoryD1();
+    const document = testDocument();
+    const sentMessages: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+    const certPassword = "correct horse battery staple";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          estado: "PROCESADO",
+          codigoMsg: "001",
+          descripcionMsg: "Invalidación recibida",
+          selloRecibido: "2026INVALIDACIONSEAL",
+          observaciones: []
+        })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Prueba aceptada" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-invalidated" };
+          }
+        } as SendEmail,
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        MH_CERT_XML: await generatedCertificateXml(certPassword),
+        MH_CERT_PASSWORD: certPassword,
+        MH_USER_TEST: "10000003520015",
+        MH_PASSWORD_TEST: "test-password",
+        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+        MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      accepted: true,
+      emailSent: true
+    });
+    expect(document.status).toBe("INVALIDATED");
+    expect(sentMessages).toHaveLength(1);
+    const sentMessage = sentMessages[0] as { subject: string; text: string; attachments: Array<{ filename: string; content: unknown }> };
+    expect(sentMessage.subject).toContain("Invalidación");
+    expect(sentMessage.text).toContain("INVALIDADO");
+    expect(sentMessage.text).toContain("DTE-15-M001P004-000000000000009");
+    expect(new TextDecoder().decode((sentMessage.attachments[0].content as Uint8Array).slice(0, 4))).toBe("%PDF");
+    expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
+      receptor: { correo: "legacy-contact-2@example.com" }
+    });
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "SENT",
+      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-invalidated" })
+    }));
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_INVALIDATION_SENT", entity_id: "doc_1" }));
+  });
+
   it("returns a conflict when MH rejects the invalidation event", async () => {
     const db = new InMemoryD1();
     const document = testDocument();
@@ -964,6 +1037,30 @@ describe("advanced CDE generation", () => {
     expect(response.status).toBe(202);
     expect(db.wompiEvents[0]).toMatchObject({ environment: "01" });
     expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
+  });
+
+  it("opens the advanced template with a default amount when quick amount is blank", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced-template", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ amount: "", donorDocument: "100000001" })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { draft: { resumen: { valorTotal: number } } };
+    expect(body.draft.resumen.valorTotal).toBe(1);
   });
 
   it("stores a schema-valid advanced CDE draft and queues it for transmission", async () => {
@@ -1863,6 +1960,14 @@ class Statement {
       if (document) {
         document.status = "CONTINGENCY_PENDING";
         document.contingency_period_id = String(periodId);
+        document.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents SET status = 'INVALIDATED'")) {
+      const [updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.status = "INVALIDATED";
         document.updated_at = String(updatedAt);
       }
     }

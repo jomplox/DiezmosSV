@@ -29,4 +29,16 @@ describe("admin test Wompi payload", () => {
   it("rejects a missing test amount before queueing", () => {
     expect(() => buildTestWompiPayload({ donorDocument: "100000035" })).toThrow(/monto debe ser mayor que cero/);
   });
+
+  it("uses the default amount when an optional advanced template amount is blank", () => {
+    const payload = buildTestWompiPayload({ amount: "", donorDocument: "100000035" }, { defaultAmount: "1.00" });
+
+    expect(amountCents(payload)).toBe(100);
+  });
+
+  it("uses the default amount when an optional advanced template amount is not positive", () => {
+    const payload = buildTestWompiPayload({ amount: "0", donorDocument: "100000035" }, { defaultAmount: "1.00" });
+
+    expect(amountCents(payload)).toBe(100);
+  });
 });

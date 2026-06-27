@@ -565,10 +565,40 @@ select,
   min-width: 0;
 }
 
-.advanced-form-grid label span {
+.advanced-form-grid label > span:first-child {
   color: #52656c;
   font-size: 12px;
   font-weight: 650;
+}
+
+.advanced-form-grid .currency-input {
+  border: 1px solid #d8e0e3;
+  border-radius: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.advanced-form-grid .currency-symbol {
+  color: #52656c;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.advanced-form-grid .currency-input input {
+  border: 0;
+  border-radius: 0;
+  min-height: 36px;
+  padding: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-form-grid .currency-input:focus-within {
+  border-color: #0b8f8f;
+  box-shadow: 0 0 0 2px rgba(11, 143, 143, 0.12);
 }
 
 .field-error {

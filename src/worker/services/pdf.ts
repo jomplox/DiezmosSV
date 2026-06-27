@@ -75,6 +75,9 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
 
   drawItemsTable(page, item, amount, regular, bold);
   drawTotals(page, amount, document.resumen?.totalLetras, regular, bold);
+  if (record.status === "INVALIDATED") {
+    drawInvalidatedWatermark(page, bold);
+  }
 
   return pdf.save();
 }
@@ -203,6 +206,19 @@ function drawQr(page: PDFPage, text: string, x: number, y: number, size: number)
   });
 }
 
+function drawInvalidatedWatermark(page: PDFPage, font: PDFFont): void {
+  const text = "INVALIDADO";
+  const size = 74;
+  page.drawText(text, {
+    x: 72,
+    y: 340,
+    size,
+    font,
+    color: rgb(0.82, 0.03, 0.03),
+    opacity: 0.22
+  });
+}
+
 function drawKeyValue(
   page: PDFPage,
   label: string,
@@ -234,6 +250,9 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
     codGen: record.codigo_generacion,
     fechaEmi: document.identificacion?.fecEmi ?? record.issued_at.slice(0, 10)
   });
+  if (record.status === "INVALIDATED") {
+    params.set("estado", "INVALIDADO");
+  }
   return `https://admin.factura.gob.sv/consultaPublica?${params.toString()}`;
 }
 

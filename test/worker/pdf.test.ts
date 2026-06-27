@@ -44,9 +44,27 @@ describe("DTE PDF rendering", () => {
     const url = new URL(buildDteQrPayload(testDocument()));
 
     expect(url.href).toBe("https://admin.factura.gob.sv/consultaPublica?ambiente=00&codGen=6CAE5F7E-A590-4573-8EF2-FE48B14796C4&fechaEmi=2026-06-25");
+    expect(url.searchParams.get("estado")).toBeNull();
     expect(url.searchParams.get("tipoDte")).toBeNull();
     expect(url.searchParams.get("codigoGeneracion")).toBeNull();
     expect(url.searchParams.get("sello")).toBeNull();
+  });
+
+  it("marks invalidated CDE PDFs and updates the QR payload", async () => {
+    const invalidated = { ...testDocument(), status: "INVALIDATED" };
+    const url = new URL(buildDteQrPayload(invalidated));
+    expect(url.searchParams.get("estado")).toBe("INVALIDADO");
+
+    const pdf = await renderDtePdf(invalidated);
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-invalidated-"));
+    const pdfPath = join(dir, "cde-invalidated.pdf");
+    const txtPath = join(dir, "cde-invalidated.txt");
+    writeFileSync(pdfPath, pdf);
+
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+    const text = execFileSync("cat", [txtPath], { encoding: "utf8" });
+
+    expect(text).toContain("INVALIDADO");
   });
 });
 
