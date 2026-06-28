@@ -1161,6 +1161,129 @@ select,
   min-width: 0;
 }
 
+.credential-settings-shell {
+  display: grid;
+  grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  min-width: 0;
+}
+
+.credential-settings-nav {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dfe6e8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.credential-settings-nav-head {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px 10px;
+  border-bottom: 1px solid #edf1f2;
+}
+
+.credential-settings-nav-head span {
+  color: #1b2328;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.credential-settings-nav-head small {
+  color: #61737a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.credential-settings-nav-item {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 52px;
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: #33525b;
+  background: transparent;
+  text-align: left;
+}
+
+.credential-settings-nav-item:hover {
+  border-color: #d8e9eb;
+  background: #f8fbfc;
+}
+
+.credential-settings-nav-item.active {
+  border-color: #b9e3df;
+  color: #0d4d4b;
+  background: #edf9f7;
+}
+
+.credential-settings-nav-item > svg {
+  justify-self: center;
+  color: currentColor;
+}
+
+.credential-settings-nav-item span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.credential-settings-nav-item strong {
+  color: #1b2328;
+  font-size: 13px;
+  line-height: 1.2;
+}
+
+.credential-settings-nav-item small {
+  color: #61737a;
+  font-size: 11px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credential-settings-nav-item em {
+  align-self: start;
+  padding: 3px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 800;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.credential-settings-nav-item em.ready {
+  color: #00756f;
+  background: #dff5f2;
+}
+
+.credential-settings-nav-item em.pending {
+  color: #8a5c00;
+  background: #fff2d2;
+}
+
+.credential-settings-detail {
+  min-width: 0;
+}
+
+.credential-detail-panel {
+  min-height: 360px;
+}
+
+.credential-section-content {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
 .panel-head {
   display: flex;
   align-items: flex-start;
@@ -2248,6 +2371,10 @@ pre {
   .credential-layout {
     grid-template-columns: 1fr;
   }
+
+  .credential-settings-shell {
+    grid-template-columns: minmax(220px, 250px) minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 1020px) {
@@ -2313,6 +2440,21 @@ pre {
     grid-template-columns: 1fr;
   }
 
+  .credential-settings-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .credential-settings-nav {
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(190px, 1fr);
+    overflow-x: auto;
+  }
+
+  .credential-settings-nav-head {
+    border-right: 1px solid #edf1f2;
+    border-bottom: 0;
+  }
+
   .contingency-grid {
     grid-template-columns: 1fr;
   }
@@ -2355,6 +2497,16 @@ pre {
 
   .credential-fields {
     grid-template-columns: 1fr;
+  }
+
+  .credential-settings-nav {
+    grid-auto-flow: row;
+    grid-auto-columns: auto;
+  }
+
+  .credential-settings-nav-head {
+    border-right: 0;
+    border-bottom: 1px solid #edf1f2;
   }
 
   .issuer-config-grid {

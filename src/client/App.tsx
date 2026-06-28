@@ -34,6 +34,7 @@ import {
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
+import { credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
@@ -80,6 +81,16 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
   { id: "credentials", label: "Credenciales", icon: Settings, minRole: "OWNER" }
 ];
+
+const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof FileText> = {
+  ambiente: Settings,
+  mh: KeyRound,
+  firmador: ShieldCheck,
+  wompi: Cloud,
+  emisor: FileText,
+  correo: Mail,
+  plantillas: Braces
+};
 
 export function App() {
   const [token, setToken] = useState(() => localStorage.getItem("diezmos_token") ?? "");
@@ -1380,6 +1391,7 @@ function CredentialsPanel({
   const [writerCommandCopied, setWriterCommandCopied] = useState(false);
   const [writerToken, setWriterToken] = useState("");
   const [writerTokenError, setWriterTokenError] = useState("");
+  const [activeSection, setActiveSection] = useState<CredentialSettingsSectionId>("ambiente");
   const writerSetupCommand = `wrangler secret put CLOUDFLARE_API_TOKEN --env ${status?.target.appEnv || "staging"}`;
   const writerMessage = writerConfigured
     ? "Guardado seguro de credenciales habilitado"
@@ -1388,6 +1400,8 @@ function CredentialsPanel({
       : "No se pueden guardar cambios todavía.";
   const activeEnvironmentLabel = input.environment === "test" ? "Pruebas 00" : "Producción 01";
   const runtimeEnvironment = credentialRuntimeEnvironment(emissionEnvironment, status?.target.appEnv);
+  const activeSectionMeta = credentialSettingsSections.find((section) => section.id === activeSection) ?? credentialSettingsSections[0];
+  const activeSectionDescription = credentialSettingsPanelDescription(activeSection, activeEnvironmentLabel);
   async function handleCertificateFile(file: File | undefined): Promise<void> {
     if (!file) return;
     try {
@@ -1533,175 +1547,249 @@ function CredentialsPanel({
       </div>
 
       <div className="credential-main-panel">
-        <form
-          className="credential-form-panel"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void onSubmit();
-          }}
-        >
-        <div className="panel-head">
-          <div>
-            <h2>Actualizar secretos</h2>
-            <p>Los valores activos se muestran cuando no son secretos; los protegidos solo se reemplazan.</p>
-          </div>
-          <Lock size={20} />
-        </div>
-        <div className="credential-runtime-env">
-          <div>
-            <span>Ambiente activo de emisión</span>
-            <strong>{runtimeEnvironment.label}</strong>
-          </div>
-          <p>{runtimeEnvironment.help}</p>
-          <div className="segmented credential-runtime-selector" aria-label="Ambiente activo de emisión">
-            <button
-              type="button"
-              className={runtimeEnvironment.environment === "00" ? "active" : ""}
-              disabled={emissionBusy}
-              onClick={() => void onEmissionEnvironmentChange("00")}
-            >
-              Pruebas 00
-            </button>
-            <button
-              type="button"
-              className={runtimeEnvironment.environment === "01" ? "active" : ""}
-              disabled={emissionBusy}
-              onClick={() => void onEmissionEnvironmentChange("01")}
-            >
-              Producción 01
-            </button>
-          </div>
-          <small>Este cambio afecta únicamente los DTE nuevos. Los documentos ya emitidos conservan su ambiente original.</small>
-        </div>
-        <div className="credential-env-heading">
-          <span>Usuario y contraseña MH a editar</span>
-          <small>Este selector no cambia el ambiente activo; solo escoge cuál par de credenciales MH desea revisar o rotar.</small>
-        </div>
-        <div className="segmented credential-env">
-          <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-          <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
-        </div>
-        <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
-          {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-          <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
-        </div>
-        <div className="credential-fields">
-          <div className="credential-section-title span-2">
-            <h3>Credenciales API MH ({activeEnvironmentLabel})</h3>
-            <p>Estos dos campos son los únicos que cambian con el selector de ambiente.</p>
-          </div>
-          <label>
-            <CredentialFieldLabel label="Usuario MH API" configured={credentialConfigured(status, mhUserSecret)} />
-            <CredentialActiveValue status={status} name={mhUserSecret} />
-            <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhUserSecret, "Nuevo usuario MH API")} autoComplete="off" />
-          </label>
-          <label>
-            <CredentialFieldLabel label="Contraseña MH API" configured={credentialConfigured(status, mhPasswordSecret)} />
-            <CredentialActiveValue status={status} name={mhPasswordSecret} />
-            <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña MH API")} type="password" autoComplete="new-password" />
-          </label>
-          <div className="credential-section-title span-2">
-            <h3>Firmador MH</h3>
-            <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
-          </div>
-          <div className="credential-field-block span-2">
-            <CredentialFieldLabel label="Certificado firmador MH (.crt/.xml)" configured={signerConfigured} />
-            <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
-            <div className="credential-file-row">
-              <label className="file-upload-button">
-                <Upload size={16} />
-                Reemplazar certificado
-                <input
-                  className="file-input-hidden"
-                  type="file"
-                  accept=".crt,.xml,text/xml,application/xml,text/plain"
-                  onChange={(event) => void handleCertificateFile(event.currentTarget.files?.[0])}
-                />
-              </label>
-              <span className="credential-file-status">
-                {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
-              </span>
+        <div className="credential-settings-shell">
+          <nav className="credential-settings-nav" aria-label="Secciones de credenciales">
+            <div className="credential-settings-nav-head">
+              <span>Configuración</span>
+              <small>Elija una sección para editar solo lo necesario.</small>
             </div>
-            <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml de MH o cargue el archivo")} spellCheck={false} />
-            <small>Este campo es para reemplazar el certificado que MH entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
-            {certificateFileError && <small className="field-error">{certificateFileError}</small>}
+            {credentialSettingsSections.map((section) => {
+              const SectionIcon = credentialSettingsSectionIcons[section.id];
+              const sectionState = credentialSectionState(section.id, status);
+              return (
+                <button
+                  className={activeSection === section.id ? "credential-settings-nav-item active" : "credential-settings-nav-item"}
+                  key={section.id}
+                  type="button"
+                  onClick={() => setActiveSection(section.id)}
+                >
+                  <SectionIcon size={17} />
+                  <span>
+                    <strong>{section.label}</strong>
+                    <small>{section.description}</small>
+                  </span>
+                  <em className={sectionState}>{sectionState === "ready" ? "Listo" : "Pendiente"}</em>
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="credential-settings-detail">
+            {activeSection === "plantillas" ? (
+              <EmailTemplateEditor
+                settings={emailTemplates}
+                draft={emailTemplateDraft}
+                busy={templateBusy}
+                onChange={onEmailTemplateChange}
+                onSubmit={onEmailTemplateSubmit}
+              />
+            ) : (
+              <form
+                className="credential-form-panel credential-detail-panel"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void onSubmit();
+                }}
+              >
+                <div className="panel-head">
+                  <div>
+                    <h2>{activeSectionMeta.label}</h2>
+                    <p>{activeSectionDescription}</p>
+                  </div>
+                  <Lock size={20} />
+                </div>
+
+                {activeSection === "ambiente" && (
+                  <div className="credential-section-content">
+                    <div className="credential-runtime-env">
+                      <div>
+                        <span>Ambiente activo de emisión</span>
+                        <strong>{runtimeEnvironment.label}</strong>
+                      </div>
+                      <p>{runtimeEnvironment.help}</p>
+                      <div className="segmented credential-runtime-selector" aria-label="Ambiente activo de emisión">
+                        <button
+                          type="button"
+                          className={runtimeEnvironment.environment === "00" ? "active" : ""}
+                          disabled={emissionBusy}
+                          onClick={() => void onEmissionEnvironmentChange("00")}
+                        >
+                          Pruebas 00
+                        </button>
+                        <button
+                          type="button"
+                          className={runtimeEnvironment.environment === "01" ? "active" : ""}
+                          disabled={emissionBusy}
+                          onClick={() => void onEmissionEnvironmentChange("01")}
+                        >
+                          Producción 01
+                        </button>
+                      </div>
+                      <small>Este cambio afecta únicamente los DTE nuevos. Los documentos ya emitidos conservan su ambiente original.</small>
+                    </div>
+                    <div className="credential-env-heading">
+                      <span>Credenciales API MH a editar</span>
+                      <small>Este selector no cambia el ambiente activo; solo escoge cuál usuario y contraseña MH desea revisar o rotar.</small>
+                    </div>
+                    <div className="segmented credential-env">
+                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                    </div>
+                    <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
+                      {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
+                    </div>
+                  </div>
+                )}
+
+                {activeSection === "mh" && (
+                  <div className="credential-section-content">
+                    <div className="credential-env-heading">
+                      <span>Credenciales API MH a editar</span>
+                      <small>Seleccione el ambiente cuyas credenciales API quiere reemplazar.</small>
+                    </div>
+                    <div className="segmented credential-env">
+                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                    </div>
+                    <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
+                      {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
+                    </div>
+                    <div className="credential-fields">
+                      <div className="credential-section-title span-2">
+                        <h3>Credenciales API MH ({activeEnvironmentLabel})</h3>
+                        <p>Estos dos campos son los únicos que cambian con el selector de ambiente.</p>
+                      </div>
+                      <label>
+                        <CredentialFieldLabel label="Usuario MH API" configured={credentialConfigured(status, mhUserSecret)} />
+                        <CredentialActiveValue status={status} name={mhUserSecret} />
+                        <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhUserSecret, "Nuevo usuario MH API")} autoComplete="off" />
+                      </label>
+                      <label>
+                        <CredentialFieldLabel label="Contraseña MH API" configured={credentialConfigured(status, mhPasswordSecret)} />
+                        <CredentialActiveValue status={status} name={mhPasswordSecret} />
+                        <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña MH API")} type="password" autoComplete="new-password" />
+                      </label>
+                    </div>
+                  </div>
+                )}
+
+                {activeSection === "firmador" && (
+                  <div className="credential-fields">
+                    <div className="credential-section-title span-2">
+                      <h3>Firmador MH</h3>
+                      <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
+                    </div>
+                    <div className="credential-field-block span-2">
+                      <CredentialFieldLabel label="Certificado firmador MH (.crt/.xml)" configured={signerConfigured} />
+                      <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
+                      <div className="credential-file-row">
+                        <label className="file-upload-button">
+                          <Upload size={16} />
+                          Reemplazar certificado
+                          <input
+                            className="file-input-hidden"
+                            type="file"
+                            accept=".crt,.xml,text/xml,application/xml,text/plain"
+                            onChange={(event) => void handleCertificateFile(event.currentTarget.files?.[0])}
+                          />
+                        </label>
+                        <span className="credential-file-status">
+                          {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
+                        </span>
+                      </div>
+                      <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml de MH o cargue el archivo")} spellCheck={false} />
+                      <small>Este campo es para reemplazar el certificado que MH entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
+                      {certificateFileError && <small className="field-error">{certificateFileError}</small>}
+                    </div>
+                    <label>
+                      <CredentialFieldLabel label="Contraseña de llave privada" configured={credentialConfigured(status, "MH_CERT_PASSWORD")} />
+                      <CredentialActiveValue status={status} name="MH_CERT_PASSWORD" />
+                      <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_PASSWORD", "Nueva contraseña de llave privada")} type="password" autoComplete="new-password" />
+                    </label>
+                  </div>
+                )}
+
+                {activeSection === "wompi" && (
+                  <div className="credential-fields">
+                    <div className="credential-section-title span-2">
+                      <h3>Webhook entrante de Wompi</h3>
+                      <p>Wompi invoca esta URL cuando aprueba un pago; el Worker valida la firma antes de emitir el CDE.</p>
+                    </div>
+                    <label className="span-2">
+                      <CredentialFieldLabel label="Secreto de firma del webhook Wompi" configured={credentialConfigured(status, "WOMPI_API_SECRET")} />
+                      <CredentialActiveValue status={status} name="WOMPI_API_SECRET" />
+                      <input value={input.wompiSecret} onChange={(event) => onChange({ ...input, wompiSecret: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "WOMPI_API_SECRET", "Nuevo secreto de firma Wompi")} type="password" autoComplete="new-password" />
+                    </label>
+                    <div className="credential-field-block span-2">
+                      <span className="plain-field-label">URL del webhook de Wompi</span>
+                      <div className="credential-readonly-row">
+                        <div className="credential-readonly-endpoint">
+                          <code>{webhookUrl}</code>
+                        </div>
+                        <button className="endpoint-copy-button" type="button" onClick={() => void copyWebhookUrl()} title="Copiar URL del webhook de Wompi">
+                          <Copy size={15} />
+                          {webhookCopied ? "Copiado" : "Copiar"}
+                        </button>
+                      </div>
+                      <small>Configure esta URL en Wompi como endpoint de notificación para pagos aprobados.</small>
+                    </div>
+                  </div>
+                )}
+
+                {activeSection === "emisor" && (
+                  <div className="credential-fields">
+                    <IssuerConfigEditor status={status} input={input} onChange={onChange} />
+                  </div>
+                )}
+
+                {activeSection === "correo" && (
+                  <div className="credential-fields">
+                    <div className="credential-section-title span-2">
+                      <h3>Correo Cloudflare y respaldo HTTP</h3>
+                      <p>
+                        El envío principal usa Cloudflare Email Workers. El respaldo es un endpoint HTTPS con POST JSON y
+                        Authorization: Bearer; se usa solo si Cloudflare Email no puede entregar el comprobante.
+                      </p>
+                    </div>
+                    <label>
+                      <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
+                      <CredentialActiveValue status={status} name="EMAIL_API_URL" />
+                      <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
+                      <small>Recibe from, to, subject, text y adjuntos PDF/JSON en base64.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
+                      <CredentialActiveValue status={status} name="EMAIL_API_KEY" />
+                      <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_KEY", "Nuevo token bearer")} type="password" autoComplete="new-password" />
+                      <small>Se envía como Authorization: Bearer.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Correo remitente" configured={credentialConfigured(status, "EMAIL_FROM")} />
+                      <CredentialActiveValue status={status} name="EMAIL_FROM" />
+                      <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_FROM", "Nuevo correo remitente")} type="email" />
+                      <small>Usado como remitente tanto en Cloudflare Email como en el respaldo.</small>
+                    </label>
+                  </div>
+                )}
+
+                {activeSection !== "ambiente" && (
+                  <div className="credential-actions">
+                    <div>
+                      <EyeOff size={16} />
+                      <span>{writerConfigured ? "Los valores protegidos no se muestran después de guardarse." : "Configure un token API de Cloudflare para guardar cambios desde esta pantalla."}</span>
+                    </div>
+                    <button className="primary" disabled={busy || !writerConfigured} type="submit">
+                      <KeyRound size={16} />
+                      {busy ? "Guardando" : "Guardar secretos"}
+                    </button>
+                  </div>
+                )}
+              </form>
+            )}
           </div>
-          <label>
-            <CredentialFieldLabel label="Contraseña de llave privada" configured={credentialConfigured(status, "MH_CERT_PASSWORD")} />
-            <CredentialActiveValue status={status} name="MH_CERT_PASSWORD" />
-            <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_PASSWORD", "Nueva contraseña de llave privada")} type="password" autoComplete="new-password" />
-          </label>
-          <div className="credential-section-title span-2">
-            <h3>Wompi</h3>
-            <p>Configuración del webhook que Wompi invoca cuando aprueba un pago.</p>
-          </div>
-          <label className="span-2">
-            <CredentialFieldLabel label="Secreto de firma del webhook Wompi" configured={credentialConfigured(status, "WOMPI_API_SECRET")} />
-            <CredentialActiveValue status={status} name="WOMPI_API_SECRET" />
-            <input value={input.wompiSecret} onChange={(event) => onChange({ ...input, wompiSecret: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "WOMPI_API_SECRET", "Nuevo secreto de firma Wompi")} type="password" autoComplete="new-password" />
-          </label>
-          <div className="credential-field-block span-2">
-            <span className="plain-field-label">URL del webhook de Wompi</span>
-            <div className="credential-readonly-row">
-              <div className="credential-readonly-endpoint">
-                <code>{webhookUrl}</code>
-              </div>
-              <button className="endpoint-copy-button" type="button" onClick={() => void copyWebhookUrl()} title="Copiar URL del webhook de Wompi">
-                <Copy size={15} />
-                {webhookCopied ? "Copiado" : "Copiar"}
-              </button>
-            </div>
-            <small>Wompi debe hacer POST aquí cuando aprueba un pago; este Worker valida la firma con el secreto anterior.</small>
-          </div>
-          <div className="credential-section-title span-2">
-            <h3>Emisor</h3>
-            <p>Datos fiscales y valores por defecto usados para construir cada CDE.</p>
-          </div>
-          <IssuerConfigEditor status={status} input={input} onChange={onChange} />
-          <div className="credential-section-title span-2">
-            <h3>Correo Cloudflare y respaldo HTTP</h3>
-            <p>
-              El envío principal usa Cloudflare Email Workers. El respaldo es un endpoint HTTPS con POST JSON y
-              Authorization: Bearer; se usa solo si Cloudflare Email no puede entregar el comprobante.
-            </p>
-          </div>
-          <label>
-            <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
-            <CredentialActiveValue status={status} name="EMAIL_API_URL" />
-            <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
-            <small>Recibe from, to, subject, text y adjuntos PDF/JSON en base64.</small>
-          </label>
-          <label>
-            <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
-            <CredentialActiveValue status={status} name="EMAIL_API_KEY" />
-            <input value={input.emailApiKey} onChange={(event) => onChange({ ...input, emailApiKey: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_KEY", "Nuevo token bearer")} type="password" autoComplete="new-password" />
-            <small>Se envía como Authorization: Bearer.</small>
-          </label>
-          <label>
-            <CredentialFieldLabel label="Correo remitente" configured={credentialConfigured(status, "EMAIL_FROM")} />
-            <CredentialActiveValue status={status} name="EMAIL_FROM" />
-            <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_FROM", "Nuevo correo remitente")} type="email" />
-            <small>Usado como remitente tanto en Cloudflare Email como en el respaldo.</small>
-          </label>
         </div>
-        <div className="credential-actions">
-          <div>
-            <EyeOff size={16} />
-            <span>{writerConfigured ? "Los valores protegidos no se muestran después de guardarse." : "Configure un token API de Cloudflare para guardar cambios desde esta pantalla."}</span>
-          </div>
-          <button className="primary" disabled={busy || !writerConfigured} type="submit">
-            <KeyRound size={16} />
-            {busy ? "Guardando" : "Guardar secretos"}
-          </button>
-        </div>
-        </form>
-        <EmailTemplateEditor
-          settings={emailTemplates}
-          draft={emailTemplateDraft}
-          busy={templateBusy}
-          onChange={onEmailTemplateChange}
-          onSubmit={onEmailTemplateSubmit}
-        />
       </div>
     </section>
   );
@@ -2018,6 +2106,19 @@ function credentialRuntimeEnvironment(
       ? `Los próximos CDE se emitirán contra MH ${label}. Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
       : `Usando ${label} como valor inicial. Guarde una selección aquí para controlar el ambiente activo desde la UI.`
   };
+}
+
+function credentialSettingsPanelDescription(section: CredentialSettingsSectionId, activeEnvironmentLabel: string): string {
+  const descriptions: Record<CredentialSettingsSectionId, string> = {
+    ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales MH que desea revisar.",
+    mh: `Reemplace el usuario y contraseña API de MH para ${activeEnvironmentLabel}.`,
+    firmador: "Rote el certificado firmador y la contraseña de la llave privada cuando MH entregue nuevos archivos.",
+    wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
+    emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
+    correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
+    plantillas: "Edite los asuntos y cuerpos de los correos automáticos."
+  };
+  return descriptions[section];
 }
 
 function CredentialFieldLabel({ label, configured }: { label: string; configured: boolean }) {
