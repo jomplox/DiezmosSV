@@ -1465,98 +1465,6 @@ function CredentialsPanel({
   }
   return (
     <section className="credential-layout">
-      <div className="credential-status-panel">
-        <div className="panel-head">
-          <div>
-            <h2>Estado de secretos</h2>
-            <p>{status?.target.scriptName ?? "Worker no configurado"} · {status?.target.appEnv ?? "sin ambiente"}</p>
-          </div>
-          <button className="icon-button" onClick={() => void onRefresh()} title="Actualizar">
-            <RefreshCw size={17} />
-          </button>
-        </div>
-        <div className={writerConfigured ? "writer-state ready" : "writer-state"}>
-          <Cloud size={17} />
-          <div>
-            <span>{writerMessage}</span>
-            {writerConfigured ? (
-              <small>Puede actualizar credenciales desde esta pantalla; se guardarán como secretos del Worker en Cloudflare.</small>
-            ) : (
-              <small>Las credenciales actuales siguen funcionando; solo falta habilitar cambios desde esta pantalla.</small>
-            )}
-          </div>
-        </div>
-        {!writerConfigured && (
-          <div className="writer-remedy">
-            <div>
-              <h3>Habilitar edición desde UI</h3>
-              {writerNeedsOnlyToken ? (
-                <p>
-                  Pegue el token API de Cloudflare una sola vez para que el Worker lo guarde como secreto y pueda rotar credenciales desde esta pantalla.
-                  El token no se muestra ni se guarda en D1.
-                </p>
-              ) : (
-                <p>Antes de activar esta edición faltan datos del Worker: {credentialWriterMissingLabel(writerMissing)}.</p>
-              )}
-            </div>
-            {writerNeedsOnlyToken && (
-              <form className="writer-token-form" onSubmit={(event) => void submitWriterToken(event)}>
-                <label>
-                  <span>Token API de Cloudflare</span>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    value={writerToken}
-                    onChange={(event) => {
-                      setWriterToken(event.target.value);
-                      setWriterTokenError("");
-                    }}
-                    placeholder="Pegar token API"
-                  />
-                </label>
-                <button className="primary" type="submit" disabled={writerBusy || !writerToken.trim()}>
-                  <KeyRound size={15} />
-                  {writerBusy ? "Activando..." : "Activar edición"}
-                </button>
-                {writerTokenError && <small className="field-error">{writerTokenError}</small>}
-              </form>
-            )}
-            <details className="writer-terminal-fallback">
-              <summary>Usar Wrangler en terminal</summary>
-              <div className="writer-command-row">
-                <code>{writerSetupCommand}</code>
-                <button type="button" onClick={() => void copyWriterSetupCommand()} title="Copiar comando para configurar token">
-                  <Copy size={15} />
-                  {writerCommandCopied ? "Copiado" : "Copiar"}
-                </button>
-              </div>
-              <small>Ejecute el comando desde la carpeta del proyecto y pegue el token solo en el prompt seguro de Wrangler.</small>
-            </details>
-          </div>
-        )}
-        <div className="credential-groups">
-          {groups.map(([id, group]) => (
-            <div className="credential-group" key={id}>
-              <div className="credential-group-title">
-                {group.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                <strong>{group.label}</strong>
-              </div>
-              <ul>
-                {group.items.map((item) => (
-                  <li key={item.name}>
-                    <span>
-                      {item.label}
-                      {item.displayValue && <small>{credentialStatusDisplayValue(item)}</small>}
-                    </span>
-                    <strong className={item.configured ? "configured" : ""}>{item.configured ? "Configurado" : "Pendiente"}</strong>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
-        </div>
-      </div>
-
       <div className="credential-main-panel">
         <div className="credential-settings-shell">
           <nav className="credential-settings-nav" aria-label="Secciones de credenciales">
@@ -1800,6 +1708,97 @@ function CredentialsPanel({
               </form>
             )}
           </div>
+        </div>
+      </div>
+      <div className="credential-status-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Estado de secretos</h2>
+            <p>{status?.target.scriptName ?? "Worker no configurado"} · {status?.target.appEnv ?? "sin ambiente"}</p>
+          </div>
+          <button className="icon-button" onClick={() => void onRefresh()} title="Actualizar">
+            <RefreshCw size={17} />
+          </button>
+        </div>
+        <div className={writerConfigured ? "writer-state ready" : "writer-state"}>
+          <Cloud size={17} />
+          <div>
+            <span>{writerMessage}</span>
+            {writerConfigured ? (
+              <small>Puede actualizar credenciales desde esta pantalla; se guardarán como secretos del Worker en Cloudflare.</small>
+            ) : (
+              <small>Las credenciales actuales siguen funcionando; solo falta habilitar cambios desde esta pantalla.</small>
+            )}
+          </div>
+        </div>
+        {!writerConfigured && (
+          <div className="writer-remedy">
+            <div>
+              <h3>Habilitar edición desde UI</h3>
+              {writerNeedsOnlyToken ? (
+                <p>
+                  Pegue el token API de Cloudflare una sola vez para que el Worker lo guarde como secreto y pueda rotar credenciales desde esta pantalla.
+                  El token no se muestra ni se guarda en D1.
+                </p>
+              ) : (
+                <p>Antes de activar esta edición faltan datos del Worker: {credentialWriterMissingLabel(writerMissing)}.</p>
+              )}
+            </div>
+            {writerNeedsOnlyToken && (
+              <form className="writer-token-form" onSubmit={(event) => void submitWriterToken(event)}>
+                <label>
+                  <span>Token API de Cloudflare</span>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    value={writerToken}
+                    onChange={(event) => {
+                      setWriterToken(event.target.value);
+                      setWriterTokenError("");
+                    }}
+                    placeholder="Pegar token API"
+                  />
+                </label>
+                <button className="primary" type="submit" disabled={writerBusy || !writerToken.trim()}>
+                  <KeyRound size={15} />
+                  {writerBusy ? "Activando..." : "Activar edición"}
+                </button>
+                {writerTokenError && <small className="field-error">{writerTokenError}</small>}
+              </form>
+            )}
+            <details className="writer-terminal-fallback">
+              <summary>Usar Wrangler en terminal</summary>
+              <div className="writer-command-row">
+                <code>{writerSetupCommand}</code>
+                <button type="button" onClick={() => void copyWriterSetupCommand()} title="Copiar comando para configurar token">
+                  <Copy size={15} />
+                  {writerCommandCopied ? "Copiado" : "Copiar"}
+                </button>
+              </div>
+              <small>Ejecute el comando desde la carpeta del proyecto y pegue el token solo en el prompt seguro de Wrangler.</small>
+            </details>
+          </div>
+        )}
+        <div className="credential-groups">
+          {groups.map(([id, group]) => (
+            <div className="credential-group" key={id}>
+              <div className="credential-group-title">
+                {group.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
+                <strong>{group.label}</strong>
+              </div>
+              <ul>
+                {group.items.map((item) => (
+                  <li key={item.name}>
+                    <span>
+                      {item.label}
+                      {item.displayValue && <small>{credentialStatusDisplayValue(item)}</small>}
+                    </span>
+                    <strong className={item.configured ? "configured" : ""}>{item.configured ? "Configurado" : "Pendiente"}</strong>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
         </div>
       </div>
       {pendingEmissionEnvironment && (
