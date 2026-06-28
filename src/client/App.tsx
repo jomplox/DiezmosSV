@@ -1392,6 +1392,7 @@ function CredentialsPanel({
   const [writerToken, setWriterToken] = useState("");
   const [writerTokenError, setWriterTokenError] = useState("");
   const [activeSection, setActiveSection] = useState<CredentialSettingsSectionId>("ambiente");
+  const [pendingEmissionEnvironment, setPendingEmissionEnvironment] = useState<EmissionEnvironmentState["environment"] | null>(null);
   const writerSetupCommand = `wrangler secret put CLOUDFLARE_API_TOKEN --env ${status?.target.appEnv || "staging"}`;
   const writerMessage = writerConfigured
     ? "Guardado seguro de credenciales habilitado"
@@ -1451,6 +1452,16 @@ function CredentialsPanel({
     if (saved) {
       setWriterToken("");
     }
+  }
+  function requestEmissionEnvironmentChange(environment: EmissionEnvironmentState["environment"]): void {
+    if (emissionBusy || runtimeEnvironment.environment === environment) return;
+    setPendingEmissionEnvironment(environment);
+  }
+  async function confirmEmissionEnvironmentChange(): Promise<void> {
+    if (!pendingEmissionEnvironment) return;
+    const environment = pendingEmissionEnvironment;
+    setPendingEmissionEnvironment(null);
+    await onEmissionEnvironmentChange(environment);
   }
   return (
     <section className="credential-layout">
@@ -1612,7 +1623,7 @@ function CredentialsPanel({
                           type="button"
                           className={runtimeEnvironment.environment === "00" ? "active" : ""}
                           disabled={emissionBusy}
-                          onClick={() => void onEmissionEnvironmentChange("00")}
+                          onClick={() => requestEmissionEnvironmentChange("00")}
                         >
                           Pruebas 00
                         </button>
@@ -1620,7 +1631,7 @@ function CredentialsPanel({
                           type="button"
                           className={runtimeEnvironment.environment === "01" ? "active" : ""}
                           disabled={emissionBusy}
-                          onClick={() => void onEmissionEnvironmentChange("01")}
+                          onClick={() => requestEmissionEnvironmentChange("01")}
                         >
                           Producción 01
                         </button>
@@ -1791,6 +1802,15 @@ function CredentialsPanel({
           </div>
         </div>
       </div>
+      {pendingEmissionEnvironment && (
+        <EmissionEnvironmentConfirmDialog
+          busy={emissionBusy}
+          currentEnvironment={runtimeEnvironment.environment}
+          targetEnvironment={pendingEmissionEnvironment}
+          onCancel={() => setPendingEmissionEnvironment(null)}
+          onConfirm={() => void confirmEmissionEnvironmentChange()}
+        />
+      )}
     </section>
   );
 }
@@ -2089,6 +2109,62 @@ function credentialWriterMissingLabel(names: string[]): string {
     CLOUDFLARE_API_TOKEN: "token API de Cloudflare (CLOUDFLARE_API_TOKEN)"
   };
   return names.map((name) => labels[name] ?? name).join(", ");
+}
+
+function EmissionEnvironmentConfirmDialog({
+  busy,
+  currentEnvironment,
+  targetEnvironment,
+  onCancel,
+  onConfirm
+}: {
+  busy: boolean;
+  currentEnvironment: EmissionEnvironmentState["environment"];
+  targetEnvironment: EmissionEnvironmentState["environment"];
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const targetLabel = environmentLabel(targetEnvironment);
+  const isProductionTarget = targetEnvironment === "01";
+  return (
+    <div className="modal-backdrop">
+      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="emission-environment-confirm-title">
+        <header>
+          <div>
+            <h2 id="emission-environment-confirm-title">Confirmar cambio de ambiente</h2>
+            <p>Este cambio aplica a los próximos CDE generados o recibidos por webhook. Los documentos ya emitidos conservan su ambiente original.</p>
+          </div>
+          <button className="icon-button" onClick={onCancel} disabled={busy} title="Cerrar">
+            <X size={17} />
+          </button>
+        </header>
+        <div className="legal-box warning">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>{isProductionTarget ? "Va a activar emisión en producción" : "Va a cambiar el ambiente activo"}</strong>
+            <small>
+              {isProductionTarget
+                ? "Confirme solo si las credenciales de producción MH están listas y desea emitir CDE reales."
+                : "Confirme si desea que los próximos CDE usen el ambiente de pruebas de MH."}
+            </small>
+          </div>
+        </div>
+        <dl className="confirm-facts">
+          <dt>Ambiente actual</dt>
+          <dd>{environmentLabel(currentEnvironment)}</dd>
+          <dt>Nuevo ambiente</dt>
+          <dd>{targetLabel}</dd>
+        </dl>
+        <footer>
+          <button onClick={onCancel} disabled={busy}>Cancelar</button>
+          <button className={isProductionTarget ? "danger solid" : "primary"} onClick={onConfirm} disabled={busy}>
+            <AlertTriangle size={16} />
+            {busy ? "Cambiando" : `Confirmar ${targetLabel}`}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
 }
 
 function credentialRuntimeEnvironment(
