@@ -263,6 +263,55 @@ describe("document email resend", () => {
     }));
   });
 
+  it("uses the configured receipt email template", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify({
+        dteReceipt: {
+          subject: "CDE {{numeroControl}} listo",
+          body: "Hola {{donante}}, recibimos {{monto}} y adjuntamos {{codigoGeneracion}}."
+        },
+        dteInvalidation: {
+          subject: "CDE invalidado {{numeroControl}}",
+          body: "El CDE {{numeroControl}} fue INVALIDADO."
+        }
+      }),
+      updated_by: "user_owner",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-template" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0]).toMatchObject({
+      subject: "CDE DTE-15-M001P004-000000000000009 listo",
+      text: "Hola Example Person, recibimos $100.00 y adjuntamos 6CAE5F7E-A590-4573-8EF2-FE48B14796C4."
+    });
+  });
+
   it("attaches valid DTE JSON even when the document has a signed JWS", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
@@ -754,6 +803,21 @@ describe("document invalidation", () => {
     const sentMessages: unknown[] = [];
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
     db.documents.push(document);
+    db.settings.push({
+      key: "email_templates_json",
+      value: JSON.stringify({
+        dteReceipt: {
+          subject: "CDE {{numeroControl}} listo",
+          body: "Adjuntamos {{numeroControl}}."
+        },
+        dteInvalidation: {
+          subject: "Aviso de invalidación {{numeroControl}}",
+          body: "Hola {{donante}}, el CDE {{numeroControl}} quedó {{estado}} ante MH."
+        }
+      }),
+      updated_by: "user_owner",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
     const certPassword = "correct horse battery staple";
     const fetchMock = vi
       .fn()
@@ -805,9 +869,8 @@ describe("document invalidation", () => {
     expect(document.status).toBe("INVALIDATED");
     expect(sentMessages).toHaveLength(1);
     const sentMessage = sentMessages[0] as { subject: string; text: string; attachments: Array<{ filename: string; content: unknown }> };
-    expect(sentMessage.subject).toContain("Invalidación");
-    expect(sentMessage.text).toContain("INVALIDADO");
-    expect(sentMessage.text).toContain("DTE-15-M001P004-000000000000009");
+    expect(sentMessage.subject).toBe("Aviso de invalidación DTE-15-M001P004-000000000000009");
+    expect(sentMessage.text).toBe("Hola Example Person, el CDE DTE-15-M001P004-000000000000009 quedó Invalidado ante MH.");
     expect(new TextDecoder().decode((sentMessage.attachments[0].content as Uint8Array).slice(0, 4))).toBe("%PDF");
     expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
       receptor: { correo: "legacy-contact-2@example.com" }
@@ -1439,6 +1502,83 @@ describe("credential administration", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-resource-example/secrets-bulk");
     expect(init.headers).toMatchObject({ Authorization: "Bearer cf-writer-token" });
+  });
+});
+
+describe("email template settings", () => {
+  it("lets owners edit subject and body templates for each email type", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/email-templates", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          templates: {
+            dteReceipt: {
+              subject: "CDE {{numeroControl}} emitido",
+              body: "Estimado {{donante}}, se emitió {{numeroControl}} por {{monto}}."
+            },
+            dteInvalidation: {
+              subject: "CDE {{numeroControl}} invalidado",
+              body: "El CDE {{numeroControl}} quedó {{estado}}."
+            }
+          }
+        })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailTemplates: {
+        definitions: [
+          expect.objectContaining({ type: "dteReceipt", label: "Envío de DTE" }),
+          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de DTE" })
+        ],
+        placeholders: expect.arrayContaining(["{{numeroControl}}", "{{donante}}", "{{monto}}"]),
+        templates: {
+          dteReceipt: {
+            subject: "CDE {{numeroControl}} emitido",
+            body: "Estimado {{donante}}, se emitió {{numeroControl}} por {{monto}}."
+          },
+          dteInvalidation: {
+            subject: "CDE {{numeroControl}} invalidado",
+            body: "El CDE {{numeroControl}} quedó {{estado}}."
+          }
+        }
+      }
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_templates_json",
+      updated_by: "user_owner"
+    }));
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "EMAIL_TEMPLATES_UPDATED",
+      entity_type: "app_setting",
+      entity_id: "email_templates_json"
+    }));
+
+    const getResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/email-templates", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      emailTemplates: {
+        templates: {
+          dteReceipt: { subject: "CDE {{numeroControl}} emitido" },
+          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" }
+        }
+      }
+    });
   });
 });
 

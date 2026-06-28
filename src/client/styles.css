@@ -1155,6 +1155,12 @@ select,
   min-width: 0;
 }
 
+.credential-main-panel {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+}
+
 .panel-head {
   display: flex;
   align-items: flex-start;
@@ -1772,6 +1778,88 @@ select,
   gap: 8px;
   color: #61737a;
   font-size: 12px;
+}
+
+.email-template-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.email-template-guidance {
+  display: grid;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #c8ebe7;
+  border-radius: 6px;
+  background: #edf9f7;
+  color: #33525b;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.email-template-placeholders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.email-template-placeholders code {
+  padding: 4px 7px;
+  border: 1px solid #c8dcdf;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #143339;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+}
+
+.email-template-list {
+  display: grid;
+  gap: 12px;
+}
+
+.email-template-card {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid #e7eef0;
+}
+
+.email-template-card:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.email-template-card h3 {
+  margin-bottom: 3px;
+  font-size: 14px;
+}
+
+.email-template-card p {
+  color: #61737a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.email-template-card label {
+  display: grid;
+  gap: 6px;
+}
+
+.email-template-card label span {
+  color: #52656c;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.email-template-card textarea {
+  min-height: 116px;
+  resize: vertical;
+}
+
+.email-template-actions {
+  margin-top: 0;
+  padding-top: 2px;
 }
 
 .icon-button {

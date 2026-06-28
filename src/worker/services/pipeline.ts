@@ -6,17 +6,16 @@ import { Repository } from "../storage/repository";
 import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, WompiWebhook } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { EmailService } from "./email";
+import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
 
 export class IssuancePipeline {
   private readonly repo: Repository;
   private readonly mh: MhClient;
-  private readonly email: EmailService;
 
   constructor(private readonly env: Env) {
     this.repo = new Repository(env.DB);
     this.mh = new MhClient(env);
-    this.email = new EmailService(env);
   }
 
   async processWompiEvent(wompiEventId: string): Promise<DteDocumentRecord | null> {
@@ -371,7 +370,8 @@ export class IssuancePipeline {
       return;
     }
     try {
-      const response = await this.email.sendReceipt(record, record.donor_email);
+      const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
+      const response = await new EmailService(this.env, templates).sendReceipt(record, record.donor_email);
       await this.repo.recordEmailDelivery({ documentId: record.id, toEmail: record.donor_email, status: "SENT", providerResponse: response });
       await this.repo.createAudit({
         action: "EMAIL_SENT",

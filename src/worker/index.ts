@@ -6,6 +6,7 @@ import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloa
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
+import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -149,6 +150,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/settings/emission-environment") {
     return handleEmissionEnvironmentRoute(request, env, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/email-templates") {
+    return handleEmailTemplatesRoute(request, repo, user);
   }
 
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {
@@ -402,6 +407,38 @@ async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: 
     metadata: { environment }
   });
   return jsonResponse({ ok: true, emissionEnvironment: await emissionEnvironmentState(repo, env) });
+}
+
+async function handleEmailTemplatesRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method === "GET") {
+    requireRole(user, "OWNER");
+    const settings = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
+    return jsonResponse({ emailTemplates: emailTemplateResponse(settings) });
+  }
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  const body = (await request.json().catch(() => ({}))) as { templates?: unknown };
+  try {
+    const templates = normalizeEmailTemplateSettings(body.templates);
+    await repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "EMAIL_TEMPLATES_UPDATED",
+      entityType: "app_setting",
+      entityId: EMAIL_TEMPLATES_SETTING_KEY,
+      summary: "Plantillas de correo actualizadas",
+      metadata: { types: Object.keys(templates) }
+    });
+    return jsonResponse({ ok: true, emailTemplates: emailTemplateResponse(templates) });
+  } catch (error) {
+    if (error instanceof EmailTemplateValidationError) {
+      return jsonResponse({ error: "invalid_email_templates", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
 }
 
 async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
@@ -720,7 +757,8 @@ async function handleDocumentRoute(
       return jsonResponse({ error: "missing_email" }, { status: 400 });
     }
     try {
-      const response = await new EmailService(env).sendReceipt(document, toEmail);
+      const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
+      const response = await new EmailService(env, templates).sendReceipt(document, toEmail);
       await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "SENT", providerResponse: response });
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Reenviado a ${toEmail}`, metadata: response });
       return jsonResponse({ ok: true });
@@ -826,7 +864,8 @@ async function handleDocumentRoute(
       const invalidatedDocument = (await repo.getDteDocument(document.id)) ?? { ...document, status: "INVALIDATED" };
       if (invalidatedDocument.donor_email) {
         try {
-          const emailResponse = await new EmailService(env).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
+          const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
+          const emailResponse = await new EmailService(env, templates).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
           await repo.recordEmailDelivery({ documentId: document.id, toEmail: invalidatedDocument.donor_email, status: "SENT", providerResponse: emailResponse });
           await repo.createAudit({
             actorType: "USER",

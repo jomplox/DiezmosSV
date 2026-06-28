@@ -1,24 +1,26 @@
 import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64 } from "../utils/encoding";
+import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, type EmailTemplateSettings } from "./emailTemplates";
 import { renderDtePdf } from "./pdf";
 
 export class EmailService {
-  constructor(private readonly env: Env) {}
+  constructor(
+    private readonly env: Env,
+    private readonly templates: EmailTemplateSettings = DEFAULT_EMAIL_TEMPLATES
+  ) {}
 
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
-    const subject = record.status === "CONTINGENCY_PENDING" ? "Comprobante DTE transitorio por donación" : "Comprobante DTE por donación";
-    return this.sendDteEmail(record, toEmail, {
-      subject,
-      text: `Adjuntamos su Comprobante de Donación Electrónico ${record.numero_control}.`
-    });
+    const message = renderEmailTemplate(this.templates.dteReceipt, record);
+    if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
+      message.subject = "Comprobante DTE transitorio por donación";
+    }
+    return this.sendDteEmail(record, toEmail, message);
   }
 
   async sendInvalidationNotice(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
-    return this.sendDteEmail({ ...record, status: "INVALIDATED" }, toEmail, {
-      subject: `Invalidación de CDE ${record.numero_control}`,
-      text: `El Comprobante de Donación Electrónico ${record.numero_control} fue INVALIDADO ante MH. Adjuntamos la representación gráfica actualizada con marca INVALIDADO y el JSON del documento para sus registros.`
-    });
+    const invalidatedRecord = { ...record, status: "INVALIDATED" };
+    return this.sendDteEmail(invalidatedRecord, toEmail, renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord));
   }
 
   private async sendDteEmail(record: DteDocumentRecord, toEmail: string, message: EmailMessage): Promise<unknown> {

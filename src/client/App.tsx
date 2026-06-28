@@ -32,7 +32,7 @@ import {
   Users
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DteDocument, EmissionEnvironmentState, User } from "./types";
+import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { openNativeDatePicker } from "./datePicker";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
@@ -94,6 +94,8 @@ export function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
+  const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings | null>(null);
+  const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
   const [contingency, setContingency] = useState<ContingencyState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
@@ -173,12 +175,14 @@ export function App() {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, environmentResult] = await Promise.all([
+      const [credentialResult, environmentResult, emailTemplateResult] = await Promise.all([
         api<{ credentials: CredentialStatus }>("/api/credentials", token),
-        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
+        api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token)
       ]);
       setCredentials(credentialResult.credentials);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
+      applyEmailTemplates(emailTemplateResult.emailTemplates);
     }
     if (view === "exports" && can(user, "ADMIN")) {
       if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
@@ -441,6 +445,22 @@ export function App() {
       });
       setEmissionEnvironment(result.emissionEnvironment);
       setToast(`Ambiente de emisión cambiado a ${environmentLabel(environment)}`);
+    });
+  }
+
+  function applyEmailTemplates(settings: EmailTemplateSettings) {
+    setEmailTemplates(settings);
+    setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
+  }
+
+  async function updateEmailTemplates() {
+    await runAction("email-templates", async () => {
+      const result = await api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token, {
+        method: "PUT",
+        body: { templates: emailTemplateDraft }
+      });
+      applyEmailTemplates(result.emailTemplates);
+      setToast("Plantillas de correo actualizadas");
     });
   }
 
@@ -717,21 +737,37 @@ export function App() {
           <CredentialsPanel
             status={credentials}
             emissionEnvironment={emissionEnvironment}
+            emailTemplates={emailTemplates}
+            emailTemplateDraft={emailTemplateDraft}
             input={credentialInput}
             busy={busy === "credentials"}
             emissionBusy={busy === "emission-environment"}
+            templateBusy={busy === "email-templates"}
             writerBusy={busy === "credential-writer"}
             onChange={setCredentialInput}
             onSubmit={updateCredentials}
+            onEmailTemplateChange={(type, patch) => {
+              setEmailTemplateDraft((current) => ({
+                ...current,
+                [type]: {
+                  subject: current[type]?.subject ?? "",
+                  body: current[type]?.body ?? "",
+                  ...patch
+                }
+              }));
+            }}
+            onEmailTemplateSubmit={updateEmailTemplates}
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onBootstrapWriter={bootstrapCredentialWriter}
             onRefresh={async () => {
-              const [credentialResult, environmentResult] = await Promise.all([
+              const [credentialResult, environmentResult, emailTemplateResult] = await Promise.all([
                 api<{ credentials: CredentialStatus }>("/api/credentials", token),
-                api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+                api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
+                api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token)
               ]);
               setCredentials(credentialResult.credentials);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
+              applyEmailTemplates(emailTemplateResult.emailTemplates);
             }}
           />
         )}
@@ -1298,24 +1334,34 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
 function CredentialsPanel({
   status,
   emissionEnvironment,
+  emailTemplates,
+  emailTemplateDraft,
   input,
   busy,
   emissionBusy,
+  templateBusy,
   writerBusy,
   onChange,
   onSubmit,
+  onEmailTemplateChange,
+  onEmailTemplateSubmit,
   onEmissionEnvironmentChange,
   onBootstrapWriter,
   onRefresh
 }: {
   status: CredentialStatus | null;
   emissionEnvironment: EmissionEnvironmentState | null;
+  emailTemplates: EmailTemplateSettings | null;
+  emailTemplateDraft: Record<string, EmailTemplateValue>;
   input: CredentialFormInput;
   busy: boolean;
   emissionBusy: boolean;
+  templateBusy: boolean;
   writerBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
   onSubmit: () => Promise<void>;
+  onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
+  onEmailTemplateSubmit: () => Promise<void>;
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
   onRefresh: () => Promise<void>;
@@ -1486,13 +1532,14 @@ function CredentialsPanel({
         </div>
       </div>
 
-      <form
-        className="credential-form-panel"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void onSubmit();
-        }}
-      >
+      <div className="credential-main-panel">
+        <form
+          className="credential-form-panel"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void onSubmit();
+          }}
+        >
         <div className="panel-head">
           <div>
             <h2>Actualizar secretos</h2>
@@ -1647,8 +1694,108 @@ function CredentialsPanel({
             {busy ? "Guardando" : "Guardar secretos"}
           </button>
         </div>
-      </form>
+        </form>
+        <EmailTemplateEditor
+          settings={emailTemplates}
+          draft={emailTemplateDraft}
+          busy={templateBusy}
+          onChange={onEmailTemplateChange}
+          onSubmit={onEmailTemplateSubmit}
+        />
+      </div>
     </section>
+  );
+}
+
+function EmailTemplateEditor({
+  settings,
+  draft,
+  busy,
+  onChange,
+  onSubmit
+}: {
+  settings: EmailTemplateSettings | null;
+  draft: Record<string, EmailTemplateValue>;
+  busy: boolean;
+  onChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
+  onSubmit: () => Promise<void>;
+}) {
+  const definitions = settings?.definitions ?? [];
+  const placeholders = settings?.placeholders ?? [];
+  const complete = definitions.every((definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim());
+  return (
+    <section className="credential-form-panel email-template-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Plantillas de correo</h2>
+          <p>Asunto y mensaje para cada correo automático enviado al donante.</p>
+        </div>
+        <Mail size={20} />
+      </div>
+      {definitions.length === 0 ? (
+        <div className="empty-state">Cargando plantillas de correo.</div>
+      ) : (
+        <>
+          <div className="email-template-guidance">
+            <span>Use variables para insertar datos del CDE. Los nuevos tipos de correo aparecerán en esta misma sección.</span>
+            <div className="email-template-placeholders" aria-label="Variables disponibles">
+              {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+            </div>
+          </div>
+          <div className="email-template-list">
+            {definitions.map((definition) => {
+              const value = draft[definition.type] ?? { subject: "", body: "" };
+              return (
+                <section className="email-template-card" key={definition.type}>
+                  <div>
+                    <h3>{definition.label}</h3>
+                    <p>{definition.description}</p>
+                  </div>
+                  <label>
+                    <span>Asunto</span>
+                    <input
+                      value={value.subject}
+                      onChange={(event) => onChange(definition.type, { subject: event.target.value })}
+                      placeholder={definition.defaultSubject}
+                    />
+                  </label>
+                  <label>
+                    <span>Cuerpo del correo</span>
+                    <textarea
+                      value={value.body}
+                      onChange={(event) => onChange(definition.type, { body: event.target.value })}
+                      placeholder={definition.defaultBody}
+                    />
+                  </label>
+                </section>
+              );
+            })}
+          </div>
+          <div className="credential-actions email-template-actions">
+            <div>
+              <Mail size={16} />
+              <span>Estos textos se aplican al próximo envío o reenvío de correo.</span>
+            </div>
+            <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+              <Mail size={16} />
+              {busy ? "Guardando" : "Guardar plantillas"}
+            </button>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
+function cloneEmailTemplates(templates: Record<string, EmailTemplateValue>): Record<string, EmailTemplateValue> {
+  return Object.fromEntries(
+    Object.entries(templates).map(([type, template]) => [
+      type,
+      {
+        subject: template.subject,
+        body: template.body
+      }
+    ])
   );
 }
 

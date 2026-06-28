@@ -166,3 +166,22 @@ export interface EmissionEnvironmentState {
   source: "setting" | "deployment_default";
   appEnv: string;
 }
+
+export interface EmailTemplateValue {
+  subject: string;
+  body: string;
+}
+
+export interface EmailTemplateDefinition {
+  type: string;
+  label: string;
+  description: string;
+  defaultSubject: string;
+  defaultBody: string;
+}
+
+export interface EmailTemplateSettings {
+  definitions: EmailTemplateDefinition[];
+  placeholders: string[];
+  templates: Record<string, EmailTemplateValue>;
+}
