@@ -1,8 +1,19 @@
 import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
-import { bytesToBase64 } from "../utils/encoding";
-import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, type EmailTemplateSettings } from "./emailTemplates";
-import { renderDtePdf } from "./pdf";
+import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
+import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, type EmailTemplateSettings, type EmailTemplateType, type EmailTemplateValue } from "./emailTemplates";
+import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
+
+export interface EmailDeliveryResult {
+  providerResponse: unknown;
+  emailType: EmailTemplateType;
+  documentStatusAtSend: string;
+  templateVersion: string;
+  pdfRendererVersion: string;
+  pdfSha256: string;
+  dteJsonSha256: string;
+  providerDeliveryId: string | null;
+}
 
 export class EmailService {
   constructor(
@@ -10,22 +21,30 @@ export class EmailService {
     private readonly templates: EmailTemplateSettings = DEFAULT_EMAIL_TEMPLATES
   ) {}
 
-  async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
+  async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
     const message = renderEmailTemplate(this.templates.dteReceipt, record);
     if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
       message.subject = "Comprobante DTE transitorio por donación";
     }
-    return this.sendDteEmail(record, toEmail, message);
+    return this.sendDteEmail(record, toEmail, "dteReceipt", this.templates.dteReceipt, message);
   }
 
-  async sendInvalidationNotice(record: DteDocumentRecord, toEmail: string): Promise<unknown> {
+  async sendInvalidationNotice(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
     const invalidatedRecord = { ...record, status: "INVALIDATED" };
-    return this.sendDteEmail(invalidatedRecord, toEmail, renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord));
+    return this.sendDteEmail(invalidatedRecord, toEmail, "dteInvalidation", this.templates.dteInvalidation, renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord));
   }
 
-  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, message: EmailMessage): Promise<unknown> {
+  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, emailType: EmailTemplateType, template: EmailTemplateValue, message: EmailMessage): Promise<EmailDeliveryResult> {
     const pdfBytes = await renderDtePdf(record);
     const jsonBytes = new TextEncoder().encode(record.plain_json);
+    const evidence = {
+      emailType,
+      documentStatusAtSend: record.status,
+      templateVersion: await templateVersion(emailType, template),
+      pdfRendererVersion: DTE_PDF_RENDERER_VERSION,
+      pdfSha256: await sha256Hex(pdfBytes),
+      dteJsonSha256: await sha256Hex(jsonBytes)
+    };
     const from = this.env.EMAIL_FROM ?? "dte@example.org";
     const pdfAttachment = {
       filename: `${record.codigo_generacion}.pdf`,
@@ -57,7 +76,8 @@ export class EmailService {
     };
 
     if (isMockMode(this.env)) {
-      return { mock: true, toEmail, subject: message.subject };
+      const providerResponse = { mock: true, toEmail, subject: message.subject };
+      return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
     }
     if (this.env.EMAIL) {
       try {
@@ -81,16 +101,19 @@ export class EmailService {
             }
           ]
         });
-        return { provider: "cloudflare-email", messageId: result.messageId };
+        const providerResponse = { provider: "cloudflare-email", messageId: result.messageId };
+        return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
       } catch (error) {
         if (hasHttpProvider(this.env)) {
-          return sendViaHttpProvider(this.env, payload, error);
+          const providerResponse = await sendViaHttpProvider(this.env, payload, error);
+          return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
         }
         throw error;
       }
     }
     if (hasHttpProvider(this.env)) {
-      return sendViaHttpProvider(this.env, payload);
+      const providerResponse = await sendViaHttpProvider(this.env, payload);
+      return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
     }
     throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
   }
@@ -151,4 +174,27 @@ function parseProviderResponse(responseBody: string): unknown {
   } catch {
     return { text: responseBody };
   }
+}
+
+async function templateVersion(emailType: EmailTemplateType, template: EmailTemplateValue): Promise<string> {
+  const payload = JSON.stringify({ emailType, subject: template.subject, body: template.body });
+  return `${emailType}:sha256:${await sha256Hex(utf8Bytes(payload))}`;
+}
+
+function deliveryIdFromProvider(providerResponse: unknown): string | null {
+  if (!isRecord(providerResponse)) return null;
+  const messageId = stringValue(providerResponse.messageId);
+  if (messageId) return messageId;
+  const id = stringValue(providerResponse.id);
+  if (id) return id;
+  const response = providerResponse.response;
+  return isRecord(response) ? stringValue(response.id) ?? stringValue(response.messageId) : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
 }

@@ -251,7 +251,9 @@ describe("document email resend", () => {
     const sentMessage = sentMessages[0] as { attachments: Array<{ content: unknown }> };
     expect(sentMessage.attachments[0].content).toBeInstanceOf(Uint8Array);
     expect(new TextDecoder().decode((sentMessage.attachments[0].content as Uint8Array).slice(0, 4))).toBe("%PDF");
+    const pdfSha256 = await sha256Hex(sentMessage.attachments[0].content as Uint8Array);
     expect(sentMessage.attachments[1].content).toBeInstanceOf(Uint8Array);
+    const dteJsonBytes = sentMessage.attachments[1].content as Uint8Array;
     expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
       receptor: { correo: "legacy-contact-2@example.com" }
     });
@@ -259,6 +261,13 @@ describe("document email resend", () => {
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
       status: "SENT",
+      email_type: "dteReceipt",
+      document_status_at_send: "ACCEPTED",
+      template_version: expect.stringMatching(/^dteReceipt:sha256:[a-f0-9]{64}$/),
+      pdf_renderer_version: expect.stringMatching(/^cde-pdf:/),
+      pdf_sha256: pdfSha256,
+      dte_json_sha256: await sha256Hex(dteJsonBytes),
+      provider_delivery_id: "cf-email-1",
       provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-1" })
     }));
   });
@@ -872,6 +881,8 @@ describe("document invalidation", () => {
     expect(sentMessage.subject).toBe("Aviso de invalidación DTE-15-M001P004-000000000000009");
     expect(sentMessage.text).toBe("Hola Example Person, el CDE DTE-15-M001P004-000000000000009 quedó Invalidado ante MH.");
     expect(new TextDecoder().decode((sentMessage.attachments[0].content as Uint8Array).slice(0, 4))).toBe("%PDF");
+    const invalidationPdfSha256 = await sha256Hex(sentMessage.attachments[0].content as Uint8Array);
+    const invalidationJsonBytes = sentMessage.attachments[1].content as Uint8Array;
     expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
       receptor: { correo: "legacy-contact-2@example.com" }
     });
@@ -879,6 +890,13 @@ describe("document invalidation", () => {
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
       status: "SENT",
+      email_type: "dteInvalidation",
+      document_status_at_send: "INVALIDATED",
+      template_version: expect.stringMatching(/^dteInvalidation:sha256:[a-f0-9]{64}$/),
+      pdf_renderer_version: expect.stringMatching(/^cde-pdf:/),
+      pdf_sha256: invalidationPdfSha256,
+      dte_json_sha256: await sha256Hex(invalidationJsonBytes),
+      provider_delivery_id: "cf-email-invalidated",
       provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-invalidated" })
     }));
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_INVALIDATION_SENT", entity_id: "doc_1" }));
@@ -1796,14 +1814,35 @@ class Statement {
       }
     }
     if (this.sql.includes("INSERT INTO email_deliveries")) {
-      const [id, documentId, toEmail, status, providerResponseJson, sentAt] = this.args;
+      const [
+        id,
+        documentId,
+        toEmail,
+        status,
+        providerResponseJson,
+        sentAt,
+        emailType,
+        documentStatusAtSend,
+        templateVersion,
+        pdfRendererVersion,
+        pdfSha256,
+        dteJsonSha256,
+        providerDeliveryId
+      ] = this.args;
       this.db.emailDeliveries.push({
         id,
         document_id: documentId,
         to_email: toEmail,
         status,
         provider_response_json: providerResponseJson,
-        sent_at: sentAt
+        sent_at: sentAt,
+        email_type: emailType,
+        document_status_at_send: documentStatusAtSend,
+        template_version: templateVersion,
+        pdf_renderer_version: pdfRendererVersion,
+        pdf_sha256: pdfSha256,
+        dte_json_sha256: dteJsonSha256,
+        provider_delivery_id: providerDeliveryId
       });
     }
     if (this.sql.includes("INSERT INTO wompi_events")) {
@@ -2244,6 +2283,10 @@ async function signWompiBody(body: string, secret: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", utf8Bytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8Bytes(body)));
   return hexFromBytes(digest);
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
 
 async function generatedCertificateXml(password: string): Promise<string> {

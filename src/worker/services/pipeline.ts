@@ -372,7 +372,19 @@ export class IssuancePipeline {
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const response = await new EmailService(this.env, templates).sendReceipt(record, record.donor_email);
-      await this.repo.recordEmailDelivery({ documentId: record.id, toEmail: record.donor_email, status: "SENT", providerResponse: response });
+      await this.repo.recordEmailDelivery({
+        documentId: record.id,
+        toEmail: record.donor_email,
+        status: "SENT",
+        providerResponse: response.providerResponse,
+        emailType: response.emailType,
+        documentStatusAtSend: response.documentStatusAtSend,
+        templateVersion: response.templateVersion,
+        pdfRendererVersion: response.pdfRendererVersion,
+        pdfSha256: response.pdfSha256,
+        dteJsonSha256: response.dteJsonSha256,
+        providerDeliveryId: response.providerDeliveryId
+      });
       await this.repo.createAudit({
         action: "EMAIL_SENT",
         entityType: "dte_document",

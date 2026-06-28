@@ -119,6 +119,13 @@ CREATE TABLE IF NOT EXISTS email_deliveries (
   to_email TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('PENDING', 'SENT', 'FAILED')),
   provider_response_json TEXT NOT NULL DEFAULT '{}',
+  email_type TEXT,
+  document_status_at_send TEXT,
+  template_version TEXT,
+  pdf_renderer_version TEXT,
+  pdf_sha256 TEXT,
+  dte_json_sha256 TEXT,
+  provider_delivery_id TEXT,
   sent_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

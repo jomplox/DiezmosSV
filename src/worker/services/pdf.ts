@@ -3,6 +3,8 @@ import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import type { DteDocumentRecord } from "../types";
 
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v2";
+
 type PdfColor = ReturnType<typeof rgb>;
 
 const LOGO_X = 28;

@@ -522,13 +522,42 @@ export class Repository {
       .run();
   }
 
-  async recordEmailDelivery(input: { documentId: string; toEmail: string; status: "SENT" | "FAILED"; providerResponse?: unknown }): Promise<void> {
+  async recordEmailDelivery(input: {
+    documentId: string;
+    toEmail: string;
+    status: "SENT" | "FAILED";
+    providerResponse?: unknown;
+    emailType?: string | null;
+    documentStatusAtSend?: string | null;
+    templateVersion?: string | null;
+    pdfRendererVersion?: string | null;
+    pdfSha256?: string | null;
+    dteJsonSha256?: string | null;
+    providerDeliveryId?: string | null;
+  }): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO email_deliveries (id, document_id, to_email, status, provider_response_json, sent_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO email_deliveries (
+           id, document_id, to_email, status, provider_response_json, sent_at,
+           email_type, document_status_at_send, template_version, pdf_renderer_version,
+           pdf_sha256, dte_json_sha256, provider_delivery_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .bind(newId("email"), input.documentId, input.toEmail, input.status, JSON.stringify(input.providerResponse ?? {}), input.status === "SENT" ? nowIso() : null)
+      .bind(
+        newId("email"),
+        input.documentId,
+        input.toEmail,
+        input.status,
+        JSON.stringify(input.providerResponse ?? {}),
+        input.status === "SENT" ? nowIso() : null,
+        input.emailType ?? null,
+        input.documentStatusAtSend ?? null,
+        input.templateVersion ?? null,
+        input.pdfRendererVersion ?? null,
+        input.pdfSha256 ?? null,
+        input.dteJsonSha256 ?? null,
+        input.providerDeliveryId ?? null
+      )
       .run();
   }
 

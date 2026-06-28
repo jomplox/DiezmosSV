@@ -759,7 +759,19 @@ async function handleDocumentRoute(
     try {
       const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const response = await new EmailService(env, templates).sendReceipt(document, toEmail);
-      await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "SENT", providerResponse: response });
+      await repo.recordEmailDelivery({
+        documentId: document.id,
+        toEmail,
+        status: "SENT",
+        providerResponse: response.providerResponse,
+        emailType: response.emailType,
+        documentStatusAtSend: response.documentStatusAtSend,
+        templateVersion: response.templateVersion,
+        pdfRendererVersion: response.pdfRendererVersion,
+        pdfSha256: response.pdfSha256,
+        dteJsonSha256: response.dteJsonSha256,
+        providerDeliveryId: response.providerDeliveryId
+      });
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Reenviado a ${toEmail}`, metadata: response });
       return jsonResponse({ ok: true });
     } catch (error) {
@@ -866,7 +878,19 @@ async function handleDocumentRoute(
         try {
           const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
           const emailResponse = await new EmailService(env, templates).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
-          await repo.recordEmailDelivery({ documentId: document.id, toEmail: invalidatedDocument.donor_email, status: "SENT", providerResponse: emailResponse });
+          await repo.recordEmailDelivery({
+            documentId: document.id,
+            toEmail: invalidatedDocument.donor_email,
+            status: "SENT",
+            providerResponse: emailResponse.providerResponse,
+            emailType: emailResponse.emailType,
+            documentStatusAtSend: emailResponse.documentStatusAtSend,
+            templateVersion: emailResponse.templateVersion,
+            pdfRendererVersion: emailResponse.pdfRendererVersion,
+            pdfSha256: emailResponse.pdfSha256,
+            dteJsonSha256: emailResponse.dteJsonSha256,
+            providerDeliveryId: emailResponse.providerDeliveryId
+          });
           await repo.createAudit({
             actorType: "USER",
             actorId: actor.id,
