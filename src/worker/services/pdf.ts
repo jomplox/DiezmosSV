@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import type { DteDocumentRecord } from "../types";
@@ -208,14 +208,15 @@ function drawQr(page: PDFPage, text: string, x: number, y: number, size: number)
 
 function drawInvalidatedWatermark(page: PDFPage, font: PDFFont): void {
   const text = "INVALIDADO";
-  const size = 74;
+  const size = 116;
   page.drawText(text, {
-    x: 72,
-    y: 340,
+    x: 92,
+    y: 95,
     size,
     font,
     color: rgb(0.82, 0.03, 0.03),
-    opacity: 0.22
+    opacity: 0.2,
+    rotate: degrees(45)
   });
 }
 

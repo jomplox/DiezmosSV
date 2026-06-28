@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -58,15 +58,83 @@ describe("DTE PDF rendering", () => {
     const pdf = await renderDtePdf(invalidated);
     const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-invalidated-"));
     const pdfPath = join(dir, "cde-invalidated.pdf");
-    const txtPath = join(dir, "cde-invalidated.txt");
     writeFileSync(pdfPath, pdf);
 
-    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
-    const text = execFileSync("cat", [txtPath], { encoding: "utf8" });
+    const ppmPrefix = join(dir, "cde-invalidated");
+    execFileSync("pdftoppm", ["-r", "72", "-singlefile", pdfPath, ppmPrefix]);
+    const watermarkBounds = redPixelBounds(readPpm(`${ppmPrefix}.ppm`), {
+      top: 230,
+      bottom: 650
+    });
 
-    expect(text).toContain("INVALIDADO");
+    expect(watermarkBounds.count).toBeGreaterThan(900);
+    expect(watermarkBounds.width).toBeGreaterThan(360);
+    expect(watermarkBounds.height).toBeGreaterThan(220);
   });
 });
+
+function readPpm(path: string): { width: number; height: number; pixels: Buffer } {
+  const bytes = readFileSync(path);
+  let offset = 0;
+  const isWhitespace = (byte: number) => byte === 9 || byte === 10 || byte === 13 || byte === 32;
+  const skipWhitespaceAndComments = () => {
+    while (offset < bytes.length) {
+      if (isWhitespace(bytes[offset])) {
+        offset += 1;
+        continue;
+      }
+      if (bytes[offset] === 35) {
+        while (offset < bytes.length && bytes[offset] !== 10) offset += 1;
+        continue;
+      }
+      break;
+    }
+  };
+  const nextToken = () => {
+    skipWhitespaceAndComments();
+    const start = offset;
+    while (offset < bytes.length && !isWhitespace(bytes[offset])) offset += 1;
+    return bytes.subarray(start, offset).toString("ascii");
+  };
+
+  expect(nextToken()).toBe("P6");
+  const width = Number(nextToken());
+  const height = Number(nextToken());
+  expect(Number(nextToken())).toBe(255);
+  skipWhitespaceAndComments();
+  return { width, height, pixels: bytes.subarray(offset) };
+}
+
+function redPixelBounds(
+  image: { width: number; height: number; pixels: Buffer },
+  crop: { top: number; bottom: number }
+): { count: number; width: number; height: number } {
+  let minX = image.width;
+  let maxX = -1;
+  let minY = image.height;
+  let maxY = -1;
+  let count = 0;
+  for (let y = crop.top; y < Math.min(crop.bottom, image.height); y += 1) {
+    for (let x = 0; x < image.width; x += 1) {
+      const index = (y * image.width + x) * 3;
+      const red = image.pixels[index];
+      const green = image.pixels[index + 1];
+      const blue = image.pixels[index + 2];
+      if (red > 210 && green < 235 && blue < 235 && red - green > 18 && red - blue > 18) {
+        count += 1;
+        minX = Math.min(minX, x);
+        maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y);
+        maxY = Math.max(maxY, y);
+      }
+    }
+  }
+  return {
+    count,
+    width: maxX >= minX ? maxX - minX + 1 : 0,
+    height: maxY >= minY ? maxY - minY + 1 : 0
+  };
+}
 
 function testDocument(): DteDocumentRecord {
   return {
