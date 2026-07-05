@@ -1,7 +1,6 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
-import { buildAdvancedCdeDocument, buildCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type InvalidationInput } from "./domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
-import { buildTestWompiPayload, type TestWompiInput } from "./domain/testWompi";
 import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
@@ -112,6 +111,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ ok: true, appEnv: env.APP_ENV ?? "unknown", now: nowIso() });
   }
 
+  if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
+    return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
+  }
+
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
     if (!hasValidBootstrapOwnerToken(request, env)) {
       return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
@@ -131,13 +134,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/documents" && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return jsonResponse({
-      documents: await repo.listDteDocuments({
-        status: url.searchParams.get("status"),
-        q: url.searchParams.get("q"),
-        limit: Number(url.searchParams.get("limit") ?? 50)
-      })
-    });
+    return jsonResponse(await repo.listDteDocuments({
+      status: url.searchParams.get("status"),
+      q: url.searchParams.get("q"),
+      cursor: url.searchParams.get("cursor"),
+      limit: Number(url.searchParams.get("limit") ?? 50)
+    }));
   }
 
   if (url.pathname === "/api/credentials") {
@@ -243,32 +245,41 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (isProduction(env)) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const input = (await request.json().catch(() => ({}))) as TestWompiInput;
-    const donorDocument = input.donorDocument?.trim();
-    if (!donorDocument) {
-      return jsonResponse({ error: "missing_donor_document" }, { status: 400 });
-    }
-    let payload;
+    const input = (await request.json().catch(() => ({}))) as DirectCdeInput;
+    const donorFields = directDonorFields(input);
+    if (donorFields instanceof Response) return donorFields;
+    const config = getEmisorConfig(env);
+    const environment = await activeEmissionEnvironment(repo, env);
+    let document: Record<string, unknown>;
     try {
-      payload = buildTestWompiPayload({ ...input, donorDocument });
+      const sequence = await repo.nextControlSequence(environment, config.controlPrefix);
+      document = buildDirectCdeDocument({ ...input, ...donorFields }, config, { sequence, environment });
     } catch (error) {
       return jsonResponse({ error: "invalid_test_payload", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
     }
-    const rawBody = JSON.stringify(payload);
-    const environment = await activeEmissionEnvironment(repo, env);
-    const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, { source: "admin_test_generation" }, environment);
+    const summary = cdeDocumentSummary(document);
+    const dte = await repo.createDteDocument({
+      wompiEventId: null,
+      environment: summary.environment,
+      codigoGeneracion: summary.codigoGeneracion,
+      numeroControl: summary.numeroControl,
+      plainJson: document,
+      donorEmail: summary.donorEmail,
+      donorName: summary.donorName,
+      amountCents: summary.amountCents,
+      issuedAt: nowIso()
+    });
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
-      action: inserted ? "TEST_WOMPI_CREATED" : "TEST_WOMPI_DUPLICATE",
-      entityType: "wompi_event",
-      entityId: record.id,
-      summary: payload.IdTransaccion
+      action: "QUICK_CDE_CREATED",
+      entityType: "dte_document",
+      entityId: dte.id,
+      summary: dte.numero_control,
+      metadata: { source: "quick_direct_generation" }
     });
-    if (inserted) {
-      await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
-    }
-    return jsonResponse({ ok: true, wompiEventId: record.id, queued: inserted, transactionId: payload.IdTransaccion }, { status: inserted ? 202 : 200 });
+    await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
+    return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
   }
 
   if (url.pathname === "/api/test/dte/advanced-template" && request.method === "POST") {
@@ -276,11 +287,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (isProduction(env)) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const input = (await request.json().catch(() => ({}))) as TestWompiInput;
+    const input = (await request.json().catch(() => ({}))) as DirectCdeInput;
+    const donorFields = directDonorFields(input);
+    if (donorFields instanceof Response) return donorFields;
     try {
-      const payload = buildTestWompiPayload(input, { defaultAmount: "1.00" });
       const environment = await activeEmissionEnvironment(repo, env);
-      const draft = buildCdeDocument(payload, getEmisorConfig(env), { sequence: 1, environment });
+      const draft = buildDirectCdeDocument({ ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) }, getEmisorConfig(env), { sequence: 1, environment });
       return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
     } catch (error) {
       return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
@@ -304,15 +316,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "invalid_advanced_cde", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
     }
     const summary = cdeDocumentSummary(document);
-    const syntheticWompi = advancedCdeWompiPayload(document, summary);
-    const { record: wompiEvent } = await repo.insertWompiEvent(
-      syntheticWompi,
-      JSON.stringify(syntheticWompi),
-      { source: "admin_advanced_generation" },
-      summary.environment
-    );
     const dte = await repo.createDteDocument({
-      wompiEventId: wompiEvent.id,
+      wompiEventId: null,
       environment: summary.environment,
       codigoGeneracion: summary.codigoGeneracion,
       numeroControl: summary.numeroControl,
@@ -329,7 +334,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       entityType: "dte_document",
       entityId: dte.id,
       summary: dte.numero_control,
-      metadata: { source: "admin_advanced_generation" }
+      metadata: { source: "admin_advanced_direct_generation" }
     });
     await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
     return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
@@ -503,7 +508,7 @@ async function contingencyState(repo: Repository): Promise<Record<string, unknow
   const periodsRaw = await repo.listContingencyPeriods();
   const pendingDocuments = activeRaw
     ? await repo.listContingencyDocuments(String(activeRaw.id))
-    : await repo.listDteDocuments({ status: "CONTINGENCY_PENDING", limit: 100 });
+    : (await repo.listDteDocuments({ status: "CONTINGENCY_PENDING", limit: 100 })).documents;
   const batches = activeRaw ? await repo.listContingencyBatches(String(activeRaw.id)) : await repo.listContingencyBatches();
   const batchLines = activeRaw ? await repo.listContingencyBatchLines({ periodId: String(activeRaw.id) }) : await repo.listContingencyBatchLines();
   const events = await repo.listDteEventsByType("CONTINGENCIA");
@@ -543,48 +548,6 @@ function contingencyPeriodView(period: Record<string, unknown>): Record<string, 
   };
 }
 
-function advancedCdeWompiPayload(
-  document: Record<string, unknown>,
-  summary: ReturnType<typeof cdeDocumentSummary>
-): WompiWebhook {
-  const receptor = isRecord(document.receptor) ? document.receptor : {};
-  const direccion = isRecord(receptor.direccion) ? receptor.direccion : {};
-  const firstItem = Array.isArray(document.cuerpoDocumento) && isRecord(document.cuerpoDocumento[0]) ? document.cuerpoDocumento[0] : {};
-  return {
-    IdCuenta: "example-worker-advanced",
-    FechaTransaccion: new Date().toISOString(),
-    Monto: (summary.amountCents / 100).toFixed(2),
-    IdTransaccion: `ADV-${crypto.randomUUID()}`,
-    ResultadoTransaccion: "ExitosaAprobada",
-    CodigoAutorizacion: "ADVANCED",
-    IdIntentoPago: crypto.randomUUID(),
-    Cantidad: numberValue(firstItem.cantidad, 1),
-    EsProductiva: summary.environment === "01",
-    Aplicativo: {
-      Nombre: "DiezmosSV DTE Avanzado",
-      Url: "https://worker.example.invalid/",
-      Id: "example-worker-advanced"
-    },
-    EnlacePago: {
-      Id: 1,
-      IdentificadorEnlaceComercio: "DTE Avanzado",
-      NombreProducto: stringValue(firstItem.descripcion) ?? "DTE avanzado",
-      DescripcionProducto: "Generación avanzada desde panel"
-    },
-    Cliente: {
-      DocumentoIdentidad: stringValue(receptor.numDocumento) ?? "SIN-DOCUMENTO",
-      Nombre: summary.donorName ?? "Donante",
-      Apellidos: "",
-      Direccion: stringValue(direccion.complemento) ?? "",
-      EMail: summary.donorEmail ?? "",
-      Celular: stringValue(receptor.telefono) ?? "",
-      CodigoPais: stringValue(receptor.codPais) ?? "SV"
-    },
-    EsInternacional: stringValue(receptor.codPais) !== "SV",
-    IdExterno: summary.codigoGeneracion
-  };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -600,7 +563,7 @@ function mhRejectionMessage(result: MhResponse): string {
   if (result.observaciones.length > 0) {
     return result.observaciones.join("; ");
   }
-  return result.estado || "Invalidación rechazada por MH";
+  return result.estado || "Invalidación rechazada por el Ministerio de Hacienda";
 }
 
 function isRetryableDocumentStatus(status: string): boolean {
@@ -615,12 +578,31 @@ function normalizeEmail(value: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" ? value : null;
+function directDonorFields(input: DirectCdeInput): { donorName: string; donorDocument: string; donorEmail?: string } | Response {
+  const donorName = input.donorName?.trim();
+  if (!donorName) {
+    return jsonResponse({ error: "missing_donor_name" }, { status: 400 });
+  }
+  const donorDocument = input.donorDocument?.trim();
+  if (!donorDocument) {
+    return jsonResponse({ error: "missing_donor_document" }, { status: 400 });
+  }
+  const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
+  if (donorEmail && !normalizeEmail(donorEmail)) {
+    return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });
+  }
+  return { donorName, donorDocument, ...(donorEmail ? { donorEmail } : {}) };
 }
 
-function numberValue(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+function advancedTemplateAmount(value: unknown): string | number {
+  if (typeof value === "number") {
+    return Number.isFinite(value) && value > 0 ? value : "1.00";
+  }
+  if (typeof value === "string") {
+    const parsed = Number.parseFloat(value.trim());
+    return Number.isFinite(parsed) && parsed > 0 ? value : "1.00";
+  }
+  return "1.00";
 }
 
 async function handleCredentialsRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
@@ -802,7 +784,11 @@ async function handleDocumentRoute(
       );
     }
     if (!document.signed_jws) {
-      await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });
+      if (document.wompi_event_id) {
+        await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });
+      } else {
+        await env.ISSUANCE_QUEUE.send({ advancedDocumentId: document.id });
+      }
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }

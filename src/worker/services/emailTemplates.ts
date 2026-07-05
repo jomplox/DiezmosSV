@@ -40,7 +40,7 @@ export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
     label: "Invalidación de DTE",
     description: "Correo que recibe el donante cuando un CDE emitido queda invalidado.",
     defaultSubject: "Invalidación de CDE {{numeroControl}}",
-    defaultBody: "El Comprobante de Donación Electrónico {{numeroControl}} fue INVALIDADO ante MH. Adjuntamos la representación gráfica actualizada con marca INVALIDADO y el JSON del documento para sus registros."
+    defaultBody: "El Comprobante de Donación Electrónico {{numeroControl}} fue INVALIDADO ante el Ministerio de Hacienda. Adjuntamos la representación gráfica actualizada con marca INVALIDADO y el JSON del documento para sus registros."
   }
 ];
 

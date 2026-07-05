@@ -5,16 +5,29 @@ export interface InvalidationWindowInfo {
   canInvalidate: boolean;
   deadlineIso: string | null;
   deadlineLabel: string | null;
+  title: string;
   remainingLabel: string;
   tone: "ok" | "warning" | "expired" | "pending";
 }
 
 export function invalidationWindowInfo(document: DteDocument, reference: Date = new Date()): InvalidationWindowInfo {
+  if (document.status === "INVALIDATED") {
+    return {
+      canInvalidate: false,
+      deadlineIso: null,
+      deadlineLabel: null,
+      title: "CDE invalidado",
+      remainingLabel: "Este CDE ya fue invalidado ante el Ministerio de Hacienda.",
+      tone: "pending"
+    };
+  }
+
   if (document.status !== "ACCEPTED" || !document.sello_recibido || !document.accepted_at) {
     return {
       canInvalidate: false,
       deadlineIso: null,
       deadlineLabel: null,
+      title: "Ventana de invalidación CDE",
       remainingLabel: "Disponible cuando el CDE tenga sello recibido.",
       tone: "pending"
     };
@@ -27,6 +40,7 @@ export function invalidationWindowInfo(document: DteDocument, reference: Date = 
       canInvalidate: false,
       deadlineIso,
       deadlineLabel,
+      title: "Ventana de invalidación CDE",
       remainingLabel: "La ventana legal de invalidación ya cerró.",
       tone: "expired"
     };
@@ -37,6 +51,7 @@ export function invalidationWindowInfo(document: DteDocument, reference: Date = 
     canInvalidate: true,
     deadlineIso,
     deadlineLabel,
+    title: "Ventana de invalidación CDE",
     remainingLabel: `Quedan ${formatRemainingTime(remainingMs)} para invalidar este CDE.`,
     tone: remainingMs <= 24 * 60 * 60 * 1000 ? "warning" : "ok"
   };

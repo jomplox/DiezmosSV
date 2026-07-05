@@ -118,7 +118,7 @@ export interface EmisorConfig {
 
 export interface DteDocumentRecord {
   id: string;
-  wompi_event_id: string;
+  wompi_event_id: string | null;
   tipo_dte: "15";
   environment: Ambiente;
   codigo_generacion: string;

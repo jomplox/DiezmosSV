@@ -29,6 +29,16 @@ describe("invalidation window presentation", () => {
     expect(info.remainingLabel).toBe("Disponible cuando el CDE tenga sello recibido.");
     expect(info.tone).toBe("pending");
   });
+
+  it("does not show invalidation-window guidance for already invalidated CDEs", () => {
+    const info = invalidationWindowInfo({ ...testDocument(), status: "INVALIDATED" }, new Date("2026-06-29T02:59:59.000Z"));
+
+    expect(info.canInvalidate).toBe(false);
+    expect(info.deadlineIso).toBeNull();
+    expect(info.title).toBe("CDE invalidado");
+    expect(info.remainingLabel).toBe("Este CDE ya fue invalidado ante el Ministerio de Hacienda.");
+    expect(info.tone).toBe("pending");
+  });
 });
 
 function testDocument(): DteDocument {

@@ -23,6 +23,39 @@ describe("Worker fetch error handling", () => {
 });
 
 describe("owner bootstrap", () => {
+  it("reports bootstrap availability before the first user exists", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ bootstrapAvailable: true });
+  });
+
+  it("reports bootstrap unavailable after an owner exists", async () => {
+    const db = new InMemoryD1();
+    db.users.push({
+      id: "user_owner",
+      email: "owner@example.org",
+      name: "Owner",
+      role: "OWNER",
+      password_hash: "hash",
+      password_salt: "salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ bootstrapAvailable: false });
+  });
+
   it("rejects first-owner bootstrap when the setup token is missing", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
@@ -64,6 +97,104 @@ describe("owner bootstrap", () => {
     });
     expect(db.users).toHaveLength(1);
     expect(db.users[0].role).toBe("OWNER");
+  });
+});
+
+describe("document listing", () => {
+  it("returns a bounded page with a cursor for older matching documents", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({
+        id: "doc_1",
+        codigo_generacion: "11111111-1111-4111-8111-111111111111",
+        numero_control: "DTE-15-M001P004-000000000000001",
+        donor_name: "Staging Smoke",
+        donor_email: "one@example.org",
+        created_at: "2026-06-26T03:00:00.000Z"
+      }),
+      testDocument({
+        id: "doc_2",
+        codigo_generacion: "70000003-2222-4222-8222-700000032222",
+        numero_control: "DTE-15-M001P004-000000000000002",
+        donor_name: "Staging Smoke",
+        donor_email: "two@example.org",
+        created_at: "2026-06-26T02:00:00.000Z"
+      }),
+      testDocument({
+        id: "doc_3",
+        codigo_generacion: "33333333-3333-4333-8333-333333333333",
+        numero_control: "DTE-15-M001P004-000000000000003",
+        donor_name: "Staging Smoke",
+        donor_email: "three@example.org",
+        created_at: "2026-06-26T01:00:00.000Z"
+      })
+    );
+
+    const firstResponse = await worker.fetch(
+      new Request("https://example.org/api/documents?q=Smoke&limit=2", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(firstResponse.status).toBe(200);
+    const firstPage = await firstResponse.json() as { documents: DteDocumentRecord[]; hasMore: boolean; nextCursor: string | null; limit: number };
+    expect(firstPage.documents.map((document) => document.id)).toEqual(["doc_1", "doc_2"]);
+    expect(firstPage.hasMore).toBe(true);
+    expect(firstPage.nextCursor).toBeTruthy();
+    expect(firstPage.limit).toBe(2);
+
+    const secondResponse = await worker.fetch(
+      new Request(`https://example.org/api/documents?q=Smoke&limit=2&cursor=${encodeURIComponent(firstPage.nextCursor ?? "")}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(secondResponse.status).toBe(200);
+    await expect(secondResponse.json()).resolves.toMatchObject({
+      documents: [expect.objectContaining({ id: "doc_3" })],
+      hasMore: false,
+      nextCursor: null,
+      limit: 2
+    });
+  });
+
+  it("uses indexed token-prefix search instead of scanning document text columns", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({
+        id: "doc_1",
+        codigo_generacion: "11111111-1111-4111-8111-111111111111",
+        numero_control: "DTE-15-M001P004-000000000000001",
+        donor_name: "Staging Smoke",
+        donor_email: "smoke@example.org",
+        created_at: "2026-06-26T03:00:00.000Z"
+      }),
+      testDocument({
+        id: "doc_2",
+        codigo_generacion: "70000003-2222-4222-8222-700000032222",
+        numero_control: "DTE-15-M001P004-000000000000002",
+        donor_name: "Example Person",
+        donor_email: "donor@example.org",
+        created_at: "2026-06-26T02:00:00.000Z"
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?q=Stag%20Smok&limit=10", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const page = await response.json() as { documents: DteDocumentRecord[] };
+    expect(page.documents.map((document) => document.id)).toEqual(["doc_1"]);
+    expect(db.preparedSql.some((sql) => sql.includes("dte_document_search") && sql.includes("MATCH ?"))).toBe(true);
+    expect(db.preparedSql.some((sql) => sql.includes("LIKE ? ESCAPE"))).toBe(false);
   });
 });
 
@@ -1075,7 +1206,7 @@ describe("F960 CSV export", () => {
 });
 
 describe("advanced CDE generation", () => {
-  it("uses the UI-selected emission environment when creating quick DTE records", async () => {
+  it("creates quick DTE records directly without a synthetic Wompi event", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -1111,13 +1242,102 @@ describe("advanced CDE generation", () => {
       }),
       env(db, {
         APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
         ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
       })
     );
 
     expect(response.status).toBe(202);
-    expect(db.wompiEvents[0]).toMatchObject({ environment: "01" });
-    expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, queued: true });
+    expect(db.wompiEvents).toHaveLength(0);
+    expect(db.documents).toHaveLength(1);
+    const generated = JSON.parse(db.documents[0].plain_json);
+    expect(generated.identificacion).toMatchObject({ ambiente: "01", tipoDte: "15" });
+    expect(generated.receptor.nombre).toBe("Example Person");
+    expect(generated.otrosDocumentos[0]).toMatchObject({
+      descDocumento: "Generación directa",
+      detalleDocumento: "Donación offline"
+    });
+    expect(db.documents[0]).toMatchObject({
+      wompi_event_id: null,
+      donor_email: "donor@example.org",
+      donor_name: "Example Person",
+      amount_cents: 100,
+      status: "PENDING"
+    });
+    expect(queued).toEqual([{ advancedDocumentId: db.documents[0].id }]);
+  });
+
+  it("accepts a quick DTE donor document type outside DUI and NIT", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          amount: "5.00",
+          donorName: "Donante Offline",
+          donorDocumentType: "37",
+          donorDocument: "RECIBO-123",
+          donorEmail: "offline@example.org"
+        })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.wompiEvents).toHaveLength(0);
+    expect(db.documents).toHaveLength(1);
+    const generated = JSON.parse(db.documents[0].plain_json);
+    expect(generated.receptor).toMatchObject({
+      tipoDocumento: "37",
+      numDocumento: "RECIBO-123",
+      nombre: "Donante Offline"
+    });
+    expect(queued).toEqual([{ advancedDocumentId: db.documents[0].id }]);
+  });
+
+  it("rejects malformed donor email on quick DTE creation", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          amount: "5.00",
+          donorName: "Donante Offline",
+          donorDocumentType: "37",
+          donorDocument: "RECIBO-123",
+          donorEmail: "correo-invalido"
+        })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_donor_email", message: "Ingrese un correo válido" });
+    expect(db.documents).toHaveLength(0);
+    expect(queued).toEqual([]);
   });
 
   it("opens the advanced template with a default amount when quick amount is blank", async () => {
@@ -1131,7 +1351,7 @@ describe("advanced CDE generation", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ amount: "", donorDocument: "100000001" })
+        body: JSON.stringify({ amount: "", donorName: "Example Person", donorDocumentType: "03", donorDocument: "A1234567" })
       }),
       env(db, {
         APP_ENV: "staging",
@@ -1140,7 +1360,8 @@ describe("advanced CDE generation", () => {
     );
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { draft: { resumen: { valorTotal: number } } };
+    const body = (await response.json()) as { draft: { receptor: { tipoDocumento: string; numDocumento: string }; resumen: { valorTotal: number } } };
+    expect(body.draft.receptor).toMatchObject({ tipoDocumento: "03", numDocumento: "A1234567" });
     expect(body.draft.resumen.valorTotal).toBe(1);
   });
 
@@ -1167,6 +1388,7 @@ describe("advanced CDE generation", () => {
 
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toMatchObject({ ok: true, queued: true });
+    expect(db.wompiEvents).toHaveLength(0);
     expect(db.documents).toHaveLength(1);
     const generated = JSON.parse(db.documents[0].plain_json);
     expect(generated.identificacion).toMatchObject({
@@ -1181,6 +1403,7 @@ describe("advanced CDE generation", () => {
     expect(generated.receptor.nombre).toBe("Example Person Advanced");
     expect(generated.cuerpoDocumento[0].descripcion).toBe("Diezmo avanzado");
     expect(db.documents[0]).toMatchObject({
+      wompi_event_id: null,
       donor_email: "advanced@example.org",
       donor_name: "Example Person Advanced",
       amount_cents: 12345,
@@ -1630,6 +1853,7 @@ class InMemoryD1 {
   readonly sessions: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
   readonly documents: DteDocumentRecord[] = [];
+  readonly preparedSql: string[] = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly contingencies: Array<Record<string, unknown>> = [];
@@ -1641,6 +1865,7 @@ class InMemoryD1 {
   sessionUser: Record<string, string> | null = null;
 
   prepare(sql: string): Statement {
+    this.preparedSql.push(sql);
     return new Statement(this, sql);
   }
 }
@@ -1723,6 +1948,27 @@ class Statement {
     }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
+      if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
+        let argIndex = 0;
+        if (this.sql.includes("status = ?")) {
+          const status = String(this.args[argIndex]);
+          argIndex += 1;
+          documents = documents.filter((document) => document.status === status);
+        }
+        if (this.sql.includes("dte_document_search MATCH ?")) {
+          const ftsQuery = String(this.args[argIndex] ?? "");
+          argIndex += 1;
+          documents = documents.filter((document) => documentMatchesFtsQuery(document, ftsQuery));
+        }
+        if (this.sql.includes("created_at < ?")) {
+          const createdAt = String(this.args[argIndex]);
+          const id = String(this.args[argIndex + 2]);
+          documents = documents.filter((document) => document.created_at < createdAt || (document.created_at === createdAt && document.id < id));
+        }
+        const limit = Number(this.args.at(-1) ?? 100);
+        documents.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)) || String(right.id).localeCompare(String(left.id)));
+        return { results: documents.slice(0, limit) as T[] };
+      }
       if (this.sql.includes("status = ?")) {
         const status = String(this.args[0]);
         documents = documents.filter((document) => document.status === status);
@@ -1866,7 +2112,7 @@ class Statement {
       const [id, wompiEventId, environment, codigoGeneracion, numeroControl, status, plainJson, donorEmail, donorName, amountCents, issuedAt, contingencyPeriodId] = this.args;
       this.db.documents.push({
         id: String(id),
-        wompi_event_id: String(wompiEventId),
+        wompi_event_id: wompiEventId == null ? null : String(wompiEventId),
         tipo_dte: "15",
         environment: environment === "01" ? "01" : "00",
         codigo_generacion: String(codigoGeneracion),
@@ -2154,7 +2400,29 @@ class Statement {
   }
 }
 
-function testDocument(): DteDocumentRecord {
+function documentMatchesFtsQuery(document: DteDocumentRecord, query: string): boolean {
+  const prefixes = query
+    .split(/\s+AND\s+/i)
+    .map((part) => part.replace(/\*$/, "").toLowerCase())
+    .filter(Boolean);
+  if (prefixes.length === 0) {
+    return true;
+  }
+  const controlTail = document.numero_control.split("-").at(-1) ?? "";
+  const corpus = [
+    document.codigo_generacion,
+    document.codigo_generacion.replace(/[^a-z0-9]+/gi, ""),
+    document.numero_control,
+    document.numero_control.replace(/[^a-z0-9]+/gi, ""),
+    controlTail.replace(/^0+/, "") || controlTail,
+    document.donor_email,
+    document.donor_name
+  ];
+  const tokens = corpus.flatMap((value) => String(value ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? []);
+  return prefixes.every((prefix) => tokens.some((token) => token.startsWith(prefix)));
+}
+
+function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRecord {
   return {
     id: "doc_1",
     wompi_event_id: "wompi_1",
@@ -2180,7 +2448,8 @@ function testDocument(): DteDocumentRecord {
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
     created_at: "2026-06-26T01:46:47.015Z",
-    updated_at: "2026-06-26T01:46:48.000Z"
+    updated_at: "2026-06-26T01:46:48.000Z",
+    ...overrides
   };
 }
 

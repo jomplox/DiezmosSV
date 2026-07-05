@@ -1,6 +1,6 @@
 export interface DteDocument {
   id: string;
-  wompi_event_id: string;
+  wompi_event_id: string | null;
   tipo_dte: "15";
   environment: "00" | "01";
   codigo_generacion: string;
@@ -19,6 +19,13 @@ export interface DteDocument {
   contingency_period_id: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DocumentListPage {
+  documents: DteDocument[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  limit: number;
 }
 
 export interface User {

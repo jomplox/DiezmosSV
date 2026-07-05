@@ -3,6 +3,18 @@ import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 
+export interface DteDocumentListPage {
+  documents: DteDocumentRecord[];
+  hasMore: boolean;
+  nextCursor: string | null;
+  limit: number;
+}
+
+interface DteDocumentCursor {
+  createdAt: string;
+  id: string;
+}
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -77,7 +89,7 @@ export class Repository {
   }
 
   async createDteDocument(input: {
-    wompiEventId: string;
+    wompiEventId?: string | null;
     environment: Ambiente;
     codigoGeneracion: string;
     numeroControl: string;
@@ -99,7 +111,7 @@ export class Repository {
       )
       .bind(
         id,
-        input.wompiEventId,
+        input.wompiEventId ?? null,
         input.environment,
         input.codigoGeneracion,
         input.numeroControl,
@@ -112,11 +124,14 @@ export class Repository {
         input.contingencyPeriodId ?? null
       )
       .run();
-    await this.db.prepare("UPDATE wompi_events SET created_document_id = ?, processed_at = ? WHERE id = ?").bind(id, nowIso(), input.wompiEventId).run();
+    if (input.wompiEventId) {
+      await this.db.prepare("UPDATE wompi_events SET created_document_id = ?, processed_at = ? WHERE id = ?").bind(id, nowIso(), input.wompiEventId).run();
+    }
     const record = await this.getDteDocument(id);
     if (!record) {
       throw new Error("No se pudo leer el documento DTE creado");
     }
+    await this.indexDteDocument(record);
     return record;
   }
 
@@ -128,25 +143,41 @@ export class Repository {
     return this.db.prepare("SELECT * FROM dte_documents WHERE wompi_event_id = ?").bind(id).first<DteDocumentRecord>();
   }
 
-  async listDteDocuments(params: { status?: string | null; q?: string | null; limit?: number } = {}): Promise<DteDocumentRecord[]> {
-    const limit = Math.min(params.limit ?? 50, 100);
+  async listDteDocuments(params: { status?: string | null; q?: string | null; limit?: number; cursor?: string | null } = {}): Promise<DteDocumentListPage> {
+    const limit = normalizeDocumentListLimit(params.limit);
     const filters: string[] = [];
     const bindings: Array<string | number> = [];
     if (params.status) {
-      filters.push("status = ?");
+      filters.push("dte_documents.status = ?");
       bindings.push(params.status);
     }
-    if (params.q) {
-      filters.push("(codigo_generacion LIKE ? OR numero_control LIKE ? OR donor_email LIKE ? OR donor_name LIKE ?)");
-      const q = `%${params.q}%`;
-      bindings.push(q, q, q, q);
+    const ftsQuery = buildDteSearchQuery(params.q);
+    if (ftsQuery) {
+      filters.push("dte_document_search MATCH ?");
+      bindings.push(ftsQuery);
+    }
+    const cursor = parseDocumentCursor(params.cursor);
+    if (cursor) {
+      filters.push("(dte_documents.created_at < ? OR (dte_documents.created_at = ? AND dte_documents.id < ?))");
+      bindings.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    return this.db
-      .prepare(`SELECT * FROM dte_documents ${where} ORDER BY created_at DESC LIMIT ?`)
-      .bind(...bindings, limit)
+    const from = ftsQuery
+      ? "FROM dte_documents JOIN dte_document_search ON dte_document_search.document_id = dte_documents.id"
+      : "FROM dte_documents";
+    const rows = await this.db
+      .prepare(`SELECT dte_documents.* ${from} ${where} ORDER BY dte_documents.created_at DESC, dte_documents.id DESC LIMIT ?`)
+      .bind(...bindings, limit + 1)
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
+    const documents = rows.slice(0, limit);
+    const hasMore = rows.length > limit;
+    return {
+      documents,
+      hasMore,
+      nextCursor: hasMore && documents.length > 0 ? encodeDocumentCursor(documents[documents.length - 1]) : null,
+      limit
+    };
   }
 
   async listAcceptedDteDocumentsForExport(): Promise<DteDocumentRecord[]> {
@@ -172,6 +203,7 @@ export class Repository {
       )
       .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, input.status, nowIso(), id)
       .run();
+    await this.indexDteDocumentById(id);
   }
 
   async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
@@ -191,6 +223,36 @@ export class Repository {
 
   async updateDocumentDonorEmail(id: string, email: string): Promise<void> {
     await this.db.prepare("UPDATE dte_documents SET donor_email = ?, updated_at = ? WHERE id = ?").bind(email, nowIso(), id).run();
+    await this.indexDteDocumentById(id);
+  }
+
+  private async indexDteDocumentById(id: string): Promise<void> {
+    const record = await this.getDteDocument(id);
+    if (record) {
+      await this.indexDteDocument(record);
+    }
+  }
+
+  private async indexDteDocument(record: DteDocumentRecord): Promise<void> {
+    await this.db.prepare("DELETE FROM dte_document_search WHERE document_id = ?").bind(record.id).run();
+    await this.db
+      .prepare(
+        `INSERT INTO dte_document_search (
+          document_id, codigo_generacion, codigo_generacion_compact, numero_control, numero_control_compact,
+          numero_control_serial, donor_email, donor_name
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        record.id,
+        record.codigo_generacion,
+        compactSearchIdentifier(record.codigo_generacion),
+        record.numero_control,
+        compactSearchIdentifier(record.numero_control),
+        controlSerial(record.numero_control),
+        record.donor_email,
+        record.donor_name
+      )
+      .run();
   }
 
   async createAudit(input: {
@@ -657,4 +719,53 @@ export class Repository {
       .run();
     await this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(nowIso(), userId).run();
   }
+}
+
+function normalizeDocumentListLimit(value: number | undefined): number {
+  if (!Number.isFinite(value) || !value || value < 1) {
+    return 50;
+  }
+  return Math.min(Math.trunc(value), 100);
+}
+
+function encodeDocumentCursor(record: DteDocumentRecord): string {
+  return `${encodeURIComponent(record.created_at)}|${encodeURIComponent(record.id)}`;
+}
+
+function parseDocumentCursor(value: string | null | undefined): DteDocumentCursor | null {
+  if (!value) {
+    return null;
+  }
+  const parts = value.split("|");
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
+    return null;
+  }
+  try {
+    return {
+      createdAt: decodeURIComponent(parts[0]),
+      id: decodeURIComponent(parts[1])
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildDteSearchQuery(value: string | null | undefined): string | null {
+  const tokens = Array.from((value ?? "").toLowerCase().matchAll(/[\p{L}\p{N}]+/gu), (match) => match[0])
+    .filter((token) => token.length > 0)
+    .slice(0, 8)
+    .map((token) => token.slice(0, 64));
+  if (tokens.length === 0) {
+    return null;
+  }
+  return tokens.map((token) => `${token}*`).join(" AND ");
+}
+
+function compactSearchIdentifier(value: string | null | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function controlSerial(value: string | null | undefined): string {
+  const lastSegment = (value ?? "").split("-").at(-1) ?? "";
+  return lastSegment.replace(/^0+/, "") || lastSegment || "";
 }

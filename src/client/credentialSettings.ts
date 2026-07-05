@@ -27,13 +27,13 @@ export const credentialSettingsSections: CredentialSettingsSection[] = [
   },
   {
     id: "mh",
-    label: "MH API",
-    description: "Usuario y contraseña de Hacienda.",
+    label: "API del Ministerio de Hacienda",
+    description: "Usuario y contraseña del Ministerio de Hacienda.",
     groupIds: ["mhTest", "mhProduction"]
   },
   {
     id: "firmador",
-    label: "Firmador MH",
+    label: "Firmador del Ministerio de Hacienda",
     description: "Certificado y llave privada.",
     groupIds: ["signer"]
   },

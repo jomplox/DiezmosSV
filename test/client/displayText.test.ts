@@ -22,6 +22,10 @@ describe("client display text", () => {
     expect(auditActionLabel("USER_PASSWORD_RESET")).toBe("Contraseña restablecida");
     expect(auditActionLabel("DTE_INVALIDATION_REJECTED")).toBe("Invalidación rechazada");
     expect(userFacingErrorMessage("Invalid credentials")).toBe("Credenciales inválidas");
+    expect(userFacingErrorMessage("MH auth failed")).toBe("Falló la autenticación con el Ministerio de Hacienda.");
+    expect(userFacingErrorMessage("MH unavailable")).toBe("El Ministerio de Hacienda no está disponible.");
+    expect(userFacingErrorMessage("MH auth failed: 401")).toBe("Falló la autenticación con el Ministerio de Hacienda: 401");
+    expect(userFacingErrorMessage("MH unavailable: 503")).toBe("El Ministerio de Hacienda no está disponible: 503");
     expect(userFacingErrorMessage("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled")).toBe("Configure el servicio de correo antes de enviar comprobantes.");
   });
 

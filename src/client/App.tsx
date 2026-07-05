@@ -32,7 +32,8 @@ import {
   Users
 } from "lucide-react";
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { openNativeDatePicker } from "./datePicker";
 import { credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
@@ -72,6 +73,9 @@ import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
 
+const DOCUMENT_PAGE_SIZE = 50;
+const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
+
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
@@ -110,9 +114,14 @@ export function App() {
   const [contingency, setContingency] = useState<ContingencyState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
+  const [debouncedQuery, setDebouncedQuery] = useState("");
   const [status, setStatus] = useState<string>("");
+  const [documentNextCursor, setDocumentNextCursor] = useState<string | null>(null);
+  const [documentsHasMore, setDocumentsHasMore] = useState(false);
+  const [documentsLoadingMore, setDocumentsLoadingMore] = useState(false);
   const [toast, setToast] = useState("");
   const [authNotice, setAuthNotice] = useState("");
+  const [authBootstrapStatus, setAuthBootstrapStatus] = useState<AuthBootstrapStatus | null>(null);
   const [busy, setBusy] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
@@ -134,6 +143,7 @@ export function App() {
     amount: "",
     donorName: "",
     donorEmail: "",
+    donorDocumentType: "13",
     donorDocument: "",
     donorPhone: ""
   });
@@ -149,7 +159,7 @@ export function App() {
   const [contingencyInput, setContingencyInput] = useState<ContingencyOpenInput>({
     environment: "00",
     tipoContingencia: "2",
-    reason: "MH no disponible"
+    reason: "Ministerio de Hacienda no disponible"
   });
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
@@ -164,19 +174,60 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const handle = window.setTimeout(() => setDebouncedQuery(query.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [query]);
+
+  useEffect(() => {
     if (!token) {
       return;
     }
     void refresh().catch(handleApiFailure);
-  }, [token, filteredStatus, query, view, exportStartDate, exportEndDate]);
+  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate]);
+
+  useEffect(() => {
+    if (token) {
+      return;
+    }
+    let cancelled = false;
+    setAuthBootstrapStatus(null);
+    void api<AuthBootstrapStatus>("/api/auth/bootstrap-status", "")
+      .then((result) => {
+        if (!cancelled) setAuthBootstrapStatus(result);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthBootstrapStatus({ bootstrapAvailable: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
+
+  async function fetchDocumentPage(options: { append?: boolean; cursor?: string | null; query?: string; status?: string } = {}) {
+    const params = new URLSearchParams();
+    const effectiveStatus = options.status ?? filteredStatus;
+    const effectiveQuery = options.query ?? debouncedQuery;
+    if (effectiveStatus) params.set("status", effectiveStatus);
+    if (effectiveQuery) params.set("q", effectiveQuery);
+    if (options.cursor) params.set("cursor", options.cursor);
+    params.set("limit", String(DOCUMENT_PAGE_SIZE));
+    const page = await api<DocumentListPage>(`/api/documents?${params}`, token);
+    setDocuments((current) => options.append ? [...current, ...page.documents] : page.documents);
+    setDocumentNextCursor(page.nextCursor);
+    setDocumentsHasMore(page.hasMore);
+    if (!options.append) {
+      setSelectedId((current) => {
+        if (current && page.documents.some((document) => document.id === current)) {
+          return current;
+        }
+        return page.documents[0]?.id ?? null;
+      });
+    }
+    return page;
+  }
 
   async function refresh() {
-    const params = new URLSearchParams();
-    if (filteredStatus) params.set("status", filteredStatus);
-    if (query) params.set("q", query);
-    const docs = await api<{ documents: DteDocument[] }>(`/api/documents?${params}`, token);
-    setDocuments(docs.documents);
-    if (!selectedId && docs.documents[0]) setSelectedId(docs.documents[0].id);
+    await fetchDocumentPage();
     const contingencyResult = await api<{ contingency: ContingencyState }>("/api/contingency", token);
     setContingency(contingencyResult.contingency);
     if (view === "audit") {
@@ -203,6 +254,16 @@ export function App() {
       }
       const params = exportParams(exportStartDate, exportEndDate);
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
+    }
+  }
+
+  async function loadMoreDocuments() {
+    if (!documentNextCursor || documentsLoadingMore) return;
+    setDocumentsLoadingMore(true);
+    try {
+      await fetchDocumentPage({ append: true, cursor: documentNextCursor });
+    } finally {
+      setDocumentsLoadingMore(false);
     }
   }
 
@@ -240,18 +301,9 @@ export function App() {
   }
 
   async function createTestDte() {
-    const amountError = testAmountValidationMessage(testInput.amount);
-    if (amountError) {
-      setToast(amountError);
-      return;
-    }
-    if (!testInput.donorDocument.trim()) {
-      setToast("Ingrese documento del donante para la prueba");
-      return;
-    }
-    const donorDuiError = duiValidationMessage(testInput.donorDocument);
-    if (donorDuiError) {
-      setToast(donorDuiError);
+    const validationError = quickDteValidationMessage(testInput);
+    if (validationError) {
+      setToast(validationError);
       return;
     }
     await runAction("test-dte", async () => {
@@ -263,6 +315,11 @@ export function App() {
   }
 
   async function openAdvancedDte() {
+    const validationError = quickDteValidationMessage(testInput, { requireAmount: false });
+    if (validationError) {
+      setToast(validationError);
+      return;
+    }
     await runAction("advanced-template", async () => {
       const result = await api<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", token, { method: "POST", body: testInput });
       setAdvancedDteTemplate(result.draft);
@@ -538,7 +595,7 @@ export function App() {
   }
 
   if (!token || !user) {
-    return <AuthScreen notice={authNotice} onLogin={login} onBootstrap={bootstrap} />;
+    return <AuthScreen notice={authNotice} onLogin={login} onBootstrap={bootstrap} bootstrapAvailable={shouldShowBootstrapMode(authBootstrapStatus)} />;
   }
 
   function handleApiFailure(error: unknown) {
@@ -658,6 +715,12 @@ export function App() {
               </div>
               <Stats documents={documents} />
               <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
+              <DocumentListFooter
+                count={documents.length}
+                hasMore={documentsHasMore}
+                loading={documentsLoadingMore}
+                onLoadMore={loadMoreDocuments}
+              />
             </div>
               <DetailPanel
                 selected={selected}
@@ -950,7 +1013,7 @@ function ContingencyPanel({
 
       <div className="stats contingency-stats">
         <Metric label="Pendientes" value={summary.pending} tone="warn" />
-        <Metric label="Lotes MH" value={summary.batches} tone="neutral" />
+        <Metric label="Lotes del Ministerio de Hacienda" value={summary.batches} tone="neutral" />
         <Metric label="CDE aceptados" value={summary.batchAccepted} tone="ok" />
         <Metric label="CDE en lote" value={summary.batchPending} tone="warn" />
         <Metric label="CDE rechazados" value={summary.batchRejected} tone="bad" />
@@ -997,7 +1060,7 @@ function ContingencyPanel({
       <section className="contingency-panel">
         <div className="panel-head">
           <div>
-            <h2>Lotes MH</h2>
+              <h2>Lotes del Ministerio de Hacienda</h2>
             <p>Envío por /recepcionlote y consulta por código de lote.</p>
           </div>
           <FileText size={20} />
@@ -1053,7 +1116,7 @@ function ContingencyPanel({
         <section className="contingency-panel">
           <div className="panel-head">
             <div>
-              <h2>Eventos MH</h2>
+              <h2>Eventos del Ministerio de Hacienda</h2>
               <p>Transmisiones reales a /contingencia.</p>
             </div>
             <History size={20} />
@@ -1413,7 +1476,7 @@ function CredentialsPanel({
         return;
       }
       if (!trimmed.startsWith("<") || !trimmed.includes("CertificadoMH")) {
-        setCertificateFileError("El archivo no parece ser el certificado .crt/.xml de MH para firma.");
+        setCertificateFileError("El archivo no parece ser el certificado .crt/.xml del Ministerio de Hacienda para firma.");
         return;
       }
       setCertificateFileError("");
@@ -1547,8 +1610,8 @@ function CredentialsPanel({
                       <small>Este cambio afecta únicamente los DTE nuevos. Los documentos ya emitidos conservan su ambiente original.</small>
                     </div>
                     <div className="credential-env-heading">
-                      <span>Credenciales API MH a editar</span>
-                      <small>Este selector no cambia el ambiente activo; solo escoge cuál usuario y contraseña MH desea revisar o rotar.</small>
+                      <span>Credenciales API del Ministerio de Hacienda a editar</span>
+                      <small>Este selector no cambia el ambiente activo; solo escoge cuál usuario y contraseña del Ministerio de Hacienda desea revisar o rotar.</small>
                     </div>
                     <div className="segmented credential-env">
                       <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
@@ -1556,7 +1619,7 @@ function CredentialsPanel({
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
+                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API del Ministerio de Hacienda configuradas" : "credenciales API del Ministerio de Hacienda pendientes"}</span>
                     </div>
                   </div>
                 )}
@@ -1564,7 +1627,7 @@ function CredentialsPanel({
                 {activeSection === "mh" && (
                   <div className="credential-section-content">
                     <div className="credential-env-heading">
-                      <span>Credenciales API MH a editar</span>
+                      <span>Credenciales API del Ministerio de Hacienda a editar</span>
                       <small>Seleccione el ambiente cuyas credenciales API quiere reemplazar.</small>
                     </div>
                     <div className="segmented credential-env">
@@ -1573,22 +1636,22 @@ function CredentialsPanel({
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API MH configuradas" : "credenciales API MH pendientes"}</span>
+                      <span>{activeEnvironmentLabel}: {activeMhGroup?.ready ? "credenciales API del Ministerio de Hacienda configuradas" : "credenciales API del Ministerio de Hacienda pendientes"}</span>
                     </div>
                     <div className="credential-fields">
                       <div className="credential-section-title span-2">
-                        <h3>Credenciales API MH ({activeEnvironmentLabel})</h3>
+                        <h3>Credenciales API del Ministerio de Hacienda ({activeEnvironmentLabel})</h3>
                         <p>Estos dos campos son los únicos que cambian con el selector de ambiente.</p>
                       </div>
                       <label>
-                        <CredentialFieldLabel label="Usuario MH API" configured={credentialConfigured(status, mhUserSecret)} />
+                        <CredentialFieldLabel label="Usuario API del Ministerio de Hacienda" configured={credentialConfigured(status, mhUserSecret)} />
                         <CredentialActiveValue status={status} name={mhUserSecret} />
-                        <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhUserSecret, "Nuevo usuario MH API")} autoComplete="off" />
+                        <input value={input.mhUser} onChange={(event) => onChange({ ...input, mhUser: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhUserSecret, "Nuevo usuario API del Ministerio de Hacienda")} autoComplete="off" />
                       </label>
                       <label>
-                        <CredentialFieldLabel label="Contraseña MH API" configured={credentialConfigured(status, mhPasswordSecret)} />
+                        <CredentialFieldLabel label="Contraseña API del Ministerio de Hacienda" configured={credentialConfigured(status, mhPasswordSecret)} />
                         <CredentialActiveValue status={status} name={mhPasswordSecret} />
-                        <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña MH API")} type="password" autoComplete="new-password" />
+                        <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña API del Ministerio de Hacienda")} type="password" autoComplete="new-password" />
                       </label>
                     </div>
                   </div>
@@ -1597,11 +1660,11 @@ function CredentialsPanel({
                 {activeSection === "firmador" && (
                   <div className="credential-fields">
                     <div className="credential-section-title span-2">
-                      <h3>Firmador MH</h3>
+                      <h3>Firmador del Ministerio de Hacienda</h3>
                       <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
                     </div>
                     <div className="credential-field-block span-2">
-                      <CredentialFieldLabel label="Certificado firmador MH (.crt/.xml)" configured={signerConfigured} />
+                      <CredentialFieldLabel label="Certificado firmador del Ministerio de Hacienda (.crt/.xml)" configured={signerConfigured} />
                       <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
                       <div className="credential-file-row">
                         <label className="file-upload-button">
@@ -1618,8 +1681,8 @@ function CredentialsPanel({
                           {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
                         </span>
                       </div>
-                      <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml de MH o cargue el archivo")} spellCheck={false} />
-                      <small>Este campo es para reemplazar el certificado que MH entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
+                      <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml del Ministerio de Hacienda o cargue el archivo")} spellCheck={false} />
+                      <small>Este campo es para reemplazar el certificado que el Ministerio de Hacienda entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
                       {certificateFileError && <small className="field-error">{certificateFileError}</small>}
                     </div>
                     <label>
@@ -1965,7 +2028,7 @@ function IssuerConfigEditor({
       <div className="issuer-config-grid">
         <div className="credential-subsection span-2">
           <h4>Identificación fiscal</h4>
-          <p>Información legal del emisor ante MH.</p>
+          <p>Información legal del emisor ante el Ministerio de Hacienda.</p>
         </div>
         <label>
           <span>Tipo documento del emisor</span>
@@ -2031,11 +2094,11 @@ function IssuerConfigEditor({
           <input value={form.correo} onChange={(event) => update({ correo: event.target.value })} placeholder="Correo del emisor" type="email" />
         </label>
         <label>
-          <span>Código establecimiento MH</span>
+          <span>Código establecimiento del Ministerio de Hacienda</span>
           <input value={form.codEstableMH} onChange={(event) => update({ codEstableMH: event.target.value })} placeholder="M001" />
         </label>
         <label>
-          <span>Código punto venta MH</span>
+          <span>Código punto de venta del Ministerio de Hacienda</span>
           <input value={form.codPuntoVentaMH} onChange={(event) => update({ codPuntoVentaMH: event.target.value })} placeholder="P004" />
         </label>
         <label>
@@ -2143,8 +2206,8 @@ function EmissionEnvironmentConfirmDialog({
             <strong>{isProductionTarget ? "Va a activar emisión en producción" : "Va a cambiar el ambiente activo"}</strong>
             <small>
               {isProductionTarget
-                ? "Confirme solo si las credenciales de producción MH están listas y desea emitir CDE reales."
-                : "Confirme si desea que los próximos CDE usen el ambiente de pruebas de MH."}
+                ? "Confirme solo si las credenciales de producción del Ministerio de Hacienda están listas y desea emitir CDE reales."
+                : "Confirme si desea que los próximos CDE usen el ambiente de pruebas del Ministerio de Hacienda."}
             </small>
           </div>
         </div>
@@ -2178,16 +2241,16 @@ function credentialRuntimeEnvironment(
     environment,
     label,
     help: source === "setting"
-      ? `Los próximos CDE se emitirán contra MH ${label}. Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
+      ? `Los próximos CDE se emitirán contra el Ministerio de Hacienda (${label}). Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
       : `Usando ${label} como valor inicial. Guarde una selección aquí para controlar el ambiente activo desde la UI.`
   };
 }
 
 function credentialSettingsPanelDescription(section: CredentialSettingsSectionId, activeEnvironmentLabel: string): string {
   const descriptions: Record<CredentialSettingsSectionId, string> = {
-    ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales MH que desea revisar.",
-    mh: `Reemplace el usuario y contraseña API de MH para ${activeEnvironmentLabel}.`,
-    firmador: "Rote el certificado firmador y la contraseña de la llave privada cuando MH entregue nuevos archivos.",
+    ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales del Ministerio de Hacienda que desea revisar.",
+    mh: `Reemplace el usuario y contraseña API del Ministerio de Hacienda para ${activeEnvironmentLabel}.`,
+    firmador: "Rote el certificado firmador y la contraseña de la llave privada cuando el Ministerio de Hacienda entregue nuevos archivos.",
     wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
@@ -2282,11 +2345,14 @@ function TestDtePanel({
     <section className="test-panel">
       <div>
         <h2>DTE Rápido</h2>
-        <p>Crea un CDE con los datos básicos de la donación.</p>
+        <p>Crea un CDE directo para donaciones offline.</p>
       </div>
       <div className="test-grid">
         <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
-        <input value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Donante" />
+        <input value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Nombre o razón social" />
+        <span className="quick-document-type">
+          <CatalogSelect value={input.donorDocumentType} options={CAT022_DOCUMENT_TYPES} showCodes={false} onChange={(donorDocumentType) => onChange({ ...input, donorDocumentType })} />
+        </span>
         <input value={input.donorDocument} onChange={(event) => onChange({ ...input, donorDocument: event.target.value })} placeholder="Documento" />
         <input value={input.donorEmail} onChange={(event) => onChange({ ...input, donorEmail: event.target.value })} placeholder="Correo" type="email" />
         <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Teléfono" />
@@ -2561,12 +2627,14 @@ function CatalogSelect({
   value,
   options,
   onChange,
-  placeholder
+  placeholder,
+  showCodes = true
 }: {
   value: string;
   options: readonly CatalogOption[];
   onChange: (value: string) => void;
   placeholder?: string;
+  showCodes?: boolean;
 }) {
   const selectedValue = catalogSelectValue(options, value);
   return (
@@ -2574,7 +2642,7 @@ function CatalogSelect({
       {(placeholder || !selectedValue) && <option value="">{placeholder ?? "Seleccione"}</option>}
       {options.map((option) => (
         <option key={`${option.code}-${option.label}`} value={option.code}>
-          {option.code} - {catalogOptionLabel(option.label)}
+          {showCodes ? `${option.code} - ` : ""}{catalogOptionLabel(option.label)}
         </option>
       ))}
     </select>
@@ -2586,13 +2654,20 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
   return options.some((option) => option.code === code) ? code : "";
 }
 
-function AuthScreen({ notice, onLogin, onBootstrap }: { notice?: string; onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void> }) {
+function AuthScreen({ notice, onLogin, onBootstrap, bootstrapAvailable }: { notice?: string; onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>; bootstrapAvailable: boolean }) {
   const [mode, setMode] = useState<"login" | "bootstrap">("login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!bootstrapAvailable && mode === "bootstrap") {
+      setMode("login");
+    }
+  }, [bootstrapAvailable, mode]);
+
   return (
     <div className="auth-screen">
       <form
@@ -2610,10 +2685,12 @@ function AuthScreen({ notice, onLogin, onBootstrap }: { notice?: string; onLogin
       >
         <ShieldCheck size={32} />
         <h1>ExamplePerson1</h1>
-        <div className="segmented">
-          <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>
-          <button type="button" className={mode === "bootstrap" ? "active" : ""} onClick={() => setMode("bootstrap")}>Crear propietario</button>
-        </div>
+        {bootstrapAvailable && (
+          <div className="segmented">
+            <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>
+            <button type="button" className={mode === "bootstrap" ? "active" : ""} onClick={() => setMode("bootstrap")}>Crear propietario</button>
+          </div>
+        )}
         {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" />}
         <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />
         <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Contraseña" type="password" />
@@ -2633,10 +2710,10 @@ function Stats({ documents }: { documents: DteDocument[] }) {
   const counts = countByStatus(documents);
   return (
     <div className="stats">
-      <Metric label="Aceptados" value={counts.ACCEPTED ?? 0} tone="ok" />
-      <Metric label="Fallidos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
-      <Metric label="Contingencia" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
-      <Metric label="Invalidados" value={counts.INVALIDATED ?? 0} tone="neutral" />
+      <Metric label="Aceptados visibles" value={counts.ACCEPTED ?? 0} tone="ok" />
+      <Metric label="Fallidos visibles" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
+      <Metric label="Contingencia visible" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
+      <Metric label="Invalidados visibles" value={counts.INVALIDATED ?? 0} tone="neutral" />
     </div>
   );
 }
@@ -2677,6 +2754,30 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function DocumentListFooter({
+  count,
+  hasMore,
+  loading,
+  onLoadMore
+}: {
+  count: number;
+  hasMore: boolean;
+  loading: boolean;
+  onLoadMore: () => Promise<void>;
+}) {
+  return (
+    <div className="document-list-footer">
+      <span>{count > 0 ? `Mostrando ${count} CDE` : "Sin CDE para estos filtros"}</span>
+      {hasMore && (
+        <button type="button" onClick={() => void onLoadMore()} disabled={loading}>
+          <ChevronRight size={16} />
+          {loading ? "Cargando" : "Cargar más"}
+        </button>
+      )}
     </div>
   );
 }
@@ -2764,7 +2865,7 @@ function DetailPanel({
       <div className={`legal-box ${invalidationWindow.tone}`}>
         <LegalIcon size={17} />
         <div>
-          <strong>Ventana de invalidación CDE</strong>
+          <strong>{invalidationWindow.title}</strong>
           <span>{invalidationWindow.remainingLabel}</span>
           {invalidationWindow.deadlineLabel && <small>Límite: {invalidationWindow.deadlineLabel} hora El Salvador</small>}
         </div>
@@ -2805,7 +2906,7 @@ function InvalidationConfirmDialog({
         <header>
           <div>
             <h2 id="invalidation-confirm-title">Confirmar invalidación</h2>
-            <p>Esta acción transmite un evento de invalidación al MH y no se puede deshacer desde el panel.</p>
+            <p>Esta acción transmite un evento de invalidación al Ministerio de Hacienda y no se puede deshacer desde el panel.</p>
           </div>
           <button className="icon-button" onClick={onCancel} disabled={busy} title="Cerrar">
             <X size={17} />
@@ -3065,14 +3166,14 @@ function StatusPill({ status }: { status: string }) {
 function invalidationToast(result: { accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }): string {
   if (result.accepted) {
     if (result.emailSent) {
-      return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}. Aviso enviado por correo`;
+      return `Invalidación aceptada por el Ministerio de Hacienda${result.result?.estado ? `: ${result.result.estado}` : ""}. Aviso enviado por correo`;
     }
     if (result.emailError) {
-      return `Invalidación aceptada por MH; falló el correo: ${result.emailError}`;
+      return `Invalidación aceptada por el Ministerio de Hacienda; falló el correo: ${result.emailError}`;
     }
-    return `Invalidación aceptada por MH${result.result?.estado ? `: ${result.result.estado}` : ""}. Sin correo de envío`;
+    return `Invalidación aceptada por el Ministerio de Hacienda${result.result?.estado ? `: ${result.result.estado}` : ""}. Sin correo de envío`;
   }
-  return "Invalidación enviada a MH";
+  return "Invalidación enviada al Ministerio de Hacienda";
 }
 
 function isRetryableDocumentStatus(status: string): boolean {
@@ -3140,7 +3241,7 @@ function delay(ms: number): Promise<void> {
 function subtitleFor(view: View): string {
   if (view === "documents") return "Emisión, sello, correo y acciones legales por CDE.";
   if (view === "contingency") return "Eventos, pendientes, plazos y trazabilidad.";
-  if (view === "credentials") return "Secretos MH, Wompi y correo para el Worker actual.";
+  if (view === "credentials") return "Secretos del Ministerio de Hacienda, Wompi y correo para el Worker actual.";
   if (view === "exports") return "Archivos CSV para declaración y control.";
   return "Operaciones administrativas y trazabilidad.";
 }
@@ -3167,7 +3268,7 @@ function contingencyDeadline(active: ContingencyState["active"]): { title: strin
   }
   if (active.event_sello && active.transmit_deadline_at) {
     return {
-      title: "Evento sellado por MH",
+      title: "Evento sellado por el Ministerio de Hacienda",
       detail: `Reenvío DTE hasta ${formatDateTime(active.transmit_deadline_at)} hora El Salvador.`,
       tone: "ok"
     };
@@ -3262,7 +3363,7 @@ const advancedCdeSteps = [
 
 const contingencyTypeOptions = [
   { value: "1", label: "1 - Internet del emisor" },
-  { value: "2", label: "2 - Servicios MH no disponibles" },
+  { value: "2", label: "2 - Servicios del Ministerio de Hacienda no disponibles" },
   { value: "3", label: "3 - Sistema del emisor" },
   { value: "4", label: "4 - Firmador no disponible" },
   { value: "5", label: "5 - Otro" }
@@ -3686,10 +3787,25 @@ function testAmountValidationMessage(value: string): string {
   return Number.isFinite(parsed) && parsed > 0 ? "" : "Ingrese monto mayor que cero";
 }
 
+export function quickDteValidationMessage(input: TestDteInput, options: { requireAmount?: boolean } = {}): string {
+  if (options.requireAmount !== false) {
+    const amountError = testAmountValidationMessage(input.amount);
+    if (amountError) return amountError;
+  }
+  if (!input.donorName.trim()) return "Ingrese nombre o razón social del donante";
+  if (!input.donorDocument.trim()) return "Ingrese documento del donante para la prueba";
+  const donorDuiError = isDuiDocumentType(input.donorDocumentType) ? duiValidationMessage(input.donorDocument) : "";
+  if (donorDuiError) return donorDuiError;
+  const donorEmail = input.donorEmail.trim();
+  if (donorEmail && !isValidEmail(donorEmail)) return "Ingrese un correo válido";
+  return "";
+}
+
 interface TestDteInput {
   amount: string;
   donorName: string;
   donorEmail: string;
+  donorDocumentType: string;
   donorDocument: string;
   donorPhone: string;
 }

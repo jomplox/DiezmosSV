@@ -116,7 +116,7 @@ export class MhClient {
     let data = await this.authenticate(primaryAuthUrl, credentials);
     let token = data.body?.token;
 
-    // Some MH test accounts are provisioned through the central auth service while still transmitting to TEST endpoints.
+    // Some Ministerio de Hacienda test accounts are provisioned through the central auth service while still transmitting to TEST endpoints.
     if (!token && ambiente === "00" && isInvalidCredentials(data)) {
       const centralAuthUrl = mhEndpoint(this.env, "auth", "01");
       if (centralAuthUrl !== primaryAuthUrl) {
@@ -128,7 +128,7 @@ export class MhClient {
     if (!token) {
       const code = data.body?.codigoMsg ? ` ${data.body.codigoMsg}` : "";
       const message = data.body?.descripcionMsg ? `: ${data.body.descripcionMsg}` : "";
-      throw new Error(`MH auth response did not include body.token${code}${message}`);
+      throw new Error(`La autenticación con el Ministerio de Hacienda no devolvió body.token${code}${message}`);
     }
     const expiresAt = new Date(Date.now() + 23 * 60 * 60 * 1000).toISOString();
     await this.env.DB.prepare(
@@ -154,7 +154,7 @@ export class MhClient {
       body: form
     });
     if (!response.ok) {
-      throw new Error(`Falló la autenticación con MH: ${response.status} ${await response.text()}`);
+      throw new Error(`Falló la autenticación con el Ministerio de Hacienda: ${response.status} ${await response.text()}`);
     }
     return (await response.json()) as MhAuthResponse;
   }
@@ -206,7 +206,7 @@ async function parseMhResponse(response: Response): Promise<MhResponse> {
   const raw = await safeJson(response);
   if (!response.ok) {
     if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
-      throw new MhUnavailableError(`MH unavailable: ${response.status}`);
+      throw new MhUnavailableError(`Ministerio de Hacienda no disponible: ${response.status}`);
     }
     return {
       accepted: false,
@@ -233,7 +233,7 @@ async function parseLoteSubmitResponse(response: Response): Promise<MhLoteSubmit
   const raw = await safeJson(response);
   if (!response.ok) {
     if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
-      throw new MhUnavailableError(`MH unavailable: ${response.status}`);
+      throw new MhUnavailableError(`Ministerio de Hacienda no disponible: ${response.status}`);
     }
     return {
       accepted: false,
@@ -260,7 +260,7 @@ async function parseLoteConsultaResponse(response: Response): Promise<MhLoteCons
   const raw = await safeJson(response);
   if (!response.ok) {
     if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
-      throw new MhUnavailableError(`MH unavailable: ${response.status}`);
+      throw new MhUnavailableError(`Ministerio de Hacienda no disponible: ${response.status}`);
     }
     return {
       estado: `HTTP_${response.status}`,

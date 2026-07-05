@@ -26,9 +26,21 @@ describe("native MH signer", () => {
     expect(parsed.active).toBe(true);
     expect(base64ToBytes(parsed.privateKeyBase64).byteLength).toBeGreaterThan(1000);
   });
+
+  it("spells out the tax authority in signer validation errors", async () => {
+    const password = "correct horse battery staple";
+    const payload = { identificacion: { tipoDte: "15" }, resumen: { valorTotal: 10 } };
+
+    await expect(signMhDocument(payload, await generatedCertificateXml(password, false), password)).rejects.toThrow(
+      "El certificado del Ministerio de Hacienda no está activo"
+    );
+    await expect(signMhDocument(payload, await generatedCertificateXml(password), "wrong-password")).rejects.toThrow(
+      "La contraseña de la llave privada del Ministerio de Hacienda no coincide"
+    );
+  });
 });
 
-async function generatedCertificateXml(password: string): Promise<string> {
+async function generatedCertificateXml(password: string, active = true): Promise<string> {
   const pair = (await crypto.subtle.generateKey(
     {
       name: "RSASSA-PKCS1-v1_5",
@@ -42,5 +54,5 @@ async function generatedCertificateXml(password: string): Promise<string> {
   const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
   const spki = new Uint8Array((await crypto.subtle.exportKey("spki", pair.publicKey)) as ArrayBuffer);
   const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
-  return `<CertificadoMH><nit>12345678901234</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
+  return `<CertificadoMH><nit>12345678901234</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>${active ? "true" : "false"}</activo></CertificadoMH>`;
 }

@@ -309,7 +309,7 @@ export class IssuancePipeline {
         continue;
       }
       const observaciones = arrayStrings(item.observaciones);
-      const message = observaciones.join("; ") || stringValue(item.descripcionMsg) || "MH rechazó el CDE en lote.";
+      const message = observaciones.join("; ") || stringValue(item.descripcionMsg) || "El Ministerio de Hacienda rechazó el CDE en lote.";
       await this.repo.markContingencyBatchLineRejected({
         lineId: line.id,
         documentId: line.document_id,

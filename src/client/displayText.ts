@@ -89,8 +89,8 @@ const ERROR_LABELS: Record<string, string> = {
   "CDE resumen.valorTotal must be a positive number": "CDE resumen.valorTotal debe ser un número positivo.",
   credential_update_failed: "No se pudieron actualizar las credenciales.",
   email_send_failed: "No se pudo enviar el correo.",
-  "MH auth failed": "Falló la autenticación con MH.",
-  "MH unavailable": "MH no está disponible.",
+  "MH auth failed": "Falló la autenticación con el Ministerio de Hacienda.",
+  "MH unavailable": "El Ministerio de Hacienda no está disponible.",
   "Invalid credentials": "Credenciales inválidas",
   Insufficient_role: "Su usuario no tiene permisos suficientes.",
   "Insufficient role": "Su usuario no tiene permisos suficientes.",
@@ -205,7 +205,16 @@ export function userFacingErrorMessage(message: string): string {
     return `Falló el proveedor de correo: ${cleaned.slice("Email provider failed:".length).trim()}`;
   }
   if (cleaned.startsWith("MH auth failed:")) {
-    return `Falló la autenticación con MH: ${cleaned.slice("MH auth failed:".length).trim()}`;
+    return `Falló la autenticación con el Ministerio de Hacienda: ${cleaned.slice("MH auth failed:".length).trim()}`;
+  }
+  if (cleaned.startsWith("Falló la autenticación con el Ministerio de Hacienda:")) {
+    return cleaned;
+  }
+  if (cleaned.startsWith("MH unavailable:")) {
+    return `El Ministerio de Hacienda no está disponible: ${cleaned.slice("MH unavailable:".length).trim()}`;
+  }
+  if (cleaned.startsWith("Ministerio de Hacienda no disponible:")) {
+    return `El Ministerio de Hacienda no está disponible: ${cleaned.slice("Ministerio de Hacienda no disponible:".length).trim()}`;
   }
   if (cleaned.startsWith("Password must be at least 10 characters")) {
     return "La contraseña debe tener al menos 10 caracteres.";

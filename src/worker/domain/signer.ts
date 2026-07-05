@@ -11,11 +11,11 @@ export interface ParsedMhCertificate {
 export async function signMhDocument(document: unknown, certXml: string, password: string): Promise<string> {
   const certificate = await parseMhCertificate(certXml);
   if (!certificate.active) {
-    throw new Error("El certificado MH no está activo");
+    throw new Error("El certificado del Ministerio de Hacienda no está activo");
   }
   const passwordHash = await sha512Hex(password);
   if (passwordHash !== certificate.privateKeyPasswordHash.toLowerCase()) {
-    throw new Error("La contraseña de la llave privada MH no coincide");
+    throw new Error("La contraseña de la llave privada del Ministerio de Hacienda no coincide");
   }
 
   const header = base64UrlFromString(JSON.stringify({ alg: "RS512" }));
@@ -73,7 +73,7 @@ async function sha512Hex(value: string): Promise<string> {
 function extractTag(xml: string, tag: string): string {
   const match = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
   if (!match) {
-    throw new Error(`Missing <${tag}> in MH certificate XML`);
+    throw new Error(`Falta <${tag}> en el certificado XML del Ministerio de Hacienda`);
   }
   return match[1].trim();
 }

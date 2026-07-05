@@ -63,15 +63,15 @@ export class CredentialWriterConfigError extends Error {
 
 export function credentialStatus(env: Env): CredentialStatus {
   const writerMissing = cloudflareWriterMissing(env);
-  const mhTest = group("MH ambiente de pruebas", [
+  const mhTest = group("Ministerio de Hacienda ambiente de pruebas", [
     visibleItem(env, "MH_USER_TEST", "Usuario API TEST"),
     protectedItem(env, "MH_PASSWORD_TEST", "Contraseña API TEST")
   ]);
-  const mhProduction = group("MH ambiente producción", [
+  const mhProduction = group("Ministerio de Hacienda ambiente producción", [
     visibleItem(env, "MH_USER_PROD", "Usuario API PROD"),
     protectedItem(env, "MH_PASSWORD_PROD", "Contraseña API PROD")
   ]);
-  const signer = group("Certificado firmador MH", [
+  const signer = group("Certificado firmador del Ministerio de Hacienda", [
     { name: "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", label: "Archivo .crt/.xml", configured: hasSignerCertificate(env), protected: true },
     protectedItem(env, "MH_CERT_PASSWORD", "Contraseña de llave privada")
   ]);

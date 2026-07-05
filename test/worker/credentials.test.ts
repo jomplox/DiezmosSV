@@ -34,6 +34,9 @@ describe("credential status", () => {
     expect(status.groups.mhTest.ready).toBe(true);
     expect(status.groups.mhProduction.ready).toBe(true);
     expect(status.groups.signer.ready).toBe(true);
+    expect(status.groups.mhTest.label).toBe("Ministerio de Hacienda ambiente de pruebas");
+    expect(status.groups.mhProduction.label).toBe("Ministerio de Hacienda ambiente producción");
+    expect(status.groups.signer.label).toBe("Certificado firmador del Ministerio de Hacienda");
     expect(status.groups.issuer.ready).toBe(true);
     expect(status.groups.email.ready).toBe(true);
     expect(status.groups.mhTest.items).toContainEqual({

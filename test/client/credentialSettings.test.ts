@@ -1,6 +1,6 @@
 import { describe, expect, test } from "vitest";
 import type { CredentialStatus } from "../../src/client/types";
-import { credentialSectionState } from "../../src/client/credentialSettings";
+import { credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
 
 const status: CredentialStatus = {
   target: {
@@ -44,6 +44,16 @@ const status: CredentialStatus = {
 };
 
 describe("credentialSectionState", () => {
+  test("spells out the tax authority in credential navigation labels", () => {
+    expect(credentialSettingsSections.find((section) => section.id === "mh")).toMatchObject({
+      label: "API del Ministerio de Hacienda",
+      description: "Usuario y contraseña del Ministerio de Hacienda."
+    });
+    expect(credentialSettingsSections.find((section) => section.id === "firmador")).toMatchObject({
+      label: "Firmador del Ministerio de Hacienda"
+    });
+  });
+
   test("marks neutral sections as ready because they do not map to a secret group", () => {
     expect(credentialSectionState("ambiente", status)).toBe("ready");
     expect(credentialSectionState("plantillas", status)).toBe("ready");

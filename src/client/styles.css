@@ -276,6 +276,21 @@ h2 {
   overflow: hidden;
 }
 
+.document-list-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  color: #52656c;
+  font-size: 12px;
+}
+
+.document-list-footer button {
+  flex: 0 0 auto;
+  min-height: 34px;
+}
+
 .toolbar {
   display: flex;
   align-items: center;
@@ -288,9 +303,9 @@ h2 {
 }
 
 .search {
-  min-width: 240px;
-  max-width: 420px;
-  flex: 1;
+  min-width: 320px;
+  max-width: none;
+  flex: 1 1 560px;
   min-height: 38px;
   border: 1px solid #d8e0e3;
   border-radius: 6px;
@@ -299,6 +314,12 @@ h2 {
   gap: 8px;
   padding: 0 10px;
   color: #71838a;
+}
+
+.toolbar > select {
+  flex: 0 0 180px;
+  width: 180px;
+  max-width: 28%;
 }
 
 .search input,
@@ -387,6 +408,15 @@ select,
   flex: 1 1 112px;
   min-width: 96px;
   width: auto;
+}
+
+.quick-document-type {
+  flex: 0 1 172px;
+  min-width: 142px;
+}
+
+.quick-document-type select {
+  width: 100%;
 }
 
 .test-grid button {
@@ -2475,6 +2505,14 @@ pre {
     flex-direction: column;
   }
 
+  .search,
+  .toolbar > select {
+    flex-basis: auto;
+    max-width: none;
+    min-width: 0;
+    width: 100%;
+  }
+
   .topbar-actions {
     align-items: stretch;
     flex-direction: column;
@@ -2543,6 +2581,7 @@ pre {
   }
 
   .test-grid input,
+  .quick-document-type,
   .test-grid button {
     flex-basis: 100%;
     width: 100%;

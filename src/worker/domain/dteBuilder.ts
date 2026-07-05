@@ -31,6 +31,16 @@ interface AdvancedCdeBuildOptions {
   issuedAt?: Date;
 }
 
+export interface DirectCdeInput {
+  amount?: string | number;
+  donorName?: string;
+  donorEmail?: string;
+  donorDocumentType?: string;
+  donorDocument?: string;
+  donorPhone?: string;
+  donorAddress?: string;
+}
+
 export interface InvalidationInput {
   tipoAnulacion: 1 | 2 | 3;
   motivoAnulacion: string;
@@ -136,6 +146,110 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       { campo: "IdTransaccion", etiqueta: "Wompi", valor: payload.IdTransaccion },
       { campo: "Autorizacion", etiqueta: "Código de autorización", valor: payload.CodigoAutorizacion ?? "N/D" },
       { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" }
+    ]
+  };
+  validateCdeDui(document);
+  validateCdeCatalogs(document);
+  validateCde(document);
+  return document;
+}
+
+export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConfig, options: AdvancedCdeBuildOptions): Record<string, unknown> {
+  const issuedAt = options.issuedAt ?? new Date();
+  const { date, time } = mhDateTime(issuedAt);
+  const amount = centsToAmount(amountToCents(input.amount));
+  const donorName = cleanNullable(input.donorName);
+  const donorDocumentType = cleanNullable(input.donorDocumentType) ?? config.defaultReceptorTipoDocumento;
+  const donorDocument = cleanNullable(input.donorDocument);
+  if (!donorName) {
+    throw new Error("Ingrese nombre del donante");
+  }
+  if (!donorDocument) {
+    throw new Error("Ingrese documento del donante");
+  }
+  const ambiente = options.environment ?? "00";
+  const address = cleanNullable(input.donorAddress);
+  const document = {
+    identificacion: {
+      version: 2,
+      ambiente,
+      tipoDte: "15",
+      numeroControl: numeroControl(config.controlPrefix, options.sequence),
+      codigoGeneracion: generationCode(),
+      tipoModelo: 1,
+      tipoOperacion: 1,
+      fecEmi: date,
+      horEmi: time,
+      tipoMoneda: "USD"
+    },
+    emisor: {
+      tipoDocumento: config.tipoDocumento,
+      numDocumento: config.numDocumento,
+      nrc: config.nrc,
+      nombre: config.nombre,
+      codActividad: config.codActividad,
+      descActividad: config.descActividad,
+      nombreComercial: config.nombreComercial,
+      direccion: config.direccion,
+      telefono: config.telefono,
+      correo: config.correo,
+      codEstable: config.codEstable,
+      codPuntoVenta: config.codPuntoVenta
+    },
+    receptor: {
+      tipoDocumento: donorDocumentType,
+      numDocumento: donorDocument,
+      nrc: null,
+      nombre: donorName,
+      codActividad: null,
+      descActividad: null,
+      direccion: address
+        ? {
+            departamento: config.direccion.departamento,
+            municipio: config.direccion.municipio,
+            distrito: config.direccion.distrito,
+            complemento: address
+          }
+        : null,
+      telefono: cleanNullable(input.donorPhone),
+      correo: cleanNullable(input.donorEmail),
+      codDomiciliado: 1,
+      codPais: config.defaultCodPais
+    },
+    otrosDocumentos: [
+      {
+        codDocAsociado: 1,
+        descDocumento: "Generación directa",
+        detalleDocumento: "Donación offline"
+      }
+    ],
+    cuerpoDocumento: [
+      {
+        numItem: 1,
+        tipoDonacion: config.defaultDonationType,
+        cantidad: 1,
+        codigo: "DONACION",
+        uniMedida: config.defaultUnidadMedida,
+        descripcion: "Donación offline",
+        tipoDepreciacion: 0,
+        valorUni: amount,
+        valor: amount
+      }
+    ],
+    resumen: {
+      valorTotal: amount,
+      totalLetras: null,
+      pagos: [
+        {
+          codigo: config.paymentMethodCode,
+          montoPago: amount,
+          referencia: "Donación offline"
+        }
+      ]
+    },
+    apendice: [
+      { campo: "Origen", etiqueta: "Origen", valor: "DTE rápido" },
+      { campo: "Canal", etiqueta: "Canal", valor: "Donación offline" }
     ]
   };
   validateCdeDui(document);
