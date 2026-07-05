@@ -27,12 +27,13 @@ class FakeArchiveBucket implements Partial<R2Bucket> {
   }
 }
 
-function envWithArchive(db: InMemoryRetentionD1, archive: FakeArchiveBucket): Env {
+function envWithArchive(db: InMemoryRetentionD1, archive: FakeArchiveBucket, overrides: Partial<Env> = {}): Env {
   return {
     DB: db as unknown as D1Database,
     ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
     ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
-    ARCHIVE: archive as unknown as R2Bucket
+    ARCHIVE: archive as unknown as R2Bucket,
+    ...overrides
   };
 }
 
@@ -41,6 +42,7 @@ function envWithArchive(db: InMemoryRetentionD1, archive: FakeArchiveBucket): En
 // the small contingency tables, plus createAudit.
 class InMemoryRetentionD1 {
   readonly dteDocuments: Array<Record<string, unknown>> = [];
+  readonly donationIntents: Array<Record<string, unknown>> = [];
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
@@ -49,11 +51,13 @@ class InMemoryRetentionD1 {
   readonly contingencyBatches: Array<Record<string, unknown>> = [];
   readonly contingencyBatchLines: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
+  readonly settings: Array<Record<string, unknown>> = [];
   readonly preparedSql: string[] = [];
   readonly appliedLimits: number[] = [];
 
   tableFor(sql: string): Array<Record<string, unknown>> | null {
     if (sql.includes("FROM dte_documents")) return this.dteDocuments;
+    if (sql.includes("FROM donation_intents")) return this.donationIntents;
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
     if (sql.includes("FROM wompi_events")) return this.wompiEvents;
@@ -84,6 +88,13 @@ class RetentionStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+      return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
+      const [action, entityId] = this.args.map(String);
+      return { count: this.db.audits.filter((audit) => audit.action === action && audit.entity_id === entityId).length } as T;
+    }
     return null;
   }
 
@@ -189,7 +200,7 @@ describe("runRetentionExport", () => {
     };
     expect(manifest.month).toBe("2026-06");
 
-    for (const table of ["dte_documents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines"]) {
+    for (const table of ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines"]) {
       expect(manifest.tables[table]).toBeDefined();
     }
     expect(manifest.tables.dte_documents.rowCount).toBe(1);
@@ -200,6 +211,29 @@ describe("runRetentionExport", () => {
 
     // manifest must be the last object written
     expect(archive.putCalls.at(-1)?.key).toBe(manifestKey);
+  });
+
+  it("windows donation_intents into the manifest by created_at like the other windowed tables", async () => {
+    const db = new InMemoryRetentionD1();
+    db.donationIntents.push(
+      row({ id: "intent_1", created_at: "2026-06-10T00:00:00.000Z" }), // in June window
+      row({ id: "intent_2", created_at: "2026-07-01T06:00:00.000Z" }) // July -> excluded (current month)
+    );
+    const archive = new FakeArchiveBucket();
+    const env = envWithArchive(db, archive);
+
+    const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
+
+    expect(result.status).toBe("completed");
+    const key = "retention/2026/2026-06/donation_intents.ndjson";
+    expect(archive.objects.has(key)).toBe(true);
+    const lines = new TextDecoder().decode(archive.objects.get(key)!.body).split("\n").filter(Boolean);
+    expect(lines.map((line) => JSON.parse(line).id)).toEqual(["intent_1"]);
+
+    const manifest = JSON.parse(new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)) as {
+      tables: Record<string, { rowCount: number }>;
+    };
+    expect(manifest.tables.donation_intents.rowCount).toBe(1);
   });
 
   it("audits RETENTION_EXPORT_COMPLETED with month and total rows", async () => {
@@ -287,6 +321,32 @@ describe("runRetentionExport", () => {
     const failed = db.audits.find((audit) => audit.action === "RETENTION_EXPORT_FAILED");
     expect(failed).toBeTruthy();
     expect(String(failed?.summary)).toContain("R2 unavailable");
+  });
+
+  it("sends an operational alert (once per month) when the export fails", async () => {
+    const db = new InMemoryRetentionD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.dteDocuments.push(row({ id: "dte_1", created_at: "2026-06-10T00:00:00.000Z" }));
+    const archive = new FakeArchiveBucket();
+    vi.spyOn(archive, "put").mockRejectedValue(new Error("R2 unavailable"));
+    const sent: unknown[] = [];
+    const env = envWithArchive(db, archive, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sent.push(message);
+          return { messageId: "retention-alert" };
+        }
+      } as unknown as Env["EMAIL"]
+    });
+
+    await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
+    // A second failing run for the same month must not re-alert (dedupe per month).
+    await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
+
+    expect(sent).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:RETENTION_EXPORT_FAILED")).toHaveLength(1);
   });
 });
 

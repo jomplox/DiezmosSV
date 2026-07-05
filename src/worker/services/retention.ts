@@ -9,6 +9,7 @@ import {
 } from "../storage/repository";
 import type { Env } from "../types";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
+import { sendOperationalAlert } from "./alerts";
 
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
@@ -20,15 +21,32 @@ export interface RetentionExportResult {
   error?: string;
 }
 
-interface TableManifestEntry {
+export interface TableManifestEntry {
   rowCount: number;
   sha256: string;
 }
 
-interface RetentionManifest {
+export interface RetentionManifest {
   month: string;
   generatedAt: string;
   tables: Record<string, TableManifestEntry>;
+}
+
+// Single source of truth for the R2 archive key layout, shared with the backups
+// service so month listing/verification/download derive keys the same way the
+// export writes them: retention/<YYYY>/<YYYY-MM>/{manifest.json,<table>.ndjson}.
+export const RETENTION_KEY_ROOT = "retention";
+
+export function retentionMonthPrefix(month: string): string {
+  return `${RETENTION_KEY_ROOT}/${month.slice(0, 4)}/${month}`;
+}
+
+export function retentionManifestKey(month: string): string {
+  return `${retentionMonthPrefix(month)}/manifest.json`;
+}
+
+export function retentionTableKey(month: string, table: string): string {
+  return `${retentionMonthPrefix(month)}/${table}.ndjson`;
 }
 
 // Every month, snapshot all legal records into R2 so they survive D1 loss, an
@@ -38,8 +56,8 @@ interface RetentionManifest {
 export async function runRetentionExport(env: Env, now: Date, options: { month?: string } = {}): Promise<RetentionExportResult> {
   const month = options.month ?? previousElSalvadorMonth(now);
   const repo = new Repository(env.DB);
-  const prefix = `retention/${month.slice(0, 4)}/${month}`;
-  const manifestKey = `${prefix}/manifest.json`;
+  const prefix = retentionMonthPrefix(month);
+  const manifestKey = retentionManifestKey(month);
 
   try {
     const existingManifest = await env.ARCHIVE.head(manifestKey);
@@ -90,6 +108,16 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       entityType: "retention_export",
       entityId: month,
       summary: message
+    });
+    // A failed monthly export leaves a gap in the immutable archive; alert an operator
+    // rather than waiting for someone to open the backups panel. Deduped per month via
+    // the ALERT_SENT:<kind> pattern, so repeated failing runs for the same month notify once.
+    await sendOperationalAlert(env, repo, {
+      kind: "RETENTION_EXPORT_FAILED",
+      title: `Exportación de retención ${month} fallida`,
+      detail: `La exportación de retención del mes ${month} falló: ${message}`,
+      entityType: "retention_export",
+      entityId: month
     });
     return { status: "failed", month, error: message };
   }
@@ -167,6 +195,13 @@ export function previousElSalvadorMonth(now: Date): string {
   const { year, month } = elSalvadorYearMonth(now);
   const previous = month === 1 ? { year: year - 1, month: 12 } : { year, month: month - 1 };
   return `${previous.year}-${String(previous.month).padStart(2, "0")}`;
+}
+
+// The YYYY-MM (El Salvador local time) that a given instant falls in. The backups
+// panel uses this to place the earliest document in its calendar month.
+export function elSalvadorMonth(date: Date): string {
+  const { year, month } = elSalvadorYearMonth(date);
+  return `${year}-${String(month).padStart(2, "0")}`;
 }
 
 function elSalvadorYearMonth(date: Date): { year: number; month: number } {

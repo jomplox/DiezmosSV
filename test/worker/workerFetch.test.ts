@@ -4097,6 +4097,180 @@ describe("manual retention export endpoint", () => {
   });
 });
 
+describe("admin backups panel", () => {
+  function seedManifest(archive: FakeArchiveBucket, month: string, tables: Record<string, { rowCount: number; body: string }>): Promise<void> {
+    return (async () => {
+      const prefix = `retention/${month.slice(0, 4)}/${month}`;
+      const manifestTables: Record<string, { rowCount: number; sha256: string }> = {};
+      for (const [table, { rowCount, body }] of Object.entries(tables)) {
+        const bytes = utf8Bytes(body);
+        await archive.put(`${prefix}/${table}.ndjson`, bytes);
+        manifestTables[table] = { rowCount, sha256: await sha256Hex(bytes) };
+      }
+      const manifest = { month, generatedAt: `${month}-28T09:00:00.000Z`, tables: manifestTables };
+      await archive.put(`${prefix}/manifest.json`, utf8Bytes(JSON.stringify(manifest)));
+    })();
+  }
+
+  it("lists archived, missing, and in-progress months newest-first with parsed manifest data", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    // Earliest document is April 2026, so the expected range spans April..(last closed month).
+    db.documents.push(testDocument({ id: "doc_1", created_at: "2026-04-10T12:00:00.000Z" }));
+    const archive = new FakeArchiveBucket();
+    // April archived, May missing (no manifest).
+    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 3, body: "a\nb\nc\n" } });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { months: Array<{ month: string; status: string; totalRows?: number; exportedAt?: string }> };
+    const byMonth = new Map(payload.months.map((entry) => [entry.month, entry]));
+
+    // Newest first.
+    expect(payload.months[0].month > payload.months[payload.months.length - 1].month).toBe(true);
+    expect(byMonth.get("2026-04")).toMatchObject({ status: "archivado", totalRows: 3 });
+    expect(byMonth.get("2026-04")?.exportedAt).toBe("2026-04-28T09:00:00.000Z");
+    expect(byMonth.get("2026-05")).toMatchObject({ status: "faltante" });
+    // The current (still-open) El Salvador month appears only as en_curso.
+    const currentMonth = previousElSalvadorMonth(new Date(Date.now() + 40 * 24 * 60 * 60 * 1000));
+    expect(byMonth.get(currentMonth)?.status).toBe("en_curso");
+  });
+
+  it("returns an empty list when there are no documents and no manifests", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ months: [] });
+  });
+
+  it("rejects a VIEWER with 403 and an unauthenticated caller with 401", async () => {
+    const dbViewer = new InMemoryD1();
+    dbViewer.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const viewerResponse = await worker.fetch(
+      new Request("https://example.org/api/admin/backups", { headers: { Authorization: "Bearer test-token" } }),
+      env(dbViewer)
+    );
+    expect(viewerResponse.status).toBe(403);
+
+    const anonResponse = await worker.fetch(new Request("https://example.org/api/admin/backups"), env(new InMemoryD1()));
+    expect(anonResponse.status).toBe(401);
+  });
+
+  it("verifies a month against its manifest and audits RETENTION_VERIFIED on a full match", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 1, body: "row\n" },
+      audit_logs: { rowCount: 0, body: "" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/verify", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { ok: boolean; files: Array<{ table: string; ok: boolean }> };
+    expect(payload.ok).toBe(true);
+    expect(payload.files.every((file) => file.ok)).toBe(true);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_VERIFIED", entity_type: "retention_export", entity_id: "2026-04" })
+    );
+  });
+
+  it("reports a mismatch, audits RETENTION_VERIFY_FAILED, and sends an operational alert when an object is corrupted", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const sent: unknown[] = [];
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 1, body: "row\n" } });
+    // Corrupt the stored object's bytes so its SHA-256 no longer matches the manifest.
+    await archive.put("retention/2026/2026-04/dte_documents.ndjson", utf8Bytes("tampered\n"));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/verify", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        ARCHIVE: archive as unknown as R2Bucket,
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message);
+            return { messageId: "alert-verify" };
+          }
+        } as unknown as Env["EMAIL"]
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { ok: boolean; files: Array<{ table: string; ok: boolean; expected: string; actual: string }> };
+    expect(payload.ok).toBe(false);
+    const corrupted = payload.files.find((file) => file.table === "dte_documents");
+    expect(corrupted?.ok).toBe(false);
+    expect(corrupted?.expected).not.toBe(corrupted?.actual);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_VERIFY_FAILED", entity_type: "retention_export", entity_id: "2026-04" })
+    );
+    expect(sent).toHaveLength(1);
+  });
+
+  it("streams a table object as an attachment and audits RETENTION_DOWNLOADED", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 2, body: "line1\nline2\n" } });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download?table=dte_documents", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Disposition")).toContain("attachment");
+    expect(response.headers.get("Content-Disposition")).toContain("2026-04");
+    await expect(response.text()).resolves.toBe("line1\nline2\n");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_DOWNLOADED", entity_type: "retention_export", entity_id: "2026-04" })
+    );
+  });
+
+  it("returns 404 when downloading an object that is not in the archive", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download?table=dte_documents", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(404);
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -4144,6 +4318,29 @@ class FakeArchiveBucket {
   async head(key: string): Promise<R2Object | null> {
     this.headCalls.push(key);
     return this.objects.has(key) ? ({ key } as R2Object) : null;
+  }
+
+  async get(key: string): Promise<R2ObjectBody | null> {
+    const bytes = this.objects.get(key);
+    if (!bytes) {
+      return null;
+    }
+    // The backups service consumes get() via arrayBuffer(); expose exactly that,
+    // plus a body stream so a downloaded response can be streamed like production R2.
+    return {
+      key,
+      body: new Response(bytes).body,
+      arrayBuffer: async () =>
+        bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+    } as unknown as R2ObjectBody;
+  }
+
+  async list(options?: { prefix?: string }): Promise<R2Objects> {
+    const prefix = options?.prefix ?? "";
+    const objects = [...this.objects.keys()]
+      .filter((key) => key.startsWith(prefix))
+      .map((key) => ({ key }) as R2Object);
+    return { objects, truncated: false, delimitedPrefixes: [] } as unknown as R2Objects;
   }
 }
 
@@ -4218,6 +4415,13 @@ class Statement {
       const user = this.db.users.find((row) => row.id === token.user_id && !row.disabled_at);
       if (!user) return null;
       return { id: user.id, email: user.email, name: user.name, role: user.role, token_id: token.id, user_id: user.id } as T;
+    }
+    if (this.sql.includes("SELECT MIN(created_at) AS earliest FROM dte_documents")) {
+      const earliest = this.db.documents
+        .map((document) => String(document.created_at))
+        .sort()
+        .at(0);
+      return { earliest: earliest ?? null } as T;
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
@@ -4933,6 +5137,7 @@ class Statement {
 // serve every table the retention service reads without one bespoke branch per table.
 function retentionTableFor(db: InMemoryD1, sql: string): Array<Record<string, unknown>> | null {
   if (sql.includes("FROM dte_documents")) return db.documents as unknown as Array<Record<string, unknown>>;
+  if (sql.includes("FROM donation_intents")) return db.donationIntents;
   if (sql.includes("FROM dte_events")) return db.dteEvents;
   if (sql.includes("FROM email_deliveries")) return db.emailDeliveries;
   if (sql.includes("FROM wompi_events")) return db.wompiEvents;
