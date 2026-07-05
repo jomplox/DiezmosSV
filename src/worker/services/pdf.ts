@@ -1,6 +1,7 @@
 import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
+import { CAT012_DEPARTMENTS, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import type { DteDocumentRecord } from "../types";
 
 export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v2";
@@ -70,7 +71,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
     name: safeUpper(receptor.nombre),
     activity: receptor.descActividad ?? "Empleados",
     nrc: formatNrc(receptor.nrc),
-    documentLabel: "NIT:",
+    documentLabel: documentLabelFor(receptor.tipoDocumento),
     documentNumber: formatDocument(receptor.numDocumento),
     addressLines: [receptorContactLine(receptor)]
   });
@@ -261,14 +262,42 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
 
 function emisorLines(emisor: Party): string[] {
   const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
-  const address = [clean(emisor.direccion?.complemento), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
+  const address = [addressText(emisor.direccion), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
   return [establishment, `• ${address} /`, `Correo: ${emisor.correo ?? ""}`].filter(Boolean);
 }
 
 function receptorContactLine(receptor: Party): string {
-  return [clean(receptor.direccion?.complemento), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
+  return [addressText(receptor.direccion), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
     .filter(Boolean)
     .join(" / ");
+}
+
+function documentLabelFor(tipoDocumento: string | null | undefined): string {
+  switch (clean(tipoDocumento)) {
+    case "36":
+      return "NIT:";
+    case "13":
+      return "DUI:";
+    case "03":
+      return "Pasaporte:";
+    case "02":
+      return "Carné de residente:";
+    default:
+      return "Documento:";
+  }
+}
+
+function addressText(direccion: Party["direccion"]): string {
+  if (!direccion) {
+    return "";
+  }
+  const department = findCatalogOption(CAT012_DEPARTMENTS, direccion.departamento);
+  const municipality = findCatalogOption(getCat013Municipalities(direccion.departamento), direccion.municipio);
+  const district = findCatalogOption(getCat008Districts(direccion.departamento), direccion.distrito);
+  return [clean(direccion.complemento), district?.label, municipality?.label, department?.label]
+    .map((part) => clean(part))
+    .filter(Boolean)
+    .join(", ");
 }
 
 function transmissionLabel(tipoOperacion: number | undefined): string {
@@ -413,11 +442,15 @@ interface CdePdfJson {
 
 interface Party {
   numDocumento?: string | null;
+  tipoDocumento?: string | null;
   nrc?: string | null;
   nombre?: string | null;
   descActividad?: string | null;
   nombreComercial?: string | null;
   direccion?: {
+    departamento?: string | null;
+    municipio?: string | null;
+    distrito?: string | null;
     complemento?: string | null;
   } | null;
   telefono?: string | null;

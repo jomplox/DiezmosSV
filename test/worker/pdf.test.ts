@@ -33,6 +33,39 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("Total de la Donación");
   });
 
+  it("labels the receptor document by CAT-022 type and renders the full geographic address", async () => {
+    const text = await renderToText(testDocument());
+
+    expect(text).toMatch(/DUI:\s+10000002-7/);
+    expect(text).not.toMatch(/NIT:\s+10000002-7/);
+    // Receptor address: complemento + distrito/municipio/departamento NAMES (dept 06 / muni 23 / distrito 03).
+    expect(text).toContain("Ayutux");
+    expect(text).toContain("AYUTUXTEPEQUE");
+    expect(text).toContain("SAN SALVADOR CENTRO");
+    expect(text).toContain("San Salvador");
+  });
+
+  it("renders the emisor geographic address labels", async () => {
+    const text = await renderToText(testDocument());
+
+    // Emisor dir: dept 06 / muni 22 / distrito 01.
+    expect(text).toContain("AGUILARES");
+    expect(text).toContain("SAN SALVADOR ESTE");
+  });
+
+  it("labels a NIT receptor with the NIT: prefix", async () => {
+    const document = withReceptor(testDocument(), {
+      tipoDocumento: "36",
+      numDocumento: "06142803901121"
+    });
+
+    const text = await renderToText(document);
+
+    // 14-digit NIT is hyphenated by formatDocument and follows the NIT: label.
+    expect(text).toMatch(/NIT:\s+0614-280390-112-1/);
+    expect(text).not.toMatch(/DUI:\s+0614-280390-112-1/);
+  });
+
   it("draws the default logo as vector paths instead of an embedded raster image", async () => {
     const pdf = await renderDtePdf(testDocument());
     const pdfBody = Buffer.from(pdf).toString("latin1");
@@ -72,6 +105,22 @@ describe("DTE PDF rendering", () => {
     expect(watermarkBounds.height).toBeGreaterThan(220);
   });
 });
+
+async function renderToText(record: DteDocumentRecord): Promise<string> {
+  const pdf = await renderDtePdf(record);
+  const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-text-"));
+  const pdfPath = join(dir, "cde.pdf");
+  const txtPath = join(dir, "cde.txt");
+  writeFileSync(pdfPath, pdf);
+  execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+  return readFileSync(txtPath, "utf8");
+}
+
+function withReceptor(record: DteDocumentRecord, receptor: Record<string, unknown>): DteDocumentRecord {
+  const document = JSON.parse(record.plain_json) as { receptor?: Record<string, unknown> };
+  document.receptor = { ...document.receptor, ...receptor };
+  return { ...record, plain_json: JSON.stringify(document) };
+}
 
 function readPpm(path: string): { width: number; height: number; pixels: Buffer } {
   const bytes = readFileSync(path);
@@ -179,16 +228,16 @@ function testDocument(): DteDocumentRecord {
       },
       receptor: {
         tipoDocumento: "13",
-        numDocumento: "0123",
+        numDocumento: "10000002-7",
         nrc: null,
         nombre: "Example Person",
         codActividad: null,
         descActividad: null,
         direccion: {
           departamento: "06",
-          municipio: "22",
-          distrito: "01",
-          complemento: "SAN SALVADOR"
+          municipio: "23",
+          distrito: "03",
+          complemento: "Ayutux"
         },
         telefono: "70000001",
         correo: "legacy-contact-2@example.com",
