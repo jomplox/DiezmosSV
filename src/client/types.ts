@@ -214,3 +214,29 @@ export interface EmailTemplateSettings {
 export interface AlertEmailState {
   alertEmail: string;
 }
+
+export type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
+
+export interface BackupMonth {
+  month: string;
+  status: BackupMonthStatus;
+  exportedAt: string | null;
+  totalRows: number | null;
+  tables: string[];
+}
+
+export interface BackupsGrid {
+  months: BackupMonth[];
+}
+
+export interface BackupVerifyFile {
+  table: string;
+  ok: boolean;
+  expected: string;
+  actual: string;
+}
+
+export interface BackupVerifyResult {
+  ok: boolean;
+  files: BackupVerifyFile[];
+}

@@ -1028,6 +1028,46 @@ select,
   min-width: 720px;
 }
 
+.backups-table table {
+  min-width: 720px;
+}
+
+.backups-health {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.backups-health.ok {
+  color: #1f7a45;
+}
+
+.backups-health.warn {
+  color: #a4560d;
+}
+
+.backups-table .backup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.backups-table .backup-verify-ok {
+  color: #1f7a45;
+  font-size: 12px;
+}
+
+.backups-table .backup-verify-fail {
+  color: #b42318;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.backups-table tr.backup-row-failed td {
+  background: #fdecea;
+}
+
 .export-table tbody tr {
   cursor: default;
 }

@@ -17,7 +17,7 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
-export const RETENTION_WINDOWED_TABLES = ["dte_documents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
+export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
 export const RETENTION_SNAPSHOT_TABLES = ["contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
@@ -330,6 +330,14 @@ export class Repository {
       nextCursor: hasMore && documents.length > 0 ? encodeDocumentCursor(documents[documents.length - 1]) : null,
       limit
     };
+  }
+
+  // Earliest issued document's created_at, used by the backups panel to bound the
+  // expected month range when the archive predates (or is emptier than) the DB.
+  // Returns null when there are no documents at all.
+  async earliestDteDocumentCreatedAt(): Promise<string | null> {
+    const row = await this.db.prepare("SELECT MIN(created_at) AS earliest FROM dte_documents").first<{ earliest: string | null }>();
+    return row?.earliest ?? null;
   }
 
   async listAcceptedDteDocumentsForExport(): Promise<DteDocumentRecord[]> {

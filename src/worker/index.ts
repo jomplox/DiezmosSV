@@ -21,7 +21,8 @@ import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Se
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
-import { previousElSalvadorMonth, runRetentionExport } from "./services/retention";
+import { listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
@@ -428,6 +429,55 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     });
     const result = await runRetentionExport(env, new Date(), monthParam ? { month: monthParam } : {});
     return jsonResponse({ ok: result.status !== "failed", ...result }, { status: result.status === "failed" ? 500 : 200 });
+  }
+
+  if (url.pathname === "/api/admin/backups" && request.method === "GET") {
+    requireRole(user, "ADMIN");
+    return jsonResponse(await listBackupMonths(env, repo, new Date()));
+  }
+
+  const backupVerifyMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/verify$/);
+  if (backupVerifyMatch && request.method === "POST") {
+    const actor = requireRole(user, "ADMIN");
+    const result = await verifyBackupMonth(env, repo, backupVerifyMatch[1], actor);
+    if (!result) {
+      return notFound();
+    }
+    return jsonResponse(result);
+  }
+
+  const backupDownloadMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/download$/);
+  if (backupDownloadMatch && request.method === "GET") {
+    const actor = requireRole(user, "ADMIN");
+    const month = backupDownloadMatch[1];
+    const table = url.searchParams.get("table");
+    if (!table || !/^[a-z_]+$|^manifest$/.test(table)) {
+      return jsonResponse({ error: "invalid_backup_table", message: "Indique una tabla válida o 'manifest'." }, { status: 400 });
+    }
+    const key = table === "manifest" ? retentionManifestKey(month) : retentionTableKey(month, table);
+    const object = await env.ARCHIVE.get(key);
+    if (!object) {
+      return notFound();
+    }
+    // These NDJSON snapshots carry donor PII; every access is audited with actor,
+    // month, and table so the access trail is complete.
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "RETENTION_DOWNLOADED",
+      entityType: "retention_export",
+      entityId: month,
+      summary: `Descarga de respaldo ${month}/${table}`,
+      metadata: { month, table }
+    });
+    const filename = table === "manifest" ? `retention-${month}-manifest.json` : `retention-${month}-${table}.ndjson`;
+    const contentType = table === "manifest" ? "application/json" : "application/x-ndjson";
+    return new Response(object.body, {
+      headers: {
+        "Content-Type": contentType,
+        "Content-Disposition": `attachment; filename="${filename}"`
+      }
+    });
   }
 
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {

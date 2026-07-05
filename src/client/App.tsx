@@ -32,7 +32,7 @@ import {
   Users
 } from "lucide-react";
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
@@ -235,6 +235,8 @@ export function App() {
   const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
   const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
+  const [backups, setBackups] = useState<BackupMonth[]>([]);
+  const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
   const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
@@ -383,6 +385,7 @@ export function App() {
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
       setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
       setDonationIntents((await api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token)).intents);
+      setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
     }
   }
 
@@ -555,6 +558,48 @@ export function App() {
       link.click();
       URL.revokeObjectURL(href);
       setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
+    });
+  }
+
+  async function verifyBackup(month: string) {
+    await runAction(`backup-verify-${month}`, async () => {
+      const result = await api<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, token, { method: "POST" });
+      setBackupVerifyByMonth((current) => ({ ...current, [month]: result }));
+      setToast(result.ok ? `Respaldo de ${month} verificado: íntegro.` : `Respaldo de ${month}: se detectaron discrepancias.`);
+    });
+  }
+
+  async function downloadBackup(month: string, table: string) {
+    await runAction(`backup-download-${month}-${table}`, async () => {
+      const response = await fetch(`/api/admin/backups/${month}/download?table=${encodeURIComponent(table)}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(
+        response.headers.get("Content-Disposition"),
+        table === "manifest" ? `retention-${month}-manifest.json` : `retention-${month}-${table}.ndjson`
+      );
+      link.click();
+      URL.revokeObjectURL(href);
+    });
+  }
+
+  async function exportBackupMonth(month: string) {
+    const confirmed = window.confirm(`¿Desea generar el respaldo del mes ${month}? Se exportarán todas las tablas legales a R2.`);
+    if (!confirmed) {
+      return;
+    }
+    await runAction(`backup-export-${month}`, async () => {
+      await api(`/api/admin/retention-export?month=${month}`, token, { method: "POST" });
+      setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
+      setToast(`Respaldo del mes ${month} generado.`);
     });
   }
 
@@ -1014,6 +1059,14 @@ export function App() {
               busy={busy === "certificates-send"}
               onYearChange={setCertificateYear}
               onSend={sendAnnualCertificates}
+            />
+            <BackupsPanel
+              months={backups}
+              verifyByMonth={backupVerifyByMonth}
+              busy={busy}
+              onVerify={verifyBackup}
+              onDownload={downloadBackup}
+              onExport={exportBackupMonth}
             />
             <OnlineDonationsPanel intents={donationIntents} />
           </>
@@ -1767,6 +1820,124 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
       </div>
     </section>
   );
+}
+
+function BackupsPanel({
+  months,
+  verifyByMonth,
+  busy,
+  onVerify,
+  onDownload,
+  onExport
+}: {
+  months: BackupMonth[];
+  verifyByMonth: Record<string, BackupVerifyResult>;
+  busy: string;
+  onVerify: (month: string) => Promise<void>;
+  onDownload: (month: string, table: string) => Promise<void>;
+  onExport: (month: string) => Promise<void>;
+}) {
+  // Only closed months are expected to have a respaldo; en_curso is informational.
+  const missing = months.filter((month) => month.status === "faltante").map((month) => month.month);
+  const closedMonths = months.filter((month) => month.status !== "en_curso");
+  const healthLine =
+    missing.length === 0
+      ? "Todos los meses cerrados están respaldados."
+      : `Falta el respaldo de ${missing.join(", ")}.`;
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Respaldos mensuales</h2>
+          <p>Revise y verifique los respaldos legales mensuales guardados en R2.</p>
+        </div>
+        <ShieldCheck size={20} />
+      </div>
+      {closedMonths.length > 0 && (
+        <p className={missing.length === 0 ? "backups-health ok" : "backups-health warn"}>{healthLine}</p>
+      )}
+      <div className="table-scroll export-table backups-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Mes</th>
+              <th>Estado</th>
+              <th className="numeric">Filas</th>
+              <th>Exportado el</th>
+              <th>Acciones</th>
+            </tr>
+          </thead>
+          <tbody>
+            {months.map((month) => {
+              const verify = verifyByMonth[month.month];
+              const rowFailed = verify ? !verify.ok : false;
+              return (
+                <tr key={month.month} className={rowFailed ? "backup-row-failed" : ""}>
+                  <td className="mono">{month.month}</td>
+                  <td>{backupStatusLabel(month.status)}</td>
+                  <td className="numeric">{month.totalRows ?? "—"}</td>
+                  <td>{month.exportedAt ? formatDateTime(month.exportedAt) : "—"}</td>
+                  <td>
+                    {month.status === "archivado" && (
+                      <div className="backup-actions">
+                        <button className="ghost" disabled={busy === `backup-verify-${month.month}`} onClick={() => void onVerify(month.month)}>
+                          {busy === `backup-verify-${month.month}` ? "Verificando" : "Verificar"}
+                        </button>
+                        <select
+                          aria-label={`Descargar tabla de ${month.month}`}
+                          value=""
+                          onChange={(event) => {
+                            const table = event.target.value;
+                            if (table) {
+                              void onDownload(month.month, table);
+                              event.target.value = "";
+                            }
+                          }}
+                        >
+                          <option value="">Descargar…</option>
+                          <option value="manifest">manifest</option>
+                          {month.tables.map((table) => (
+                            <option key={table} value={table}>
+                              {table}
+                            </option>
+                          ))}
+                        </select>
+                        {verify && (
+                          <span className={verify.ok ? "backup-verify-ok" : "backup-verify-fail"}>
+                            {verify.ok
+                              ? "Íntegro"
+                              : `Discrepancia: ${verify.files.filter((file) => !file.ok).map((file) => file.table).join(", ")}`}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    {month.status === "faltante" && (
+                      <button className="primary" disabled={busy === `backup-export-${month.month}`} onClick={() => void onExport(month.month)}>
+                        <Upload size={16} />
+                        {busy === `backup-export-${month.month}` ? "Exportando" : "Exportar mes"}
+                      </button>
+                    )}
+                    {month.status === "en_curso" && <span className="hint">Mes en curso</span>}
+                  </td>
+                </tr>
+              );
+            })}
+            {closedMonths.length === 0 && (
+              <tr>
+                <td colSpan={5}>Aún no hay meses cerrados para respaldar.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function backupStatusLabel(status: BackupMonth["status"]): string {
+  if (status === "archivado") return "Archivado ✓";
+  if (status === "faltante") return "Faltante ⚠";
+  return "En curso —";
 }
 
 function CredentialsPanel({
