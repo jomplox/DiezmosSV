@@ -20,6 +20,9 @@ const ROLE_RANK: Record<Role, number> = {
   OWNER: 4
 };
 const PASSWORD_PBKDF2_ITERATIONS = 100_000;
+export const PASSWORD_RESET_TTL_MINUTES = 45;
+
+export class PasswordResetError extends Error {}
 
 export class AuthService {
   private readonly repo: Repository;
@@ -74,6 +77,29 @@ export class AuthService {
     const expiresAt = addDays(new Date().toISOString(), 1);
     await this.repo.createSession(row.id, await sha256Hex(token), expiresAt);
     return { user: publicUser(row), token, expiresAt };
+  }
+
+  async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; expiresAt: string } | null> {
+    const row = await this.repo.getUserForLogin(email);
+    if (!row || row.disabled_at) {
+      return null;
+    }
+    const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
+    const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60_000).toISOString();
+    await this.repo.createPasswordResetToken(row.id, await sha256Hex(token), expiresAt);
+    return { user: publicUser(row), token, expiresAt };
+  }
+
+  async confirmPasswordReset(token: string, password: string): Promise<AuthUser> {
+    const trimmed = token.trim();
+    const row = trimmed ? await this.repo.getActivePasswordResetUser(await sha256Hex(trimmed)) : null;
+    if (!row) {
+      throw new PasswordResetError("El enlace de restablecimiento no es válido o ya expiró. Solicite uno nuevo.");
+    }
+    const hashed = await hashPassword(password);
+    await this.repo.setUserPassword(String(row.user_id), hashed.hash, hashed.salt);
+    await this.repo.markPasswordResetTokenUsed(String(row.token_id));
+    return publicUser(row);
   }
 
   async authenticate(request: Request): Promise<AuthUser | null> {

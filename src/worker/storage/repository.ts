@@ -708,6 +708,34 @@ export class Repository {
     return updated;
   }
 
+  async createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
+    const id = newId("reset");
+    await this.db
+      .prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
+      .bind(id, userId, tokenHash, expiresAt)
+      .run();
+    return id;
+  }
+
+  async getActivePasswordResetUser(tokenHash: string): Promise<Record<string, string> | null> {
+    return this.db
+      .prepare(
+        `SELECT users.id, users.email, users.name, users.role, users.id AS user_id, password_reset_tokens.id AS token_id
+         FROM password_reset_tokens
+         JOIN users ON users.id = password_reset_tokens.user_id
+         WHERE password_reset_tokens.token_hash = ?
+           AND password_reset_tokens.used_at IS NULL
+           AND password_reset_tokens.expires_at > ?
+           AND users.disabled_at IS NULL`
+      )
+      .bind(tokenHash, nowIso())
+      .first<Record<string, string>>();
+  }
+
+  async markPasswordResetTokenUsed(id: string): Promise<void> {
+    await this.db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?").bind(nowIso(), id).run();
+  }
+
   async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
     const existing = await this.db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first<Record<string, unknown>>();
     if (!existing) {

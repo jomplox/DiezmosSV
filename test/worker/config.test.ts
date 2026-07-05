@@ -24,6 +24,12 @@ describe("worker config", () => {
     expect(() => getEmisorConfig(env({ EMISOR_CONFIG_JSON: JSON.stringify({ ...emisorConfig, tipoDocumento: "03" }) }))).toThrow(/emisor\.tipoDocumento.*NIT/i);
   });
 
+  it("reports malformed issuer JSON with a friendly config message", () => {
+    expect(() => getEmisorConfig(env({ EMISOR_CONFIG_JSON: '{\\"tipoDocumento\\":\\"36\\"}' }))).toThrow(
+      /EMISOR_CONFIG_JSON invalido: no es JSON válido/
+    );
+  });
+
   it("rejects issuer municipality values outside the authoritative catalog", () => {
     expect(() =>
       getEmisorConfig(

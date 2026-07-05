@@ -410,6 +410,11 @@ select,
   width: auto;
 }
 
+.test-grid input.quick-donor-name {
+  flex: 2 1 210px;
+  min-width: 196px;
+}
+
 .quick-document-type {
   flex: 0 1 172px;
   min-width: 142px;
@@ -487,6 +492,33 @@ select,
   border: 1px solid #e1e7e9;
   border-radius: 6px;
   background: #f7f9fa;
+}
+
+.invalidation-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.invalidation-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.invalidation-form label > span {
+  font-weight: 600;
+}
+
+.invalidation-form small {
+  color: #52656c;
+}
+
+.invalidation-form textarea,
+.invalidation-form select,
+.invalidation-form input {
+  width: 100%;
 }
 
 .wizard-actions {
@@ -2386,6 +2418,28 @@ pre {
   background: #edf9f7;
   font-size: 13px;
   line-height: 1.35;
+}
+
+.auth-hint {
+  color: #52656c;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.link-button {
+  border: 0;
+  background: transparent;
+  color: #0f766e;
+  font-size: 13px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  justify-self: center;
+  padding: 4px 8px;
+}
+
+.link-button:hover {
+  color: #0b5e57;
 }
 
 .toast {

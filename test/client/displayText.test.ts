@@ -21,6 +21,12 @@ describe("client display text", () => {
   it("localizes audit action codes and common backend errors", () => {
     expect(auditActionLabel("USER_PASSWORD_RESET")).toBe("Contraseña restablecida");
     expect(auditActionLabel("DTE_INVALIDATION_REJECTED")).toBe("Invalidación rechazada");
+    expect(auditActionLabel("QUICK_CDE_CREATED")).toBe("DTE rápido creado");
+    expect(auditActionLabel("EMAIL_INVALIDATION_SENT")).toBe("Aviso de invalidación enviado");
+    expect(auditActionLabel("EMAIL_INVALIDATION_FAILED")).toBe("Aviso de invalidación fallido");
+    expect(auditActionLabel("EMAIL_TEMPLATES_UPDATED")).toBe("Plantillas de correo actualizadas");
+    expect(auditActionLabel("EMISSION_ENVIRONMENT_UPDATED")).toBe("Ambiente de emisión actualizado");
+    expect(auditActionLabel("CLOUDFLARE_WRITER_ENABLED")).toBe("Edición de secretos desde UI habilitada");
     expect(userFacingErrorMessage("Invalid credentials")).toBe("Credenciales inválidas");
     expect(userFacingErrorMessage("MH auth failed")).toBe("Falló la autenticación con el Ministerio de Hacienda.");
     expect(userFacingErrorMessage("MH unavailable")).toBe("El Ministerio de Hacienda no está disponible.");

@@ -21,9 +21,14 @@ export function getEmisorConfig(env: Env): EmisorConfig {
   if (!env.EMISOR_CONFIG_JSON) {
     throw new Error("EMISOR_CONFIG_JSON es requerido");
   }
-  const config = JSON.parse(env.EMISOR_CONFIG_JSON);
+  let config: unknown;
+  try {
+    config = JSON.parse(env.EMISOR_CONFIG_JSON);
+  } catch {
+    throw invalidConfig("no es JSON válido. Revise comillas y caracteres de escape del secreto.");
+  }
   validateEmisorConfig(config);
-  return config;
+  return config as EmisorConfig;
 }
 
 export function validateEmisorConfig(value: unknown): asserts value is EmisorConfig {

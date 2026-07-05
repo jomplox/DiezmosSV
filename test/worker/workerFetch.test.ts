@@ -100,6 +100,168 @@ describe("owner bootstrap", () => {
   });
 });
 
+describe("password reset", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function knownUser(): Record<string, unknown> {
+    return {
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: ""
+    };
+  }
+
+  it("emails a reset link and stores only a hashed token for a known user", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: Array<{ to: string; subject: string; text: string }> = [];
+    db.users.push(knownUser());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "operator@example.org" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message as { to: string; subject: string; text: string });
+            return { messageId: "cf-email-reset" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(db.resetTokens).toHaveLength(1);
+    expect(sentMessages).toHaveLength(1);
+    const link = /https:\/\/example\.org\/\?reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
+    expect(link).toBeTruthy();
+    expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
+    expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
+  });
+
+  it("returns ok without creating tokens or sending email for unknown accounts", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: unknown[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "nadie@example.org" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-reset" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(db.resetTokens).toHaveLength(0);
+    expect(sentMessages).toHaveLength(0);
+  });
+
+  it("resets the password, revokes sessions, and consumes the token", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "hash", revoked_at: null });
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("known-token")),
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "known-token", password: "Fresh#Pass2026" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true });
+    expect(db.users[0].password_hash).not.toBe("old-hash");
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(db.resetTokens[0].used_at).toBeTruthy();
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_COMPLETED", entity_id: "user_operator" }));
+  });
+
+  it("rejects expired tokens", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("stale-token")),
+      expires_at: "2026-07-04T00:00:00.000Z",
+      used_at: null
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "stale-token", password: "Fresh#Pass2026" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_reset_token" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+  });
+
+  it("rejects weak passwords without consuming the token", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("known-token")),
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "known-token", password: "corta" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(400);
+    expect(db.users[0].password_hash).toBe("old-hash");
+    expect(db.resetTokens[0].used_at).toBeNull();
+  });
+});
+
 describe("document listing", () => {
   it("returns a bounded page with a cursor for older matching documents", async () => {
     const db = new InMemoryD1();
@@ -971,6 +1133,29 @@ describe("document invalidation", () => {
       error: "outside_legal_window",
       deadline: "2026-07-15T05:59:59.000Z"
     });
+    expect(document.status).toBe("ACCEPTED");
+  });
+
+  it("requires a replacement codigo de generación for tipo 1 invalidations", async () => {
+    const db = new InMemoryD1();
+    const document = testDocument();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 1, motivoAnulacion: "Error en datos" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "replacement_required_for_tipo_1" });
     expect(document.status).toBe("ACCEPTED");
   });
 
@@ -1898,6 +2083,7 @@ class InMemoryD1 {
   readonly contingencyBatchLines: Array<Record<string, unknown>> = [];
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly settings: Array<Record<string, unknown>> = [];
+  readonly resetTokens: Array<Record<string, unknown>> = [];
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
 
@@ -1929,6 +2115,19 @@ class Statement {
     }
     if (this.sql.includes("FROM users WHERE id = ?")) {
       return (this.db.users.find((user) => user.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("FROM users WHERE email = ?")) {
+      return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
+    }
+    if (this.sql.includes("FROM password_reset_tokens") && this.sql.includes("JOIN users")) {
+      const [tokenHash, nowIso] = this.args.map(String);
+      const token = this.db.resetTokens.find(
+        (row) => row.token_hash === tokenHash && !row.used_at && String(row.expires_at) > nowIso
+      );
+      if (!token) return null;
+      const user = this.db.users.find((row) => row.id === token.user_id && !row.disabled_at);
+      if (!user) return null;
+      return { id: user.id, email: user.email, name: user.name, role: user.role, token_id: token.id, user_id: user.id } as T;
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
@@ -2070,6 +2269,15 @@ class Statement {
         password_salt: passwordSalt,
         disabled_at: ""
       });
+    }
+    if (this.sql.includes("INSERT INTO password_reset_tokens")) {
+      const [id, userId, tokenHash, expiresAt] = this.args.map(String);
+      this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
+    }
+    if (this.sql.includes("UPDATE password_reset_tokens SET used_at")) {
+      const [usedAt, id] = this.args.map(String);
+      const token = this.db.resetTokens.find((row) => row.id === id);
+      if (token) token.used_at = usedAt;
     }
     if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson] = this.args;

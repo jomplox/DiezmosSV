@@ -75,48 +75,72 @@ export class EmailService {
       ]
     };
 
+    const providerResponse = await this.dispatch(payload, [
+      {
+        filename: pdfAttachment.filename,
+        type: pdfAttachment.contentType,
+        disposition: "attachment",
+        content: pdfBytes
+      },
+      {
+        filename: jsonAttachment.filename,
+        type: jsonAttachment.contentType,
+        disposition: "attachment",
+        content: jsonBytes
+      }
+    ]);
+    return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+  }
+
+  async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {
+    const payload: EmailPayload = {
+      from: this.env.EMAIL_FROM ?? "dte@example.org",
+      to: toEmail,
+      subject: "Restablecimiento de contraseña - ExamplePerson1",
+      text:
+        `Hola ${name},\n\n` +
+        `Recibimos una solicitud para restablecer su contraseña en ExamplePerson1. ` +
+        `Abra este enlace para crear una nueva contraseña (vence en ${expiresMinutes} minutos):\n\n` +
+        `${link}\n\n` +
+        `Si usted no solicitó este cambio, ignore este mensaje; su contraseña actual sigue vigente.`,
+      attachments: []
+    };
+    return this.dispatch(payload, []);
+  }
+
+  private async dispatch(payload: EmailPayload, cfAttachments: CloudflareEmailAttachment[]): Promise<unknown> {
     if (isMockMode(this.env)) {
-      const providerResponse = { mock: true, toEmail, subject: message.subject };
-      return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+      return { mock: true, toEmail: payload.to, subject: payload.subject };
     }
     if (this.env.EMAIL) {
       try {
         const result = await this.env.EMAIL.send({
-          from,
-          to: toEmail,
-          subject: message.subject,
+          from: payload.from,
+          to: payload.to,
+          subject: payload.subject,
           text: payload.text,
-          attachments: [
-            {
-              filename: pdfAttachment.filename,
-              type: pdfAttachment.contentType,
-              disposition: "attachment",
-              content: pdfBytes
-            },
-            {
-              filename: jsonAttachment.filename,
-              type: jsonAttachment.contentType,
-              disposition: "attachment",
-              content: jsonBytes
-            }
-          ]
+          ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
         });
-        const providerResponse = { provider: "cloudflare-email", messageId: result.messageId };
-        return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+        return { provider: "cloudflare-email", messageId: result.messageId };
       } catch (error) {
         if (hasHttpProvider(this.env)) {
-          const providerResponse = await sendViaHttpProvider(this.env, payload, error);
-          return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+          return sendViaHttpProvider(this.env, payload, error);
         }
         throw error;
       }
     }
     if (hasHttpProvider(this.env)) {
-      const providerResponse = await sendViaHttpProvider(this.env, payload);
-      return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+      return sendViaHttpProvider(this.env, payload);
     }
     throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
   }
+}
+
+interface CloudflareEmailAttachment {
+  filename: string;
+  type: string;
+  disposition: "attachment";
+  content: Uint8Array;
 }
 
 interface EmailMessage {

@@ -34,6 +34,9 @@ import {
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
+import { filterAuditEntries } from "./auditFilter";
+import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
+import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
 import { openNativeDatePicker } from "./datePicker";
 import { credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
@@ -75,6 +78,7 @@ type View = "documents" | "failures" | "contingency" | "audit" | "users" | "expo
 
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
+const TOAST_DISMISS_MS = 6000;
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
@@ -120,11 +124,13 @@ export function App() {
   const [documentsHasMore, setDocumentsHasMore] = useState(false);
   const [documentsLoadingMore, setDocumentsLoadingMore] = useState(false);
   const [toast, setToast] = useState("");
+  const [auditQuery, setAuditQuery] = useState("");
   const [authNotice, setAuthNotice] = useState("");
   const [authBootstrapStatus, setAuthBootstrapStatus] = useState<AuthBootstrapStatus | null>(null);
   const [busy, setBusy] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
+  const [invalidationForm, setInvalidationForm] = useState<InvalidationFormInput>(defaultInvalidationForm);
   const [emailEditingId, setEmailEditingId] = useState<string | null>(null);
   const [emailDraft, setEmailDraft] = useState("");
   const [advancedDteOpen, setAdvancedDteOpen] = useState(false);
@@ -139,14 +145,7 @@ export function App() {
     rowCount: 0,
     amountTotal: "0.00"
   });
-  const [testInput, setTestInput] = useState<TestDteInput>({
-    amount: "",
-    donorName: "",
-    donorEmail: "",
-    donorDocumentType: "13",
-    donorDocument: "",
-    donorPhone: ""
-  });
+  const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
     email: "",
@@ -172,6 +171,14 @@ export function App() {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (!toast) {
+      return;
+    }
+    const handle = window.setTimeout(() => setToast(""), TOAST_DISMISS_MS);
+    return () => window.clearTimeout(handle);
+  }, [toast]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedQuery(query.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
@@ -285,6 +292,14 @@ export function App() {
     await login(email, password);
   }
 
+  async function requestPasswordReset(email: string) {
+    await api("/api/auth/password-reset/request", "", { method: "POST", body: { email } });
+  }
+
+  async function confirmPasswordReset(resetToken: string, password: string) {
+    await api("/api/auth/password-reset/confirm", "", { method: "POST", body: { token: resetToken, password } });
+  }
+
   function logout() {
     localStorage.removeItem("diezmos_token");
     localStorage.removeItem("diezmos_user");
@@ -308,6 +323,7 @@ export function App() {
     }
     await runAction("test-dte", async () => {
       await api("/api/test/dte", token, { method: "POST", body: testInput });
+      setTestInput(emptyTestDteInput());
       setToast("DTE de prueba enviado a cola");
       await delay(2500);
       await refresh();
@@ -353,10 +369,14 @@ export function App() {
 
   async function documentAction(action: "resend" | "retry" | "invalidate", target = selected) {
     if (!target) return;
-    const body =
-      action === "invalidate"
-        ? { tipoAnulacion: 2, motivoAnulacion: "Invalidación solicitada desde panel" }
-        : {};
+    if (action === "invalidate") {
+      const validationError = invalidationFormValidationMessage(invalidationForm);
+      if (validationError) {
+        setToast(validationError);
+        return;
+      }
+    }
+    const body = action === "invalidate" ? invalidationRequestBody(invalidationForm) : {};
     await runAction(action, async () => {
       const result = await api<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
@@ -595,7 +615,16 @@ export function App() {
   }
 
   if (!token || !user) {
-    return <AuthScreen notice={authNotice} onLogin={login} onBootstrap={bootstrap} bootstrapAvailable={shouldShowBootstrapMode(authBootstrapStatus)} />;
+    return (
+      <AuthScreen
+        notice={authNotice}
+        onLogin={login}
+        onBootstrap={bootstrap}
+        onRequestReset={requestPasswordReset}
+        onConfirmReset={confirmPasswordReset}
+        bootstrapAvailable={shouldShowBootstrapMode(authBootstrapStatus)}
+      />
+    );
   }
 
   function handleApiFailure(error: unknown) {
@@ -727,7 +756,10 @@ export function App() {
                 busy={busy}
                 now={now}
                 onAction={documentAction}
-                onInvalidateRequest={setPendingInvalidationId}
+                onInvalidateRequest={(id) => {
+                  setInvalidationForm(defaultInvalidationForm());
+                  setPendingInvalidationId(id);
+                }}
                 onDownload={downloadDocument}
                 emailEditingId={emailEditingId}
                 emailDraft={emailDraft}
@@ -761,13 +793,21 @@ export function App() {
 
         {view === "audit" && (
           <section className="single-panel">
-            <div className="toolbar end">
+            <div className="toolbar">
+              <label className="search">
+                <Search size={16} />
+                <input
+                  placeholder="Filtrar por acción, documento o usuario"
+                  value={auditQuery}
+                  onChange={(event) => setAuditQuery(event.target.value)}
+                />
+              </label>
               <button onClick={() => void refresh()}>
                 <RefreshCw size={16} />
                 Actualizar
               </button>
             </div>
-            <AuditTable rows={audit} />
+            <AuditTable rows={filterAuditEntries(audit, auditQuery)} />
           </section>
         )}
 
@@ -865,6 +905,8 @@ export function App() {
           document={pendingInvalidation}
           busy={busy === "invalidate"}
           now={now}
+          form={invalidationForm}
+          onFormChange={setInvalidationForm}
           onCancel={() => setPendingInvalidationId(null)}
           onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
@@ -2349,7 +2391,7 @@ function TestDtePanel({
       </div>
       <div className="test-grid">
         <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
-        <input value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Nombre o razón social" />
+        <input className="quick-donor-name" value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Nombre o razón social" />
         <span className="quick-document-type">
           <CatalogSelect value={input.donorDocumentType} options={CAT022_DOCUMENT_TYPES} showCodes={false} onChange={(donorDocumentType) => onChange({ ...input, donorDocumentType })} />
         </span>
@@ -2654,19 +2696,44 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
   return options.some((option) => option.code === code) ? code : "";
 }
 
-function AuthScreen({ notice, onLogin, onBootstrap, bootstrapAvailable }: { notice?: string; onLogin: (email: string, password: string) => Promise<void>; onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>; bootstrapAvailable: boolean }) {
-  const [mode, setMode] = useState<"login" | "bootstrap">("login");
+function AuthScreen({
+  notice,
+  onLogin,
+  onBootstrap,
+  onRequestReset,
+  onConfirmReset,
+  bootstrapAvailable
+}: {
+  notice?: string;
+  onLogin: (email: string, password: string) => Promise<void>;
+  onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>;
+  onRequestReset: (email: string) => Promise<void>;
+  onConfirmReset: (token: string, password: string) => Promise<void>;
+  bootstrapAvailable: boolean;
+}) {
+  const [resetToken] = useState(() => resetTokenFromSearch(window.location.search));
+  const [mode, setMode] = useState<"login" | "bootstrap" | "reset-request" | "reset-confirm">(resetToken ? "reset-confirm" : "login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState("");
+  const [localNotice, setLocalNotice] = useState("");
 
   useEffect(() => {
     if (!bootstrapAvailable && mode === "bootstrap") {
       setMode("login");
     }
   }, [bootstrapAvailable, mode]);
+
+  function switchMode(next: "login" | "reset-request") {
+    setMode(next);
+    setError("");
+    setLocalNotice("");
+    setPassword("");
+    setConfirmPassword("");
+  }
 
   return (
     <div className="auth-screen">
@@ -2676,8 +2743,24 @@ function AuthScreen({ notice, onLogin, onBootstrap, bootstrapAvailable }: { noti
           event.preventDefault();
           setError("");
           try {
-            if (mode === "bootstrap") await onBootstrap(email, name, password, setupToken);
-            else await onLogin(email, password);
+            if (mode === "bootstrap") {
+              await onBootstrap(email, name, password, setupToken);
+            } else if (mode === "reset-request") {
+              await onRequestReset(email);
+              setLocalNotice("Si el correo está registrado, enviamos un enlace de restablecimiento. Revise su bandeja de entrada.");
+            } else if (mode === "reset-confirm") {
+              const validationError = passwordResetConfirmValidationMessage(password, confirmPassword);
+              if (validationError) {
+                setError(validationError);
+                return;
+              }
+              await onConfirmReset(resetToken ?? "", password);
+              window.history.replaceState(null, "", window.location.pathname);
+              switchMode("login");
+              setLocalNotice("Contraseña actualizada. Inicie sesión con su nueva contraseña.");
+            } else {
+              await onLogin(email, password);
+            }
           } catch (err) {
             setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
           }
@@ -2685,22 +2768,44 @@ function AuthScreen({ notice, onLogin, onBootstrap, bootstrapAvailable }: { noti
       >
         <ShieldCheck size={32} />
         <h1>ExamplePerson1</h1>
-        {bootstrapAvailable && (
+        {bootstrapAvailable && (mode === "login" || mode === "bootstrap") && (
           <div className="segmented">
             <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>
             <button type="button" className={mode === "bootstrap" ? "active" : ""} onClick={() => setMode("bootstrap")}>Crear propietario</button>
           </div>
         )}
+        {mode === "reset-request" && <p className="auth-hint">Ingrese su correo y le enviaremos un enlace para restablecer la contraseña.</p>}
+        {mode === "reset-confirm" && <p className="auth-hint">Cree su nueva contraseña para completar el restablecimiento.</p>}
         {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" />}
-        <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />
-        <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Contraseña" type="password" />
+        {mode !== "reset-confirm" && <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />}
+        {mode !== "reset-request" && (
+          <input
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder={mode === "reset-confirm" ? "Nueva contraseña" : "Contraseña"}
+            type="password"
+          />
+        )}
+        {mode === "reset-confirm" && (
+          <input value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Confirme la nueva contraseña" type="password" />
+        )}
         {mode === "bootstrap" && <input value={setupToken} onChange={(event) => setSetupToken(event.target.value)} placeholder="Token de configuración" type="password" />}
-        {notice && !error && <p className="auth-notice">{notice}</p>}
+        {(localNotice || notice) && !error && <p className="auth-notice">{localNotice || notice}</p>}
         {error && <p className="error">{error}</p>}
         <button className="primary" type="submit">
           <KeyRound size={16} />
-          Continuar
+          {mode === "reset-request" ? "Enviar enlace" : mode === "reset-confirm" ? "Guardar contraseña" : "Continuar"}
         </button>
+        {mode === "login" && (
+          <button type="button" className="link-button" onClick={() => switchMode("reset-request")}>
+            ¿Olvidó su contraseña?
+          </button>
+        )}
+        {(mode === "reset-request" || mode === "reset-confirm") && (
+          <button type="button" className="link-button" onClick={() => switchMode("login")}>
+            Volver a iniciar sesión
+          </button>
+        )}
       </form>
     </div>
   );
@@ -2890,16 +2995,21 @@ function InvalidationConfirmDialog({
   document,
   busy,
   now,
+  form,
+  onFormChange,
   onCancel,
   onConfirm
 }: {
   document: DteDocument;
   busy: boolean;
   now: Date;
+  form: InvalidationFormInput;
+  onFormChange: (form: InvalidationFormInput) => void;
   onCancel: () => void;
   onConfirm: () => void;
 }) {
   const windowInfo = invalidationWindowInfo(document, now);
+  const formError = invalidationFormValidationMessage(form);
   return (
     <div className="modal-backdrop">
       <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="invalidation-confirm-title">
@@ -2929,9 +3039,50 @@ function InvalidationConfirmDialog({
           <dt>Donante</dt>
           <dd>{document.donor_name ?? "N/D"}</dd>
         </dl>
+        <div className="invalidation-form">
+          <label>
+            <span>Tipo de invalidación</span>
+            <select
+              value={form.tipoAnulacion}
+              disabled={busy}
+              onChange={(event) => onFormChange({ ...form, tipoAnulacion: Number(event.target.value) === 1 ? 1 : 2 })}
+            >
+              <option value={2}>2 - Rescindir la operación (dejar sin efecto el CDE)</option>
+              <option value={1}>1 - Error en datos, con CDE de reemplazo ya emitido</option>
+            </select>
+          </label>
+          {form.tipoAnulacion === 1 && (
+            <label>
+              <span>Código de generación del CDE de reemplazo</span>
+              <input
+                className="mono"
+                value={form.codigoGeneracionR}
+                disabled={busy}
+                placeholder="XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX"
+                onChange={(event) => onFormChange({ ...form, codigoGeneracionR: event.target.value })}
+              />
+              <small>Primero emita el nuevo CDE que ampara la donación; aquí se relaciona su código.</small>
+            </label>
+          )}
+          <label>
+            <span>Motivo</span>
+            <textarea
+              value={form.motivoAnulacion}
+              disabled={busy}
+              rows={2}
+              placeholder="Ej.: Donación registrada con nombre de donante equivocado"
+              onChange={(event) => onFormChange({ ...form, motivoAnulacion: event.target.value })}
+            />
+          </label>
+        </div>
         <footer>
           <button onClick={onCancel} disabled={busy}>Cancelar</button>
-          <button className="danger solid" onClick={onConfirm} disabled={busy || !windowInfo.canInvalidate}>
+          <button
+            className="danger solid"
+            title={formError || undefined}
+            onClick={onConfirm}
+            disabled={busy || !windowInfo.canInvalidate || Boolean(formError)}
+          >
             <AlertTriangle size={16} />
             {busy ? "Invalidando" : "Confirmar invalidación"}
           </button>
@@ -3780,6 +3931,17 @@ function normalizeDecimalText(value: string): string {
 function formatCurrencyInputValue(value: string): string {
   const parsed = Number.parseFloat(normalizeDecimalText(value));
   return Number.isFinite(parsed) && parsed >= 0 ? parsed.toFixed(2) : "";
+}
+
+function emptyTestDteInput(): TestDteInput {
+  return {
+    amount: "",
+    donorName: "",
+    donorEmail: "",
+    donorDocumentType: "13",
+    donorDocument: "",
+    donorPhone: ""
+  };
 }
 
 function testAmountValidationMessage(value: string): string {

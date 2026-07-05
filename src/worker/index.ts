@@ -2,7 +2,7 @@ import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
 import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
-import { AuthError, AuthService, requireRole, type AuthUser, type Role } from "./services/auth";
+import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
 import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
@@ -130,6 +130,44 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const result = await auth.login(body.email, body.password);
     await repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
     return jsonResponse(result);
+  }
+
+  if (url.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
+    const body = (await request.json()) as { email?: string };
+    const email = String(body.email ?? "").trim();
+    if (email) {
+      const created = await auth.createPasswordResetToken(email);
+      if (created) {
+        const link = `${url.origin}/?reset=${created.token}`;
+        try {
+          await new EmailService(env).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
+          await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
+        } catch (error) {
+          await repo.createAudit({
+            action: "PASSWORD_RESET_EMAIL_FAILED",
+            entityType: "user",
+            entityId: created.user.id,
+            summary: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
+    // Always report success so the endpoint cannot be used to probe which emails exist.
+    return jsonResponse({ ok: true });
+  }
+
+  if (url.pathname === "/api/auth/password-reset/confirm" && request.method === "POST") {
+    const body = (await request.json()) as { token?: string; password?: string };
+    try {
+      const resetUser = await auth.confirmPasswordReset(String(body.token ?? ""), String(body.password ?? ""));
+      await repo.createAudit({ actorType: "USER", actorId: resetUser.id, action: "PASSWORD_RESET_COMPLETED", entityType: "user", entityId: resetUser.id, summary: resetUser.email });
+      return jsonResponse({ ok: true });
+    } catch (error) {
+      if (error instanceof PasswordResetError) {
+        return jsonResponse({ error: "invalid_reset_token", message: error.message }, { status: 400 });
+      }
+      return jsonResponse({ error: "weak_password", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+    }
   }
 
   if (url.pathname === "/api/documents" && request.method === "GET") {
