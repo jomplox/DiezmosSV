@@ -752,7 +752,7 @@ export function App() {
         <header className="topbar">
           <div>
             <h1>{navItems.find((item) => item.id === view)?.label}</h1>
-            <p>{subtitleFor(view)}</p>
+            <p>{viewSubtitle(view)}</p>
           </div>
           <div className="topbar-actions">
             <div className={contingency?.active ? "contingency-banner open" : "contingency-banner"}>
@@ -789,25 +789,28 @@ export function App() {
                     aria-label="Buscar código, donante o correo"
                   />
                 </label>
-                <select value={status} onChange={(event) => setStatus(event.target.value)} disabled={view === "failures"}>
-                  <option value="">Todos</option>
-                  <option value="ACCEPTED">Aceptados</option>
-                  <option value="CONTINGENCY_PENDING">Contingencia</option>
-                  <option value="REJECTED">Rechazados</option>
-                  <option value="FAILED">Fallidos</option>
-                  <option value="INVALIDATED">Invalidados</option>
-                </select>
+                {view !== "failures" && (
+                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                    <option value="">Todos</option>
+                    <option value="ACCEPTED">Aceptados</option>
+                    <option value="CONTINGENCY_PENDING">Contingencia</option>
+                    <option value="REJECTED">Rechazados</option>
+                    <option value="FAILED">Fallidos</option>
+                    <option value="INVALIDATED">Invalidados</option>
+                  </select>
+                )}
                 <button className="icon-button" onClick={() => void refresh()} title="Actualizar">
                   <RefreshCw size={17} />
                 </button>
               </div>
-              <Stats documents={documents} />
+              <Stats documents={documents} onlyFailed={view === "failures"} />
               <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
               <DocumentListFooter
                 count={documents.length}
                 hasMore={documentsHasMore}
                 loading={documentsLoadingMore}
                 onLoadMore={loadMoreDocuments}
+                emptyMessage={documentListEmptyMessage(view === "failures" ? "failures" : "documents", query)}
               />
             </div>
               <DetailPanel
@@ -2925,8 +2928,15 @@ function AuthScreen({
   );
 }
 
-function Stats({ documents }: { documents: DteDocument[] }) {
+function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed?: boolean }) {
   const counts = countByStatus(documents);
+  if (onlyFailed) {
+    return (
+      <div className="stats">
+        <Metric label="Fallidos en esta vista" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
+      </div>
+    );
+  }
   return (
     <div className="stats">
       <Metric label="Aceptados en esta vista" value={counts.ACCEPTED ?? 0} tone="ok" />
@@ -2981,16 +2991,18 @@ function DocumentListFooter({
   count,
   hasMore,
   loading,
-  onLoadMore
+  onLoadMore,
+  emptyMessage
 }: {
   count: number;
   hasMore: boolean;
   loading: boolean;
   onLoadMore: () => Promise<void>;
+  emptyMessage: string;
 }) {
   return (
     <div className="document-list-footer">
-      <span>{count > 0 ? `Mostrando ${count} CDE` : "No hay CDE que coincidan con la búsqueda o el filtro."}</span>
+      <span>{count > 0 ? `Mostrando ${count} CDE` : emptyMessage}</span>
       {hasMore && (
         <button type="button" onClick={() => void onLoadMore()} disabled={loading}>
           <ChevronRight size={16} />
@@ -3515,12 +3527,20 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function subtitleFor(view: View): string {
+export function viewSubtitle(view: View): string {
   if (view === "documents") return "Emita, envíe por correo y administre los comprobantes de donación (CDE).";
+  if (view === "failures") return "CDE con errores o rechazos que requieren su atención.";
   if (view === "contingency") return "Contingencias ante el Ministerio de Hacienda: eventos, CDE pendientes y plazos.";
+  if (view === "audit") return "Historial de todas las acciones realizadas en el panel.";
+  if (view === "users") return "Cree cuentas y asigne roles de acceso al panel.";
   if (view === "credentials") return "Credenciales del Ministerio de Hacienda, Wompi y correo.";
   if (view === "exports") return "Exporte los CDE aceptados para el F960 y control interno.";
   return "Operaciones administrativas y trazabilidad.";
+}
+
+export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
+  if (view === "failures" && query.trim() === "") return "Sin fallos pendientes. Todo en orden.";
+  return "No hay CDE que coincidan con la búsqueda o el filtro.";
 }
 
 function contingencyTypeLabel(value: number | string): string {
