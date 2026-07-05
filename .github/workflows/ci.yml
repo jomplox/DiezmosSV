@@ -21,3 +21,26 @@ jobs:
       - run: npm run typecheck
       - run: npx vitest run
       - run: npm run build
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # Provide committed NON-SECRET demo env (mock mode, demo emisor + cert).
+      - run: cp .dev.vars.ci .dev.vars
+      # Fresh runner has no .wrangler state, so this seeds an empty local D1
+      # (bootstrap path). playwright.config.ts's webServer builds + starts wrangler.
+      - run: npx wrangler d1 migrations apply diezmossv-local-db-example --local
+      - run: npx playwright test
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

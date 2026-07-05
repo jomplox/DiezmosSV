@@ -3,7 +3,17 @@ dist/
 .wrangler/
 .dev.vars
 .dev.vars.*
+# .dev.vars.ci holds committed NON-SECRET demo values used by the CI Playwright
+# smoke test; keep it tracked even though the glob above ignores .dev.vars.*.
+!.dev.vars.ci
 .DS_Store
+
+# Playwright e2e artifacts.
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/e2e/.auth/
 
 # Never publish real credentials, private keys, live certificates, or local MH exports.
 DTE/Credentials/
