@@ -4,9 +4,15 @@ compatibility_date = "2026-06-02"
 compatibility_flags = ["nodejs_compat"]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
 
+[[send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
+
 [vars]
 APP_ENV = "local"
+APP_ORIGIN = "http://localhost:8787"
 MOCK_EXTERNAL_SERVICES = "true"
+CLOUDFLARE_SCRIPT_NAME = "example-worker"
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
@@ -16,45 +22,16 @@ MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
 MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
 MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
 MH_USER_AGENT = "DiezmosSV/1.0"
-EMISOR_CONFIG_JSON = """{
-  "tipoDocumento": "36",
-  "numDocumento": "10000000000001",
-  "nrc": null,
-  "nombre": "Iglesia Demo",
-  "codActividad": "94910",
-  "descActividad": "Actividades de organizaciones religiosas",
-  "nombreComercial": "Iglesia Demo",
-  "direccion": {
-    "departamento": "06",
-    "municipio": "14",
-    "distrito": "01",
-    "complemento": "San Salvador, El Salvador"
-  },
-  "telefono": "70000003",
-  "correo": "dte@example.org",
-  "codEstable": "0001",
-  "codEstableMH": "0001",
-  "codPuntoVenta": "01",
-  "codPuntoVentaMH": "0001",
-  "controlPrefix": "00010001",
-  "defaultReceptorTipoDocumento": "13",
-  "defaultCodPais": "SV",
-  "defaultDonationType": 1,
-  "defaultUnidadMedida": 99,
-  "paymentMethodCode": null,
-  "responsable": {
-    "nombre": "Responsable Legal",
-    "tipoDocumento": "13",
-    "numeroDocumento": "000000000",
-    "tipoEstablecimiento": "02"
-  }
-}"""
 
 [[d1_databases]]
 binding = "DB"
 database_name = "diezmossv-local-db-example"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
+
+[[r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "diezmossv-local-archive-example"
 
 [[queues.producers]]
 binding = "ISSUANCE_QUEUE"
@@ -64,6 +41,124 @@ queue = "diezmossv-local-issuance-example"
 queue = "diezmossv-local-issuance-example"
 max_batch_size = 10
 max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-local-issuance-example-dlq"
+
+[[queues.consumers]]
+queue = "diezmossv-local-issuance-example-dlq"
+max_batch_size = 10
+max_batch_timeout = 5
 
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "0 9 1 * *"]
+
+# Remote TEST/Staging. Replace the zero database_id after:
+#   npx wrangler d1 create diezmossv-staging-resource-example
+# Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
+[env.staging]
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[[env.staging.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
+
+[env.staging.vars]
+APP_ENV = "staging"
+APP_ORIGIN = "https://worker.example.invalid"
+MOCK_EXTERNAL_SERVICES = "false"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-resource-example"
+EMAIL_ARBITRARY_RECIPIENTS = "true"
+# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
+MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
+MH_CONTINGENCIA_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
+MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
+MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
+MH_USER_AGENT = "DiezmosSV/1.0"
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "diezmossv-staging-resource-example"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[env.staging.r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "diezmossv-staging-archive-example"
+
+[[env.staging.queues.producers]]
+binding = "ISSUANCE_QUEUE"
+queue = "diezmossv-staging-issuance-example"
+
+[[env.staging.queues.consumers]]
+queue = "diezmossv-staging-issuance-example"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-staging-issuance-example-dlq"
+
+[[env.staging.queues.consumers]]
+queue = "diezmossv-staging-issuance-example-dlq"
+max_batch_size = 10
+max_batch_timeout = 5
+
+[env.staging.triggers]
+crons = ["*/15 * * * *", "0 9 1 * *"]
+
+# Remote production. Deploy only after staging UAT approval and one controlled
+# production issuance plan. D1/queues/R2 provisioned 2026-07-05; MH production
+# secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
+[env.production]
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[[env.production.send_email]]
+name = "EMAIL"
+allowed_sender_addresses = ["legacy-contact-4@example.com"]
+
+[env.production.vars]
+APP_ENV = "production"
+APP_ORIGIN = "https://worker.example.invalid"
+MOCK_EXTERNAL_SERVICES = "false"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-resource-example"
+# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
+MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
+MH_CONTINGENCIA_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
+MH_CONTINGENCIA_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/contingencia"
+MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
+MH_USER_AGENT = "DiezmosSV/1.0"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "diezmossv-production-resource-example"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[[env.production.r2_buckets]]
+binding = "ARCHIVE"
+bucket_name = "diezmossv-production-archive-example"
+
+[[env.production.queues.producers]]
+binding = "ISSUANCE_QUEUE"
+queue = "diezmossv-production-issuance-example"
+
+[[env.production.queues.consumers]]
+queue = "diezmossv-production-issuance-example"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-production-issuance-example-dlq"
+
+[[env.production.queues.consumers]]
+queue = "diezmossv-production-issuance-example-dlq"
+max_batch_size = 10
+max_batch_timeout = 5
+
+[env.production.triggers]
+crons = ["*/15 * * * *", "0 9 1 * *"]

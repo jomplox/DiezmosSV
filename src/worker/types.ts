@@ -4,10 +4,20 @@ export interface Env {
   DB: D1Database;
   ISSUANCE_QUEUE: Queue<IssuanceMessage>;
   ASSETS: Fetcher;
+  ARCHIVE: R2Bucket;
+  EMAIL?: SendEmail;
   APP_ENV?: string;
+  APP_ORIGIN?: string;
   MOCK_EXTERNAL_SERVICES?: string;
+  BOOTSTRAP_OWNER_TOKEN?: string;
+  CLOUDFLARE_ACCOUNT_ID?: string;
+  CLOUDFLARE_API_TOKEN?: string;
+  CLOUDFLARE_SCRIPT_NAME?: string;
+  CLOUDFLARE_API_BASE_URL?: string;
   WOMPI_API_SECRET?: string;
   MH_CERT_XML?: string;
+  MH_CERT_XML_PART_1?: string;
+  MH_CERT_XML_PART_2?: string;
   MH_CERT_PASSWORD?: string;
   MH_USER?: string;
   MH_PASSWORD?: string;
@@ -26,12 +36,14 @@ export interface Env {
   MH_USER_AGENT?: string;
   EMAIL_API_URL?: string;
   EMAIL_API_KEY?: string;
+  EMAIL_ARBITRARY_RECIPIENTS?: string;
   EMAIL_FROM?: string;
   EMISOR_CONFIG_JSON?: string;
 }
 
 export interface IssuanceMessage {
-  wompiEventId: string;
+  wompiEventId?: string;
+  advancedDocumentId?: string;
 }
 
 export interface WompiWebhook {
@@ -108,7 +120,7 @@ export interface EmisorConfig {
 
 export interface DteDocumentRecord {
   id: string;
-  wompi_event_id: string;
+  wompi_event_id: string | null;
   tipo_dte: "15";
   environment: Ambiente;
   codigo_generacion: string;
@@ -125,6 +137,44 @@ export interface DteDocumentRecord {
   issued_at: string;
   accepted_at: string | null;
   contingency_period_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ContingencyBatchRecord {
+  id: string;
+  contingency_period_id: string;
+  environment: Ambiente;
+  id_envio: string;
+  status: string;
+  codigo_lote: string | null;
+  request_json: string;
+  response_json: string;
+  last_error: string | null;
+  line_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  pending_count: number;
+  created_at: string;
+  submitted_at: string | null;
+  last_polled_at: string | null;
+  updated_at: string;
+}
+
+export interface ContingencyBatchLineRecord {
+  id: string;
+  batch_id: string;
+  contingency_period_id: string;
+  document_id: string;
+  line_no: number;
+  status: string;
+  codigo_generacion: string;
+  tipo_dte: "15";
+  signed_jws: string | null;
+  sello_recibido: string | null;
+  mh_estado: string | null;
+  mh_observaciones_json: string;
+  last_error: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -148,6 +198,22 @@ export interface MhResponse {
   accepted: boolean;
   estado: string;
   selloRecibido: string | null;
+  observaciones: string[];
+  raw: unknown;
+}
+
+export interface MhLoteSubmitResponse {
+  accepted: boolean;
+  estado: string;
+  codigoLote: string | null;
+  observaciones: string[];
+  raw: unknown;
+}
+
+export interface MhLoteConsultaResponse {
+  estado: string;
+  procesados: Array<Record<string, unknown>>;
+  rechazados: Array<Record<string, unknown>>;
   observaciones: string[];
   raw: unknown;
 }

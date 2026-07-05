@@ -18,7 +18,7 @@ export function validateCde(document: unknown): void {
 }
 
 export function validateInvalidacion(document: unknown): void {
-  assertValid("Invalidacion", validators.invalidacion(document), validators.invalidacion.errors);
+  assertValid("Invalidación", validators.invalidacion(document), validators.invalidacion.errors);
 }
 
 export function validateContingencia(document: unknown): void {
@@ -33,5 +33,5 @@ function assertValid(label: string, valid: boolean, errors: ErrorObject[] | null
     .slice(0, 8)
     .map((error) => `${error.instancePath || "/"} ${error.message ?? ""}`.trim())
     .join("; ");
-  throw new Error(`${label} schema validation failed: ${detail}`);
+  throw new Error(`La validación del esquema ${label} falló: ${detail}`);
 }

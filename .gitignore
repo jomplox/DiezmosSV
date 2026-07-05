@@ -2,7 +2,18 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+.dev.vars.*
+# .dev.vars.ci holds committed NON-SECRET demo values used by the CI Playwright
+# smoke test; keep it tracked even though the glob above ignores .dev.vars.*.
+!.dev.vars.ci
 .DS_Store
+
+# Playwright e2e artifacts.
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/e2e/.auth/
 
 # Never publish real credentials, private keys, live certificates, or local MH exports.
 DTE/Credentials/
@@ -12,6 +23,7 @@ DTE/dte-firmador/
 DTE/svfe-api-firmador/
 DTE/*.pdf
 DTE/*.xlsx
+DTE/*.csv
 DTE/*_OCR.md
 DTE/*_by_PaddleOCR*.md
 
@@ -19,3 +31,5 @@ DTE/*_by_PaddleOCR*.md
 WompiWebhookSample.json
 PRD_CDE_DTE_Wompi_ElSalvador*.md
 GOAL.md
+examples/DTE-*.json
+examples/DTE-*.pdf

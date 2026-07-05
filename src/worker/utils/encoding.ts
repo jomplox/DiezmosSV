@@ -32,6 +32,10 @@ export function hexFromBytes(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+}
+
 export function timingSafeEqual(left: string, right: string): boolean {
   const leftBytes = utf8Bytes(left);
   const rightBytes = utf8Bytes(right);

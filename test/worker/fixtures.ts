@@ -10,7 +10,7 @@ export const emisorConfig: EmisorConfig = {
   nombreComercial: "Iglesia Demo",
   direccion: {
     departamento: "06",
-    municipio: "14",
+    municipio: "22",
     distrito: "01",
     complemento: "San Salvador, El Salvador"
   },

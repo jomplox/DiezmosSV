@@ -1,0 +1,32 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
+
+describe("annual certificate UI contract", () => {
+  it("renders the certificate card with usted-form labels below the F960 card", () => {
+    expect(appSource).toContain("Constancia anual de donaciones");
+    expect(appSource).toContain("Envíe a cada donante el resumen de sus donaciones aceptadas del año.");
+    // Preview table columns: donante, donaciones, total, correo.
+    expect(appSource).toContain("<th>Donante</th>");
+    expect(appSource).toContain(">Donaciones</th>");
+    expect(appSource).toContain(">Total</th>");
+    expect(appSource).toContain("<th>Correo</th>");
+    expect(appSource).toContain("Enviar constancias");
+  });
+
+  it("confirms the send and states that donors without email are skipped", () => {
+    expect(appSource).toContain("window.confirm");
+    expect(appSource).toContain("sin correo se omitirán");
+    expect(appSource).toContain("Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.");
+  });
+
+  it("wires the preview and send endpoints for the selected year", () => {
+    expect(appSource).toContain("/api/certificates/annual?year=");
+    expect(appSource).toContain("/api/certificates/annual/send?year=");
+    expect(appSource).toContain("certificateYearOptions()");
+    expect(stylesSource).toContain(".certificate-table table");
+  });
+});

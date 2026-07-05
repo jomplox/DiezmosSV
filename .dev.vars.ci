@@ -1,0 +1,23 @@
+# Committed NON-SECRET demo values for local wrangler dev + CI Playwright smoke tests.
+# Everything here is a throwaway fixture: the certificate is a freshly generated
+# self-signed RSA key (never issued by the Ministerio de Hacienda), and all
+# tokens/passwords are dummy strings. Safe to commit. Do NOT put real secrets here.
+#
+# Task 1 made mock mode explicit opt-in, so MOCK_EXTERNAL_SERVICES MUST be "true":
+# with it, MH transmission + email are mocked and a quick CDE reaches ACEPTADO via
+# the local queue within a few seconds.
+MOCK_EXTERNAL_SERVICES="true"
+BOOTSTRAP_OWNER_TOKEN="ci-bootstrap-token"
+WOMPI_API_SECRET="ci-dummy-wompi-secret"
+CLOUDFLARE_ACCOUNT_ID="ci-dummy-account-id"
+CLOUDFLARE_API_TOKEN="ci-dummy-api-token"
+MH_CERT_PASSWORD="ci-cert-password"
+MH_CERT_XML="<CertificadoMH><nit>10000000000001</nit><publicKey><encodied>MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsR/7p9PIB9mo2+b8xGFKob2CZjafwy9KXWH7mtnFT4zcd5QSFt75tIn6jGJvaTFafzytjR7/nIdgvEwaw69XVnRRXEScYSmlxBx9W+ymP17lUKRxv5s8OrYMYVCaUlodo8C3dq3wST+qEww5iFNV9WPYNFjb1lKX1sX/41Y4OT6ha77QXzqQXGNCEel9gZwWAW20pbaOks1Xl6WlfaxFjQuKpuHkjrWAqYA3AYlyuf1lDMnizquEggKrkJuj698ToQkuSBVxjhhEkkgKQ8MaPu1BpaGIbG/lVSXQOxu9IWQs7eP/N8DaCt8pdVxibRbKbmGcts2nQ8O9+mRBSA1kSwIDAQAB</encodied></publicKey><privateKey><encodied>MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCxH/un08gH2ajb5vzEYUqhvYJmNp/DL0pdYfua2cVPjNx3lBIW3vm0ifqMYm9pMVp/PK2NHv+ch2C8TBrDr1dWdFFcRJxhKaXEHH1b7KY/XuVQpHG/mzw6tgxhUJpSWh2jwLd2rfBJP6oTDDmIU1X1Y9g0WNvWUpfWxf/jVjg5PqFrvtBfOpBcY0IR6X2BnBYBbbSlto6SzVeXpaV9rEWNC4qm4eSOtYCpgDcBiXK5/WUMyeLOq4SCAquQm6Pr3xOhCS5IFXGOGESSSApDwxo+7UGloYhsb+VVJdA7G70hZCzt4/83wNoK3yl1XGJtFspuYZy2zadDw736ZEFIDWRLAgMBAAECggEAJoRhecP0ljxvW26WHfBYRebLkgWj5VKF1dvGVoyvuxZTJQ/GhUG0xF1S5i9LsfDhEJU12l/YzwWjdB8KnO4mzG6b+LgU144ydXyKiDBkkJhGvqwb7kJILS5Eb+8SuADPvDney4iUnaEiD2VTp4ETyrqNHAkMuUUZrsM824d2z3+h0SXTcyRetXeuBbFcwNEkBU/CemwZHbUkNnuSXUht+B9osELbsxMj1fSqSHor1lZZZpVXfMawM9oaMbw+n6kVsHNHkI+UjcN5fwai00K+e8j2me2DQbkVZOu4Il2Vq4O1RkJSW2/Ajp1tLSqkN1i3Aj2hsLN0Z4Ga2l1SZfxDhQKBgQDjwhBeJ3v6HQOru0fCacQyBo1UhE9nWjXchrjp3pHDrOuHAREHYtNFWsPc8ULVbCi+WWe5V913YYidPKnmOf7qy/rorqi2f8WpmYehWOG8/hNOfg5Pkh3dzeaOdyeNLdr8eS5bn302LqKsHVFezX8B2/n6gtsjWAsZQohZuxuyBQKBgQDHFp/k9QYpyiz3t94fnGmOO/8RsRHfgdcdvKxNYpJloLDafcsd0lBh7SSD3GiPFg1Y4IwPN84vtsSVbkLfnqR4mK6+h3xtpakenRoVeyrECYa2EsNL+qy4/COxEBPEAn4HcBv458++Js0T5jk+fQrSPutNxU97JYRh7qbtRCn+DwKBgEHgg/N34Dg75C/r/5mQFhuSIZbsnjr6sNGUdi/PHMJIZeequ04zm4BX/IcPkZFBs5c7LPFDJN++6lDwlwPsintHfM+IlWwUEQw5SC23E7QimVr+wwzo6pKZV7KlbF89gDW+p1YBD6p4Wr0Fzd9p+O6Evg1jhBb5BFzODbpGkIAxAoGAItG8KUkJSOnJL5IC0TiD5ZJsq+VyIMsOmm7TG72vqQKPq8bwbUjJMjdNeZpk1xGeR/sNw+OYthObEh90prOSRF0/wqbjhjHBAE+trjAabKrV2qYxbeprpvbCL0eGjXN6I0biPYgddz5GA8LyJBGugNLsSG/H1Nvc6VvZ6glP5tUCgYEAoDByaxwtVXQiBD2VfKzHrziZe1uP0cNabZ8BPpjileeRVEwGchMDY/NAoVdSqvJIHkBEwuZh2v4Se++9ldPiyMJsGb5/b6JVZubj1KQD6qhq4IzBuwxcfFelHC5qcVfgbLDu6mtvg/IMwd/dxgyqwutu0Zazrxo284pGePpG9pw=</encodied><clave>96bd5c206c50c19920cec11500c71b37e812c073a11d22f0d55e4b81b7993e55b4796fe4206fdc83240faea4595ba4d315f046d16657844aae6ca68705ff3660</clave></privateKey><activo>true</activo></CertificadoMH>"
+MH_USER_TEST="ci-mh-user"
+MH_PASSWORD_TEST="ci-mh-password"
+MH_USER_PROD="ci-mh-user-prod"
+MH_PASSWORD_PROD="ci-mh-password-prod"
+EMAIL_FROM="dte@example.org"
+# Demo emisor config copied from .dev.vars.example. Single quotes are REQUIRED so
+# wrangler keeps the inner double quotes intact (no backslash escapes).
+EMISOR_CONFIG_JSON='{"tipoDocumento":"36","numDocumento":"10000000000001","nrc":null,"nombre":"Iglesia Demo","codActividad":"94910","descActividad":"Actividades de organizaciones religiosas","nombreComercial":"Iglesia Demo","direccion":{"departamento":"06","municipio":"22","distrito":"01","complemento":"San Salvador, El Salvador"},"telefono":"70000003","correo":"dte@example.org","codEstable":"0001","codEstableMH":"0001","codPuntoVenta":"01","codPuntoVentaMH":"0001","controlPrefix":"00010001","defaultReceptorTipoDocumento":"13","defaultCodPais":"SV","defaultDonationType":1,"defaultUnidadMedida":99,"paymentMethodCode":null,"responsable":{"nombre":"Responsable Legal","tipoDocumento":"13","numeroDocumento":"000000000","tipoEstablecimiento":"02"}}'

@@ -1,10 +1,20 @@
 WOMPI_API_SECRET="replace-with-wompi-secret"
+BOOTSTRAP_OWNER_TOKEN="replace-with-one-time-owner-bootstrap-token"
+CLOUDFLARE_ACCOUNT_ID="replace-with-cloudflare-account-id-for-ui-secret-writes"
+CLOUDFLARE_API_TOKEN="replace-with-workers-secrets-edit-token-for-ui-secret-writes"
 MH_CERT_PASSWORD="replace-with-mh-private-key-password"
 MH_CERT_XML="paste-ministerio-hacienda-certificado-xml-here"
+# Cloudflare Workers secrets are capped at 5 KB. For remote deploys with a larger certificate,
+# split the same XML across MH_CERT_XML_PART_1 and MH_CERT_XML_PART_2 instead.
+# MH_CERT_XML_PART_1="first-half-of-certificado-xml"
+# MH_CERT_XML_PART_2="second-half-of-certificado-xml"
 MH_USER_TEST="replace-with-mh-test-api-user"
 MH_PASSWORD_TEST="replace-with-mh-test-api-password"
 MH_USER_PROD="replace-with-mh-production-api-user"
 MH_PASSWORD_PROD="replace-with-mh-production-api-password"
-EMAIL_API_URL="https://email-provider.example/send"
-EMAIL_API_KEY="replace-with-email-api-key"
+# Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
+# EMAIL_API_URL="https://email-provider.example/send"
+# EMAIL_API_KEY="replace-with-email-provider-api-key"
 EMAIL_FROM="dte@example.org"
+# Use single quotes so wrangler keeps the inner double quotes intact (no backslash escapes).
+EMISOR_CONFIG_JSON='{"tipoDocumento":"36","numDocumento":"10000000000001","nrc":null,"nombre":"Iglesia Demo","codActividad":"94910","descActividad":"Actividades de organizaciones religiosas","nombreComercial":"Iglesia Demo","direccion":{"departamento":"06","municipio":"22","distrito":"01","complemento":"San Salvador, El Salvador"},"telefono":"70000003","correo":"dte@example.org","codEstable":"0001","codEstableMH":"0001","codPuntoVenta":"01","codPuntoVentaMH":"0001","controlPrefix":"00010001","defaultReceptorTipoDocumento":"13","defaultCodPais":"SV","defaultDonationType":1,"defaultUnidadMedida":99,"paymentMethodCode":null,"responsable":{"nombre":"Responsable Legal","tipoDocumento":"13","numeroDocumento":"000000000","tipoEstablecimiento":"02"}}'

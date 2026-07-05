@@ -1,3 +1,5 @@
+export { cdeInvalidationDeadline, isWithinDeadline } from "../../shared/legalWindows";
+
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 
 export function nowIso(): string {
@@ -28,27 +30,4 @@ export function addHours(iso: string, hours: number): string {
 
 export function addDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
-}
-
-export function cdeInvalidationDeadline(acceptedAtIso: string): string {
-  const accepted = new Date(acceptedAtIso);
-  const year = accepted.getUTCFullYear();
-  const month = accepted.getUTCMonth();
-  const firstFollowingMonth = new Date(Date.UTC(year, month + 1, 1, 23, 59, 59));
-  let businessDays = 0;
-  const cursor = new Date(firstFollowingMonth);
-  while (businessDays < 10) {
-    const day = cursor.getUTCDay();
-    if (day !== 0 && day !== 6) {
-      businessDays += 1;
-    }
-    if (businessDays < 10) {
-      cursor.setUTCDate(cursor.getUTCDate() + 1);
-    }
-  }
-  return cursor.toISOString();
-}
-
-export function isWithinDeadline(deadlineIso: string, reference: Date = new Date()): boolean {
-  return reference.getTime() <= new Date(deadlineIso).getTime();
 }
