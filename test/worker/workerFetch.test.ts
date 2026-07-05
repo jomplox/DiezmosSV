@@ -465,10 +465,11 @@ describe("donation intents", () => {
     await expect(response.json()).resolves.toEqual({ error: "intent_not_found" });
   });
 
-  it("expires only overdue PENDING intents on the 15-minute cron sweep", async () => {
+  it("expires overdue unpaid (PENDING and LINK_CREATED) intents on the 15-minute cron sweep", async () => {
     const db = new InMemoryD1();
     db.donationIntents.push(
       { id: "di_overdue", status: "PENDING", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
+      { id: "di_link_overdue", status: "LINK_CREATED", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
       { id: "di_fresh", status: "PENDING", expires_at: "2026-07-04T13:00:00.000Z", created_at: "2026-07-04T12:00:00.000Z" },
       { id: "di_done", status: "COMPLETED", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
     );
@@ -479,7 +480,10 @@ describe("donation intents", () => {
       vi.useRealTimers();
     }
 
+    // An abandoned checkout (link minted, donor never paid) must not sit as
+    // LINK_CREATED forever — it expires just like an unlinked PENDING intent.
     expect(db.donationIntents.find((row) => row.id === "di_overdue")?.status).toBe("EXPIRED");
+    expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
     expect(db.donationIntents.find((row) => row.id === "di_fresh")?.status).toBe("PENDING");
     expect(db.donationIntents.find((row) => row.id === "di_done")?.status).toBe("COMPLETED");
   });
@@ -4128,7 +4132,9 @@ class Statement {
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
       const [updatedAt, nowIso] = this.args.map(String);
-      for (const intent of this.db.donationIntents.filter((row) => row.status === "PENDING" && String(row.expires_at) < nowIso)) {
+      for (const intent of this.db.donationIntents.filter(
+        (row) => (row.status === "PENDING" || row.status === "LINK_CREATED") && String(row.expires_at) < nowIso
+      )) {
         intent.status = "EXPIRED";
         intent.updated_at = updatedAt;
       }

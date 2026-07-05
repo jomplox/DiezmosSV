@@ -108,7 +108,7 @@ export default {
       console.error("Stalled Wompi event sweep failed", error);
     }
     try {
-      await new Repository(env.DB).expirePendingIntentsBefore(nowIso());
+      await new Repository(env.DB).expireUnpaidIntentsBefore(nowIso());
     } catch (error) {
       console.error("Donation intent expiry sweep failed", error);
     }

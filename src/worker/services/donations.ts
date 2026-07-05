@@ -46,8 +46,10 @@ export interface ValidatedIntentInput {
 }
 
 // Parses dollars (string like "25.50" or a number) into integer cents inside the
-// donor-checkout range. Throws IntentValidationError("invalid_amount", …) on any
-// non-finite, non-positive, out-of-range, or fractional-cent value.
+// donor-checkout range. Sub-cent precision is rounded to the nearest cent
+// (Math.round) rather than rejected — friendlier for donor input. Throws
+// IntentValidationError("invalid_amount", …) on any non-finite, non-positive, or
+// out-of-range value.
 export function parseAmountCents(value: unknown): number {
   const amount = typeof value === "number" ? value : typeof value === "string" ? Number.parseFloat(value.trim()) : NaN;
   if (!Number.isFinite(amount) || amount <= 0) {

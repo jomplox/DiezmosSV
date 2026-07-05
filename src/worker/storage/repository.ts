@@ -159,11 +159,13 @@ export class Repository {
       .run();
   }
 
-  // Bulk sweep of intents that were never paid: PENDING rows past their expiry
-  // flip to EXPIRED. Filters on (status, expires_at) — the index added in 0009.
-  async expirePendingIntentsBefore(nowIso: string): Promise<void> {
+  // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
+  // rows past their expiry flip to EXPIRED. LINK_CREATED is included so an
+  // abandoned checkout (link minted, donor never paid) does not sit unexpired
+  // forever. Filters on (status, expires_at) — the index added in 0009.
+  async expireUnpaidIntentsBefore(nowIso: string): Promise<void> {
     await this.db
-      .prepare("UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status = 'PENDING' AND expires_at < ?")
+      .prepare("UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
       .bind(nowIso, nowIso)
       .run();
   }
