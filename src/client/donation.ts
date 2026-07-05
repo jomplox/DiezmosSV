@@ -15,6 +15,9 @@ export const DONAR_POLL_TIMEOUT_MS = 180_000;
 // If the Wompi script never loads or the widget button never renders within this
 // window, fall back to the full-page hosted flow (window.location.href).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
+// Poll the widget host this often (up to DONAR_SCRIPT_TIMEOUT_MS) for the button
+// Wompi injects, then auto-click it once so the payment modal opens immediately.
+export const DONAR_AUTOCLICK_INTERVAL_MS = 150;
 
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;

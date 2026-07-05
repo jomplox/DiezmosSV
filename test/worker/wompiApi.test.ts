@@ -7,6 +7,48 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+// The cards-only forma de pago every create/deactivate body must carry. The
+// permitir/permite prefixes are intentionally inconsistent — they mirror the
+// Wompi swagger EnlaceFormaPago schema exactly and must not be "corrected".
+const CARDS_ONLY_FORMA_PAGO = {
+  permitirTarjetaCreditoDebido: true,
+  permitirPagoConPuntoAgricola: false,
+  permitirPagoEnCuotasAgricola: false,
+  permitirPagoEnBitcoin: false,
+  permitePagoQuickPay: false,
+  permitePagoNequi: false
+};
+
+// Minimal in-memory D1 covering exactly the two app_settings statements
+// Repository.getSetting/setSetting issue, so the token cache has real storage.
+class FakeD1 {
+  readonly settings = new Map<string, string>();
+  prepare(sql: string) {
+    return new FakeStatement(this, sql);
+  }
+}
+
+class FakeStatement {
+  private args: unknown[] = [];
+  constructor(private readonly db: FakeD1, private readonly sql: string) {}
+  bind(...args: unknown[]): this {
+    this.args = args;
+    return this;
+  }
+  async first<T>(): Promise<T | null> {
+    if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+      const value = this.db.settings.get(String(this.args[0]));
+      return value === undefined ? null : ({ value } as T);
+    }
+    return null;
+  }
+  async run(): Promise<void> {
+    if (this.sql.includes("INSERT INTO app_settings")) {
+      this.db.settings.set(String(this.args[0]), String(this.args[1]));
+    }
+  }
+}
+
 describe("Wompi API service", () => {
   it("mints a single-use payment link with an OAuth token and returns the link fields", async () => {
     const fetchMock = vi
@@ -54,7 +96,8 @@ describe("Wompi API service", () => {
       monto: number;
       nombreProducto: string;
       limitesDeUso: { cantidadMaximaPagosExitosos: number };
-      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean };
+      formaPago: Record<string, boolean>;
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean };
       vigencia: { fechaInicio: string; fechaFin: string };
     };
     expect(body).toMatchObject({
@@ -62,12 +105,16 @@ describe("Wompi API service", () => {
       monto: 25.5,
       nombreProducto: "Donación Iglesia Demo",
       limitesDeUso: { cantidadMaximaPagosExitosos: 1 },
+      // Cards only: no puntoAgricola, cuotas, bitcoin, quickpay, or nequi.
+      formaPago: CARDS_ONLY_FORMA_PAGO,
       configuracion: {
         urlRedirect: "https://app.example.org/donar/gracias",
         urlWebhook: "https://app.example.org/webhooks/wompi",
         // The amount is pinned: the donor cannot edit the monto or quantity on Wompi's sheet.
         esMontoEditable: false,
-        esCantidadEditable: false
+        esCantidadEditable: false,
+        // Wompi must NOT email the donor: we send the CDE ourselves.
+        notificarTransaccionCliente: false
       }
     });
     expect(new Date(body.vigencia.fechaFin).getTime() - new Date(body.vigencia.fechaInicio).getTime()).toBe(60 * 60 * 1000);
@@ -140,20 +187,24 @@ describe("Wompi API service", () => {
       identificadorEnlaceComercio: string;
       monto: number;
       nombreProducto: string;
-      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean };
+      formaPago: Record<string, boolean>;
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean };
       vigencia: { fechaInicio: string; fechaFin: string };
     };
-    // Full body: PUT replaces the whole object, so configuracion must be present or it nulls out.
+    // Full body: PUT replaces the whole object, so formaPago and configuracion
+    // must be present or they null out (Wompi would re-enable every method / re-email).
     expect(body).toMatchObject({
       idEnlace: 555,
       identificadorEnlaceComercio: "di_test",
       monto: 25.5,
       nombreProducto: "Donación Iglesia Demo",
+      formaPago: CARDS_ONLY_FORMA_PAGO,
       configuracion: {
         urlRedirect: "https://app.example.org/donar/gracias",
         urlWebhook: "https://app.example.org/webhooks/wompi",
         esMontoEditable: false,
-        esCantidadEditable: false
+        esCantidadEditable: false,
+        notificarTransaccionCliente: false
       }
     });
     // Vigencia is entirely in the past (deactivates the link) yet spans at least 5 minutes.
@@ -200,6 +251,130 @@ describe("Wompi API service", () => {
   });
 });
 
+const TOKEN_CACHE_KEY = "wompi_api_token";
+
+describe("Wompi API OAuth token cache", () => {
+  it("reuses a cached token that is not expiring soon, skipping the token fetch", async () => {
+    const db = new FakeD1();
+    // A cached token valid for another hour: create must not hit the token URL.
+    db.settings.set(
+      TOKEN_CACHE_KEY,
+      JSON.stringify({ token: "cached-token", expiresAt: new Date(Date.now() + 3600_000).toISOString() })
+    );
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new WompiApiService(realEnv(db)).createPaymentLink(intent());
+
+    // Only the EnlacePago call — no token request.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [linkUrl, linkInit] = fetchMock.mock.calls[0];
+    expect(linkUrl).toBe("https://api.wompi.sv/EnlacePago");
+    expect((linkInit?.headers as Record<string, string>).authorization).toBe("Bearer cached-token");
+  });
+
+  it("fetches a fresh token on a cache miss and stores it with a 60s safety margin", async () => {
+    const db = new FakeD1();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "fresh-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const before = Date.now();
+    await new WompiApiService(realEnv(db)).createPaymentLink(intent());
+    const after = Date.now();
+
+    // Token fetch happened, then the link call used the fresh token.
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://id.wompi.sv/connect/token");
+
+    const cached = JSON.parse(String(db.settings.get(TOKEN_CACHE_KEY))) as { token: string; expiresAt: string };
+    expect(cached.token).toBe("fresh-token");
+    // expiresAt ≈ now + (expires_in - 60)s.
+    const expiresAtMs = new Date(cached.expiresAt).getTime();
+    expect(expiresAtMs).toBeGreaterThanOrEqual(before + (3600 - 60) * 1000);
+    expect(expiresAtMs).toBeLessThanOrEqual(after + (3600 - 60) * 1000);
+  });
+
+  it("refetches when the cached token is expiring within 60 seconds", async () => {
+    const db = new FakeD1();
+    // Cached token that expires in 30s — inside the 60s margin, so it must refetch.
+    db.settings.set(
+      TOKEN_CACHE_KEY,
+      JSON.stringify({ token: "stale-token", expiresAt: new Date(Date.now() + 30_000).toISOString() })
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "renewed-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new WompiApiService(realEnv(db)).createPaymentLink(intent());
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[0][0]).toBe("https://id.wompi.sv/connect/token");
+    const [, linkInit] = fetchMock.mock.calls[1];
+    expect((linkInit?.headers as Record<string, string>).authorization).toBe("Bearer renewed-token");
+    expect(String(db.settings.get(TOKEN_CACHE_KEY))).toContain("renewed-token");
+  });
+
+  it("invalidates the cache and retries once with a fresh token on a 401 from create", async () => {
+    const db = new FakeD1();
+    db.settings.set(
+      TOKEN_CACHE_KEY,
+      JSON.stringify({ token: "revoked-token", expiresAt: new Date(Date.now() + 3600_000).toISOString() })
+    );
+    const fetchMock = vi
+      .fn()
+      // First EnlacePago with the (server-side revoked) cached token → 401.
+      .mockResolvedValueOnce(new Response("token inválido", { status: 401 }))
+      // Retry: fresh token fetch, then a successful create.
+      .mockResolvedValueOnce(jsonResponse({ access_token: "retry-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(
+        jsonResponse({ idEnlace: 7, urlEnlace: "https://s.wompi.sv/7", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=7" })
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const link = await new WompiApiService(realEnv(db)).createPaymentLink(intent());
+    expect(link.idEnlace).toBe(7);
+
+    // 3 calls: failed create (cached token), token refetch, successful create.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((fetchMock.mock.calls[0][1]?.headers as Record<string, string>).authorization).toBe("Bearer revoked-token");
+    expect(fetchMock.mock.calls[1][0]).toBe("https://id.wompi.sv/connect/token");
+    expect((fetchMock.mock.calls[2][1]?.headers as Record<string, string>).authorization).toBe("Bearer retry-token");
+    // The revoked token was replaced in the cache.
+    expect(String(db.settings.get(TOKEN_CACHE_KEY))).toContain("retry-token");
+  });
+
+  it("does not retry a second time if the fresh token is also rejected with 401", async () => {
+    const db = new FakeD1();
+    db.settings.set(
+      TOKEN_CACHE_KEY,
+      JSON.stringify({ token: "revoked-token", expiresAt: new Date(Date.now() + 3600_000).toISOString() })
+    );
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("token inválido", { status: 401 }))
+      .mockResolvedValueOnce(jsonResponse({ access_token: "retry-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(new Response("token inválido", { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = await new WompiApiService(realEnv(db)).createPaymentLink(intent()).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expect((error as WompiApiError).message).toContain("401");
+    // No third create attempt: failed create, refetch, failed retry = 3 calls.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+});
+
 function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
   return {
     id: "di_test",
@@ -226,9 +401,9 @@ function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRe
   };
 }
 
-function realEnv(): Env {
+function realEnv(db: FakeD1 = new FakeD1()): Env {
   return {
-    DB: {} as D1Database,
+    DB: db as unknown as D1Database,
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
     ARCHIVE: {} as R2Bucket,
