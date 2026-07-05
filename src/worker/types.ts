@@ -7,6 +7,7 @@ export interface Env {
   ARCHIVE: R2Bucket;
   EMAIL?: SendEmail;
   APP_ENV?: string;
+  APP_ORIGIN?: string;
   MOCK_EXTERNAL_SERVICES?: string;
   BOOTSTRAP_OWNER_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;

@@ -40,6 +40,38 @@ describe("operational alert dispatch", () => {
     );
   });
 
+  it("uses the configured APP_ORIGIN in the alert email body", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const sent: Array<{ html?: string }> = [];
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      APP_ORIGIN: "https://worker.example.invalid",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sent.push(message as { html?: string });
+          return { messageId: "alert-origin" };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+
+    await sendOperationalAlert(env, repo, {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_origin"
+    });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].html).toContain("https://worker.example.invalid");
+  });
+
   it("does nothing when alert_email is not configured", async () => {
     const db = new InMemoryAlertD1();
     const sent: unknown[] = [];

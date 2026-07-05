@@ -750,6 +750,17 @@ export class Repository {
     return Number(row?.count ?? 0);
   }
 
+  // Windowed variant for the auth rate limiter: counts (action, entity_id) audits
+  // whose created_at is at or after `sinceIso`. Reads use the (action, entity_id,
+  // created_at) index added in migration 0008.
+  async countAuditEntriesSince(action: string, entityId: string, sinceIso: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ? AND created_at >= ?")
+      .bind(action, entityId, sinceIso)
+      .first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
   // Paged reads for the monthly legal-retention export (Task 1). Each call reads at
   // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged

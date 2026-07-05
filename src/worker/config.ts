@@ -14,7 +14,10 @@ import {
 import { assertValidDui, isDuiDocumentType } from "../shared/dui";
 
 export function isMockMode(env: Env): boolean {
-  return env.MOCK_EXTERNAL_SERVICES !== "false";
+  // Explicit opt-in: external services are only mocked when MOCK_EXTERNAL_SERVICES
+  // is exactly "true". Any other value — including unset — performs real calls, so
+  // a forgotten flag fails safe toward production behavior rather than silent mocks.
+  return env.MOCK_EXTERNAL_SERVICES === "true";
 }
 
 export function getEmisorConfig(env: Env): EmisorConfig {

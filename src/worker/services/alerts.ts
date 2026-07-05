@@ -53,6 +53,10 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
 }
 
 function originUrl(env: Env): string {
+  const appOrigin = env.APP_ORIGIN?.trim();
+  if (appOrigin) {
+    return appOrigin;
+  }
   const scriptName = env.CLOUDFLARE_SCRIPT_NAME?.trim();
   return scriptName ? `https://${scriptName}.workers.dev/` : "https://diezmos.example.org/";
 }

@@ -22,6 +22,19 @@ export class EmailService {
     private readonly templates: EmailTemplateSettings = DEFAULT_EMAIL_TEMPLATES
   ) {}
 
+  // Sender identity for real dispatch. EMAIL_FROM is required for any actual send;
+  // mock mode short-circuits before `from` is used, so an unset value stays harmless
+  // there and only surfaces as an error when a real provider would be contacted.
+  private resolveFrom(): string {
+    if (isMockMode(this.env)) {
+      return this.env.EMAIL_FROM ?? "";
+    }
+    if (!this.env.EMAIL_FROM) {
+      throw new Error("EMAIL_FROM es requerido para enviar correos");
+    }
+    return this.env.EMAIL_FROM;
+  }
+
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
     const message = renderEmailTemplate(this.templates.dteReceipt, record);
     if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
@@ -46,7 +59,7 @@ export class EmailService {
       pdfSha256: await sha256Hex(pdfBytes),
       dteJsonSha256: await sha256Hex(jsonBytes)
     };
-    const from = this.env.EMAIL_FROM ?? "dte@example.org";
+    const from = this.resolveFrom();
     const pdfAttachment = {
       filename: `${record.codigo_generacion}.pdf`,
       contentBase64: bytesToBase64(pdfBytes),
@@ -96,7 +109,7 @@ export class EmailService {
 
   async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {
     const payload: EmailPayload = {
-      from: this.env.EMAIL_FROM ?? "dte@example.org",
+      from: this.resolveFrom(),
       to: toEmail,
       subject: "Restablecimiento de contraseña - ExamplePerson1",
       text:
@@ -113,7 +126,7 @@ export class EmailService {
 
   async sendOperationalAlert(input: { to: string; subject: string; text: string; html: string }): Promise<unknown> {
     const payload: EmailPayload = {
-      from: this.env.EMAIL_FROM ?? "dte@example.org",
+      from: this.resolveFrom(),
       to: input.to,
       subject: input.subject,
       text: input.text,

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
+import { hashPassword } from "../../src/worker/services/auth";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -98,6 +99,154 @@ describe("owner bootstrap", () => {
     });
     expect(db.users).toHaveLength(1);
     expect(db.users[0].role).toBe("OWNER");
+  });
+});
+
+describe("auth rate limiting", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function seedAudit(db: InMemoryD1, action: string, entityId: string, createdAt: string): void {
+    db.audits.push({
+      id: `audit_${action}_${db.audits.length}`,
+      actor_type: "SYSTEM",
+      actor_id: null,
+      action,
+      entity_type: "user",
+      entity_id: entityId,
+      summary: "seeded",
+      metadata_json: "{}",
+      created_at: createdAt
+    });
+  }
+
+  function loginRequest(email: string, password = "whatever") {
+    return new Request("https://example.org/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password })
+    });
+  }
+
+  it("blocks the sixth failed login within 15 minutes without attempting authentication", async () => {
+    const db = new InMemoryD1();
+    // Five recent failures inside the window, keyed on the normalized (lowercase) email.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "abuser@example.org", `2026-07-04T11:5${i}:00.000Z`);
+    }
+
+    const response = await worker.fetch(loginRequest("ABuser@example.org"), env(db));
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toEqual({
+      error: "too_many_attempts",
+      message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+    });
+    // No authentication was attempted, so no additional LOGIN_FAILED audit is written.
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(5);
+  });
+
+  it("ignores failures older than the 15-minute window", async () => {
+    const db = new InMemoryD1();
+    // Five failures, but all older than 15 minutes — must not trip the limiter.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "olduser@example.org", `2026-07-04T11:${10 + i}:00.000Z`);
+    }
+
+    const response = await worker.fetch(loginRequest("olduser@example.org"), env(db));
+
+    // No such user exists, so the credential error surfaces (not the throttle).
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
+    // A fresh LOGIN_FAILED audit is recorded for this attempt.
+    const recent = db.audits.filter((audit) => audit.action === "LOGIN_FAILED");
+    expect(recent).toHaveLength(6);
+    expect(recent.at(-1)).toMatchObject({ action: "LOGIN_FAILED", entity_type: "user", entity_id: "olduser@example.org", summary: "Credenciales inválidas" });
+  });
+
+  it("audits a failed login and returns the credential error below the threshold", async () => {
+    const db = new InMemoryD1();
+
+    const response = await worker.fetch(loginRequest("nobody@example.org"), env(db));
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "LOGIN_FAILED", entity_type: "user", entity_id: "nobody@example.org", summary: "Credenciales inválidas" })
+    );
+  });
+
+  it("lets a valid login succeed despite older failures in the window", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_ok",
+      email: "good@example.org",
+      name: "Good User",
+      role: "OPERATOR",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: ""
+    });
+    // Four prior failures (below the 5 threshold) inside the window must not block a valid login.
+    for (let i = 0; i < 4; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "good@example.org", `2026-07-04T11:5${i}:00.000Z`);
+    }
+
+    const response = await worker.fetch(loginRequest("good@example.org", "Valid#Pass2026"), env(db));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ user: { email: "good@example.org", role: "OPERATOR" } });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_ok" }));
+  });
+
+  it("throttles password-reset requests but stays enumeration-safe with a 200", async () => {
+    const db = new InMemoryD1();
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: ""
+    });
+    const sentMessages: unknown[] = [];
+    // Three recent reset requests inside the window — the next one must be throttled.
+    for (let i = 0; i < 3; i += 1) {
+      seedAudit(db, "PASSWORD_RESET_REQUESTED", "user_operator", `2026-07-04T11:5${i}:00.000Z`);
+    }
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "operator@example.org" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-reset" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(db.resetTokens).toHaveLength(0);
+    expect(sentMessages).toHaveLength(0);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "PASSWORD_RESET_THROTTLED", entity_type: "user", entity_id: "user_operator" })
+    );
   });
 });
 
@@ -600,6 +749,7 @@ describe("document email resend", () => {
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
         EMAIL: {
           send: async (message: unknown) => {
             sentMessages.push(message);
@@ -637,6 +787,7 @@ describe("document email resend", () => {
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
         EMAIL: {
           send: async (message: unknown) => {
             sentMessages.push(message);
@@ -721,7 +872,7 @@ describe("document email resend", () => {
         },
         body: JSON.stringify({})
       }),
-      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+      env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com" })
     );
 
     expect(response.status).toBe(502);
@@ -729,6 +880,48 @@ describe("document email resend", () => {
       error: "email_send_failed",
       message: expect.stringContaining("Configure el servicio de correo")
     });
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "FAILED"
+    });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_RESEND_FAILED", entity_id: "doc_1" }));
+  });
+
+  it("records a failed delivery when EMAIL_FROM is missing for a real send", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        // EMAIL_FROM intentionally omitted even though a provider binding exists.
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message);
+            return { messageId: "cf-email-should-not-send" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_send_failed",
+      message: expect.stringContaining("EMAIL_FROM es requerido para enviar correos")
+    });
+    expect(sentMessages).toHaveLength(0);
     expect(db.emailDeliveries).toHaveLength(1);
     expect(db.emailDeliveries[0]).toMatchObject({
       document_id: "doc_1",
@@ -2975,6 +3168,10 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
     ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
     ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
     ARCHIVE: new FakeArchiveBucket() as unknown as R2Bucket,
+    // Default to mocked external services so tests that never touch email/MH stay
+    // offline under the explicit-opt-in rule (isMockMode only mocks when "true").
+    // Tests exercising real dispatch override this with "false".
+    MOCK_EXTERNAL_SERVICES: "true",
     ...values
   };
 }
@@ -3047,6 +3244,14 @@ class Statement {
     }
     if (this.sql.includes("FROM users WHERE email = ?")) {
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("created_at >= ?")) {
+      const [action, entityId, sinceIso] = this.args.map(String);
+      return {
+        count: this.db.audits.filter(
+          (audit) => audit.action === action && audit.entity_id === entityId && String(audit.created_at) >= sinceIso
+        ).length
+      } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);

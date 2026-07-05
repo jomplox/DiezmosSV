@@ -23,6 +23,17 @@ const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
+// Audit-based auth throttling. Failed logins and password-reset requests are
+// counted over a rolling window keyed on (action, entity_id); crossing the
+// threshold short-circuits the endpoint before any credential work runs, so
+// there is no timing oracle to distinguish throttled from rejected.
+const AUTH_THROTTLE_WINDOW_MINUTES = 15;
+const LOGIN_FAILED_LIMIT = 5;
+const PASSWORD_RESET_LIMIT = 3;
+
+function authThrottleSinceIso(): string {
+  return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -217,7 +228,20 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     const body = (await request.json()) as { email: string; password: string };
-    const result = await auth.login(body.email, body.password);
+    const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
+    const recentFailures = await repo.countAuditEntriesSince("LOGIN_FAILED", normalizedEmail, authThrottleSinceIso());
+    if (recentFailures >= LOGIN_FAILED_LIMIT) {
+      // Short-circuit before authenticating so a throttled attempt costs the same as
+      // any other rejection — no PBKDF2 work, no DB read, no timing signal.
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    let result;
+    try {
+      result = await auth.login(body.email, body.password);
+    } catch (error) {
+      await repo.createAudit({ action: "LOGIN_FAILED", entityType: "user", entityId: normalizedEmail, summary: error instanceof Error ? error.message : String(error) });
+      throw error;
+    }
     await repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
     return jsonResponse(result);
   }
@@ -226,19 +250,31 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await request.json()) as { email?: string };
     const email = String(body.email ?? "").trim();
     if (email) {
-      const created = await auth.createPasswordResetToken(email);
-      if (created) {
-        const link = `${url.origin}/?reset=${created.token}`;
-        try {
-          await new EmailService(env).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
-          await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
-        } catch (error) {
-          await repo.createAudit({
-            action: "PASSWORD_RESET_EMAIL_FAILED",
-            entityType: "user",
-            entityId: created.user.id,
-            summary: error instanceof Error ? error.message : String(error)
-          });
+      // Resolve the account first so the throttle can key on its id (matching
+      // PASSWORD_RESET_REQUESTED) and, crucially, run BEFORE any token is created.
+      // Unknown emails yield no account and fall through to the enumeration-safe
+      // 200 below without ever touching the rate limiter.
+      const account = await repo.getUserForLogin(email);
+      if (account && !account.disabled_at) {
+        const recentRequests = await repo.countAuditEntriesSince("PASSWORD_RESET_REQUESTED", account.id, authThrottleSinceIso());
+        if (recentRequests >= PASSWORD_RESET_LIMIT) {
+          await repo.createAudit({ action: "PASSWORD_RESET_THROTTLED", entityType: "user", entityId: account.id, summary: account.email });
+        } else {
+          const created = await auth.createPasswordResetToken(email);
+          if (created) {
+            const link = `${url.origin}/?reset=${created.token}`;
+            try {
+              await new EmailService(env).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
+              await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
+            } catch (error) {
+              await repo.createAudit({
+                action: "PASSWORD_RESET_EMAIL_FAILED",
+                entityType: "user",
+                entityId: created.user.id,
+                summary: error instanceof Error ? error.message : String(error)
+              });
+            }
+          }
         }
       }
     }

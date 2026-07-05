@@ -1,7 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { getEmisorConfig, getMhCertificateXml } from "../../src/worker/config";
+import { getEmisorConfig, getMhCertificateXml, isMockMode } from "../../src/worker/config";
 import type { Env } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
+
+describe("mock mode", () => {
+  it("performs real external calls when MOCK_EXTERNAL_SERVICES is unset", () => {
+    expect(isMockMode(env({}))).toBe(false);
+  });
+
+  it("only mocks external services when MOCK_EXTERNAL_SERVICES is exactly \"true\"", () => {
+    expect(isMockMode(env({ MOCK_EXTERNAL_SERVICES: "true" }))).toBe(true);
+  });
+
+  it("performs real external calls when MOCK_EXTERNAL_SERVICES is \"false\"", () => {
+    expect(isMockMode(env({ MOCK_EXTERNAL_SERVICES: "false" }))).toBe(false);
+  });
+});
 
 describe("worker config", () => {
   it("uses the single MH certificate secret when present", () => {

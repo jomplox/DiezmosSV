@@ -20,6 +20,8 @@ describe("client display text", () => {
 
   it("localizes audit action codes and common backend errors", () => {
     expect(auditActionLabel("USER_PASSWORD_RESET")).toBe("Contraseña restablecida");
+    expect(auditActionLabel("LOGIN_FAILED")).toBe("Inicio de sesión fallido");
+    expect(auditActionLabel("PASSWORD_RESET_THROTTLED")).toBe("Restablecimiento limitado por intentos");
     expect(auditActionLabel("DTE_INVALIDATION_REJECTED")).toBe("Invalidación rechazada");
     expect(auditActionLabel("QUICK_CDE_CREATED")).toBe("CDE rápido creado");
     expect(auditActionLabel("EMAIL_INVALIDATION_SENT")).toBe("Aviso de invalidación enviado");
