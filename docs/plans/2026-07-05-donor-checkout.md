@@ -27,6 +27,15 @@ Confirmed against https://docs.wompi.sv (2026-07-05):
   Response: `{ idEnlace, urlEnlace, urlQrCodeEnlace, estaProductivo }`.
 - Redirect back: Wompi appends `identificadorEnlaceComercio`, `idTransaccion`, `idEnlace`, `monto`,
   `hash` (HMAC over the parameters) to the configured redirect URL.
+- Embedded widget (verified empirically 2026-07-05 in a live browser): including
+  `<script src="https://pagos.wompi.sv/js/wompi.pagos.js">` and a
+  `<div class="wompi_button_widget" data-url-pago="<link URL>&esWidget=1" data-render="widget">`
+  renders a "Pagar con Wompi" button; clicking it opens the payment flow in an IFRAME MODAL with a
+  dimmed backdrop ON THE SAME PAGE — no navigation, no popup. The donor never leaves our page.
+  Unverified until the finale: whether the `urlEnlace` returned by the EnlacePago API is accepted
+  as `data-url-pago` (the panel-generated snippet uses the
+  `pagos.wompi.sv/IntentoPago/Redirect?id=…&esWidget=1` form). The full-page redirect flow is the
+  guaranteed fallback either way.
 
 ## Global Constraints
 
@@ -102,6 +111,10 @@ applies to a fresh local D1.
 - `GET /api/donations/catalogs` (no auth): departamentos + municipios + distritos (code, label,
   departmentCode) so the SPA needn't bundle the full catalog file if the implementer measures it
   as heavy; if bundling via `src/shared` import is lighter, skip this endpoint and document why.
+- `GET /api/donations/intent/:id/status` (no auth): returns `{ status }` ONLY — never donor data.
+  Intent ids are unguessable (`di_<uuid>`), and the response must stay enumeration-safe: unknown id
+  → 404 with the same shape/timing as a known-but-foreign id would get. This powers the donation
+  page's post-payment polling (Task 4).
 - Expiry: hook `expirePendingIntentsBefore` into the existing 15-minute cron branch (alongside the
   stalled-event sweep) — intents past `expires_at` in PENDING/LINK_CREATED become EXPIRED.
 - Worker tests in workerFetch.test.ts: happy path (mock mode), each validation rejection, throttle
@@ -148,13 +161,28 @@ everything else behaves exactly as today.
   "Revise el número de DUI."); correo; teléfono (opcional); departamento → municipio → distrito as
   CASCADING selects driven by the `src/shared/catalogs.ts` helpers (changing departamento resets
   the dependent selects); dirección (complemento) textarea; monto with quick-amount chips
-  ($5 / $10 / $25 / $50 / custom input, min $1). Submit → POST intent → on success
-  `window.location.href = urlEnlace`. Disable the submit button while in flight
+  ($5 / $10 / $25 / $50 / custom input, min $1). Disable the submit button while in flight
   ("Preparando el pago…"). All errors inline, usted-form.
-- `/donar/gracias`: reads `identificadorEnlaceComercio`, `idTransaccion`, `monto` from the query
-  string (display only — NO trust decisions from these parameters; the `hash` parameter is not
-  verified in v1 and nothing security-relevant may depend on this page). Message: payment received,
-  the comprobante (CDE) will arrive by email once MH confirms. Include church name.
+- Payment handoff, widget-first with redirect fallback:
+  1. Load `https://pagos.wompi.sv/js/wompi.pagos.js` on the `/donar` view only (dynamic script
+     injection when the view mounts; NEVER on the admin views).
+  2. On intent success, render the `wompi_button_widget` div with `data-url-pago` =
+     `urlEnlace` + `&esWidget=1` and `data-render="widget"` — clicking opens Wompi's iframe modal
+     on the same page (verified behavior; card data stays inside Wompi's iframe, never in our DOM).
+  3. While the modal is open, poll `GET /api/donations/intent/:id/status` every ~5s; when the
+     webhook flips the intent to COMPLETED, swap the view in place to the thank-you state
+     ("Su donación fue recibida. Recibirá su comprobante (CDE) por correo cuando el Ministerio de
+     Hacienda lo confirme.") — webhook-driven truth, independent of the widget's internals.
+  4. Fallback: if the Wompi script fails to load, or the widget doesn't render within a short
+     timeout, use `window.location.href = urlEnlace` (the full-page hosted flow). This fallback is
+     mandatory and tested — it is also the launch behavior if the finale discovers API-created
+     links don't work in the widget.
+- `/donar/gracias`: landing for the redirect fallback (and Wompi's per-link redirect). Reads
+  `identificadorEnlaceComercio`, `idTransaccion`, `monto` from the query string (display only — NO
+  trust decisions from these parameters; the `hash` parameter is not verified in v1 and nothing
+  security-relevant may depend on this page). Same thank-you copy; if it detects it is running
+  inside an iframe (widget modal), postMessage the parent so `/donar` can close the modal and show
+  the thank-you state directly.
 - Branding consistent with the admin login screen's existing styles; mobile-first (this page is
   the one donors open on phones).
 - Tests: source-contract tests (new file test/client/donarPage.test.ts) asserting labels, the
@@ -189,7 +217,9 @@ everything else behaves exactly as today.
   `WOMPI_CLIENT_SECRET` (values provided by José from the Wompi panel — controller must ASK, never
   invent); deploy staging.
 - Live verification on staging: open `/donar`, fill real data with a $1.00 amount, complete payment
-  on Wompi's hosted page, verify webhook → intent correlation → CDE ACEPTADO with the intent's
-  receptor (catalog codes + canonical DUI), donor email, intent COMPLETED, admin card shows it.
+  in the widget modal (verify the API-created `urlEnlace` renders in the widget; if it does not,
+  confirm the redirect fallback engages cleanly and record the finding), verify webhook → intent
+  correlation → CDE ACEPTADO with the intent's receptor (catalog codes + canonical DUI), donor
+  email, intent COMPLETED with the page flipping to the thank-you state, admin card shows it.
 - Verify the legacy path: one payment through the OLD static link still emits with fallbacks.
 - Push, CI green, PR to main, merge. Production deploy for parity (secrets remain go-live items).
