@@ -5,6 +5,15 @@ import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloa
 import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
+import {
+  clientIpFrom,
+  createDonationIntent,
+  IntentLinkError,
+  intentThrottleSinceIso,
+  IntentValidationError,
+  INTENT_THROTTLE_LIMIT,
+  validateIntentInput
+} from "./services/donations";
 import { EmailService } from "./services/email";
 import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates } from "./services/certificate";
@@ -97,6 +106,11 @@ export default {
       await pipeline.sweepStalledWompiEvents();
     } catch (error) {
       console.error("Stalled Wompi event sweep failed", error);
+    }
+    try {
+      await new Repository(env.DB).expirePendingIntentsBefore(nowIso());
+    } catch (error) {
+      console.error("Donation intent expiry sweep failed", error);
     }
     try {
       await checkCertificateExpiry(env, new Repository(env.DB));
@@ -215,6 +229,46 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
     return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
+  }
+
+  // Public donor checkout: unauthenticated, runs before any role check.
+  if (url.pathname === "/api/donations/intent" && request.method === "POST") {
+    const clientIp = clientIpFrom(request);
+    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
+    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
+      // Short-circuit before any validation/persistence so a throttled attempt is cheap.
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    let input;
+    try {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      input = validateIntentInput(body);
+    } catch (error) {
+      if (error instanceof IntentValidationError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    try {
+      const created = await createDonationIntent(env, repo, input, clientIp);
+      return jsonResponse(created, { status: 201 });
+    } catch (error) {
+      if (error instanceof IntentLinkError) {
+        // Intent stays PENDING and expires harmlessly on the cron sweep.
+        return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
+      }
+      throw error;
+    }
+  }
+
+  const intentStatusMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/status$/);
+  if (intentStatusMatch && request.method === "GET") {
+    const intent = await repo.getDonationIntent(intentStatusMatch[1]);
+    if (!intent) {
+      // Enumeration-safe: unknown ids get the same shape a foreign id would.
+      return jsonResponse({ error: "intent_not_found" }, { status: 404 });
+    }
+    return jsonResponse({ status: intent.status });
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {

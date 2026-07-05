@@ -250,6 +250,241 @@ describe("auth rate limiting", () => {
   });
 });
 
+describe("donation intents", () => {
+  // A checksum-valid DUI (10000001-9) and a deliberately invalid one that only
+  // fails the verifier digit (01234567-0; correct check digit is 8).
+  const VALID_DUI = "10000001-9";
+  const BAD_CHECKSUM_DUI = "01234567-0";
+
+  function validIntentBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      amount: "25.50",
+      donorName: "Donante Fiel",
+      donorDocumentType: "13",
+      donorDocument: VALID_DUI,
+      donorEmail: "donante@example.org",
+      donorPhone: "70001122",
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      complemento: "Colonia Escalón, San Salvador",
+      ...overrides
+    };
+  }
+
+  function intentRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+    return new Request("https://example.org/api/donations/intent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
+      body: JSON.stringify(body)
+    });
+  }
+
+  it("creates a PENDING intent, attaches a mock Wompi link, and returns all three link fields", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
+
+    expect(response.status).toBe(201);
+    const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string };
+    expect(payload.intentId).toMatch(/^di_/);
+    expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
+    expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
+
+    expect(db.donationIntents).toHaveLength(1);
+    const intent = db.donationIntents[0];
+    expect(intent.status).toBe("LINK_CREATED");
+    expect(intent.amount_cents).toBe(2550);
+    expect(intent.donor_document).toBe("10000001-9"); // stored canonically via formatDui
+    expect(intent.client_ip).toBe("203.0.113.7");
+    expect(intent.wompi_url_enlace).toBe(payload.urlEnlace);
+
+    // Audit records the intent creation with amount + document type, never the number.
+    const audit = db.audits.find((row) => row.action === "DONATION_INTENT_CREATED");
+    expect(audit).toBeDefined();
+    expect(audit?.entity_type).toBe("donation_intent");
+    expect(audit?.entity_id).toBe(payload.intentId);
+    const metadata = JSON.stringify(audit?.metadata_json ?? "");
+    expect(metadata).not.toContain("04182769");
+  });
+
+  it("accepts a numeric amount and a type 37 free-form document without checksum rules", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ amount: 100, donorDocumentType: "37", donorDocument: "PASAPORTE-XZ-9" })),
+      env(db)
+    );
+
+    expect(response.status).toBe(201);
+    expect(db.donationIntents[0].amount_cents).toBe(10000);
+    expect(db.donationIntents[0].donor_document).toBe("PASAPORTE-XZ-9");
+  });
+
+  it("rejects an amount below the one-dollar minimum", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ amount: "0.99" })), env(db));
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error: string; message: string };
+    expect(payload.error).toBe("invalid_amount");
+    expect(payload.message).toMatch(/usted|monto/i);
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects an amount above the five-thousand-dollar maximum", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ amount: "5000.01" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_amount" });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects a missing donor name", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ donorName: "   " })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_donor_name" });
+  });
+
+  it("rejects a DUI that fails the check digit for document type 13", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ donorDocument: BAD_CHECKSUM_DUI })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_dui",
+      message: "DUI inválido: revise el número y el dígito verificador."
+    });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects a municipio that does not belong to the given departamento", async () => {
+    const db = new InMemoryD1();
+    // 23 is a valid San Salvador (06) municipio but not valid under Ahuachapán (01).
+    const response = await worker.fetch(intentRequest(validIntentBody({ departamento: "01", municipio: "23", distrito: "01" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_municipio" });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects a distrito that does not belong to the given departamento", async () => {
+    const db = new InMemoryD1();
+    // 14 is a valid district under San Salvador (06) but not under Ahuachapán (01).
+    const response = await worker.fetch(intentRequest(validIntentBody({ departamento: "01", municipio: "13", distrito: "14" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_distrito" });
+  });
+
+  it("rejects a missing complemento", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ complemento: "" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+  });
+
+  it("rejects an email that is not RFC-trivially valid", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ donorEmail: "no-at-sign" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_email" });
+  });
+
+  it("blocks the sixth intent from one IP within 15 minutes with a 429", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      const db = new InMemoryD1();
+      // Five intents already created by this IP inside the window.
+      for (let i = 0; i < 5; i += 1) {
+        db.donationIntents.push({
+          id: `di_seed_${i}`,
+          status: "LINK_CREATED",
+          client_ip: "203.0.113.7",
+          expires_at: "2026-07-04T13:00:00.000Z",
+          created_at: `2026-07-04T11:5${i}:00.000Z`
+        });
+      }
+
+      const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
+
+      expect(response.status).toBe(429);
+      await expect(response.json()).resolves.toEqual({
+        error: "too_many_attempts",
+        message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+      });
+      // No new intent was created.
+      expect(db.donationIntents).toHaveLength(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns 502 and leaves the intent PENDING when Wompi link creation fails", async () => {
+    const db = new InMemoryD1();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("nope", { status: 500 }));
+    try {
+      const response = await worker.fetch(
+        intentRequest(validIntentBody()),
+        env(db, {
+          MOCK_EXTERNAL_SERVICES: "false",
+          APP_ORIGIN: "https://donar.example.org",
+          EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+          WOMPI_CLIENT_ID: "id",
+          WOMPI_CLIENT_SECRET: "secret"
+        })
+      );
+
+      expect(response.status).toBe(502);
+      await expect(response.json()).resolves.toMatchObject({ error: "wompi_link_failed" });
+      expect(db.donationIntents).toHaveLength(1);
+      expect(db.donationIntents[0].status).toBe("PENDING");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("returns only the status for a known intent id", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({ id: "di_known", status: "LINK_CREATED", donor_name: "Secreto", donor_document: "10000001-9" });
+
+    const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_known/status"), env(db));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED" });
+  });
+
+  it("returns 404 for an unknown intent id", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_missing/status"), env(db));
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({ error: "intent_not_found" });
+  });
+
+  it("expires only overdue PENDING intents on the 15-minute cron sweep", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push(
+      { id: "di_overdue", status: "PENDING", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
+      { id: "di_fresh", status: "PENDING", expires_at: "2026-07-04T13:00:00.000Z", created_at: "2026-07-04T12:00:00.000Z" },
+      { id: "di_done", status: "COMPLETED", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
+    );
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(db.donationIntents.find((row) => row.id === "di_overdue")?.status).toBe("EXPIRED");
+    expect(db.donationIntents.find((row) => row.id === "di_fresh")?.status).toBe("PENDING");
+    expect(db.donationIntents.find((row) => row.id === "di_done")?.status).toBe("COMPLETED");
+  });
+});
+
 describe("password reset", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
@@ -3475,6 +3710,7 @@ class InMemoryD1 {
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly settings: Array<Record<string, unknown>> = [];
   readonly resetTokens: Array<Record<string, unknown>> = [];
+  readonly donationIntents: Array<Record<string, unknown>> = [];
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
 
@@ -3534,6 +3770,17 @@ class Statement {
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
+      return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents") && this.sql.includes("client_ip = ?")) {
+      const [clientIp, sinceIso] = this.args.map(String);
+      return {
+        count: this.db.donationIntents.filter(
+          (intent) => intent.client_ip === clientIp && String(intent.created_at) >= sinceIso
+        ).length
+      } as T;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
       return (this.db.wompiEvents.find((event) => event.id === this.args[0]) ?? null) as T | null;
@@ -3821,6 +4068,70 @@ class Statement {
         processed_at: null,
         created_document_id: null
       });
+    }
+    if (this.sql.includes("INSERT INTO donation_intents")) {
+      const [
+        id,
+        amountCents,
+        donorName,
+        donorDocumentType,
+        donorDocument,
+        donorEmail,
+        donorPhone,
+        direccionDepartamento,
+        direccionMunicipio,
+        direccionDistrito,
+        direccionComplemento,
+        clientIp,
+        expiresAt
+      ] = this.args;
+      this.db.donationIntents.push({
+        id: String(id),
+        status: "PENDING",
+        amount_cents: Number(amountCents),
+        donor_name: String(donorName),
+        donor_document_type: String(donorDocumentType),
+        donor_document: String(donorDocument),
+        donor_email: String(donorEmail),
+        donor_phone: donorPhone == null ? null : String(donorPhone),
+        direccion_departamento: String(direccionDepartamento),
+        direccion_municipio: String(direccionMunicipio),
+        direccion_distrito: String(direccionDistrito),
+        direccion_complemento: String(direccionComplemento),
+        wompi_id_enlace: null,
+        wompi_url_enlace: null,
+        wompi_url_enlace_largo: null,
+        client_ip: clientIp == null ? null : String(clientIp),
+        created_at: "2026-06-26T01:46:47.015Z",
+        updated_at: "2026-06-26T01:46:47.015Z",
+        expires_at: String(expiresAt)
+      });
+    }
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("status = 'LINK_CREATED'")) {
+      const [idEnlace, urlEnlace, urlEnlaceLargo, updatedAt, id] = this.args;
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent) {
+        intent.wompi_id_enlace = Number(idEnlace);
+        intent.wompi_url_enlace = String(urlEnlace);
+        intent.wompi_url_enlace_largo = String(urlEnlaceLargo);
+        intent.status = "LINK_CREATED";
+        intent.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE donation_intents SET status = 'COMPLETED'")) {
+      const [updatedAt, id] = this.args;
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent) {
+        intent.status = "COMPLETED";
+        intent.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
+      const [updatedAt, nowIso] = this.args.map(String);
+      for (const intent of this.db.donationIntents.filter((row) => row.status === "PENDING" && String(row.expires_at) < nowIso)) {
+        intent.status = "EXPIRED";
+        intent.updated_at = updatedAt;
+      }
     }
     if (this.sql.includes("INSERT INTO dte_documents")) {
       const [id, wompiEventId, environment, codigoGeneracion, numeroControl, status, plainJson, donorEmail, donorName, amountCents, issuedAt, contingencyPeriodId] = this.args;
