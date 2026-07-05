@@ -24,6 +24,7 @@ interface WompiTokenResponse {
 interface WompiEnlacePagoResponse {
   idEnlace: number;
   urlEnlace: string;
+  urlEnlaceLargo: string;
 }
 
 export class WompiApiService {
@@ -35,7 +36,8 @@ export class WompiApiService {
     if (isMockMode(this.env)) {
       return {
         idEnlace: mockLinkId(intent.id),
-        urlEnlace: `https://mock.wompi.sv/enlace/${intent.id}`
+        urlEnlace: `https://mock.wompi.sv/enlace/${intent.id}`,
+        urlEnlaceLargo: `https://mock.wompi.sv/enlace-largo/${intent.id}`
       };
     }
 
@@ -76,7 +78,7 @@ export class WompiApiService {
       throw new WompiApiError(`Wompi rechazó la creación del enlace de pago: ${response.status} ${await response.text()}`);
     }
     const data = (await response.json()) as WompiEnlacePagoResponse;
-    return { idEnlace: data.idEnlace, urlEnlace: data.urlEnlace };
+    return { idEnlace: data.idEnlace, urlEnlace: data.urlEnlace, urlEnlaceLargo: data.urlEnlaceLargo };
   }
 
   private async requestToken(): Promise<string> {

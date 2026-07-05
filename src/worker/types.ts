@@ -198,6 +198,7 @@ export interface DonationIntentRecord {
   direccion_complemento: string;
   wompi_id_enlace: number | null;
   wompi_url_enlace: string | null;
+  wompi_url_enlace_largo: string | null;
   client_ip: string | null;
   created_at: string;
   updated_at: string;
@@ -207,6 +208,7 @@ export interface DonationIntentRecord {
 export interface WompiPaymentLink {
   idEnlace: number;
   urlEnlace: string;
+  urlEnlaceLargo: string;
 }
 
 export interface WompiEventRecord {

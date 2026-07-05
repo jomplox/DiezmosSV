@@ -145,10 +145,10 @@ export class Repository {
     await this.db
       .prepare(
         `UPDATE donation_intents
-         SET wompi_id_enlace = ?, wompi_url_enlace = ?, status = 'LINK_CREATED', updated_at = ?
+         SET wompi_id_enlace = ?, wompi_url_enlace = ?, wompi_url_enlace_largo = ?, status = 'LINK_CREATED', updated_at = ?
          WHERE id = ?`
       )
-      .bind(link.idEnlace, link.urlEnlace, nowIso(), id)
+      .bind(link.idEnlace, link.urlEnlace, link.urlEnlaceLargo, nowIso(), id)
       .run();
   }
 

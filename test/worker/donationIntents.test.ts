@@ -93,13 +93,19 @@ describe("donation intents repository", () => {
   it("attaches the Wompi link and flips status to LINK_CREATED", async () => {
     const { repository, db } = repo();
 
-    await repository.attachIntentLink("di_1", { idEnlace: 987654, urlEnlace: "https://api.wompi.sv/enlace/987654" });
+    await repository.attachIntentLink("di_1", {
+      idEnlace: 987654,
+      urlEnlace: "https://s.wompi.sv/987654",
+      urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+    });
 
     const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("wompi_id_enlace"));
     expect(update).toBeTruthy();
     expect(update!.sql).toContain("status = 'LINK_CREATED'");
+    expect(update!.sql).toContain("wompi_url_enlace_largo");
     expect(update!.args).toContain(987654);
-    expect(update!.args).toContain("https://api.wompi.sv/enlace/987654");
+    expect(update!.args).toContain("https://s.wompi.sv/987654");
+    expect(update!.args).toContain("https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc");
     expect(update!.args).toContain("di_1");
   });
 
@@ -155,6 +161,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     direccion_complemento: "San Salvador",
     wompi_id_enlace: null,
     wompi_url_enlace: null,
+    wompi_url_enlace_largo: null,
     client_ip: "203.0.113.9",
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",

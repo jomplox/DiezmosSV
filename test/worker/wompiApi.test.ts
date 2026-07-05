@@ -12,13 +12,23 @@ describe("Wompi API service", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 987654, urlEnlace: "https://api.wompi.sv/enlace/987654" }));
+      .mockResolvedValueOnce(
+        jsonResponse({
+          idEnlace: 987654,
+          urlEnlace: "https://s.wompi.sv/987654",
+          urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+        })
+      );
     vi.stubGlobal("fetch", fetchMock);
 
     const service = new WompiApiService(realEnv());
     const link = await service.createPaymentLink(intent());
 
-    expect(link).toEqual({ idEnlace: 987654, urlEnlace: "https://api.wompi.sv/enlace/987654" });
+    expect(link).toEqual({
+      idEnlace: 987654,
+      urlEnlace: "https://s.wompi.sv/987654",
+      urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+    });
 
     // Token request: form-encoded client-credentials with audience wompi_api.
     const [tokenUrl, tokenInit] = fetchMock.mock.calls[0];
@@ -68,6 +78,7 @@ describe("Wompi API service", () => {
     const link = await service.createPaymentLink(intent());
 
     expect(link.urlEnlace).toBe("https://mock.wompi.sv/enlace/di_test");
+    expect(link.urlEnlaceLargo).toBe("https://mock.wompi.sv/enlace-largo/di_test");
     expect(link.idEnlace).toBeGreaterThan(0);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -119,6 +130,7 @@ function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRe
     direccion_complemento: "San Salvador",
     wompi_id_enlace: null,
     wompi_url_enlace: null,
+    wompi_url_enlace_largo: null,
     client_ip: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",

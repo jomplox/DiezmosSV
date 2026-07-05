@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS donation_intents (
   direccion_complemento TEXT NOT NULL,
   wompi_id_enlace INTEGER,
   wompi_url_enlace TEXT,
+  wompi_url_enlace_largo TEXT,
   client_ip TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
