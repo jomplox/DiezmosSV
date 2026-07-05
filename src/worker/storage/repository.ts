@@ -15,6 +15,19 @@ interface DteDocumentCursor {
   id: string;
 }
 
+export const RETENTION_PAGE_SIZE = 500;
+
+export const RETENTION_WINDOWED_TABLES = ["dte_documents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
+export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
+
+export const RETENTION_SNAPSHOT_TABLES = ["contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
+export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
+
+export interface RetentionCursor {
+  createdAt: string;
+  id: string;
+}
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -728,6 +741,47 @@ export class Repository {
       .bind(action, entityId)
       .first<{ count: number }>();
     return Number(row?.count ?? 0);
+  }
+
+  // Paged reads for the monthly legal-retention export (Task 1). Each call reads at
+  // most `limit` rows via a (created_at, id) keyset cursor so a month with more rows
+  // than fit in memory at once is still read in bounded chunks — never an unpaged
+  // full-table scan. `cursor` is the (created_at, id) of the last row from the
+  // previous page, or null for the first page.
+  async listRowsCreatedBetween(
+    table: RetentionTable,
+    range: { startIso: string; endIso: string },
+    cursor: RetentionCursor | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<Array<Record<string, unknown>>> {
+    const conditions = ["created_at >= ?", "created_at < ?"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso];
+    if (cursor) {
+      conditions.push("(created_at, id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(`SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`)
+      .bind(...bindings, limit)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  // Full-snapshot paged reads for the small contingency tables (no created_at
+  // window — the brief asks for a full snapshot, simpler than windowing).
+  async listAllRowsPaged(table: RetentionSnapshotTable, cursor: RetentionCursor | null, limit = RETENTION_PAGE_SIZE): Promise<Array<Record<string, unknown>>> {
+    const conditions: string[] = [];
+    const bindings: Array<string | number> = [];
+    if (cursor) {
+      conditions.push("(created_at, id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = await this.db
+      .prepare(`SELECT * FROM ${table} ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
+      .bind(...bindings, limit)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
   }
 
   async createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string): Promise<string> {

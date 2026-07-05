@@ -71,6 +71,10 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   PASSWORD_RESET_EMAIL_FAILED: "Correo de restablecimiento fallido",
   PASSWORD_RESET_REQUESTED: "Restablecimiento de contraseña solicitado",
   QUICK_CDE_CREATED: "CDE rápido creado",
+  RETENTION_EXPORT_COMPLETED: "Exportación de retención completada",
+  RETENTION_EXPORT_FAILED: "Exportación de retención fallida",
+  RETENTION_EXPORT_REQUESTED: "Exportación de retención solicitada",
+  RETENTION_EXPORT_SKIPPED: "Exportación de retención omitida",
   TEST_WOMPI_CREATED: "CDE rápido creado",
   TEST_WOMPI_DUPLICATE: "CDE rápido duplicado",
   USER_CREATED: "Usuario creado",
@@ -88,6 +92,7 @@ const ENTITY_LABELS: Record<string, string> = {
   credentials: "Credenciales",
   dte_document: "Documento DTE",
   export: "Exportación",
+  retention_export: "Exportación de retención",
   user: "Usuario",
   wompi_event: "Evento Wompi"
 };

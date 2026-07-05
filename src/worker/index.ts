@@ -11,6 +11,7 @@ import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Se
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
+import { runRetentionExport } from "./services/retention";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
@@ -19,6 +20,7 @@ import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
 
 const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
+const RETENTION_EXPORT_CRON = "0 9 1 * *";
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -62,14 +64,26 @@ export default {
     }
   },
 
-  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+  async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
+    if (event.cron === RETENTION_EXPORT_CRON) {
+      try {
+        await runRetentionExport(env, new Date(event.scheduledTime));
+      } catch (error) {
+        console.error("Retention export failed", error);
+      }
+      return;
+    }
     const pipeline = new IssuancePipeline(env);
     try {
       await pipeline.runContingencySweep();
     } catch (error) {
       console.error("Contingency sweep failed", error);
     }
-    await pipeline.sweepStalledWompiEvents();
+    try {
+      await pipeline.sweepStalledWompiEvents();
+    } catch (error) {
+      console.error("Stalled Wompi event sweep failed", error);
+    }
   }
 };
 
@@ -234,6 +248,24 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/settings/alert-email") {
     return handleAlertEmailRoute(request, repo, user);
+  }
+
+  if (url.pathname === "/api/admin/retention-export" && request.method === "POST") {
+    const actor = requireRole(user, "OWNER");
+    const monthParam = url.searchParams.get("month");
+    if (monthParam && !/^\d{4}-\d{2}$/.test(monthParam)) {
+      return jsonResponse({ error: "invalid_retention_month", message: "Use el formato YYYY-MM." }, { status: 400 });
+    }
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "RETENTION_EXPORT_REQUESTED",
+      entityType: "retention_export",
+      entityId: monthParam ?? "previous_month",
+      summary: monthParam ? `Exportación de retención solicitada para ${monthParam}` : "Exportación de retención solicitada para el mes anterior"
+    });
+    const result = await runRetentionExport(env, new Date(), monthParam ? { month: monthParam } : {});
+    return jsonResponse({ ok: result.status !== "failed", ...result });
   }
 
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {

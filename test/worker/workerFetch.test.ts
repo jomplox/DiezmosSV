@@ -2287,6 +2287,73 @@ function queuedNoop(_message: IssuanceMessage): void {
   // Sweep should not requeue once an event has already been flagged stalled.
 }
 
+describe("scheduled cron dispatch", () => {
+  it("routes the monthly retention cron to the retention export, not the 15-minute sweeps", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(stalledWompiEventFixture());
+    const queued: IssuanceMessage[] = [];
+    const archive = new FakeArchiveBucket();
+    const scheduledEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>,
+      ARCHIVE: archive as unknown as R2Bucket
+    });
+
+    await worker.scheduled({ cron: "0 9 1 * *", scheduledTime: new Date("2026-07-01T09:00:00.000Z").getTime() } as ScheduledEvent, scheduledEnv);
+
+    // Retention export ran (audited), and the 15-minute sweep logic (which
+    // would have requeued the stalled Wompi event) did not run.
+    expect(db.audits.some((audit) => String(audit.action).startsWith("RETENTION_EXPORT_"))).toBe(true);
+    expect(queued).toHaveLength(0);
+    expect(db.audits.some((audit) => audit.action === "WOMPI_EVENT_REQUEUED")).toBe(false);
+  });
+
+  it("routes the 15-minute cron to the existing sweeps, not the retention export", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(stalledWompiEventFixture());
+    const queued: IssuanceMessage[] = [];
+    const archive = new FakeArchiveBucket();
+    const scheduledEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>,
+      ARCHIVE: archive as unknown as R2Bucket
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: new Date("2026-07-01T09:15:00.000Z").getTime() } as ScheduledEvent, scheduledEnv);
+
+    expect(queued).toEqual([{ wompiEventId: "wompi_stalled" }]);
+    expect(archive.putCalls).toHaveLength(0);
+    expect(db.audits.some((audit) => String(audit.action).startsWith("RETENTION_EXPORT_"))).toBe(false);
+  });
+
+  it("isolates a retention export failure so it never throws out of scheduled()", async () => {
+    const db = new InMemoryD1();
+    const archive = new FakeArchiveBucket();
+    vi.spyOn(archive, "put").mockRejectedValue(new Error("R2 unavailable"));
+    const scheduledEnv = env(db, { ARCHIVE: archive as unknown as R2Bucket });
+
+    await expect(
+      worker.scheduled({ cron: "0 9 1 * *", scheduledTime: new Date("2026-07-01T09:00:00.000Z").getTime() } as ScheduledEvent, scheduledEnv)
+    ).resolves.toBeUndefined();
+
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "RETENTION_EXPORT_FAILED" }));
+  });
+});
+
+function stalledWompiEventFixture(): Record<string, unknown> {
+  return {
+    id: "wompi_stalled",
+    transaction_id: "TX-STALLED-1",
+    environment: "00",
+    result: "ExitosaAprobada",
+    amount_cents: 2500,
+    donor_email: "donante@example.org",
+    donor_name: "Donante",
+    raw_body: "{}",
+    processed_at: null,
+    created_document_id: null,
+    created_at: "2026-01-01T00:00:00.000Z"
+  };
+}
+
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
     const db = new InMemoryD1();
@@ -2575,6 +2642,62 @@ describe("alert email setting", () => {
   });
 });
 
+describe("manual retention export endpoint", () => {
+  it("lets an owner trigger the retention export for an explicit month and audits the request", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.documents.push(testDocument({ id: "doc_1", created_at: "2026-03-15T00:00:00.000Z" }));
+    const archive = new FakeArchiveBucket();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/retention-export?month=2026-03", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, status: "completed", month: "2026-03" });
+    expect(archive.objects.has("retention/2026/2026-03/manifest.json")).toBe(true);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_EXPORT_REQUESTED", entity_type: "retention_export", entity_id: "2026-03" })
+    );
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "RETENTION_EXPORT_COMPLETED" }));
+  });
+
+  it("rejects a malformed month parameter", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/retention-export?month=not-a-month", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_retention_month" });
+  });
+
+  it("rejects non-owners", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/retention-export", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -2596,8 +2719,29 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
     DB: db as unknown as D1Database,
     ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
     ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+    ARCHIVE: new FakeArchiveBucket() as unknown as R2Bucket,
     ...values
   };
+}
+
+// Minimal in-memory R2 fake for tests that don't exercise retention export
+// directly but still need a well-typed ARCHIVE binding on Env.
+class FakeArchiveBucket {
+  readonly objects = new Map<string, Uint8Array>();
+  readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
+  readonly headCalls: string[] = [];
+
+  async put(key: string, value: unknown): Promise<R2Object> {
+    const bytes = value instanceof Uint8Array ? value : utf8Bytes(String(value));
+    this.objects.set(key, bytes);
+    this.putCalls.push({ key, bytes });
+    return { key } as R2Object;
+  }
+
+  async head(key: string): Promise<R2Object | null> {
+    this.headCalls.push(key);
+    return this.objects.has(key) ? ({ key } as R2Object) : null;
+  }
 }
 
 class InMemoryD1 {
@@ -2697,6 +2841,35 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("ORDER BY created_at ASC, id ASC LIMIT ?")) {
+      const table = retentionTableFor(this.db, this.sql);
+      if (table) {
+        let rows = [...table];
+        if (this.sql.includes("created_at >= ? AND created_at < ?")) {
+          const hasCursor = this.sql.includes("(created_at, id) > (?, ?)");
+          const [start, end] = this.args.map(String);
+          rows = rows.filter((row) => String(row.created_at) >= start && String(row.created_at) < end);
+          if (hasCursor) {
+            const [afterCreatedAt, afterId] = [this.args[2], this.args[3]].map(String);
+            rows = rows.filter((row) => {
+              const createdAt = String(row.created_at);
+              const id = String(row.id);
+              return createdAt > afterCreatedAt || (createdAt === afterCreatedAt && id > afterId);
+            });
+          }
+        } else if (this.sql.includes("(created_at, id) > (?, ?)")) {
+          const [afterCreatedAt, afterId] = [this.args[0], this.args[1]].map(String);
+          rows = rows.filter((row) => {
+            const createdAt = String(row.created_at);
+            const id = String(row.id);
+            return createdAt > afterCreatedAt || (createdAt === afterCreatedAt && id > afterId);
+          });
+        }
+        rows.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+        const limit = Number(this.args.at(-1) ?? 500);
+        return { results: rows.slice(0, limit) as T[] };
+      }
+    }
     if (this.sql.includes("FROM wompi_events") && this.sql.includes("created_document_id IS NULL")) {
       const cutoff = String(this.args[0]);
       const stalled = this.db.wompiEvents.filter(
@@ -3188,6 +3361,21 @@ class Statement {
     }
     return {};
   }
+}
+
+// Maps a retention-export SELECT's table name to its backing in-memory array,
+// so the generic "ORDER BY created_at ASC, id ASC LIMIT ?" branch above can
+// serve every table the retention service reads without one bespoke branch per table.
+function retentionTableFor(db: InMemoryD1, sql: string): Array<Record<string, unknown>> | null {
+  if (sql.includes("FROM dte_documents")) return db.documents as unknown as Array<Record<string, unknown>>;
+  if (sql.includes("FROM dte_events")) return db.dteEvents;
+  if (sql.includes("FROM email_deliveries")) return db.emailDeliveries;
+  if (sql.includes("FROM wompi_events")) return db.wompiEvents;
+  if (sql.includes("FROM audit_logs")) return db.audits;
+  if (sql.includes("FROM contingency_periods")) return db.contingencies;
+  if (sql.includes("FROM contingency_batch_lines")) return db.contingencyBatchLines;
+  if (sql.includes("FROM contingency_batches")) return db.contingencyBatches;
+  return null;
 }
 
 function documentMatchesFtsQuery(document: DteDocumentRecord, query: string): boolean {

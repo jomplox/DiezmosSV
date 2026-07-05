@@ -214,6 +214,7 @@ function testEnv(envVars: Record<string, string>): Env {
     DB: { prepare: () => statement } as unknown as D1Database,
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
+    ARCHIVE: {} as R2Bucket,
     MOCK_EXTERNAL_SERVICES: "false",
     MH_USER_TEST: required(envVars, "MH_USER_TEST"),
     MH_PASSWORD_TEST: required(envVars, "MH_PASSWORD_TEST"),

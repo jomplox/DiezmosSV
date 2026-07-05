@@ -46,6 +46,7 @@ function testEnv(): Env {
     DB: { prepare: vi.fn().mockReturnValue(statement) } as unknown as D1Database,
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
+    ARCHIVE: {} as R2Bucket,
     MOCK_EXTERNAL_SERVICES: "false",
     MH_USER_TEST: "10000000000001",
     MH_PASSWORD_TEST: "test-api-password",

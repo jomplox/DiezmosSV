@@ -4,6 +4,7 @@ export interface Env {
   DB: D1Database;
   ISSUANCE_QUEUE: Queue<IssuanceMessage>;
   ASSETS: Fetcher;
+  ARCHIVE: R2Bucket;
   EMAIL?: SendEmail;
   APP_ENV?: string;
   MOCK_EXTERNAL_SERVICES?: string;

@@ -37,6 +37,10 @@ describe("client display text", () => {
     expect(auditActionLabel("ALERT_SENT:ISSUANCE_DEAD_LETTERED")).toBe("Alerta enviada: Emisión agotó reintentos en cola");
     expect(auditActionLabel("ALERT_SENT:WOMPI_EVENT_STALLED")).toBe("Alerta enviada: Evento Wompi sin procesar — revisar");
     expect(auditActionLabel("ALERT_FAILED:DTE_FAILED")).toBe("Alerta fallida: DTE fallido");
+    expect(auditActionLabel("RETENTION_EXPORT_COMPLETED")).toBe("Exportación de retención completada");
+    expect(auditActionLabel("RETENTION_EXPORT_SKIPPED")).toBe("Exportación de retención omitida");
+    expect(auditActionLabel("RETENTION_EXPORT_FAILED")).toBe("Exportación de retención fallida");
+    expect(auditActionLabel("RETENTION_EXPORT_REQUESTED")).toBe("Exportación de retención solicitada");
     expect(userFacingErrorMessage("Invalid credentials")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("Credenciales inválidas")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("MH auth failed")).toBe("Falló la autenticación con el Ministerio de Hacienda.");

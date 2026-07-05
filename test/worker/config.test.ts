@@ -49,6 +49,7 @@ function env(values: Partial<Env>): Env {
     DB: {} as D1Database,
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
+    ARCHIVE: {} as R2Bucket,
     ...values
   };
 }
