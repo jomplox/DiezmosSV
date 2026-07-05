@@ -31,12 +31,12 @@ export const DONAR_COMPLETED_MESSAGE = "diezmos:donation-completed";
 
 export type DonorDocumentType = "13" | "37";
 
+// Name and email are collected on Wompi's hosted sheet, not on the /donar form, so
+// the form input carries only documento, teléfono, dirección, and monto.
 export interface DonationFormInput {
   amount: string;
-  donorName: string;
   donorDocumentType: DonorDocumentType;
   donorDocument: string;
-  donorEmail: string;
   donorPhone: string;
   departamento: string;
   municipio: string;
@@ -52,13 +52,10 @@ export function isDonarGraciasPath(pathname: string): boolean {
   return pathname === "/donar/gracias" || pathname === "/donar/gracias/";
 }
 
-function isValidEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
 // Mirrors the server-side validation codes (src/worker/services/donations.ts) but
 // with donor-facing usted-form messages shown inline. The DUI check-digit rule
-// only applies when the selected document type is DUI (13).
+// only applies when the selected document type is DUI (13). Name and email are NOT
+// validated here — the donor enters them on Wompi's hosted sheet.
 export function donationFormValidationMessage(input: DonationFormInput): string {
   const amount = Number.parseFloat(input.amount.trim());
   if (!input.amount.trim() || !Number.isFinite(amount)) {
@@ -68,20 +65,12 @@ export function donationFormValidationMessage(input: DonationFormInput): string 
     return "El monto mínimo de donación es $1.00.";
   }
 
-  if (!input.donorName.trim()) {
-    return "Ingrese su nombre completo.";
-  }
-
   if (input.donorDocumentType === "13") {
     if (!isValidDui(input.donorDocument)) {
       return "Revise el número de DUI.";
     }
   } else if (!input.donorDocument.trim()) {
     return "Ingrese su documento.";
-  }
-
-  if (!isValidEmail(input.donorEmail.trim())) {
-    return "Ingrese un correo electrónico válido.";
   }
 
   if (!input.departamento) {

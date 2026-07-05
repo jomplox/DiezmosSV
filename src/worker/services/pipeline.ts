@@ -90,7 +90,7 @@ export class IssuancePipeline {
     const environment = event.environment;
     const intent = await this.correlateIntent(payload);
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride: intent ? donorOverrideFromIntent(intent) : undefined });
+    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
@@ -183,7 +183,7 @@ export class IssuancePipeline {
     // raw-webhook fallback donor data.
     const intent = await this.correlateIntent(payload);
     const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
-    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent) : undefined });
+    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
     const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     await this.repo.replaceDocumentPayload(record.id, {
@@ -470,7 +470,7 @@ export class IssuancePipeline {
       sequence,
       environment: record.environment,
       contingency: true,
-      donorOverride: intent ? donorOverrideFromIntent(intent) : undefined
+      donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined
     });
     const identifiers = extractCdeIdentifiers(contingencyDocument);
     const signedJws = await signMhDocument(contingencyDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
@@ -595,13 +595,19 @@ export class IssuancePipeline {
   }
 }
 
-function donorOverrideFromIntent(intent: DonationIntentRecord): IntentDonorOverride {
+// Merge the correlated intent with the payment webhook into the CDE receptor:
+// identity (tipoDocumento/numDocumento) and the catalog-coded direccion come from the
+// intent (validated on the /donar form); nombre and correo come from the WEBHOOK,
+// because the donor types those on Wompi's hosted sheet and the intent no longer
+// stores them. telefono prefers the intent's phone, else the webhook Celular. This
+// keeps the canonical DUI and clean address while carrying the real donor contact.
+function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWebhook): IntentDonorOverride {
   return {
     tipoDocumento: intent.donor_document_type,
     numDocumento: intent.donor_document,
-    nombre: intent.donor_name,
-    correo: intent.donor_email,
-    telefono: intent.donor_phone,
+    nombre: donorName(payload),
+    correo: cleanNullable(payload.Cliente?.EMail),
+    telefono: intent.donor_phone ?? cleanNullable(payload.Cliente?.Celular),
     direccion: {
       departamento: intent.direccion_departamento,
       municipio: intent.direccion_municipio,
@@ -609,6 +615,13 @@ function donorOverrideFromIntent(intent: DonationIntentRecord): IntentDonorOverr
       complemento: intent.direccion_complemento
     }
   };
+}
+
+// Trim to null, mirroring dteBuilder's fallback normalization so an empty/whitespace
+// webhook field becomes null rather than "" on the CDE receptor.
+function cleanNullable(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }
 
 function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGeneracion: string; numeroControl: string } {

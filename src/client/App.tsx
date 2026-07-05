@@ -1751,9 +1751,7 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
                   </span>
                 </td>
                 <td className="numeric">{formatMoneyCents(intent.amount_cents)}</td>
-                <td>
-                  <StackedCell primary={intent.donor_name} secondary={intent.donor_email} />
-                </td>
+                <td>{intent.document_donor_name ?? "—"}</td>
                 <td className="numeric">{formatDateTime(intent.created_at)}</td>
                 <td className="mono">{intent.numero_control ?? "—"}</td>
               </tr>
@@ -3099,10 +3097,8 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 
 const emptyDonationForm: DonationFormInput = {
   amount: "",
-  donorName: "",
   donorDocumentType: "13",
   donorDocument: "",
-  donorEmail: "",
   donorPhone: "",
   departamento: "",
   municipio: "",
@@ -3242,10 +3238,8 @@ function DonarPage() {
         method: "POST",
         body: {
           amount: form.amount.trim(),
-          donorName: form.donorName.trim(),
           donorDocumentType: form.donorDocumentType,
           donorDocument: form.donorDocument.trim(),
-          donorEmail: form.donorEmail.trim(),
           donorPhone: form.donorPhone.trim() || undefined,
           departamento: form.departamento,
           municipio: form.municipio,
@@ -3272,6 +3266,7 @@ function DonarPage() {
         <ShieldCheck size={30} />
         <h1>Haga su donación</h1>
         <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
+        <p className="donar-note">Su nombre y correo se ingresan al pagar con Wompi.</p>
 
         {stage === "widget" && intent && (
           <div className="donar-handoff">
@@ -3287,16 +3282,6 @@ function DonarPage() {
 
         {stage === "form" && (
           <form className="donar-form" onSubmit={submit}>
-            <label>
-              <span>Nombre completo</span>
-              <input
-                value={form.donorName}
-                onChange={(event) => update({ donorName: event.target.value })}
-                placeholder="Nombre o razón social"
-                aria-label="Nombre completo"
-              />
-            </label>
-
             <div className="donar-doc-row">
               <label>
                 <span>Tipo de documento</span>
@@ -3324,17 +3309,6 @@ function DonarPage() {
                 />
               </label>
             </div>
-
-            <label>
-              <span>Correo electrónico</span>
-              <input
-                value={form.donorEmail}
-                onChange={(event) => update({ donorEmail: event.target.value })}
-                placeholder="legacy-email-105@example.com"
-                aria-label="Correo electrónico"
-                type="email"
-              />
-            </label>
 
             <label>
               <span>Teléfono (opcional)</span>

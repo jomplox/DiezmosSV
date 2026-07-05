@@ -223,3 +223,29 @@ everything else behaves exactly as today.
   email, intent COMPLETED with the page flipping to the thank-you state, admin card shows it.
 - Verify the legacy path: one payment through the OLD static link still emits with fallbacks.
 - Push, CI green, PR to main, merge. Production deploy for parity (secrets remain go-live items).
+
+## Amendment (2026-07-05): eliminate duplicate donor fields
+
+**User-directed change**, discovered after Tasks 1–5 shipped. Wompi's hosted payment sheet **requires**
+name + email and cannot prefill or disable them via the API; the church has since disabled
+document/address/phone on Wompi's side, so the sheet now asks **only** for name + email, and every real
+webhook carries `Cliente.Nombre` + `Cliente.EMail`. Collecting name/email on the `/donar` form as well
+made the donor type them twice. The form therefore stops asking for them, and the correlation merges:
+**identity + address from the intent, contact (nombre/correo) from the webhook**.
+
+- **Migration `0010_donation_intents_optional_contact.sql`** — rebuilds `donation_intents` (0009 is
+  applied on staging + production, so it is not edited) making `donor_name` / `donor_email` nullable,
+  preserving all rows and the three indexes.
+- **`/donar` form** — removes the "Nombre completo" and "Correo electrónico" fields and their
+  validation (`src/client/App.tsx`, `src/client/donation.ts`); adds the note *"Su nombre y correo se
+  ingresan al pagar con Wompi."* Keeps documento (with DUI validation), teléfono, dirección, monto.
+- **`POST /api/donations/intent`** — no longer accepts/validates/persists donorName/donorEmail; binds
+  null (`src/worker/services/donations.ts`, repository `createDonationIntent`, `DonationIntentRecord`).
+- **Correlation merge** — `donorOverrideFromIntent(intent, payload)`: nombre = `donorName(payload)`,
+  correo = webhook `Cliente.EMail`, telefono = `intent.donor_phone ?? webhook Celular`;
+  tipoDocumento/numDocumento/direccion stay from the intent. The non-intent fallback path is unchanged.
+- **Admin panel** — the "Donante" column now comes from the joined document's `donor_name` for
+  COMPLETED intents (`listRecentDonationIntents` LEFT JOIN → `document_donor_name`), else "—".
+- **Tests** — TDD (RED first) across `donarPage`, `workerFetch` (intent creation without name/email;
+  correlation asserts receptor nombre/correo from the WEBHOOK while numDocumento/direccion from the
+  intent), `donationIntents` (nullable binds), `onlineDonationsUi`, and `e2e/donar`.

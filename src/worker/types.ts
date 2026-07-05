@@ -187,10 +187,13 @@ export interface DonationIntentRecord {
   id: string;
   status: DonationIntentStatus;
   amount_cents: number;
-  donor_name: string;
+  // Name and email are no longer collected on the /donar form — the donor types them
+  // on Wompi's hosted sheet — so the intent stores identity + address only and both
+  // are nullable. The correlated CDE lifts nombre/correo from the webhook.
+  donor_name: string | null;
   donor_document_type: "13" | "37";
   donor_document: string;
-  donor_email: string;
+  donor_email: string | null;
   donor_phone: string | null;
   direccion_departamento: string;
   direccion_municipio: string;
@@ -206,11 +209,14 @@ export interface DonationIntentRecord {
   expires_at: string;
 }
 
-// A donation intent joined with the numero de control of the CDE it produced
-// (present only for COMPLETED intents linked via document_id). Feeds the admin
-// "Donaciones en línea" listing (Task 5).
+// A donation intent joined with the emitted CDE it produced (present only for
+// COMPLETED intents linked via document_id): its numero de control and its
+// donor_name — the donante shown in the admin panel now comes from the document
+// (lifted from the webhook), since the intent no longer stores name/email. Feeds the
+// admin "Donaciones en línea" listing (Task 5).
 export interface DonationIntentListItem extends DonationIntentRecord {
   numero_control: string | null;
+  document_donor_name: string | null;
 }
 
 export interface WompiPaymentLink {
