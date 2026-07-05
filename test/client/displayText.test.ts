@@ -27,6 +27,9 @@ describe("client display text", () => {
     expect(auditActionLabel("EMAIL_TEMPLATES_UPDATED")).toBe("Plantillas de correo actualizadas");
     expect(auditActionLabel("EMISSION_ENVIRONMENT_UPDATED")).toBe("Ambiente de emisión actualizado");
     expect(auditActionLabel("CLOUDFLARE_WRITER_ENABLED")).toBe("Edición de secretos desde UI habilitada");
+    expect(auditActionLabel("ISSUANCE_DEAD_LETTERED")).toBe("Emisión agotó reintentos en cola");
+    expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
+    expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
     expect(userFacingErrorMessage("Invalid credentials")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("Credenciales inválidas")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("MH auth failed")).toBe("Falló la autenticación con el Ministerio de Hacienda.");

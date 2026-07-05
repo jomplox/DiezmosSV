@@ -36,6 +36,13 @@ queue = "diezmossv-local-issuance-example"
 queue = "diezmossv-local-issuance-example"
 max_batch_size = 10
 max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-local-issuance-example-dlq"
+
+[[queues.consumers]]
+queue = "diezmossv-local-issuance-example-dlq"
+max_batch_size = 10
+max_batch_timeout = 5
 
 [triggers]
 crons = ["*/15 * * * *"]
@@ -80,6 +87,13 @@ queue = "diezmossv-staging-issuance-example"
 queue = "diezmossv-staging-issuance-example"
 max_batch_size = 10
 max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-staging-issuance-example-dlq"
+
+[[env.staging.queues.consumers]]
+queue = "diezmossv-staging-issuance-example-dlq"
+max_batch_size = 10
+max_batch_timeout = 5
 
 [env.staging.triggers]
 crons = ["*/15 * * * *"]
@@ -121,6 +135,13 @@ queue = "diezmossv-production-issuance-example"
 
 [[env.production.queues.consumers]]
 queue = "diezmossv-production-issuance-example"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+dead_letter_queue = "diezmossv-production-issuance-example-dlq"
+
+[[env.production.queues.consumers]]
+queue = "diezmossv-production-issuance-example-dlq"
 max_batch_size = 10
 max_batch_timeout = 5
 

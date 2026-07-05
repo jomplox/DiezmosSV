@@ -708,6 +708,28 @@ export class Repository {
     return updated;
   }
 
+  async listStalledApprovedWompiEvents(cutoffIso: string): Promise<Array<Record<string, unknown>>> {
+    const rows = await this.db
+      .prepare(
+        `SELECT id, transaction_id, created_at FROM wompi_events
+         WHERE created_document_id IS NULL
+           AND processed_at IS NULL
+           AND result = 'ExitosaAprobada'
+           AND created_at < ?`
+      )
+      .bind(cutoffIso)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  async countAuditEntries(action: string, entityId: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ?")
+      .bind(action, entityId)
+      .first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
   async createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
     const id = newId("reset");
     await this.db

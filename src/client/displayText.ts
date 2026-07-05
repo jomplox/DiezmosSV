@@ -62,6 +62,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   EMAIL_TEMPLATES_UPDATED: "Plantillas de correo actualizadas",
   EMISSION_ENVIRONMENT_UPDATED: "Ambiente de emisión actualizado",
   EXPORT_F960_CSV: "CSV F960 exportado",
+  ISSUANCE_DEAD_LETTERED: "Emisión agotó reintentos en cola",
   EXPORT_F960_XLSX: "XLSX F960 exportado",
   LOGIN: "Inicio de sesión",
   OWNER_BOOTSTRAPPED: "Propietario inicial creado",
@@ -75,6 +76,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   USER_PASSWORD_RESET: "Contraseña restablecida",
   USER_UPDATED: "Usuario actualizado",
   WOMPI_DUPLICATE: "Wompi duplicado",
+  WOMPI_EVENT_REQUEUED: "Evento Wompi reencolado",
+  WOMPI_EVENT_STALLED: "Evento Wompi sin procesar — revisar",
   WOMPI_IGNORED: "Wompi ignorado",
   WOMPI_RECEIVED: "Wompi recibido"
 };

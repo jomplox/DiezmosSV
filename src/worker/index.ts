@@ -39,6 +39,10 @@ export default {
   },
 
   async queue(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
+    if (batch.queue.endsWith("-dlq")) {
+      await handleDeadLetterBatch(batch, env);
+      return;
+    }
     const pipeline = new IssuancePipeline(env);
     for (const message of batch.messages) {
       try {
@@ -58,9 +62,30 @@ export default {
   },
 
   async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
-    await new IssuancePipeline(env).runContingencySweep();
+    const pipeline = new IssuancePipeline(env);
+    try {
+      await pipeline.runContingencySweep();
+    } catch (error) {
+      console.error("Contingency sweep failed", error);
+    }
+    await pipeline.sweepStalledWompiEvents();
   }
 };
+
+async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
+  const repo = new Repository(env.DB);
+  for (const message of batch.messages) {
+    const documentId = message.body.advancedDocumentId;
+    const wompiEventId = message.body.wompiEventId;
+    await repo.createAudit({
+      action: "ISSUANCE_DEAD_LETTERED",
+      entityType: documentId ? "dte_document" : "wompi_event",
+      entityId: documentId ?? wompiEventId ?? "desconocido",
+      summary: "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión"
+    });
+    message.ack();
+  }
+}
 
 async function handleWompiWebhook(request: Request, env: Env): Promise<Response> {
   if (request.method !== "POST") {

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
-import type { DteDocumentRecord, Env } from "../../src/worker/types";
+import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1909,6 +1909,98 @@ describe("Wompi webhook integration", () => {
   });
 });
 
+describe("issuance dead-letter and stalled-event sweep", () => {
+  function deadLetterBatch(body: IssuanceMessage, queueName: string) {
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const batch = {
+      queue: queueName,
+      messages: [{ id: "msg_1", timestamp: new Date(), body, attempts: 3, ack, retry }],
+      ackAll: vi.fn(),
+      retryAll: vi.fn()
+    } as unknown as MessageBatch<IssuanceMessage>;
+    return { batch, ack, retry };
+  }
+
+  function stalledWompiEvent(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+    return {
+      id: "wompi_stalled",
+      transaction_id: "TX-STALLED-1",
+      environment: "00",
+      result: "ExitosaAprobada",
+      amount_cents: 2500,
+      donor_email: "donante@example.org",
+      donor_name: "Donante",
+      raw_body: "{}",
+      processed_at: null,
+      created_document_id: null,
+      created_at: "2026-01-01T00:00:00.000Z",
+      ...overrides
+    };
+  }
+
+  it("audits and acks dead-lettered issuance messages", async () => {
+    const db = new InMemoryD1();
+    const { batch, ack, retry } = deadLetterBatch({ wompiEventId: "wompi_dead" }, "diezmossv-staging-issuance-example-dlq");
+
+    await worker.queue(batch, env(db));
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ISSUANCE_DEAD_LETTERED", entity_type: "wompi_event", entity_id: "wompi_dead" })
+    );
+  });
+
+  it("re-enqueues an approved wompi event stuck without a document for over an hour", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    db.wompiEvents.push(stalledWompiEvent());
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toEqual([{ wompiEventId: "wompi_stalled" }]);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "WOMPI_EVENT_REQUEUED", entity_id: "wompi_stalled" })
+    );
+  });
+
+  it("does not touch recent or already-processed events", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    db.wompiEvents.push(stalledWompiEvent({ id: "wompi_fresh", created_at: new Date().toISOString() }));
+    db.wompiEvents.push(stalledWompiEvent({ id: "wompi_done", created_document_id: "dte_1" }));
+    db.wompiEvents.push(stalledWompiEvent({ id: "wompi_declined", result: "Rechazada" }));
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toHaveLength(0);
+  });
+
+  it("gives up after three requeues and flags the event exactly once", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    db.wompiEvents.push(stalledWompiEvent());
+    for (let i = 0; i < 3; i++) {
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+    }
+    const scheduledEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+
+    expect(queued).toHaveLength(0);
+    const stalledAudits = db.audits.filter((audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === "wompi_stalled");
+    expect(stalledAudits).toHaveLength(1);
+  });
+});
+
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
     const db = new InMemoryD1();
@@ -2187,6 +2279,10 @@ class Statement {
     if (this.sql.includes("FROM users WHERE email = ?")) {
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
+      const [action, entityId] = this.args.map(String);
+      return { count: this.db.audits.filter((audit) => audit.action === action && audit.entity_id === entityId).length } as T;
+    }
     if (this.sql.includes("FROM password_reset_tokens") && this.sql.includes("JOIN users")) {
       const [tokenHash, nowIso] = this.args.map(String);
       const token = this.db.resetTokens.find(
@@ -2231,6 +2327,17 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("FROM wompi_events") && this.sql.includes("created_document_id IS NULL")) {
+      const cutoff = String(this.args[0]);
+      const stalled = this.db.wompiEvents.filter(
+        (event) =>
+          !event.created_document_id &&
+          !event.processed_at &&
+          event.result === "ExitosaAprobada" &&
+          String(event.created_at) < cutoff
+      );
+      return { results: stalled as T[] };
+    }
     if (this.sql.includes("FROM contingency_batches")) {
       let batches = [...this.db.contingencyBatches];
       if (this.sql.includes("WHERE contingency_period_id = ?")) {

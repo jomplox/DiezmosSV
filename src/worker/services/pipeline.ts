@@ -9,6 +9,9 @@ import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
 
+const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
+const MAX_WOMPI_EVENT_REQUEUES = 3;
+
 export class IssuancePipeline {
   private readonly repo: Repository;
   private readonly mh: MhClient;
@@ -16,6 +19,37 @@ export class IssuancePipeline {
   constructor(private readonly env: Env) {
     this.repo = new Repository(env.DB);
     this.mh = new MhClient(env);
+  }
+
+  // Red de seguridad para el peor fallo del sistema: una donación aprobada cuyo
+  // mensaje de emisión se perdió (la cola descarta tras agotar reintentos). Los
+  // eventos aprobados sin CDE después de una hora se reencolan; processWompiEvent
+  // es idempotente, así que un reencolado duplicado es inofensivo.
+  async sweepStalledWompiEvents(): Promise<void> {
+    const cutoff = new Date(Date.now() - STALLED_WOMPI_EVENT_AGE_MS).toISOString();
+    const stalled = await this.repo.listStalledApprovedWompiEvents(cutoff);
+    for (const event of stalled) {
+      const eventId = String(event.id);
+      const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
+      if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
+        if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
+          await this.repo.createAudit({
+            action: "WOMPI_EVENT_STALLED",
+            entityType: "wompi_event",
+            entityId: eventId,
+            summary: `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`
+          });
+        }
+        continue;
+      }
+      await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId });
+      await this.repo.createAudit({
+        action: "WOMPI_EVENT_REQUEUED",
+        entityType: "wompi_event",
+        entityId: eventId,
+        summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora"
+      });
+    }
   }
 
   async processWompiEvent(wompiEventId: string): Promise<DteDocumentRecord | null> {
