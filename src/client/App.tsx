@@ -968,11 +968,13 @@ export function App() {
           onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
       )}
-      {toast && (
-        <button className="toast" role="status" aria-live="polite" onClick={() => setToast("")}>
-          {toast}
-        </button>
-      )}
+      <div className="toast-region" role="status" aria-live="polite">
+        {toast && (
+          <button className="toast" onClick={() => setToast("")}>
+            {toast}
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -3593,11 +3595,7 @@ function contingencyDeadline(active: ContingencyState["active"]): { title: strin
 
 function formatDateTime(value?: string | null): string {
   if (!value) return "—";
-  return new Intl.DateTimeFormat("es-SV", {
-    dateStyle: "short",
-    timeStyle: "short",
-    timeZone: "America/El_Salvador"
-  }).format(new Date(value));
+  return formatElSalvadorDateTime(value);
 }
 
 function formatMoneyCents(value: number): string {

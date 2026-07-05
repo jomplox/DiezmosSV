@@ -6,14 +6,16 @@ const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/Ap
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 
 describe("keyboard accessibility contract", () => {
-  it("gives the toast a polite status live region", () => {
-    expect(appSource).toContain('role="status"');
-    expect(appSource).toContain('aria-live="polite"');
+  it("gives the toast a polite status live region that stays mounted", () => {
+    expect(appSource).toContain('<div className="toast-region" role="status" aria-live="polite">');
+    expect(appSource).toContain('<button className="toast" onClick={() => setToast("")}>');
   });
 
   it("wires useDialogDismiss into the four dialogs", () => {
+    const callSites = appSource.match(/useDialogDismiss\(dialogRef/g) ?? [];
+    expect(callSites.length).toBeGreaterThanOrEqual(4);
     const occurrences = appSource.match(/useDialogDismiss\(/g) ?? [];
-    expect(occurrences.length).toBeGreaterThanOrEqual(4);
+    expect(occurrences.length).toBeGreaterThanOrEqual(5);
   });
 
   it("labels the quick-DTE Monto input for screen readers", () => {

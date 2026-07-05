@@ -2463,6 +2463,10 @@ pre {
   color: #0b5e57;
 }
 
+.toast-region {
+  pointer-events: none;
+}
+
 .toast {
   position: fixed;
   right: 22px;
@@ -2470,6 +2474,7 @@ pre {
   background: #112327;
   color: #ffffff;
   border-color: #112327;
+  pointer-events: auto;
 }
 
 @media (max-width: 1320px) {
