@@ -150,6 +150,7 @@ describe("password reset", () => {
     expect(sentMessages).toHaveLength(1);
     const link = /https:\/\/example\.org\/\?reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
     expect(link).toBeTruthy();
+    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/?reset=${link![1]}"`);
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
@@ -528,6 +529,7 @@ describe("document email resend", () => {
       to: "legacy-contact-2@example.com",
       subject: "Comprobante de su donación",
       text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
+      html: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       attachments: [
         expect.objectContaining({
           filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.pdf",

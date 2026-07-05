@@ -1781,7 +1781,7 @@ function CredentialsPanel({
                       <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
                       <CredentialActiveValue status={status} name="EMAIL_API_URL" />
                       <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
-                      <small>Recibe un POST JSON con remitente, destinatario, asunto, texto y adjuntos PDF/JSON en base64.</small>
+                      <small>Recibe un POST JSON con remitente, destinatario, asunto, texto, HTML y adjuntos PDF/JSON en base64.</small>
                     </label>
                     <label>
                       <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />

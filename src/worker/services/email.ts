@@ -1,6 +1,7 @@
 import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
+import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
 import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, type EmailTemplateSettings, type EmailTemplateType, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
@@ -61,6 +62,7 @@ export class EmailService {
       to: toEmail,
       subject: message.subject,
       text: message.text,
+      html: dteEmailHtml(record, message.text, { organizationName: organizationName(this.env) }),
       attachments: [
         {
           filename: pdfAttachment.filename,
@@ -103,6 +105,7 @@ export class EmailService {
         `Abra este enlace para crear una nueva contraseña (vence en ${expiresMinutes} minutos):\n\n` +
         `${link}\n\n` +
         `Si usted no solicitó este cambio, ignore este mensaje; su contraseña actual sigue vigente.`,
+      html: passwordResetEmailHtml(name, link, expiresMinutes),
       attachments: []
     };
     return this.dispatch(payload, []);
@@ -119,6 +122,7 @@ export class EmailService {
           to: payload.to,
           subject: payload.subject,
           text: payload.text,
+          ...(payload.html ? { html: payload.html } : {}),
           ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
         });
         return { provider: "cloudflare-email", messageId: result.messageId };
@@ -174,11 +178,23 @@ interface EmailPayload {
   to: string;
   subject: string;
   text: string;
+  html?: string;
   attachments: Array<{
     filename: string;
     contentType: string;
     contentBase64: string;
   }>;
+}
+
+function organizationName(env: Env): string {
+  // Lenient on purpose: a branding fallback must never block an email send.
+  try {
+    const parsed = JSON.parse(env.EMISOR_CONFIG_JSON ?? "") as { nombreComercial?: unknown; nombre?: unknown };
+    const name = [parsed.nombreComercial, parsed.nombre].find((value) => typeof value === "string" && value.trim());
+    return typeof name === "string" ? name.trim() : "ExamplePerson1";
+  } catch {
+    return "ExamplePerson1";
+  }
 }
 
 function hasHttpProvider(env: Env): boolean {
