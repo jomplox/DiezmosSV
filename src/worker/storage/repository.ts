@@ -161,6 +161,19 @@ export class Repository {
       .run();
   }
 
+  // The intents the next expireUnpaidIntentsBefore(nowIso) call will flip: same
+  // (status, expires_at) predicate as the UPDATE, so the sweep can deactivate the
+  // Wompi links of exactly the rows it is about to expire. Read this BEFORE the
+  // UPDATE (afterwards the rows no longer match) — its results feed
+  // WompiApiService.deactivatePaymentLink.
+  async listIntentsExpiringBefore(nowIso: string): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status">>> {
+    const result = await this.db
+      .prepare("SELECT id, wompi_id_enlace, amount_cents, status FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
+      .bind(nowIso)
+      .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status">>();
+    return result.results;
+  }
+
   // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
   // rows past their expiry flip to EXPIRED. LINK_CREATED is included so an
   // abandoned checkout (link minted, donor never paid) does not sit unexpired
