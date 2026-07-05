@@ -22,6 +22,9 @@ CREATE TABLE IF NOT EXISTS donation_intents (
   wompi_id_enlace INTEGER,
   wompi_url_enlace TEXT,
   wompi_url_enlace_largo TEXT,
+  -- Set on MH acceptance to the CDE that closed this intent, so the admin panel
+  -- (Task 5) can surface the emitted numero de control for a COMPLETED intent.
+  document_id TEXT,
   client_ip TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),

@@ -199,6 +199,7 @@ export interface DonationIntentRecord {
   wompi_id_enlace: number | null;
   wompi_url_enlace: string | null;
   wompi_url_enlace_largo: string | null;
+  document_id: string | null;
   client_ip: string | null;
   created_at: string;
   updated_at: string;

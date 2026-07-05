@@ -152,10 +152,10 @@ export class Repository {
       .run();
   }
 
-  async markIntentCompleted(id: string): Promise<void> {
+  async markIntentCompleted(id: string, documentId: string): Promise<void> {
     await this.db
-      .prepare("UPDATE donation_intents SET status = 'COMPLETED', updated_at = ? WHERE id = ?")
-      .bind(nowIso(), id)
+      .prepare("UPDATE donation_intents SET status = 'COMPLETED', document_id = ?, updated_at = ? WHERE id = ?")
+      .bind(documentId, nowIso(), id)
       .run();
   }
 

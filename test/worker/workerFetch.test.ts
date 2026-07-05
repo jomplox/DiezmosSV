@@ -2678,6 +2678,221 @@ describe("Wompi webhook integration", () => {
   });
 });
 
+describe("donation intent correlation", () => {
+  const INTENT_ADDRESS = {
+    departamento: "05",
+    municipio: "24",
+    distrito: "01",
+    complemento: "Calle Donante 123, Antiguo Cuscatlán"
+  };
+
+  function seedIntentRow(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const intent = {
+      id: "di_corr_1",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_name: "Ana Donante",
+      donor_document_type: "13",
+      donor_document: "10000002-7",
+      donor_email: "ana@example.org",
+      donor_phone: "70001111",
+      direccion_departamento: INTENT_ADDRESS.departamento,
+      direccion_municipio: INTENT_ADDRESS.municipio,
+      direccion_distrito: INTENT_ADDRESS.distrito,
+      direccion_complemento: INTENT_ADDRESS.complemento,
+      wompi_id_enlace: 987654,
+      wompi_url_enlace: "https://s.wompi.sv/987654",
+      wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
+      document_id: null,
+      client_ip: "203.0.113.9",
+      created_at: "2026-06-26T01:00:00.000Z",
+      updated_at: "2026-06-26T01:00:00.000Z",
+      expires_at: "2026-06-26T02:00:00.000Z",
+      ...overrides
+    };
+    db.donationIntents.push(intent);
+    return intent;
+  }
+
+  function seedWompiEvent(db: InMemoryD1, webhook: Record<string, unknown>, id = "wompi_corr_evt"): string {
+    db.wompiEvents.push({
+      id,
+      transaction_id: String(webhook.IdTransaccion),
+      environment: "00",
+      result: String(webhook.ResultadoTransaccion),
+      amount_cents: 2500,
+      donor_email: null,
+      donor_name: null,
+      raw_body: JSON.stringify(webhook),
+      headers_json: "{}",
+      received_at: "2026-06-26T01:46:47.015Z",
+      processed_at: null,
+      created_document_id: null
+    });
+    return id;
+  }
+
+  function correlationWebhook(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-26T01:40:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_corr_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_corr_1",
+      // Fallback donor data that MUST be overridden by the intent when correlated.
+      // Non-DUI document so the uncorrelated fallback CDE still validates.
+      cliente: {
+        DocumentoIdentidad: "P-A123456",
+        Nombre: "Fallback",
+        Apellidos: "Cliente",
+        EMail: "fallback@example.org",
+        Celular: "70000003",
+        CodigoPais: "SV"
+      },
+      ...overrides
+    };
+  }
+
+  async function pipelineEnv(db: InMemoryD1): Promise<Env> {
+    return env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password"
+    });
+  }
+
+  it("correlates a LINK_CREATED intent: receptor equals intent data with donor catalog codes", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("ACCEPTED");
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({
+      tipoDocumento: "13",
+      numDocumento: "10000002-7",
+      nombre: "Ana Donante",
+      correo: "ana@example.org",
+      telefono: "70001111",
+      direccion: INTENT_ADDRESS
+    });
+    // The intent is closed and points at the CDE that fulfilled it.
+    const intent = db.donationIntents.find((row) => row.id === "di_corr_1");
+    expect(intent?.status).toBe("COMPLETED");
+    expect(intent?.document_id).toBe(record!.id);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_corr_1" })
+    );
+  });
+
+  it("correlates an EXPIRED intent (donor paid in the link's last minute)", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { status: "EXPIRED" });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
+  });
+
+  it("does not correlate a COMPLETED intent: falls back to the webhook donor data", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { status: "COMPLETED", document_id: "dte_prev" });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // Fallback receptor derived from the webhook, not the intent.
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+    // The already-completed intent keeps its original document link.
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_prev");
+  });
+
+  it("audits an amount mismatch and uses the webhook amount, still correlating", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { amount_cents: 2500 });
+    // Webhook amount ($30) differs from the intent amount ($25): money truth is Wompi.
+    const eventId = seedWompiEvent(db, correlationWebhook({ Monto: "30.00" }));
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.amount_cents).toBe(3000);
+    const cde = JSON.parse(record!.plain_json) as { resumen: { valorTotal: number }; receptor: Record<string, unknown> };
+    expect(cde.resumen.valorTotal).toBe(30);
+    // Still correlated to the intent despite the mismatch.
+    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_AMOUNT_MISMATCH");
+    expect(mismatch).toBeTruthy();
+    expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { intentAmountCents: number; eventAmountCents: number };
+    expect(metadata).toMatchObject({ intentAmountCents: 2500, eventAmountCents: 3000 });
+  });
+
+  it("leaves legacy payloads (no intent id) unchanged: fallback receptor, no intent lookup", async () => {
+    const db = new InMemoryD1();
+    // A static-link payload whose IdentificadorEnlaceComercio is not a "di_" intent id.
+    const webhook = correlationWebhook({ IdExterno: undefined, enlacePago: { IdentificadorEnlaceComercio: "DONACION-legacy" } });
+    const eventId = seedWompiEvent(db, webhook);
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+  });
+
+  it("keeps the intent receptor when an operator rebuilds a REJECTED intent-backed CDE", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    // A REJECTED document already exists for this Wompi event (fallback receptor).
+    db.documents.push({
+      id: "dte_rejected",
+      wompi_event_id: eventId,
+      tipo_dte: "15",
+      environment: "00",
+      codigo_generacion: "11111111-1111-4111-8111-111111111111",
+      numero_control: "DTE-15-M001P004-000000000000009",
+      status: "REJECTED",
+      plain_json: JSON.stringify({ receptor: { nombre: "Fallback Cliente" } }),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: "[]",
+      donor_email: "fallback@example.org",
+      donor_name: "Fallback Cliente",
+      amount_cents: 2500,
+      issued_at: "2026-06-26T01:46:47.015Z",
+      accepted_at: null,
+      contingency_period_id: null,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const record = db.documents.find((row) => row.id === "dte_rejected") as unknown as DteDocumentRecord;
+    const result = await new IssuancePipeline(await pipelineEnv(db)).rebuildRejectedWompiDocument(record);
+
+    expect(result.accepted).toBe(true);
+    const rebuilt = db.documents.find((row) => row.id === "dte_rejected");
+    const cde = JSON.parse(String(rebuilt!.plain_json)) as { receptor: Record<string, unknown> };
+    // The rebuild must NOT downgrade to the fallback donor data — it re-applies the intent.
+    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_rejected");
+  });
+});
+
 describe("pipeline failure alerts", () => {
   it("sends an operational alert when a Wompi-triggered DTE fails", async () => {
     const db = new InMemoryD1();
@@ -4105,6 +4320,7 @@ class Statement {
         wompi_id_enlace: null,
         wompi_url_enlace: null,
         wompi_url_enlace_largo: null,
+        document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
         created_at: "2026-06-26T01:46:47.015Z",
         updated_at: "2026-06-26T01:46:47.015Z",
@@ -4123,10 +4339,11 @@ class Statement {
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'COMPLETED'")) {
-      const [updatedAt, id] = this.args;
+      const [documentId, updatedAt, id] = this.args;
       const intent = this.db.donationIntents.find((row) => row.id === id);
       if (intent) {
         intent.status = "COMPLETED";
+        intent.document_id = documentId == null ? null : String(documentId);
         intent.updated_at = String(updatedAt);
       }
     }

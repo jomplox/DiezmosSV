@@ -109,13 +109,16 @@ describe("donation intents repository", () => {
     expect(update!.args).toContain("di_1");
   });
 
-  it("marks an intent COMPLETED", async () => {
+  it("marks an intent COMPLETED and records the emitted document id", async () => {
     const { repository, db } = repo();
 
-    await repository.markIntentCompleted("di_1");
+    await repository.markIntentCompleted("di_1", "dte_42");
 
     const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("status = 'COMPLETED'"));
     expect(update).toBeTruthy();
+    // document_id links the intent to the CDE so the admin panel can show its numero de control.
+    expect(update!.sql).toContain("document_id = ?");
+    expect(update!.args).toContain("dte_42");
     expect(update!.args).toContain("di_1");
   });
 
@@ -164,6 +167,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     wompi_id_enlace: null,
     wompi_url_enlace: null,
     wompi_url_enlace_largo: null,
+    document_id: null,
     client_ip: "203.0.113.9",
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",
