@@ -22,6 +22,7 @@ import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { previousElSalvadorMonth, runRetentionExport } from "./services/retention";
+import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
@@ -108,7 +109,25 @@ export default {
       console.error("Stalled Wompi event sweep failed", error);
     }
     try {
-      await new Repository(env.DB).expireUnpaidIntentsBefore(nowIso());
+      const repo = new Repository(env.DB);
+      const now = nowIso();
+      // Snapshot what the UPDATE will expire BEFORE running it (afterwards the rows
+      // no longer match the predicate), so we can deactivate their Wompi links.
+      const expiring = await repo.listIntentsExpiringBefore(now);
+      await repo.expireUnpaidIntentsBefore(now);
+      const wompi = new WompiApiService(env);
+      for (const intent of expiring) {
+        if (intent.wompi_id_enlace == null) {
+          continue;
+        }
+        // Each deactivation is isolated: one Wompi failure must not abort the sweep
+        // or the other deactivations. The intent is already EXPIRED regardless.
+        try {
+          await wompi.deactivatePaymentLink(intent);
+        } catch (error) {
+          console.error("Wompi link deactivation failed", intent.id, error);
+        }
+      }
     } catch (error) {
       console.error("Donation intent expiry sweep failed", error);
     }

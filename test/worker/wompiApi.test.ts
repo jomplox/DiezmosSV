@@ -54,7 +54,7 @@ describe("Wompi API service", () => {
       monto: number;
       nombreProducto: string;
       limitesDeUso: { cantidadMaximaPagosExitosos: number };
-      configuracion: { urlRedirect: string; urlWebhook: string };
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean };
       vigencia: { fechaInicio: string; fechaFin: string };
     };
     expect(body).toMatchObject({
@@ -64,7 +64,10 @@ describe("Wompi API service", () => {
       limitesDeUso: { cantidadMaximaPagosExitosos: 1 },
       configuracion: {
         urlRedirect: "https://app.example.org/donar/gracias",
-        urlWebhook: "https://app.example.org/webhooks/wompi"
+        urlWebhook: "https://app.example.org/webhooks/wompi",
+        // The amount is pinned: the donor cannot edit the monto or quantity on Wompi's sheet.
+        esMontoEditable: false,
+        esCantidadEditable: false
       }
     });
     expect(new Date(body.vigencia.fechaFin).getTime() - new Date(body.vigencia.fechaInicio).getTime()).toBe(60 * 60 * 1000);
@@ -111,6 +114,89 @@ describe("Wompi API service", () => {
     expect((error as WompiApiError).message).toContain("401");
     expect((error as WompiApiError).message).not.toContain("test-client-secret");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("deactivates a link by PUTting the full body with a past vigencia window", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 555, usable: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new WompiApiService(realEnv());
+    await service.deactivatePaymentLink(intent({ wompi_id_enlace: 555 }));
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // Token first, then the PUT to the specific link.
+    const [linkUrl, linkInit] = fetchMock.mock.calls[1];
+    expect(linkUrl).toBe("https://api.wompi.sv/EnlacePago/555");
+    expect(linkInit?.method).toBe("PUT");
+    expect(linkInit?.headers).toMatchObject({
+      authorization: "Bearer wompi-access-token",
+      "Content-Type": "application/json"
+    });
+    const body = JSON.parse(String(linkInit?.body)) as {
+      idEnlace: number;
+      identificadorEnlaceComercio: string;
+      monto: number;
+      nombreProducto: string;
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean };
+      vigencia: { fechaInicio: string; fechaFin: string };
+    };
+    // Full body: PUT replaces the whole object, so configuracion must be present or it nulls out.
+    expect(body).toMatchObject({
+      idEnlace: 555,
+      identificadorEnlaceComercio: "di_test",
+      monto: 25.5,
+      nombreProducto: "Donación Iglesia Demo",
+      configuracion: {
+        urlRedirect: "https://app.example.org/donar/gracias",
+        urlWebhook: "https://app.example.org/webhooks/wompi",
+        esMontoEditable: false,
+        esCantidadEditable: false
+      }
+    });
+    // Vigencia is entirely in the past (deactivates the link) yet spans at least 5 minutes.
+    const start = new Date(body.vigencia.fechaInicio).getTime();
+    const end = new Date(body.vigencia.fechaFin).getTime();
+    expect(end).toBeLessThan(Date.now());
+    expect(end - start).toBeGreaterThanOrEqual(5 * 60 * 1000);
+  });
+
+  it("does not call fetch when deactivating in mock mode", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new WompiApiService(mockEnv());
+    await service.deactivatePaymentLink(intent({ wompi_id_enlace: 555 }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not call fetch when the intent has no wompi_id_enlace", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new WompiApiService(realEnv());
+    await service.deactivatePaymentLink(intent({ wompi_id_enlace: null }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("throws a typed error with the response text on a non-2xx deactivation response", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(new Response("enlace no encontrado", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new WompiApiService(realEnv());
+
+    const error = await service.deactivatePaymentLink(intent({ wompi_id_enlace: 555 })).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(WompiApiError);
+    expect((error as WompiApiError).message).toContain("404");
+    expect((error as WompiApiError).message).toContain("enlace no encontrado");
+    expect((error as WompiApiError).message).not.toContain("test-client-secret");
   });
 });
 

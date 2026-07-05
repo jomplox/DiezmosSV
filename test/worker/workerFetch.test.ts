@@ -470,11 +470,13 @@ describe("donation intents", () => {
   it("expires overdue unpaid (PENDING and LINK_CREATED) intents on the 15-minute cron sweep", async () => {
     const db = new InMemoryD1();
     db.donationIntents.push(
-      { id: "di_overdue", status: "PENDING", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
-      { id: "di_link_overdue", status: "LINK_CREATED", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
-      { id: "di_fresh", status: "PENDING", expires_at: "2026-07-04T13:00:00.000Z", created_at: "2026-07-04T12:00:00.000Z" },
-      { id: "di_done", status: "COMPLETED", expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
+      { id: "di_overdue", status: "PENDING", wompi_id_enlace: null, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
+      { id: "di_link_overdue", status: "LINK_CREATED", wompi_id_enlace: 555, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
+      { id: "di_fresh", status: "PENDING", wompi_id_enlace: null, amount_cents: 2550, expires_at: "2026-07-04T13:00:00.000Z", created_at: "2026-07-04T12:00:00.000Z" },
+      { id: "di_done", status: "COMPLETED", wompi_id_enlace: 999, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
     );
+    // Mock mode (env's default): deactivatePaymentLink is a no-op, so no fetch happens.
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
     try {
       await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
@@ -488,6 +490,69 @@ describe("donation intents", () => {
     expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
     expect(db.donationIntents.find((row) => row.id === "di_fresh")?.status).toBe("PENDING");
     expect(db.donationIntents.find((row) => row.id === "di_done")?.status).toBe("COMPLETED");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("deactivates the Wompi link of each expired LINK_CREATED intent in real mode", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push(
+      { id: "di_link_overdue", status: "LINK_CREATED", wompi_id_enlace: 555, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" },
+      { id: "di_pending_overdue", status: "PENDING", wompi_id_enlace: null, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
+    );
+    // Token, then the PUT that deactivates the one link with a wompi_id_enlace.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ idEnlace: 555, usable: false }), { status: 200 }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        APP_ORIGIN: "https://donar.example.org",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        WOMPI_CLIENT_ID: "id",
+        WOMPI_CLIENT_SECRET: "secret"
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    // Both intents expire; only the linked one triggers a token + PUT (2 calls).
+    expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
+    expect(db.donationIntents.find((row) => row.id === "di_pending_overdue")?.status).toBe("EXPIRED");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const [putUrl, putInit] = fetchSpy.mock.calls[1];
+    expect(putUrl).toBe("https://api.wompi.sv/EnlacePago/555");
+    expect((putInit as RequestInit).method).toBe("PUT");
+  });
+
+  it("still expires intents when a Wompi deactivation PUT fails", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push(
+      { id: "di_link_overdue", status: "LINK_CREATED", wompi_id_enlace: 555, amount_cents: 2550, expires_at: "2026-07-04T11:00:00.000Z", created_at: "2026-07-04T10:00:00.000Z" }
+    );
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({ access_token: "tok", expires_in: 3600, token_type: "Bearer" }), { status: 200 }))
+      .mockResolvedValueOnce(new Response("boom", { status: 500 }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      // A deactivation failure must not throw out of the sweep or leave the intent unexpired.
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        APP_ORIGIN: "https://donar.example.org",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        WOMPI_CLIENT_ID: "id",
+        WOMPI_CLIENT_SECRET: "secret"
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -4203,6 +4268,20 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
+      // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
+      // the fields the deactivation sweep needs.
+      const nowIso = String(this.args[0]);
+      const rows = this.db.donationIntents
+        .filter((intent) => (intent.status === "PENDING" || intent.status === "LINK_CREATED") && String(intent.expires_at) < nowIso)
+        .map((intent) => ({
+          id: intent.id,
+          wompi_id_enlace: intent.wompi_id_enlace ?? null,
+          amount_cents: intent.amount_cents,
+          status: intent.status
+        }));
+      return { results: rows as T[] };
+    }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("LEFT JOIN dte_documents")) {
       const limit = Number(this.args.at(-1) ?? 50);
       const rows = [...this.db.donationIntents]

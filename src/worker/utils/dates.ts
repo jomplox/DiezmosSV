@@ -28,6 +28,10 @@ export function addHours(iso: string, hours: number): string {
   return new Date(new Date(iso).getTime() + hours * 60 * 60 * 1000).toISOString();
 }
 
+export function addMinutes(iso: string, minutes: number): string {
+  return new Date(new Date(iso).getTime() + minutes * 60 * 1000).toISOString();
+}
+
 export function addDays(iso: string, days: number): string {
   return new Date(new Date(iso).getTime() + days * 24 * 60 * 60 * 1000).toISOString();
 }
