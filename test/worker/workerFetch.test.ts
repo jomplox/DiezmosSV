@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -937,6 +937,43 @@ describe("contingency administration", () => {
 });
 
 describe("document invalidation", () => {
+  // Pin the clock inside the legal window of testDocument()'s sello (June 2026 →
+  // invalidation allowed until the tenth business day of July, 2026-07-15T05:59:59Z).
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-01T15:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("blocks invalidation after the tenth business day of the following month", async () => {
+    vi.setSystemTime(new Date("2026-07-15T06:00:00.000Z"));
+    const db = new InMemoryD1();
+    const document = testDocument();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Fuera de ventana" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "outside_legal_window",
+      deadline: "2026-07-15T05:59:59.000Z"
+    });
+    expect(document.status).toBe("ACCEPTED");
+  });
+
   it("emails an invalidation notice when MH accepts the invalidation event", async () => {
     const db = new InMemoryD1();
     const document = testDocument();

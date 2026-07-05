@@ -8,12 +8,26 @@ interface LocalDateParts {
 }
 
 export function cdeInvalidationDeadline(acceptedAtIso: string): string {
+  // Normativa de Cumplimiento de los DTE v2.0, Cuadro 6 (fila 1): un CDE puede
+  // invalidarse dentro de los diez primeros días hábiles del mes siguiente al
+  // periodo tributario en que obtuvo el Sello de Recepción. Se cuentan como
+  // hábiles lunes a viernes sin descontar feriados, lo que solo puede adelantar
+  // el vencimiento respecto al plazo legal, nunca extenderlo.
   const acceptedDate = localDateParts(new Date(acceptedAtIso));
-  const deadlineDate = new Date(Date.UTC(acceptedDate.year, acceptedDate.month - 1, acceptedDate.day + 4, 12, 0, 0));
+  const cursor = new Date(Date.UTC(acceptedDate.year, acceptedDate.month, 1, 12, 0, 0));
+  let businessDays = 0;
+  for (;;) {
+    const weekday = cursor.getUTCDay();
+    if (weekday !== 0 && weekday !== 6) {
+      businessDays += 1;
+      if (businessDays === 10) break;
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
   return endOfElSalvadorDayIso({
-    year: deadlineDate.getUTCFullYear(),
-    month: deadlineDate.getUTCMonth() + 1,
-    day: deadlineDate.getUTCDate()
+    year: cursor.getUTCFullYear(),
+    month: cursor.getUTCMonth() + 1,
+    day: cursor.getUTCDate()
   });
 }
 

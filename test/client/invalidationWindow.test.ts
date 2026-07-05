@@ -7,14 +7,14 @@ describe("invalidation window presentation", () => {
     const info = invalidationWindowInfo(testDocument(), new Date("2026-06-29T02:59:59.000Z"));
 
     expect(info.canInvalidate).toBe(true);
-    expect(info.deadlineIso).toBe("2026-06-30T05:59:59.000Z");
-    expect(info.deadlineLabel).toBe("29/06/2026, 23:59");
-    expect(info.remainingLabel).toBe("Quedan 1 día y 3 horas para invalidar este CDE.");
+    expect(info.deadlineIso).toBe("2026-07-15T05:59:59.000Z");
+    expect(info.deadlineLabel).toBe("14/07/2026, 23:59");
+    expect(info.remainingLabel).toBe("Quedan 16 días y 3 horas para invalidar este CDE.");
     expect(info.tone).toBe("ok");
   });
 
   it("marks the window as closed after the legal deadline", () => {
-    const info = invalidationWindowInfo(testDocument(), new Date("2026-06-30T06:00:00.000Z"));
+    const info = invalidationWindowInfo(testDocument(), new Date("2026-07-15T06:00:00.000Z"));
 
     expect(info.canInvalidate).toBe(false);
     expect(info.remainingLabel).toBe("La ventana legal de invalidación ya cerró.");
