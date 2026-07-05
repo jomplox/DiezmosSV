@@ -37,6 +37,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   ADVANCED_CDE_CREATED: "CDE avanzado creado",
   ADVANCED_CDE_FAILED: "CDE avanzado fallido",
   ADVANCED_CDE_REJECTED: "CDE avanzado rechazado",
+  CERT_EXPIRING: "Certificado por vencer",
   CLOUDFLARE_WRITER_ENABLED: "Edición de secretos desde UI habilitada",
   CONTINGENCY_BATCH_SUBMITTED: "Lote de contingencia enviado",
   CONTINGENCY_DTE_ACCEPTED: "CDE de contingencia aceptado",

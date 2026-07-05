@@ -11,7 +11,8 @@ import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Se
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
-import { runRetentionExport } from "./services/retention";
+import { previousElSalvadorMonth, runRetentionExport } from "./services/retention";
+import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
 import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
@@ -136,6 +137,7 @@ async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void>
     return;
   }
   const remainingDays = Math.floor((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  const remainingLabel = remainingDays < 0 ? `venció hace ${Math.abs(remainingDays)} días` : `Quedan ${remainingDays} día(s)`;
   for (const threshold of CERT_EXPIRY_ALERT_THRESHOLD_DAYS) {
     if (remainingDays > threshold) {
       continue;
@@ -143,7 +145,7 @@ async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void>
     await sendOperationalAlert(env, repo, {
       kind: "CERT_EXPIRING",
       title: "Certificado del firmador MH por vencer",
-      detail: `El certificado del firmador del Ministerio de Hacienda vence el ${expiresAt}. Quedan ${remainingDays} día(s).`,
+      detail: `El certificado del firmador del Ministerio de Hacienda vence el ${formatElSalvadorDate(expiresAt)}. ${remainingLabel}.`,
       entityType: "credentials",
       entityId: `${expiresAt}:${threshold}`
     });
@@ -294,6 +296,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (monthParam && !/^\d{4}-\d{2}$/.test(monthParam)) {
       return jsonResponse({ error: "invalid_retention_month", message: "Use el formato YYYY-MM." }, { status: 400 });
     }
+    const lastClosedMonth = previousElSalvadorMonth(new Date());
+    if (monthParam && monthParam > lastClosedMonth) {
+      return jsonResponse(
+        { error: "invalid_retention_month", message: `Solo se pueden exportar meses ya cerrados (hasta ${lastClosedMonth}).` },
+        { status: 400 }
+      );
+    }
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
@@ -303,7 +312,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       summary: monthParam ? `Exportación de retención solicitada para ${monthParam}` : "Exportación de retención solicitada para el mes anterior"
     });
     const result = await runRetentionExport(env, new Date(), monthParam ? { month: monthParam } : {});
-    return jsonResponse({ ok: result.status !== "failed", ...result });
+    return jsonResponse({ ok: result.status !== "failed", ...result }, { status: result.status === "failed" ? 500 : 200 });
   }
 
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {

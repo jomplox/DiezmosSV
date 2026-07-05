@@ -108,6 +108,8 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 
 # Remote production. Replace the zero database_id after:
 #   npx wrangler d1 create diezmossv-production-resource-example
+# Also create the production R2 archive bucket before first deploy:
+#   npx wrangler r2 bucket create diezmossv-production-archive-example
 # Deploy only after staging UAT approval and one controlled production issuance plan.
 [env.production]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }

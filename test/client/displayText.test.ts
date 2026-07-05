@@ -36,6 +36,7 @@ describe("client display text", () => {
     expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Contingencia abierta");
     expect(auditActionLabel("ALERT_SENT:ISSUANCE_DEAD_LETTERED")).toBe("Alerta enviada: Emisión agotó reintentos en cola");
     expect(auditActionLabel("ALERT_SENT:WOMPI_EVENT_STALLED")).toBe("Alerta enviada: Evento Wompi sin procesar — revisar");
+    expect(auditActionLabel("ALERT_SENT:CERT_EXPIRING")).toBe("Alerta enviada: Certificado por vencer");
     expect(auditActionLabel("ALERT_FAILED:DTE_FAILED")).toBe("Alerta fallida: DTE fallido");
     expect(auditActionLabel("RETENTION_EXPORT_COMPLETED")).toBe("Exportación de retención completada");
     expect(auditActionLabel("RETENTION_EXPORT_SKIPPED")).toBe("Exportación de retención omitida");

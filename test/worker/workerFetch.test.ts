@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
+import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
 
@@ -2281,6 +2282,53 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       expect.objectContaining({ action: "ALERT_SENT:WOMPI_EVENT_STALLED", entity_type: "wompi_event", entity_id: "wompi_stalled" })
     );
   });
+
+  it("retries the operational alert on a later tick after the first send attempt fails", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.wompiEvents.push(stalledWompiEvent());
+    for (let i = 0; i < 3; i++) {
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+    }
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    let attempt = 0;
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queuedNoop(message) } as unknown as Queue<IssuanceMessage>,
+      EMAIL: {
+        send: async (message: unknown) => {
+          attempt += 1;
+          if (attempt === 1) {
+            throw new Error("SMTP unavailable");
+          }
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-stalled-retry" };
+        }
+      } as SendEmail
+    });
+
+    // Tick 1: email provider throws — WOMPI_EVENT_STALLED audit is written but the alert send fails.
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    expect(sentAlerts).toHaveLength(0);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_FAILED:WOMPI_EVENT_STALLED", entity_type: "wompi_event", entity_id: "wompi_stalled" })
+    );
+    expect(db.audits.filter((audit) => audit.action === "WOMPI_EVENT_STALLED")).toHaveLength(1);
+
+    // Tick 2: email provider succeeds — the alert must be retried (not permanently
+    // suppressed by the WOMPI_EVENT_STALLED audit from tick 1) and now sends.
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    expect(sentAlerts).toHaveLength(1);
+    expect(sentAlerts[0].to).toBe("owner@example.org");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:WOMPI_EVENT_STALLED", entity_type: "wompi_event", entity_id: "wompi_stalled" })
+    );
+
+    // Tick 3: alert already sent — sendOperationalAlert's own dedupe prevents a resend.
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    expect(sentAlerts).toHaveLength(1);
+  });
 });
 
 function queuedNoop(_message: IssuanceMessage): void {
@@ -2339,6 +2387,67 @@ describe("scheduled cron dispatch", () => {
 });
 
 describe("certificate expiry alerts (15-minute cron)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("formats the expiry date in Spanish and counts days remaining in the alert copy", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-01T09:15:00.000Z") });
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const now = new Date("2026-07-01T09:15:00.000Z");
+    const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 2026-07-11
+    const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      MH_CERT_XML: certXmlWithExpiry(expiresAt),
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string; text: string });
+          return { messageId: "alert-cert-expiring-copy" };
+        }
+      } as SendEmail
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+
+    expect(sentAlerts.length).toBeGreaterThan(0);
+    for (const alert of sentAlerts) {
+      expect(alert.text).toContain("vence el 11/07/2026");
+      expect(alert.text).toContain("Quedan 10 día(s)");
+      expect(alert.text).not.toContain(expiresAt.toISOString());
+    }
+  });
+
+  it("words an already-expired certificate as 'venció hace N días' instead of a negative countdown", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-01T09:15:00.000Z") });
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const now = new Date("2026-07-01T09:15:00.000Z");
+    const expiresAt = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000); // already expired 5 days ago
+    const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      MH_CERT_XML: certXmlWithExpiry(expiresAt),
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string; text: string });
+          return { messageId: "alert-cert-expired-copy" };
+        }
+      } as SendEmail
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+
+    expect(sentAlerts.length).toBeGreaterThan(0);
+    for (const alert of sentAlerts) {
+      expect(alert.text).toContain("venció hace 5 días");
+      expect(alert.text).not.toContain("Quedan -5");
+    }
+  });
+
   it("sends a CERT_EXPIRING alert once per threshold crossed and never duplicates on repeated ticks", async () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
@@ -2785,6 +2894,47 @@ describe("manual retention export endpoint", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_retention_month" });
+  });
+
+  it("rejects an export request for the current (still-open) month and writes nothing to the archive", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const archive = new FakeArchiveBucket();
+    // The month currently open in El Salvador local time — same helper the
+    // handler itself will use to compute "the previous closed month" — so
+    // this test targets "now"'s own month regardless of when it runs.
+    const currentMonth = previousElSalvadorMonth(new Date(Date.now() + 31 * 24 * 60 * 60 * 1000));
+
+    const response = await worker.fetch(
+      new Request(`https://example.org/api/admin/retention-export?month=${currentMonth}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_retention_month" });
+    expect(archive.putCalls).toHaveLength(0);
+  });
+
+  it("returns HTTP 500 when the export itself fails, instead of 200 with ok:false", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.documents.push(testDocument({ id: "doc_1", created_at: "2026-03-15T00:00:00.000Z" }));
+    const archive = new FakeArchiveBucket();
+    vi.spyOn(archive, "put").mockRejectedValue(new Error("R2 unavailable"));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/retention-export?month=2026-03", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ ok: false, status: "failed", month: "2026-03" });
   });
 
   it("rejects non-owners", async () => {

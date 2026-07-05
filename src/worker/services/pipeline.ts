@@ -33,22 +33,26 @@ export class IssuancePipeline {
       const eventId = String(event.id);
       const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
+        const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
         if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
-          const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
           await this.repo.createAudit({
             action: "WOMPI_EVENT_STALLED",
             entityType: "wompi_event",
             entityId: eventId,
             summary
           });
-          await sendOperationalAlert(this.env, this.repo, {
-            kind: "WOMPI_EVENT_STALLED",
-            title: "Evento Wompi sin procesar",
-            detail: summary,
-            entityType: "wompi_event",
-            entityId: eventId
-          });
         }
+        // Retried on every tick regardless of the WOMPI_EVENT_STALLED audit above:
+        // if the email send itself failed (ALERT_FAILED), that audit alone must not
+        // permanently suppress future attempts. sendOperationalAlert has its own
+        // ALERT_SENT:WOMPI_EVENT_STALLED dedupe, so once a send succeeds this becomes a no-op.
+        await sendOperationalAlert(this.env, this.repo, {
+          kind: "WOMPI_EVENT_STALLED",
+          title: "Evento Wompi sin procesar",
+          detail: summary,
+          entityType: "wompi_event",
+          entityId: eventId
+        });
         continue;
       }
       await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId });

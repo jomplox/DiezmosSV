@@ -165,6 +165,13 @@ Do not set production secrets or deploy `--env production` until staging UAT is 
 cutover then uses production MH credentials, production Wompi secret, production email sender, and one
 controlled low-value issuance while tailing logs.
 
+Before the first production deploy, create the production R2 archive bucket referenced by
+`[env.production.r2_buckets]` in `wrangler.toml` (the monthly retention export writes legal archives there):
+
+```
+npx wrangler r2 bucket create diezmossv-production-archive-example
+```
+
 Protect the public Worker before production with Cloudflare Access or equivalent WAF/rate-limiting
 rules around `/api/auth/*`, plus monitoring for Queue retries, MH rejects, email failures, and D1
 backup/export.
