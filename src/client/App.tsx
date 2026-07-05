@@ -2541,7 +2541,12 @@ function AdvancedDteModal({
                   <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
                 <AdvancedField label="Complemento / dirección completa" span>
-                  <textarea value={form.direccionComplemento} onChange={(event) => update({ direccionComplemento: event.target.value })} rows={4} />
+                  <textarea
+                    value={form.direccionComplemento}
+                    onChange={(event) => update({ direccionComplemento: event.target.value })}
+                    rows={4}
+                    placeholder="Calle, número, colonia…"
+                  />
                 </AdvancedField>
               </div>
             )}
@@ -2569,7 +2574,12 @@ function AdvancedDteModal({
                   <CurrencyInput value={form.valorTotal} onChange={(valorTotal) => update({ valorTotal })} />
                 </AdvancedField>
                 <AdvancedField label="Descripción" span>
-                  <textarea value={form.descripcion} onChange={(event) => update({ descripcion: event.target.value })} rows={3} />
+                  <textarea
+                    value={form.descripcion}
+                    onChange={(event) => update({ descripcion: event.target.value })}
+                    rows={3}
+                    placeholder="Ej.: Donación en efectivo"
+                  />
                 </AdvancedField>
               </div>
             )}
@@ -3563,7 +3573,7 @@ interface AdvancedCdeFormInput {
 
 function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
   return {
-    donorName: "Donante de Prueba",
+    donorName: "",
     donorTipoDocumento: "13",
     donorDocument: "SIN-DOCUMENTO",
     donorNrc: "",
@@ -3576,12 +3586,12 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
     departamento: "06",
     municipio: "22",
     distrito: "01",
-    direccionComplemento: "Dirección de prueba",
+    direccionComplemento: "",
     tipoDonacion: "1",
     cantidad: "1",
     codigo: "DONACION",
     uniMedida: "59",
-    descripcion: "Donación de prueba",
+    descripcion: "",
     tipoDepreciacion: "0",
     valorUni: "1.00",
     valorTotal: "1.00",
@@ -3662,7 +3672,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
     tipoDocumento: cleanText(form.donorTipoDocumento) || "13",
     numDocumento: cleanText(form.donorDocument) || "SIN-DOCUMENTO",
     nrc: nullableText(form.donorNrc),
-    nombre: cleanText(form.donorName) || "Donante de Prueba",
+    nombre: cleanText(form.donorName),
     codActividad: nullableText(form.donorCodActividad),
     descActividad: nullableText(form.donorDescActividad),
     direccion: {
@@ -3685,7 +3695,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
       cantidad,
       codigo: cleanText(form.codigo) || "DONACION",
       uniMedida: integerValue(form.uniMedida, 59),
-      descripcion: cleanText(form.descripcion) || "Donación de prueba",
+      descripcion: cleanText(form.descripcion),
       tipoDepreciacion: integerValue(form.tipoDepreciacion, 0),
       valorUni,
       valor: valorTotal
@@ -3729,7 +3739,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
   return draft;
 }
 
-function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
+export function validateAdvancedCdeForm(form: AdvancedCdeFormInput): string | null {
   const requiredFields: Array<[string, string]> = [
     [form.donorName, "Nombre del donante"],
     [form.donorDocument, "Número documento"],
