@@ -50,12 +50,13 @@ describe("donar page routing", () => {
 });
 
 describe("donar form validation", () => {
+  // Name and email are no longer collected on the form — the donor types them on
+  // Wompi's hosted sheet — so the validated input carries only documento, teléfono,
+  // dirección, and monto.
   const base = {
     amount: "10.00",
-    donorName: "Donante Prueba",
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
-    donorEmail: "donante@example.org",
     donorPhone: "",
     departamento: "06",
     municipio: "23",
@@ -79,9 +80,8 @@ describe("donar form validation", () => {
     expect(donationFormValidationMessage({ ...base, donorDocumentType: "37", donorDocument: "PASAPORTE-123" })).toBe("");
   });
 
-  it("requires the donor name, a valid email, and the address fields", () => {
-    expect(donationFormValidationMessage({ ...base, donorName: "  " })).toBe("Ingrese su nombre completo.");
-    expect(donationFormValidationMessage({ ...base, donorEmail: "correo-invalido" })).toBe("Ingrese un correo electrónico válido.");
+  it("requires the document and the address fields (name/email are collected on Wompi)", () => {
+    expect(donationFormValidationMessage({ ...base, donorDocumentType: "37", donorDocument: "  " })).toBe("Ingrese su documento.");
     expect(donationFormValidationMessage({ ...base, departamento: "" })).toBe("Seleccione un departamento.");
     expect(donationFormValidationMessage({ ...base, municipio: "" })).toBe("Seleccione un municipio.");
     expect(donationFormValidationMessage({ ...base, distrito: "" })).toBe("Seleccione un distrito.");
@@ -147,15 +147,21 @@ describe("donar thank-you page", () => {
 describe("donar page source contract", () => {
   it("labels the form fields in usted-form Spanish", () => {
     expect(appSource).toContain("Haga su donación");
-    expect(appSource).toContain("Nombre completo");
     expect(appSource).toContain("Tipo de documento");
-    expect(appSource).toContain("Correo electrónico");
     expect(appSource).toContain("Teléfono (opcional)");
     expect(appSource).toContain("Departamento");
     expect(appSource).toContain("Municipio");
     expect(appSource).toContain("Distrito");
     expect(appSource).toContain("Dirección");
     expect(appSource).toContain("Monto");
+  });
+
+  it("no longer collects name or email on the form (both are entered on Wompi's sheet)", () => {
+    // Wompi's hosted sheet requires and asks only for name + email, so the form
+    // must not render those fields — and must tell the donor what comes next.
+    expect(appSource).not.toContain("Nombre completo");
+    expect(appSource).not.toContain("Correo electrónico");
+    expect(appSource).toContain("Su nombre y correo se ingresan al pagar con Wompi.");
   });
 
   it("wires cascading municipio/distrito selects to the department-scoped catalog helpers", () => {

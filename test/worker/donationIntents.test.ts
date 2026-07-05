@@ -58,10 +58,12 @@ describe("donation intents repository", () => {
     const created = await repository.createDonationIntent({
       id: "di_seed",
       amountCents: 2550,
-      donorName: "Juan Donante",
+      // Name and email are no longer collected on the form — they arrive on the
+      // webhook from Wompi — so the intent binds null for both.
+      donorName: null,
       donorDocumentType: "13",
       donorDocument: "000000000",
-      donorEmail: "juan@example.org",
+      donorEmail: null,
       donorPhone: null,
       direccionDepartamento: "06",
       direccionMunicipio: "22",
@@ -79,6 +81,9 @@ describe("donation intents repository", () => {
     expect(insert!.args).toContain("2026-07-05T13:00:00.000Z");
     expect(insert!.args).toContain(2550);
     expect(insert!.args).toContain("203.0.113.9");
+    // donor_name and donor_email are bound null (positions 3 and 6 of the VALUES list).
+    expect(insert!.args[2]).toBeNull();
+    expect(insert!.args[5]).toBeNull();
   });
 
   it("reads a single intent by id", async () => {
@@ -155,10 +160,10 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     id: "di_seed",
     status: "PENDING",
     amount_cents: 2550,
-    donor_name: "Juan Donante",
+    donor_name: null,
     donor_document_type: "13",
     donor_document: "000000000",
-    donor_email: "juan@example.org",
+    donor_email: null,
     donor_phone: null,
     direccion_departamento: "06",
     direccion_municipio: "22",

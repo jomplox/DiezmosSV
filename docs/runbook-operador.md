@@ -47,18 +47,26 @@ abre una **Contingencia** (secciones 6 y 7).
 
 ## 3. Donaciones en línea (página /donar)
 
-Además del enlace de pago fijo de Wompi, la aplicación publica una página **/donar** donde el
-propio donante escribe sus datos (nombre, documento, correo y dirección) **antes** de pagar. Con
-esos datos el sistema arma el comprobante, así que el CDE sale con la información correcta del
-donante sin que usted tenga que capturarla.
+Además del enlace de pago fijo de Wompi, la aplicación publica una página **/donar**. Los datos del
+donante se **dividen** entre el formulario y la pantalla de pago de Wompi:
+
+- **Formulario /donar:** el **documento** fiscal (con validación de DUI) y la **dirección**
+  (departamento, municipio, distrito y complemento), además del teléfono opcional y el monto.
+- **Pantalla de Wompi:** el **nombre** y el **correo**, que Wompi pide obligatoriamente en su propia
+  pantalla de pago (no se pueden desactivar ni rellenar por adelantado).
+
+Con esas dos fuentes el sistema arma el comprobante, así que el CDE sale con la información correcta
+del donante sin que usted tenga que capturarla.
 
 **Cómo funciona:**
 
-1. El donante abre la página **/donar**, completa el formulario y elige el monto.
+1. El donante abre la página **/donar**, completa el documento y la dirección, y elige el monto.
 2. El sistema valida los datos y genera un **enlace de pago de un solo uso** en Wompi.
-3. Cuando el donante paga, Wompi avisa al sistema, que arma y transmite el CDE con los datos
-   del formulario y, al recibir el sello de Hacienda, envía el comprobante por correo.
-4. La página del donante muestra automáticamente la confirmación.
+3. En la pantalla de Wompi, el donante escribe su **nombre** y **correo** y paga.
+4. Cuando el donante paga, Wompi avisa al sistema, que arma y transmite el CDE combinando el
+   documento y la dirección del formulario con el nombre y el correo de Wompi; al recibir el sello de
+   Hacienda, envía el comprobante por correo.
+5. La página del donante muestra automáticamente la confirmación.
 
 **Qué significa cada estado de una donación en línea** (los verá en la sección **Exportar**):
 
@@ -71,10 +79,12 @@ donante sin que usted tenga que capturarla.
 
 En la sección **Exportar** (rol Administrador o superior) verá la tarjeta **Donaciones en línea**
 con las últimas donaciones recibidas por este medio: estado, monto, donante, fecha y, para las
-**Completadas**, el número de control del CDE emitido. Cuando abra un CDE que provino de este
+**Completadas**, el número de control del CDE emitido. La columna **donante** se toma del nombre que
+quedó en el CDE emitido (el que el donante escribió en Wompi), por lo que solo aparece en las
+donaciones **Completadas**; en los demás estados verá «—». Cuando abra un CDE que provino de este
 formulario, en su detalle aparecerá la etiqueta **«Datos del donante verificados en el formulario
-de donación»**, que le indica que los datos del donante fueron capturados y validados por el propio
-donante, no tomados del aviso de pago.
+de donación»**, que le indica que el documento y la dirección fueron capturados y validados por el
+propio donante en el formulario, no tomados del aviso de pago.
 
 **El enlace de pago fijo sigue funcionando.** Si un donante paga por el enlace estático de siempre
 (sin pasar por /donar), el comprobante se emite igual, tomando los datos disponibles del aviso de

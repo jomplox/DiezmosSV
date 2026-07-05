@@ -30,8 +30,9 @@ export interface DonationIntentListItem {
   id: string;
   status: DonationIntentStatus;
   amount_cents: number;
-  donor_name: string;
-  donor_email: string;
+  // The donante shown in the panel comes from the emitted CDE's donor_name (joined via
+  // document_id for COMPLETED intents); the intent itself no longer stores name/email.
+  document_donor_name: string | null;
   document_id: string | null;
   numero_control: string | null;
   created_at: string;

@@ -18,12 +18,11 @@ import { expect, test } from "@playwright/test";
  * isolated wrangler state dir (PW_PERSIST_TO="$(mktemp -d)").
  */
 
-// A DUI whose check digit is valid (10000001-9): exercises the DUI branch.
+// A DUI whose check digit is valid (10000001-9): exercises the DUI branch. Name and
+// email are no longer collected on the form — the donor types them on Wompi's sheet.
 const DONOR = {
   amount: "1.00",
-  name: "Donante Prueba Donar",
-  dui: "10000001-9",
-  email: "donante@example.org"
+  dui: "10000001-9"
 };
 
 test.beforeEach(async ({ context }) => {
@@ -44,10 +43,12 @@ test("public donation form submits and reaches the Wompi handoff state", async (
   await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continuar" })).toHaveCount(0);
 
-  await page.getByLabel("Nombre completo").fill(DONOR.name);
+  // Name and email are entered on Wompi's sheet, not here — the form no longer has them.
+  await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
+  await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
+
   // Default document type is DUI (13).
   await page.getByLabel("Número de documento").fill(DONOR.dui);
-  await page.getByLabel("Correo electrónico").fill(DONOR.email);
 
   // Cascading selects: municipio options depend on the chosen departamento.
   await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });

@@ -257,12 +257,12 @@ describe("donation intents", () => {
   const BAD_CHECKSUM_DUI = "01234567-0";
 
   function validIntentBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    // Name and email are collected on Wompi's hosted sheet, not on the /donar form,
+    // so the intent body carries only documento, teléfono, dirección, and monto.
     return {
       amount: "25.50",
-      donorName: "Donante Fiel",
       donorDocumentType: "13",
       donorDocument: VALID_DUI,
-      donorEmail: "donante@example.org",
       donorPhone: "70001122",
       departamento: "06",
       municipio: "23",
@@ -295,6 +295,10 @@ describe("donation intents", () => {
     expect(intent.status).toBe("LINK_CREATED");
     expect(intent.amount_cents).toBe(2550);
     expect(intent.donor_document).toBe("10000001-9"); // stored canonically via formatDui
+    // Name and email are never collected on the form: they are bound null and later
+    // sourced from the webhook.
+    expect(intent.donor_name).toBeNull();
+    expect(intent.donor_email).toBeNull();
     expect(intent.client_ip).toBe("203.0.113.7");
     expect(intent.wompi_url_enlace).toBe(payload.urlEnlace);
 
@@ -339,12 +343,18 @@ describe("donation intents", () => {
     expect(db.donationIntents).toHaveLength(0);
   });
 
-  it("rejects a missing donor name", async () => {
+  it("ignores a donorName/donorEmail in the body: they are never validated or persisted", async () => {
     const db = new InMemoryD1();
-    const response = await worker.fetch(intentRequest(validIntentBody({ donorName: "   " })), env(db));
+    // Even if a client sends name/email, the endpoint neither requires nor stores them.
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ donorName: "Ignorado", donorEmail: "ignorado@example.org" })),
+      env(db)
+    );
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "invalid_donor_name" });
+    expect(response.status).toBe(201);
+    expect(db.donationIntents).toHaveLength(1);
+    expect(db.donationIntents[0].donor_name).toBeNull();
+    expect(db.donationIntents[0].donor_email).toBeNull();
   });
 
   it("rejects a DUI that fails the check digit for document type 13", async () => {
@@ -384,14 +394,6 @@ describe("donation intents", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
-  });
-
-  it("rejects an email that is not RFC-trivially valid", async () => {
-    const db = new InMemoryD1();
-    const response = await worker.fetch(intentRequest(validIntentBody({ donorEmail: "no-at-sign" })), env(db));
-
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "invalid_email" });
   });
 
   it("blocks the sixth intent from one IP within 15 minutes with a 429", async () => {
@@ -764,7 +766,10 @@ describe("online donation intents listing", () => {
     db.documents.push(
       testDocument({
         id: "doc_paid",
-        numero_control: "DTE-15-M001P004-000000000000042"
+        numero_control: "DTE-15-M001P004-000000000000042",
+        // The donante shown in the panel now comes from the emitted CDE's donor_name
+        // (which was lifted from the webhook), not from the intent.
+        donor_name: "Beto del Webhook"
       })
     );
     db.donationIntents.push(
@@ -772,10 +777,11 @@ describe("online donation intents listing", () => {
         id: "di_pending",
         status: "PENDING",
         amount_cents: 1000,
-        donor_name: "Ana Pendiente",
+        // Name/email are no longer stored on the intent.
+        donor_name: null,
         donor_document_type: "13",
         donor_document: "000000000",
-        donor_email: "ana@example.org",
+        donor_email: null,
         donor_phone: null,
         direccion_departamento: "06",
         direccion_municipio: "22",
@@ -794,10 +800,10 @@ describe("online donation intents listing", () => {
         id: "di_done",
         status: "COMPLETED",
         amount_cents: 2550,
-        donor_name: "Beto Completo",
+        donor_name: null,
         donor_document_type: "13",
         donor_document: "000000000",
-        donor_email: "beto@example.org",
+        donor_email: null,
         donor_phone: null,
         direccion_departamento: "06",
         direccion_municipio: "22",
@@ -822,11 +828,16 @@ describe("online donation intents listing", () => {
     );
 
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { intents: Array<{ id: string; status: string; numero_control: string | null }> };
+    const body = (await response.json()) as {
+      intents: Array<{ id: string; status: string; numero_control: string | null; document_donor_name: string | null }>;
+    };
     // Newest first: the COMPLETED intent (12:00) precedes the PENDING one (10:00).
     expect(body.intents.map((intent) => intent.id)).toEqual(["di_done", "di_pending"]);
     expect(body.intents[0].numero_control).toBe("DTE-15-M001P004-000000000000042");
+    // The COMPLETED intent's donante comes from the joined document; the PENDING one has none.
+    expect(body.intents[0].document_donor_name).toBe("Beto del Webhook");
     expect(body.intents[1].numero_control).toBeNull();
+    expect(body.intents[1].document_donor_name).toBeNull();
   });
 });
 
@@ -2827,10 +2838,12 @@ describe("donation intent correlation", () => {
       id: "di_corr_1",
       status: "LINK_CREATED",
       amount_cents: 2500,
-      donor_name: "Ana Donante",
+      // Name/email are no longer captured on the form; the intent stores null and the
+      // correlated CDE lifts nombre/correo from the webhook.
+      donor_name: null,
       donor_document_type: "13",
       donor_document: "10000002-7",
-      donor_email: "ana@example.org",
+      donor_email: null,
       donor_phone: "70001111",
       direccion_departamento: INTENT_ADDRESS.departamento,
       direccion_municipio: INTENT_ADDRESS.municipio,
@@ -2900,7 +2913,7 @@ describe("donation intent correlation", () => {
     });
   }
 
-  it("correlates a LINK_CREATED intent: receptor equals intent data with donor catalog codes", async () => {
+  it("correlates a LINK_CREATED intent: identity + address from the intent, nombre/correo from the webhook", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
     const eventId = seedWompiEvent(db, correlationWebhook());
@@ -2909,11 +2922,14 @@ describe("donation intent correlation", () => {
 
     expect(record?.status).toBe("ACCEPTED");
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // Merge: tipoDocumento/numDocumento/direccion from the intent (canonical DUI +
+    // catalog-coded address), nombre/correo from the webhook (the donor typed them on
+    // Wompi's sheet — the intent no longer carries them), telefono from the intent phone.
     expect(cde.receptor).toMatchObject({
       tipoDocumento: "13",
       numDocumento: "10000002-7",
-      nombre: "Ana Donante",
-      correo: "ana@example.org",
+      nombre: "Fallback Cliente",
+      correo: "fallback@example.org",
       telefono: "70001111",
       direccion: INTENT_ADDRESS
     });
@@ -2926,6 +2942,18 @@ describe("donation intent correlation", () => {
     );
   });
 
+  it("falls back to the webhook Celular when the intent has no phone", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { donor_phone: null });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // telefono = intent.donor_phone ?? webhook Celular; identity/address stay from the intent.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", telefono: "70000003", direccion: INTENT_ADDRESS });
+  });
+
   it("correlates an EXPIRED intent (donor paid in the link's last minute)", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, { status: "EXPIRED" });
@@ -2934,7 +2962,8 @@ describe("donation intent correlation", () => {
     const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
 
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    // numDocumento/direccion still come from the intent; nombre/correo from the webhook.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", nombre: "Fallback Cliente", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
   });
 
@@ -2965,8 +2994,8 @@ describe("donation intent correlation", () => {
     expect(record?.amount_cents).toBe(3000);
     const cde = JSON.parse(record!.plain_json) as { resumen: { valorTotal: number }; receptor: Record<string, unknown> };
     expect(cde.resumen.valorTotal).toBe(30);
-    // Still correlated to the intent despite the mismatch.
-    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    // Still correlated to the intent despite the mismatch: numDocumento/direccion prove it.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_AMOUNT_MISMATCH");
     expect(mismatch).toBeTruthy();
     expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
@@ -3022,8 +3051,10 @@ describe("donation intent correlation", () => {
     expect(result.accepted).toBe(true);
     const rebuilt = db.documents.find((row) => row.id === "dte_rejected");
     const cde = JSON.parse(String(rebuilt!.plain_json)) as { receptor: Record<string, unknown> };
-    // The rebuild must NOT downgrade to the fallback donor data — it re-applies the intent.
-    expect(cde.receptor).toMatchObject({ nombre: "Ana Donante", direccion: INTENT_ADDRESS });
+    // The rebuild must re-apply the intent's identity + address (not downgrade to the
+    // emisor-geography fallback). nombre/correo come from the webhook either way, so
+    // numDocumento/direccion are what prove the intent correlation survived the rebuild.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_rejected");
   });
@@ -4182,7 +4213,11 @@ class Statement {
         .slice(0, limit)
         .map((intent) => {
           const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
-          return { ...intent, numero_control: document?.numero_control ?? null };
+          return {
+            ...intent,
+            numero_control: document?.numero_control ?? null,
+            document_donor_name: document?.donor_name ?? null
+          };
         });
       return { results: rows as T[] };
     }
@@ -4462,10 +4497,10 @@ class Statement {
         id: String(id),
         status: "PENDING",
         amount_cents: Number(amountCents),
-        donor_name: String(donorName),
+        donor_name: donorName == null ? null : String(donorName),
         donor_document_type: String(donorDocumentType),
         donor_document: String(donorDocument),
-        donor_email: String(donorEmail),
+        donor_email: donorEmail == null ? null : String(donorEmail),
         donor_phone: donorPhone == null ? null : String(donorPhone),
         direccion_departamento: String(direccionDepartamento),
         direccion_municipio: String(direccionMunicipio),

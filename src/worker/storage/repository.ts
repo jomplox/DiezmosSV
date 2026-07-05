@@ -95,10 +95,12 @@ export class Repository {
   async createDonationIntent(input: {
     id: string;
     amountCents: number;
-    donorName: string;
+    // Name and email are collected on Wompi's sheet (not the /donar form), so both
+    // are nullable and bound null at insert time.
+    donorName: string | null;
     donorDocumentType: "13" | "37";
     donorDocument: string;
-    donorEmail: string;
+    donorEmail: string | null;
     donorPhone: string | null;
     direccionDepartamento: string;
     direccionMunicipio: string;
@@ -180,12 +182,16 @@ export class Repository {
   }
 
   // Newest-first listing for the admin "Donaciones en línea" panel (Task 5). The
-  // LEFT JOIN exposes the emitted CDE's numero_control for COMPLETED intents (which
-  // carry document_id) and leaves it null for every other status.
+  // LEFT JOIN exposes the emitted CDE's numero_control AND its donor_name for
+  // COMPLETED intents (which carry document_id) and leaves both null for every other
+  // status. The donante shown in the panel comes from the document (lifted from the
+  // webhook), since the intent no longer stores name/email.
   async listRecentDonationIntents(limit = 50): Promise<DonationIntentListItem[]> {
     const rows = await this.db
       .prepare(
-        `SELECT donation_intents.*, dte_documents.numero_control AS numero_control
+        `SELECT donation_intents.*,
+                dte_documents.numero_control AS numero_control,
+                dte_documents.donor_name AS document_donor_name
          FROM donation_intents
          LEFT JOIN dte_documents ON dte_documents.id = donation_intents.document_id
          ORDER BY donation_intents.created_at DESC, donation_intents.id DESC

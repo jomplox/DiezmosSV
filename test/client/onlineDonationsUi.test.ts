@@ -25,6 +25,15 @@ describe("online donations UI contract", () => {
     expect(appSource).toContain("donationIntentStatusLabel");
   });
 
+  it("shows the donante from the joined document (COMPLETED intents), else an em dash", () => {
+    // The intent no longer stores donor_name/donor_email — those come from Wompi and
+    // are joined in via the emitted document. The panel renders the document's
+    // donor_name for COMPLETED intents and a placeholder for every other status.
+    expect(appSource).toContain("intent.document_donor_name ?? \"—\"");
+    expect(appSource).not.toContain("intent.donor_name");
+    expect(appSource).not.toContain("intent.donor_email");
+  });
+
   it("surfaces the donor-data-verified badge on a document produced from an intent", () => {
     expect(appSource).toContain("Datos del donante verificados en el formulario de donación");
     expect(appSource).toContain("donorDataVerified");

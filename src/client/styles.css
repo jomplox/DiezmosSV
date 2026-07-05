@@ -2543,6 +2543,15 @@ pre {
   margin: 0;
 }
 
+/* Tells the donor that name + email are collected on Wompi's sheet, not this form. */
+.donar-note {
+  color: #52656c;
+  font-size: 13px;
+  line-height: 1.4;
+  margin: 0;
+  font-style: italic;
+}
+
 .donar-form {
   display: grid;
   gap: 14px;

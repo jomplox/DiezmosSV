@@ -431,11 +431,20 @@ ResultadoTransaccion = ExitosaAprobada
 
 ## 💳 Online donations (`/donar`)
 
-Besides the legacy static Wompi payment link, the app serves a public **`/donar`** page where a donor
-fills in their own name, document, email, and address before paying. The Worker validates that data,
-persists a **donation intent**, and mints a **single-use Wompi payment link** via the Wompi API. When
-the payment webhook arrives, the intent's validated data (not the raw webhook) becomes the CDE
-`receptor` — so the receipt carries canonical catalog codes and a clean DUI.
+Besides the legacy static Wompi payment link, the app serves a public **`/donar`** page. The donor
+data is **split** between the form and Wompi's hosted sheet:
+
+- **Formulario `/donar`** → the donor's fiscal **documento** (with DUI validation) and **dirección**
+  (catalog-coded department/municipio/distrito + complemento), plus an optional phone and the amount.
+- **Hoja de Wompi** → the donor's **nombre** and **correo**, which Wompi's hosted sheet requires and
+  now asks for exclusively (they cannot be prefilled or disabled via the API).
+
+The Worker validates the form data, persists a **donation intent** (identity + address only; name and
+email are stored null), and mints a **single-use Wompi payment link** via the Wompi API. When the
+payment webhook arrives, the CDE `receptor` **merges** the two sources: `tipoDocumento` /
+`numDocumento` / `direccion` come from the intent (canonical catalog codes and a clean DUI), while
+`nombre` / `correo` come from the webhook (what the donor typed on Wompi's sheet); the telephone
+prefers the intent's phone, falling back to the webhook's `Celular`.
 
 **Two new secrets** are required to call the Wompi API for the single-use link (the legacy static-link
 flow does not need them). Obtain `client_id` / `client_secret` from the Wompi merchant panel under
@@ -463,8 +472,11 @@ always comes from Wompi: if the webhook amount differs from the intent amount, t
 CDE. A `COMPLETED` intent never correlates twice.
 
 **Admin visibility** — the **Exportar** view lists the last 50 online donations (status, amount, donor,
-date, and the emitted `numero de control` for completed ones). A CDE produced from a completed intent
-shows a **"Datos del donante verificados en el formulario de donación"** badge in its detail panel.
+date, and the emitted `numero de control` for completed ones). The **donor** column is joined from the
+emitted CDE's `donor_name` (which came from the webhook), so it is shown only for **COMPLETED**
+intents — every other status renders "—", since the intent itself carries no name. A CDE produced from
+a completed intent shows a **"Datos del donante verificados en el formulario de donación"** badge in
+its detail panel.
 
 > The legacy static Wompi payment link keeps working: those payments have no intent, so the CDE is
 > built from the raw webhook's fallback donor data exactly as before.

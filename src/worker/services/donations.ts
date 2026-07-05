@@ -10,9 +10,7 @@ import { WompiApiError, WompiApiService } from "./wompiApi";
 // are stored as integer cents; the DTE side already rounds the same way.
 const MIN_AMOUNT_CENTS = 100; // $1.00
 const MAX_AMOUNT_CENTS = 500_000; // $5,000.00
-const MAX_DONOR_NAME = 200;
 const MAX_FREE_DOCUMENT = 50;
-const MAX_EMAIL = 200;
 const MAX_COMPLEMENTO = 300;
 const INTENT_VALIDITY_HOURS = 1; // matches the Wompi link vigencia (Task 1).
 
@@ -32,12 +30,12 @@ export class IntentValidationError extends Error {
   }
 }
 
+// Name and email are collected on Wompi's hosted sheet (which requires and now asks
+// only for those two), so the intent carries identity + address only.
 export interface ValidatedIntentInput {
   amountCents: number;
-  donorName: string;
   donorDocumentType: "13" | "37";
   donorDocument: string;
-  donorEmail: string;
   donorPhone: string | null;
   direccionDepartamento: string;
   direccionMunicipio: string;
@@ -66,19 +64,11 @@ function requireString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function isTrivialEmail(value: string): boolean {
-  return value.length <= MAX_EMAIL && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
-}
-
 // Full server-side validation of a donor-checkout body. Every branch throws an
-// IntentValidationError with its own code so the route can map it to a 400.
+// IntentValidationError with its own code so the route can map it to a 400. Name and
+// email are neither accepted nor validated: the donor enters them on Wompi's sheet.
 export function validateIntentInput(body: Record<string, unknown>): ValidatedIntentInput {
   const amountCents = parseAmountCents(body.amount);
-
-  const donorName = requireString(body.donorName);
-  if (!donorName || donorName.length > MAX_DONOR_NAME) {
-    throw new IntentValidationError("invalid_donor_name", "Ingrese el nombre del donante (máximo 200 caracteres).");
-  }
 
   const donorDocumentType = body.donorDocumentType;
   if (donorDocumentType !== "13" && donorDocumentType !== "37") {
@@ -97,11 +87,6 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
       throw new IntentValidationError("invalid_document", "Ingrese el documento del donante (máximo 50 caracteres).");
     }
     donorDocument = rawDocument;
-  }
-
-  const donorEmail = requireString(body.donorEmail);
-  if (!isTrivialEmail(donorEmail)) {
-    throw new IntentValidationError("invalid_email", "Ingrese un correo electrónico válido.");
   }
 
   const donorPhone = requireString(body.donorPhone) || null;
@@ -128,10 +113,8 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
 
   return {
     amountCents,
-    donorName,
     donorDocumentType,
     donorDocument,
-    donorEmail,
     donorPhone,
     direccionDepartamento,
     direccionMunicipio,
@@ -175,10 +158,11 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
   const intent = await repo.createDonationIntent({
     id: newId("di"),
     amountCents: input.amountCents,
-    donorName: input.donorName,
+    // Name and email are collected on Wompi's sheet, not the form: bind null here.
+    donorName: null,
     donorDocumentType: input.donorDocumentType,
     donorDocument: input.donorDocument,
-    donorEmail: input.donorEmail,
+    donorEmail: null,
     donorPhone: input.donorPhone,
     direccionDepartamento: input.direccionDepartamento,
     direccionMunicipio: input.direccionMunicipio,
