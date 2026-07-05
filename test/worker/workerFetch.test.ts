@@ -1004,6 +1004,66 @@ describe("document retry", () => {
       message: expect.stringContaining("no tiene fallos")
     });
   });
+
+  it("rebuilds a rejected Wompi CDE from the original webhook before retransmitting", async () => {
+    const certPassword = "correct horse battery staple";
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    // Real payment-link payload shape: no DocumentoIdentidad, no Direccion.
+    db.wompiEvents.push({
+      id: "wompi_evt_reject",
+      transaction_id: "TX-REJECTED-1",
+      environment: "00",
+      result: "ExitosaAprobada",
+      amount_cents: 100,
+      donor_email: "legacy-contact-2@example.com",
+      donor_name: "Example Person",
+      raw_body: JSON.stringify({
+        IdTransaccion: "TX-REJECTED-1",
+        ResultadoTransaccion: "ExitosaAprobada",
+        Monto: "1.00",
+        FechaTransaccion: "2026-07-05T10:15:19.089-06:00",
+        EsProductiva: false,
+        Cliente: { Nombre: "Example Person", EMail: "legacy-contact-2@example.com" }
+      }),
+      processed_at: "2026-07-05T16:33:40.000Z",
+      created_document_id: "doc_1",
+      received_at: "2026-07-05T16:33:20.000Z"
+    });
+    db.documents.push({
+      ...testDocument(),
+      status: "REJECTED",
+      wompi_event_id: "wompi_evt_reject",
+      signed_jws: "stale-signed-jws",
+      sello_recibido: null,
+      accepted_at: null,
+      mh_estado: "HTTP_400"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        MH_CERT_XML: await generatedCertificateXml(certPassword),
+        MH_CERT_PASSWORD: certPassword
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const document = db.documents[0];
+    // A rejection is MH's verdict on the CONTENT: the retry must rebuild the
+    // document from the webhook (new codigoGeneracion, re-signed), never
+    // retransmit the same signed JWS.
+    expect(document.signed_jws).not.toBe("stale-signed-jws");
+    expect(document.codigo_generacion).not.toBe("6CAE5F7E-A590-4573-8EF2-FE48B14796C4");
+    expect(document.status).toBe("ACCEPTED");
+    const receptor = (JSON.parse(String(document.plain_json)) as { receptor: Record<string, unknown> }).receptor;
+    expect(receptor.tipoDocumento).toBe("37");
+    expect(receptor.direccion).toMatchObject({ complemento: "No proporcionada por el donante" });
+  });
 });
 
 describe("contingency administration", () => {
@@ -3871,6 +3931,18 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET codigo_generacion = ?")) {
+      const [codigoGeneracion, numeroControl, plainJson, signedJws, status, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.codigo_generacion = String(codigoGeneracion);
+        document.numero_control = String(numeroControl);
+        document.plain_json = String(plainJson);
+        document.signed_jws = signedJws === null ? null : String(signedJws);
+        document.status = String(status);
+        document.updated_at = String(updatedAt);
       }
     }
     if (this.sql.includes("UPDATE dte_documents SET donor_email")) {

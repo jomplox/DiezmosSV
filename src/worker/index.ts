@@ -1067,6 +1067,21 @@ async function handleDocumentRoute(
         { status: 409 }
       );
     }
+    if (document.status === "REJECTED" && document.wompi_event_id) {
+      // MH rejected the CONTENT of this CDE: retransmitting the same signed JWS
+      // would be rejected identically, so rebuild it from the original webhook.
+      const result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
+      await repo.createAudit({
+        actorType: "USER",
+        actorId: actor.id,
+        action: "DTE_RETRIED",
+        entityType: "dte_document",
+        entityId: document.id,
+        summary: `${result.estado} (reconstruido)`,
+        metadata: result.raw
+      });
+      return jsonResponse({ ok: true, result });
+    }
     if (!document.signed_jws) {
       if (document.wompi_event_id) {
         await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });

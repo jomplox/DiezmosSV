@@ -25,6 +25,11 @@ export function assertValidDui(raw: string | null | undefined): void {
   }
 }
 
+export function formatDui(raw: string | null | undefined): string {
+  const digits = cleanDui(raw);
+  return `${digits.slice(0, 8)}-${digits.slice(8)}`;
+}
+
 export function isDuiDocumentType(value: unknown): boolean {
   return String(value ?? "").trim() === "13";
 }
