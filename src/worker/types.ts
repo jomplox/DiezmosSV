@@ -15,6 +15,8 @@ export interface Env {
   CLOUDFLARE_SCRIPT_NAME?: string;
   CLOUDFLARE_API_BASE_URL?: string;
   WOMPI_API_SECRET?: string;
+  WOMPI_CLIENT_ID?: string;
+  WOMPI_CLIENT_SECRET?: string;
   MH_CERT_XML?: string;
   MH_CERT_XML_PART_1?: string;
   MH_CERT_XML_PART_2?: string;
@@ -177,6 +179,34 @@ export interface ContingencyBatchLineRecord {
   last_error: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
+
+export interface DonationIntentRecord {
+  id: string;
+  status: DonationIntentStatus;
+  amount_cents: number;
+  donor_name: string;
+  donor_document_type: "13" | "37";
+  donor_document: string;
+  donor_email: string;
+  donor_phone: string | null;
+  direccion_departamento: string;
+  direccion_municipio: string;
+  direccion_distrito: string;
+  direccion_complemento: string;
+  wompi_id_enlace: number | null;
+  wompi_url_enlace: string | null;
+  client_ip: string | null;
+  created_at: string;
+  updated_at: string;
+  expires_at: string;
+}
+
+export interface WompiPaymentLink {
+  idEnlace: number;
+  urlEnlace: string;
 }
 
 export interface WompiEventRecord {
