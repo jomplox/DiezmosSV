@@ -1,6 +1,13 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { parseMhCertificate, signMhDocument, verifyMhJws } from "../../src/worker/domain/signer";
 import { base64ToBytes, bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+
+// El certificado demo del firmador de MH vive en DTE/dte-firmador/, que está
+// deliberadamente fuera de git (distribución de MH con material de llaves).
+// La prueba corre donde exista la distribución local y se omite en CI; las
+// demás pruebas del firmador usan certificados generados y cubren CI.
+const MH_DEMO_CERT_PATH = "DTE/dte-firmador/dockerSinSSL/docker/certificado/Certificado_10000000000001.crt";
 
 describe("native MH signer", () => {
   it("emits an official-style RS512 JWS that verifies with the certificate public key", async () => {
@@ -16,10 +23,8 @@ describe("native MH signer", () => {
     expect(await verifyMhJws(jws, certXml)).toBe(true);
   });
 
-  it("parses the bundled MH-shaped XML certificate", async () => {
-    const xml = await import("node:fs").then((fs) =>
-      fs.readFileSync("DTE/dte-firmador/dockerSinSSL/docker/certificado/Certificado_10000000000001.crt", "utf8")
-    );
+  it.skipIf(!existsSync(MH_DEMO_CERT_PATH))("parses the bundled MH-shaped XML certificate", async () => {
+    const xml = await import("node:fs").then((fs) => fs.readFileSync(MH_DEMO_CERT_PATH, "utf8"));
     const parsed = await parseMhCertificate(xml);
 
     expect(parsed.nit).toBe("10000000000001");
