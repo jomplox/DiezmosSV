@@ -2157,7 +2157,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       raw_body: "{}",
       processed_at: null,
       created_document_id: null,
-      created_at: "2026-01-01T00:00:00.000Z",
+      received_at: "2026-01-01T00:00:00.000Z",
       ...overrides
     };
   }
@@ -2220,7 +2220,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
   it("does not touch recent or already-processed events", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
-    db.wompiEvents.push(stalledWompiEvent({ id: "wompi_fresh", created_at: new Date().toISOString() }));
+    db.wompiEvents.push(stalledWompiEvent({ id: "wompi_fresh", received_at: new Date().toISOString() }));
     db.wompiEvents.push(stalledWompiEvent({ id: "wompi_done", created_document_id: "dte_1" }));
     db.wompiEvents.push(stalledWompiEvent({ id: "wompi_declined", result: "Rechazada" }));
 
@@ -2350,7 +2350,7 @@ function stalledWompiEventFixture(): Record<string, unknown> {
     raw_body: "{}",
     processed_at: null,
     created_document_id: null,
-    created_at: "2026-01-01T00:00:00.000Z"
+    received_at: "2026-01-01T00:00:00.000Z"
   };
 }
 
@@ -2841,43 +2841,54 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
-    if (this.sql.includes("ORDER BY created_at ASC, id ASC LIMIT ?")) {
+    const orderByMatch = this.sql.match(/ORDER BY (created_at|received_at) ASC, id ASC LIMIT \?/);
+    if (orderByMatch) {
+      const column = orderByMatch[1];
       const table = retentionTableFor(this.db, this.sql);
       if (table) {
         let rows = [...table];
-        if (this.sql.includes("created_at >= ? AND created_at < ?")) {
-          const hasCursor = this.sql.includes("(created_at, id) > (?, ?)");
+        const windowRe = new RegExp(`${column} >= \\? AND ${column} < \\?`);
+        const cursorRe = new RegExp(`\\(${column}, id\\) > \\(\\?, \\?\\)`);
+        if (windowRe.test(this.sql)) {
+          const hasCursor = cursorRe.test(this.sql);
           const [start, end] = this.args.map(String);
-          rows = rows.filter((row) => String(row.created_at) >= start && String(row.created_at) < end);
+          rows = rows.filter((row) => String(row[column]) >= start && String(row[column]) < end);
           if (hasCursor) {
-            const [afterCreatedAt, afterId] = [this.args[2], this.args[3]].map(String);
+            const [afterColumn, afterId] = [this.args[2], this.args[3]].map(String);
             rows = rows.filter((row) => {
-              const createdAt = String(row.created_at);
+              const value = String(row[column]);
               const id = String(row.id);
-              return createdAt > afterCreatedAt || (createdAt === afterCreatedAt && id > afterId);
+              return value > afterColumn || (value === afterColumn && id > afterId);
             });
           }
-        } else if (this.sql.includes("(created_at, id) > (?, ?)")) {
-          const [afterCreatedAt, afterId] = [this.args[0], this.args[1]].map(String);
+        } else if (cursorRe.test(this.sql)) {
+          const [afterColumn, afterId] = [this.args[0], this.args[1]].map(String);
           rows = rows.filter((row) => {
-            const createdAt = String(row.created_at);
+            const value = String(row[column]);
             const id = String(row.id);
-            return createdAt > afterCreatedAt || (createdAt === afterCreatedAt && id > afterId);
+            return value > afterColumn || (value === afterColumn && id > afterId);
           });
         }
-        rows.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+        rows.sort((left, right) => String(left[column]).localeCompare(String(right[column])) || String(left.id).localeCompare(String(right.id)));
         const limit = Number(this.args.at(-1) ?? 500);
         return { results: rows.slice(0, limit) as T[] };
       }
     }
     if (this.sql.includes("FROM wompi_events") && this.sql.includes("created_document_id IS NULL")) {
+      // The real wompi_events schema has no created_at column (only received_at) —
+      // require the query to reference the column that actually exists, so a
+      // regression back to `created_at < ?` fails here instead of silently
+      // matching on a column the fake happens to also carry.
+      if (!this.sql.includes("received_at < ?") || this.sql.includes("created_at < ?")) {
+        throw new Error(`SQLITE_ERROR: no such column: created_at (simulated) for SQL: ${this.sql}`);
+      }
       const cutoff = String(this.args[0]);
       const stalled = this.db.wompiEvents.filter(
         (event) =>
           !event.created_document_id &&
           !event.processed_at &&
           event.result === "ExitosaAprobada" &&
-          String(event.created_at) < cutoff
+          String(event.received_at) < cutoff
       );
       return { results: stalled as T[] };
     }

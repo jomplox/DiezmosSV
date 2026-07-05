@@ -103,6 +103,9 @@ async function exportWindowedTable(
   startIso: string,
   endIso: string
 ): Promise<TableManifestEntry> {
+  // wompi_events has no created_at column — it records received_at instead
+  // (migrations/0001_init.sql). Every other windowed table uses created_at.
+  const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
   const chunks: Uint8Array[] = [];
   let rowCount = 0;
   let cursor: RetentionCursor | null = null;
@@ -114,7 +117,7 @@ async function exportWindowedTable(
       rowCount += 1;
     }
     const last = rows[rows.length - 1];
-    cursor = { createdAt: String(last.created_at), id: String(last.id) };
+    cursor = { createdAt: String(last[cursorColumn]), id: String(last.id) };
     if (rows.length < RETENTION_PAGE_SIZE) break;
   }
   const body = concatBytes(chunks);

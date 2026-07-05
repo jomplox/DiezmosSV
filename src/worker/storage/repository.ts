@@ -28,6 +28,12 @@ export interface RetentionCursor {
   id: string;
 }
 
+// wompi_events has no created_at column — it records received_at instead
+// (migrations/0001_init.sql). Every other windowed retention table uses created_at.
+function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
+  return table === "wompi_events" ? "received_at" : "created_at";
+}
+
 export class Repository {
   constructor(private readonly db: D1Database) {}
 
@@ -722,13 +728,14 @@ export class Repository {
   }
 
   async listStalledApprovedWompiEvents(cutoffIso: string): Promise<Array<Record<string, unknown>>> {
+    // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
     const rows = await this.db
       .prepare(
-        `SELECT id, transaction_id, created_at FROM wompi_events
+        `SELECT id, transaction_id, received_at FROM wompi_events
          WHERE created_document_id IS NULL
            AND processed_at IS NULL
            AND result = 'ExitosaAprobada'
-           AND created_at < ?`
+           AND received_at < ?`
       )
       .bind(cutoffIso)
       .all<Record<string, unknown>>();
@@ -744,24 +751,27 @@ export class Repository {
   }
 
   // Paged reads for the monthly legal-retention export (Task 1). Each call reads at
-  // most `limit` rows via a (created_at, id) keyset cursor so a month with more rows
+  // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged
-  // full-table scan. `cursor` is the (created_at, id) of the last row from the
-  // previous page, or null for the first page.
+  // full-table scan. `cursor` is the (timestamp, id) of the last row from the
+  // previous page, or null for the first page. The timestamp column is per-table:
+  // wompi_events has no created_at column, only received_at (migrations/0001_init.sql);
+  // every other windowed table uses created_at.
   async listRowsCreatedBetween(
     table: RetentionTable,
     range: { startIso: string; endIso: string },
     cursor: RetentionCursor | null,
     limit = RETENTION_PAGE_SIZE
   ): Promise<Array<Record<string, unknown>>> {
-    const conditions = ["created_at >= ?", "created_at < ?"];
+    const column = retentionTimestampColumn(table);
+    const conditions = [`${column} >= ?`, `${column} < ?`];
     const bindings: Array<string | number> = [range.startIso, range.endIso];
     if (cursor) {
-      conditions.push("(created_at, id) > (?, ?)");
+      conditions.push(`(${column}, id) > (?, ?)`);
       bindings.push(cursor.createdAt, cursor.id);
     }
     const rows = await this.db
-      .prepare(`SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ORDER BY created_at ASC, id ASC LIMIT ?`)
+      .prepare(`SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ORDER BY ${column} ASC, id ASC LIMIT ?`)
       .bind(...bindings, limit)
       .all<Record<string, unknown>>();
     return rows.results ?? [];

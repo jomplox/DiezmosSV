@@ -90,21 +90,21 @@ class RetentionStatement {
   async all<T>(): Promise<{ results: T[] }> {
     const table = this.db.tableFor(this.sql);
     if (!table) return { results: [] };
+    const column = this.sql.includes("received_at") ? "received_at" : "created_at";
     let rows = [...table];
-    if (this.sql.includes("created_at >= ?") && this.sql.includes("created_at < ?")) {
+    if (this.sql.includes(`${column} >= ?`) && this.sql.includes(`${column} < ?`)) {
       const [start, end] = this.args.map(String);
-      rows = rows.filter((row) => String(row.created_at) >= start && String(row.created_at) < end);
+      rows = rows.filter((row) => String(row[column]) >= start && String(row[column]) < end);
     }
-    rows.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
-    // keyset pagination: (created_at, id) > cursor
-    const cursorCreatedAt = this.args.find((_, index) => this.sql.includes("created_at > ?") && index === (this.sql.includes("created_at >= ?") ? 2 : 0));
-    if (this.sql.includes("(dte_documents.created_at, dte_documents.id) > (?, ?)") || this.sql.includes("(created_at, id) > (?, ?)")) {
+    rows.sort((left, right) => String(left[column]).localeCompare(String(right[column])) || String(left.id).localeCompare(String(right.id)));
+    // keyset pagination: (column, id) > cursor
+    if (this.sql.includes(`(dte_documents.${column}, dte_documents.id) > (?, ?)`) || this.sql.includes(`(${column}, id) > (?, ?)`)) {
       const cursor = this.args.slice(-3, -1);
-      const [afterCreatedAt, afterId] = cursor.map(String);
+      const [afterColumn, afterId] = cursor.map(String);
       rows = rows.filter((row) => {
-        const createdAt = String(row.created_at);
+        const value = String(row[column]);
         const id = String(row.id);
-        return createdAt > afterCreatedAt || (createdAt === afterCreatedAt && id > afterId);
+        return value > afterColumn || (value === afterColumn && id > afterId);
       });
     }
     const limit = Number(this.args.at(-1) ?? 500);
@@ -205,7 +205,7 @@ describe("runRetentionExport", () => {
   it("audits RETENTION_EXPORT_COMPLETED with month and total rows", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_1", created_at: "2026-06-10T00:00:00.000Z" }));
-    db.wompiEvents.push(row({ id: "wompi_1", created_at: "2026-06-11T00:00:00.000Z" }));
+    db.wompiEvents.push(row({ id: "wompi_1", created_at: undefined, received_at: "2026-06-11T00:00:00.000Z" }));
     const archive = new FakeArchiveBucket();
     const env = envWithArchive(db, archive);
 
