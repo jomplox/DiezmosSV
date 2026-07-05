@@ -324,7 +324,7 @@ export function App() {
     await runAction("test-dte", async () => {
       await api("/api/test/dte", token, { method: "POST", body: testInput });
       setTestInput(emptyTestDteInput());
-      setToast("DTE de prueba enviado a cola");
+      setToast("CDE creado. Transmitiendo al Ministerio de Hacienda…");
       await delay(2500);
       await refresh();
     });
@@ -360,7 +360,7 @@ export function App() {
     setAdvancedDteError("");
     await runAction("advanced-dte", async () => {
       await api("/api/test/dte/advanced", token, { method: "POST", body: { draft } });
-      setToast("DTE avanzado enviado a cola");
+      setToast("CDE avanzado creado. Transmitiendo al Ministerio de Hacienda…");
       setAdvancedDteOpen(false);
       await delay(2500);
       await refresh();
@@ -664,7 +664,7 @@ export function App() {
             <ShieldCheck size={24} />
             <div className="brand-text">
               <strong>ExamplePerson1</strong>
-              <span>DTE CDE</span>
+              <span>Comprobantes de donación</span>
             </div>
           </div>
           <button
@@ -970,9 +970,9 @@ function ContingencyPanel({
           </div>
           <dl className="contingency-facts">
             <dt>Ambiente</dt>
-            <dd>{active ? environmentLabel(active.environment) : "N/D"}</dd>
+            <dd>{active ? environmentLabel(active.environment) : "—"}</dd>
             <dt>Tipo</dt>
-            <dd>{active ? contingencyTypeLabel(active.tipo_contingencia) : "N/D"}</dd>
+            <dd>{active ? contingencyTypeLabel(active.tipo_contingencia) : "—"}</dd>
             <dt>Inicio</dt>
             <dd>{formatDateTime(active?.started_at)}</dd>
             <dt>Cierre</dt>
@@ -999,7 +999,7 @@ function ContingencyPanel({
           <div className="panel-head">
             <div>
               <h2>Apertura manual</h2>
-              <p>{canManage ? "Tipo y motivo exigidos antes de emitir en contingencia." : "Requiere rol Administrador o Propietario."}</p>
+              <p>{canManage ? "Abra un periodo cuando el Ministerio de Hacienda no esté disponible; indique el tipo y el motivo." : "Requiere rol Administrador o Propietario."}</p>
             </div>
             <Cloud size={20} />
           </div>
@@ -1043,7 +1043,7 @@ function ContingencyPanel({
             </button>
             <button type="button" onClick={() => void onSweep()} disabled={!active || busy === "contingency-sweep"}>
               <RefreshCw size={16} />
-              Ejecutar barrido
+              Procesar pendientes
             </button>
             <button className="primary" type="submit" disabled={!canManage || Boolean(active) || busy === "contingency-open"}>
               <CheckCircle2 size={16} />
@@ -1064,8 +1064,8 @@ function ContingencyPanel({
       <section className="contingency-panel">
         <div className="panel-head">
           <div>
-            <h2>DTE pendientes</h2>
-            <p>Documentos locales emitidos para reenvío después del evento.</p>
+            <h2>CDE pendientes</h2>
+            <p>Comprobantes emitidos localmente que se transmitirán cuando el Ministerio de Hacienda acepte el evento.</p>
           </div>
           <FileText size={20} />
         </div>
@@ -1086,7 +1086,7 @@ function ContingencyPanel({
                   <tr key={document.id}>
                     <td><StatusPill status={document.status} /></td>
                     <td className="mono">{shortCode(document.codigo_generacion)}</td>
-                    <td><StackedCell primary={document.donor_name ?? "N/D"} secondary={document.donor_email ?? ""} /></td>
+                    <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
                     <td className="numeric">{formatMoneyCents(document.amount_cents)}</td>
                     <td className="numeric">{formatDateTime(document.created_at)}</td>
                   </tr>
@@ -1095,7 +1095,7 @@ function ContingencyPanel({
             </table>
           </div>
         ) : (
-          <EmptyState icon={<CheckCircle2 size={18} />} text="No hay DTE pendientes de contingencia." />
+          <EmptyState icon={<CheckCircle2 size={18} />} text="No hay CDE pendientes de contingencia." />
         )}
       </section>
 
@@ -1103,7 +1103,7 @@ function ContingencyPanel({
         <div className="panel-head">
           <div>
               <h2>Lotes del Ministerio de Hacienda</h2>
-            <p>Envío por /recepcionlote y consulta por código de lote.</p>
+            <p>Lotes de CDE enviados durante la contingencia y el resultado de cada consulta.</p>
           </div>
           <FileText size={20} />
         </div>
@@ -1159,7 +1159,7 @@ function ContingencyPanel({
           <div className="panel-head">
             <div>
               <h2>Eventos del Ministerio de Hacienda</h2>
-              <p>Transmisiones reales a /contingencia.</p>
+              <p>Eventos de contingencia firmados y transmitidos al Ministerio de Hacienda.</p>
             </div>
             <History size={20} />
           </div>
@@ -1428,7 +1428,7 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
             <tr key={row.codigoGeneracion}>
               <td className="numeric">{row.fechaEmision}</td>
               <td><StackedCell primary={row.nombre} secondary={row.correo} /></td>
-              <td className="mono">{row.nit || row.dui || "N/D"}</td>
+              <td className="mono">{row.nit || row.dui || "—"}</td>
               <td className="numeric">${row.monto}</td>
               <td className="mono">{row.periodo}</td>
               <td className="mono">{shortCode(row.codigoGeneracion)}</td>
@@ -1781,7 +1781,7 @@ function CredentialsPanel({
                       <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
                       <CredentialActiveValue status={status} name="EMAIL_API_URL" />
                       <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
-                      <small>Recibe from, to, subject, text y adjuntos PDF/JSON en base64.</small>
+                      <small>Recibe un POST JSON con remitente, destinatario, asunto, texto y adjuntos PDF/JSON en base64.</small>
                     </label>
                     <label>
                       <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
@@ -1839,7 +1839,7 @@ function CredentialsPanel({
         {!writerConfigured && (
           <div className="writer-remedy">
             <div>
-              <h3>Habilitar edición desde UI</h3>
+              <h3>Habilitar edición desde el panel</h3>
               {writerNeedsOnlyToken ? (
                 <p>
                   Pegue el token API de Cloudflare una sola vez para que el Worker lo guarde como secreto y pueda rotar credenciales desde esta pantalla.
@@ -2386,8 +2386,8 @@ function TestDtePanel({
   return (
     <section className="test-panel">
       <div>
-        <h2>DTE Rápido</h2>
-        <p>Crea un CDE directo para donaciones offline.</p>
+        <h2>CDE rápido</h2>
+        <p>Registre una donación recibida en persona y emita su comprobante al instante.</p>
       </div>
       <div className="test-grid">
         <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
@@ -2404,7 +2404,7 @@ function TestDtePanel({
         </button>
         <button disabled={advancedBusy} onClick={() => void onAdvanced()}>
           <Braces size={16} />
-          {advancedBusy ? "Preparando" : "DTE avanzado"}
+          {advancedBusy ? "Preparando" : "CDE avanzado"}
         </button>
       </div>
     </section>
@@ -2461,7 +2461,7 @@ function AdvancedDteModal({
         <header>
           <div>
             <h2 id="advanced-dte-title">Crear CDE avanzado</h2>
-            <p>CDE v2 en ambiente 00 con datos editables antes de transmitir.</p>
+            <p>Revise y edite cada sección del comprobante antes de transmitirlo al Ministerio de Hacienda.</p>
           </div>
           <button className="icon-button" onClick={onClose} title="Cerrar">
             <X size={17} />
@@ -2536,7 +2536,7 @@ function AdvancedDteModal({
                 <AdvancedField label="Distrito">
                   <CatalogSelect value={form.distrito} options={districtOptions} onChange={(distrito) => update({ distrito })} placeholder="Seleccione" />
                 </AdvancedField>
-                <AdvancedField label="País dirección">
+                <AdvancedField label="País de la dirección">
                   <CatalogSelect value={form.codPais} options={CAT020_COUNTRIES} onChange={(codPais) => update({ codPais })} />
                 </AdvancedField>
                 <AdvancedField label="Complemento / dirección completa" span>
@@ -2592,13 +2592,13 @@ function AdvancedDteModal({
                 <AdvancedField label="Detalle documento">
                   <input value={form.documentoDetalle} onChange={(event) => update({ documentoDetalle: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apéndice campo">
+                <AdvancedField label="Campo del apéndice">
                   <input value={form.apendiceCampo} onChange={(event) => update({ apendiceCampo: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apéndice etiqueta">
+                <AdvancedField label="Etiqueta del apéndice">
                   <input value={form.apendiceEtiqueta} onChange={(event) => update({ apendiceEtiqueta: event.target.value })} />
                 </AdvancedField>
-                <AdvancedField label="Apéndice valor" span>
+                <AdvancedField label="Valor del apéndice" span>
                   <input value={form.apendiceValor} onChange={(event) => update({ apendiceValor: event.target.value })} />
                 </AdvancedField>
               </div>
@@ -2606,9 +2606,9 @@ function AdvancedDteModal({
             {active.id === "revision" && (
               <div className="advanced-review">
                 <dl>
-                  <div><dt>Donante</dt><dd>{form.donorName || "N/D"}</dd></div>
-                  <div><dt>Documento</dt><dd>{form.donorDocument || "N/D"}</dd></div>
-                  <div><dt>Correo</dt><dd>{form.donorEmail || "N/D"}</dd></div>
+                  <div><dt>Donante</dt><dd>{form.donorName || "—"}</dd></div>
+                  <div><dt>Documento</dt><dd>{form.donorDocument || "—"}</dd></div>
+                  <div><dt>Correo</dt><dd>{form.donorEmail || "—"}</dd></div>
                   <div><dt>Total</dt><dd>${form.valorTotal || "0.00"}</dd></div>
                 </dl>
                 <pre className="advanced-json-preview">{preview}</pre>
@@ -2815,10 +2815,10 @@ function Stats({ documents }: { documents: DteDocument[] }) {
   const counts = countByStatus(documents);
   return (
     <div className="stats">
-      <Metric label="Aceptados visibles" value={counts.ACCEPTED ?? 0} tone="ok" />
-      <Metric label="Fallidos visibles" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
-      <Metric label="Contingencia visible" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
-      <Metric label="Invalidados visibles" value={counts.INVALIDATED ?? 0} tone="neutral" />
+      <Metric label="Aceptados en esta vista" value={counts.ACCEPTED ?? 0} tone="ok" />
+      <Metric label="Fallidos en esta vista" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
+      <Metric label="Contingencia en esta vista" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
+      <Metric label="Invalidados en esta vista" value={counts.INVALIDATED ?? 0} tone="neutral" />
     </div>
   );
 }
@@ -2851,9 +2851,9 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
             <tr key={document.id} className={selectedId === document.id ? "selected" : ""} onClick={() => onSelect(document.id)}>
               <td><StatusPill status={document.status} /></td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
-              <td><StackedCell primary={document.donor_name ?? "N/D"} secondary={document.donor_email ?? ""} /></td>
+              <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
               <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
-              <td className="mono">{document.sello_recibido ? shortCode(document.sello_recibido) : "N/D"}</td>
+              <td className="mono">{document.sello_recibido ? shortCode(document.sello_recibido) : "—"}</td>
               <td className="numeric">{new Date(document.created_at).toLocaleDateString()}</td>
             </tr>
           ))}
@@ -2876,7 +2876,7 @@ function DocumentListFooter({
 }) {
   return (
     <div className="document-list-footer">
-      <span>{count > 0 ? `Mostrando ${count} CDE` : "Sin CDE para estos filtros"}</span>
+      <span>{count > 0 ? `Mostrando ${count} CDE` : "No hay CDE que coincidan con la búsqueda o el filtro."}</span>
       {hasMore && (
         <button type="button" onClick={() => void onLoadMore()} disabled={loading}>
           <ChevronRight size={16} />
@@ -2924,7 +2924,7 @@ function DetailPanel({
   onSaveEmail: (document: DteDocument) => void;
 }) {
   if (!selected) {
-    return <aside className="detail-panel empty">Sin documentos.</aside>;
+    return <aside className="detail-panel empty">Seleccione un CDE de la lista para ver su detalle.</aside>;
   }
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
@@ -2943,7 +2943,7 @@ function DetailPanel({
         <dt>Sello</dt>
         <dd className="mono">{selected.sello_recibido ?? "Pendiente"}</dd>
         <dt>Donante</dt>
-        <dd>{selected.donor_name ?? "N/D"}</dd>
+        <dd>{selected.donor_name ?? "—"}</dd>
         <dt>Correo de envío</dt>
         <dd>
           {emailEditing ? (
@@ -2957,7 +2957,7 @@ function DetailPanel({
             </form>
           ) : (
             <span className="editable-readonly">
-              <span>{selected.donor_email ?? "N/D"}</span>
+              <span>{selected.donor_email ?? "Sin correo"}</span>
               <button className="icon-button" onClick={() => onStartEmailEdit(selected)} title="Editar correo de envío">
                 <Pencil size={15} />
               </button>
@@ -2976,7 +2976,7 @@ function DetailPanel({
         </div>
       </div>
       <div className="actions">
-        <button disabled={busy === "resend"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar</button>
+        <button disabled={busy === "resend"} title="Reenviar el comprobante al correo del donante" onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
         <button disabled={!canRetry || busy === "retry"} title={canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
         <button className="danger" disabled={!invalidationWindow.canInvalidate || busy === "invalidate"} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
@@ -3037,7 +3037,7 @@ function InvalidationConfirmDialog({
           <dt>Sello</dt>
           <dd className="mono">{document.sello_recibido ?? "Pendiente"}</dd>
           <dt>Donante</dt>
-          <dd>{document.donor_name ?? "N/D"}</dd>
+          <dd>{document.donor_name ?? "—"}</dd>
         </dl>
         <div className="invalidation-form">
           <label>
@@ -3200,7 +3200,7 @@ function UserSettingsModal({
           </div>
           <label className="checkbox-line">
             <input type="checkbox" checked={input.disabled} onChange={(event) => onChange({ ...input, disabled: event.target.checked })} />
-            <span>Cuenta inactiva</span>
+            <span>Cuenta deshabilitada (no puede iniciar sesión)</span>
           </label>
         </div>
 
@@ -3322,7 +3322,7 @@ function invalidationToast(result: { accepted?: boolean; result?: { estado?: str
     if (result.emailError) {
       return `Invalidación aceptada por el Ministerio de Hacienda; falló el correo: ${result.emailError}`;
     }
-    return `Invalidación aceptada por el Ministerio de Hacienda${result.result?.estado ? `: ${result.result.estado}` : ""}. Sin correo de envío`;
+    return `Invalidación aceptada por el Ministerio de Hacienda${result.result?.estado ? `: ${result.result.estado}` : ""}. El CDE no tiene correo, no se envió aviso al donante`;
   }
   return "Invalidación enviada al Ministerio de Hacienda";
 }
@@ -3390,10 +3390,10 @@ function delay(ms: number): Promise<void> {
 }
 
 function subtitleFor(view: View): string {
-  if (view === "documents") return "Emisión, sello, correo y acciones legales por CDE.";
-  if (view === "contingency") return "Eventos, pendientes, plazos y trazabilidad.";
-  if (view === "credentials") return "Secretos del Ministerio de Hacienda, Wompi y correo para el Worker actual.";
-  if (view === "exports") return "Archivos CSV para declaración y control.";
+  if (view === "documents") return "Emita, envíe por correo y administre los comprobantes de donación (CDE).";
+  if (view === "contingency") return "Contingencias ante el Ministerio de Hacienda: eventos, CDE pendientes y plazos.";
+  if (view === "credentials") return "Credenciales del Ministerio de Hacienda, Wompi y correo.";
+  if (view === "exports") return "Exporte los CDE aceptados para el F960 y control interno.";
   return "Operaciones administrativas y trazabilidad.";
 }
 
@@ -3406,7 +3406,7 @@ function contingencyDeadline(active: ContingencyState["active"]): { title: strin
   if (!active) {
     return {
       title: "Sin ventana activa",
-      detail: "No hay DTE pendientes bajo contingencia.",
+      detail: "No hay CDE pendientes bajo contingencia.",
       tone: "idle"
     };
   }
@@ -3420,14 +3420,14 @@ function contingencyDeadline(active: ContingencyState["active"]): { title: strin
   if (active.event_sello && active.transmit_deadline_at) {
     return {
       title: "Evento sellado por el Ministerio de Hacienda",
-      detail: `Reenvío DTE hasta ${formatDateTime(active.transmit_deadline_at)} hora El Salvador.`,
+      detail: `Plazo para transmitir los CDE pendientes: ${formatDateTime(active.transmit_deadline_at)} hora El Salvador.`,
       tone: "ok"
     };
   }
   if (active.event_deadline_at) {
     return {
       title: "Evento pendiente de sello",
-      detail: `Evento vence ${formatDateTime(active.event_deadline_at)} hora El Salvador.`,
+      detail: `El evento vence el ${formatDateTime(active.event_deadline_at)} hora El Salvador.`,
       tone: "warn"
     };
   }
@@ -3439,7 +3439,7 @@ function contingencyDeadline(active: ContingencyState["active"]): { title: strin
 }
 
 function formatDateTime(value?: string | null): string {
-  if (!value) return "N/D";
+  if (!value) return "—";
   return new Intl.DateTimeFormat("es-SV", {
     dateStyle: "short",
     timeStyle: "short",
@@ -3946,7 +3946,7 @@ function emptyTestDteInput(): TestDteInput {
 
 function testAmountValidationMessage(value: string): string {
   const parsed = Number.parseFloat(value.trim());
-  return Number.isFinite(parsed) && parsed > 0 ? "" : "Ingrese monto mayor que cero";
+  return Number.isFinite(parsed) && parsed > 0 ? "" : "Ingrese un monto mayor que cero";
 }
 
 export function quickDteValidationMessage(input: TestDteInput, options: { requireAmount?: boolean } = {}): string {
@@ -3954,8 +3954,8 @@ export function quickDteValidationMessage(input: TestDteInput, options: { requir
     const amountError = testAmountValidationMessage(input.amount);
     if (amountError) return amountError;
   }
-  if (!input.donorName.trim()) return "Ingrese nombre o razón social del donante";
-  if (!input.donorDocument.trim()) return "Ingrese documento del donante para la prueba";
+  if (!input.donorName.trim()) return "Ingrese el nombre o razón social del donante";
+  if (!input.donorDocument.trim()) return "Ingrese el documento del donante";
   const donorDuiError = isDuiDocumentType(input.donorDocumentType) ? duiValidationMessage(input.donorDocument) : "";
   if (donorDuiError) return donorDuiError;
   const donorEmail = input.donorEmail.trim();

@@ -526,7 +526,7 @@ describe("document email resend", () => {
     expect(sentMessages[0]).toMatchObject({
       from: "legacy-contact-6@example.com",
       to: "legacy-contact-2@example.com",
-      subject: "Comprobante DTE por donación",
+      subject: "Comprobante de su donación",
       text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       attachments: [
         expect.objectContaining({
@@ -2000,8 +2000,8 @@ describe("email template settings", () => {
     await expect(response.json()).resolves.toMatchObject({
       emailTemplates: {
         definitions: [
-          expect.objectContaining({ type: "dteReceipt", label: "Envío de DTE" }),
-          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de DTE" })
+          expect.objectContaining({ type: "dteReceipt", label: "Envío de comprobante" }),
+          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de comprobante" })
         ],
         placeholders: expect.arrayContaining(["{{numeroControl}}", "{{donante}}", "{{monto}}"]),
         templates: {

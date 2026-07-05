@@ -30,17 +30,19 @@ export class EmailTemplateValidationError extends Error {}
 export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
   {
     type: "dteReceipt",
-    label: "Envío de DTE",
-    description: "Correo que recibe el donante cuando se envía el CDE con PDF y JSON.",
-    defaultSubject: "Comprobante DTE por donación",
-    defaultBody: "Adjuntamos su Comprobante de Donación Electrónico {{numeroControl}}."
+    label: "Envío de comprobante",
+    description: "Correo que recibe el donante con su CDE en PDF y JSON.",
+    defaultSubject: "Comprobante de su donación",
+    defaultBody:
+      "Hola {{donante}}:\n\nGracias por su donación de {{monto}}. Adjuntamos su Comprobante de Donación Electrónico {{numeroControl}} en PDF y JSON, con sello de recepción del Ministerio de Hacienda.\n\nConserve este correo para sus registros."
   },
   {
     type: "dteInvalidation",
-    label: "Invalidación de DTE",
-    description: "Correo que recibe el donante cuando un CDE emitido queda invalidado.",
-    defaultSubject: "Invalidación de CDE {{numeroControl}}",
-    defaultBody: "El Comprobante de Donación Electrónico {{numeroControl}} fue INVALIDADO ante el Ministerio de Hacienda. Adjuntamos la representación gráfica actualizada con marca INVALIDADO y el JSON del documento para sus registros."
+    label: "Invalidación de comprobante",
+    description: "Correo que recibe el donante cuando su CDE queda invalidado.",
+    defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
+    defaultBody:
+      "Hola {{donante}}:\n\nLe informamos que el Comprobante de Donación Electrónico {{numeroControl}} quedó INVALIDADO ante el Ministerio de Hacienda y dejó de tener validez fiscal. Adjuntamos la representación gráfica con la marca INVALIDADO y el JSON del documento para sus registros."
   }
 ];
 

@@ -8,7 +8,7 @@ const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client
 
 describe("quick DTE UI contract", () => {
   it("uses donation wording, compact controls, and human-readable donor document labels", () => {
-    expect(appSource).toContain("Crea un CDE directo para donaciones offline.");
+    expect(appSource).toContain("Registre una donación recibida en persona y emita su comprobante al instante.");
     expect(appSource).toContain('placeholder="Nombre o razón social"');
     expect(appSource).toContain("className=\"quick-document-type\"");
     expect(appSource).toContain("showCodes={false}");

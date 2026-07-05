@@ -68,9 +68,9 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   PASSWORD_RESET_COMPLETED: "Contraseña restablecida por enlace",
   PASSWORD_RESET_EMAIL_FAILED: "Correo de restablecimiento fallido",
   PASSWORD_RESET_REQUESTED: "Restablecimiento de contraseña solicitado",
-  QUICK_CDE_CREATED: "DTE rápido creado",
-  TEST_WOMPI_CREATED: "DTE rápido creado",
-  TEST_WOMPI_DUPLICATE: "DTE rápido duplicado",
+  QUICK_CDE_CREATED: "CDE rápido creado",
+  TEST_WOMPI_CREATED: "CDE rápido creado",
+  TEST_WOMPI_DUPLICATE: "CDE rápido duplicado",
   USER_CREATED: "Usuario creado",
   USER_PASSWORD_RESET: "Contraseña restablecida",
   USER_UPDATED: "Usuario actualizado",
@@ -100,7 +100,8 @@ const ERROR_LABELS: Record<string, string> = {
   email_send_failed: "No se pudo enviar el correo.",
   "MH auth failed": "Falló la autenticación con el Ministerio de Hacienda.",
   "MH unavailable": "El Ministerio de Hacienda no está disponible.",
-  "Invalid credentials": "Credenciales inválidas",
+  "Invalid credentials": "Correo o contraseña incorrectos.",
+  "Credenciales inválidas": "Correo o contraseña incorrectos.",
   Insufficient_role: "Su usuario no tiene permisos suficientes.",
   "Insufficient role": "Su usuario no tiene permisos suficientes.",
   destination_address_is_not_a_verified_address: "La dirección de destino no está verificada en el proveedor de correo.",
@@ -114,14 +115,14 @@ const ERROR_LABELS: Record<string, string> = {
   invalid_credential_environment: "Seleccione un ambiente válido para las credenciales.",
   invalid_email: "Ingrese un correo válido.",
   invalid_export_filter: "Seleccione un filtro de exportación válido.",
-  invalid_test_payload: "Revise los datos del DTE rápido.",
+  invalid_test_payload: "Revise los datos del CDE rápido.",
   invalid_wompi_hash: "Firma Wompi inválida.",
   method_not_allowed: "Método no permitido.",
   missing_email: "Este documento no tiene correo de envío.",
   no_credentials_supplied: "Ingrese al menos un secreto para actualizar.",
   not_found: "No se encontró el recurso solicitado.",
   outside_legal_window: "La ventana legal para invalidar este CDE ya venció.",
-  replacement_required_for_tipo_1: "La invalidación por reemplazo requiere el CDE sustituto.",
+  replacement_required_for_tipo_1: "Para invalidar por error, primero emita el CDE de reemplazo e indique su código de generación.",
   test_generation_disabled_in_production: "La generación rápida no está habilitada en producción."
 };
 
@@ -159,7 +160,7 @@ export function roleLabel(role: string | null | undefined): string {
 export function environmentLabel(environment: "00" | "01" | string | null | undefined): string {
   if (environment === "01") return "Producción";
   if (environment === "00") return "Pruebas";
-  return "N/D";
+  return "—";
 }
 
 export function catalogOptionLabel(label: string): string {

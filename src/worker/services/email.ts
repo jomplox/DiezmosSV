@@ -24,7 +24,7 @@ export class EmailService {
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
     const message = renderEmailTemplate(this.templates.dteReceipt, record);
     if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
-      message.subject = "Comprobante DTE transitorio por donación";
+      message.subject = "Comprobante transitorio de su donación";
     }
     return this.sendDteEmail(record, toEmail, "dteReceipt", this.templates.dteReceipt, message);
   }
