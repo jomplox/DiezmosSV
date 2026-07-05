@@ -32,7 +32,7 @@ import {
   Users
 } from "lucide-react";
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
@@ -58,7 +58,7 @@ import {
 } from "./donation";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
-import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
+import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
@@ -233,6 +233,8 @@ export function App() {
   });
   const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
+  const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
+  const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
@@ -283,6 +285,29 @@ export function App() {
     }
     void refresh().catch(handleApiFailure);
   }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear]);
+
+  // The document list does not carry the donor-data-verified flag (it is a per-CDE
+  // indexed lookup on the server), so fetch the selected document's detail to learn it.
+  useEffect(() => {
+    const documentId = selected?.id;
+    if (!token || !documentId) {
+      setDonorVerifiedDocId(null);
+      return;
+    }
+    let cancelled = false;
+    void api<{ donorDataVerified?: boolean }>(`/api/documents/${documentId}`, token)
+      .then((detail) => {
+        if (!cancelled) {
+          setDonorVerifiedDocId(detail.donorDataVerified ? documentId : null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setDonorVerifiedDocId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [token, selected?.id]);
 
   useEffect(() => {
     if (token) {
@@ -356,6 +381,7 @@ export function App() {
       const params = exportParams(exportStartDate, exportEndDate);
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
       setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setDonationIntents((await api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token)).intents);
     }
   }
 
@@ -886,6 +912,7 @@ export function App() {
             </div>
               <DetailPanel
                 selected={selected}
+                donorDataVerified={selected?.id === donorVerifiedDocId}
                 busy={busy}
                 now={now}
                 onAction={documentAction}
@@ -987,6 +1014,7 @@ export function App() {
               onYearChange={setCertificateYear}
               onSend={sendAnnualCertificates}
             />
+            <OnlineDonationsPanel intents={donationIntents} />
           </>
         )}
 
@@ -1684,6 +1712,55 @@ function AnnualCertificatePanel({
             {donors.length === 0 && (
               <tr>
                 <td colSpan={4}>Sin donaciones aceptadas para este año.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }) {
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Donaciones en línea</h2>
+          <p>Últimas donaciones recibidas desde el formulario público de donación.</p>
+        </div>
+        <Cloud size={20} />
+      </div>
+      <div className="table-scroll export-table online-donations-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Estado</th>
+              <th className="numeric">Monto</th>
+              <th>Donante</th>
+              <th className="numeric">Fecha</th>
+              <th>Número de control</th>
+            </tr>
+          </thead>
+          <tbody>
+            {intents.map((intent) => (
+              <tr key={intent.id}>
+                <td>
+                  <span className={`status ${intent.status.toLowerCase()}`}>
+                    {donationIntentStatusLabel(intent.status).toUpperCase()}
+                  </span>
+                </td>
+                <td className="numeric">{formatMoneyCents(intent.amount_cents)}</td>
+                <td>
+                  <StackedCell primary={intent.donor_name} secondary={intent.donor_email} />
+                </td>
+                <td className="numeric">{formatDateTime(intent.created_at)}</td>
+                <td className="mono">{intent.numero_control ?? "—"}</td>
+              </tr>
+            ))}
+            {intents.length === 0 && (
+              <tr>
+                <td colSpan={5}>Sin donaciones en línea todavía.</td>
               </tr>
             )}
           </tbody>
@@ -3612,6 +3689,7 @@ function StackedCell({ primary, secondary }: { primary: string; secondary?: stri
 
 function DetailPanel({
   selected,
+  donorDataVerified,
   busy,
   now,
   onAction,
@@ -3625,6 +3703,7 @@ function DetailPanel({
   onSaveEmail
 }: {
   selected?: DteDocument;
+  donorDataVerified?: boolean;
   busy: string;
   now: Date;
   onAction: (action: "resend" | "retry" | "invalidate") => void;
@@ -3651,6 +3730,12 @@ function DetailPanel({
         <StatusPill status={selected.status} />
         <strong>{selected.numero_control}</strong>
       </div>
+      {donorDataVerified && (
+        <div className="donor-verified-badge">
+          <ShieldCheck size={16} />
+          <span>Datos del donante verificados en el formulario de donación</span>
+        </div>
+      )}
       <dl>
         <dt>Código de generación</dt>
         <dd className="mono">{selected.codigo_generacion}</dd>

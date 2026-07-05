@@ -206,6 +206,13 @@ export interface DonationIntentRecord {
   expires_at: string;
 }
 
+// A donation intent joined with the numero de control of the CDE it produced
+// (present only for COMPLETED intents linked via document_id). Feeds the admin
+// "Donaciones en línea" listing (Task 5).
+export interface DonationIntentListItem extends DonationIntentRecord {
+  numero_control: string | null;
+}
+
 export interface WompiPaymentLink {
   idEnlace: number;
   urlEnlace: string;

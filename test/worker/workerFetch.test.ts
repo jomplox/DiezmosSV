@@ -750,6 +750,142 @@ describe("document listing", () => {
   });
 });
 
+describe("online donation intents listing", () => {
+  it("rejects an unauthenticated request with 401", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/donations/intents"), env(db));
+
+    expect(response.status).toBe(401);
+  });
+
+  it("returns the newest intents for a VIEWER, exposing the linked numero de control for COMPLETED", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({
+        id: "doc_paid",
+        numero_control: "DTE-15-M001P004-000000000000042"
+      })
+    );
+    db.donationIntents.push(
+      {
+        id: "di_pending",
+        status: "PENDING",
+        amount_cents: 1000,
+        donor_name: "Ana Pendiente",
+        donor_document_type: "13",
+        donor_document: "000000000",
+        donor_email: "ana@example.org",
+        donor_phone: null,
+        direccion_departamento: "06",
+        direccion_municipio: "22",
+        direccion_distrito: "01",
+        direccion_complemento: "San Salvador",
+        wompi_id_enlace: null,
+        wompi_url_enlace: null,
+        wompi_url_enlace_largo: null,
+        document_id: null,
+        client_ip: "203.0.113.9",
+        created_at: "2026-07-05T10:00:00.000Z",
+        updated_at: "2026-07-05T10:00:00.000Z",
+        expires_at: "2026-07-05T11:00:00.000Z"
+      },
+      {
+        id: "di_done",
+        status: "COMPLETED",
+        amount_cents: 2550,
+        donor_name: "Beto Completo",
+        donor_document_type: "13",
+        donor_document: "000000000",
+        donor_email: "beto@example.org",
+        donor_phone: null,
+        direccion_departamento: "06",
+        direccion_municipio: "22",
+        direccion_distrito: "01",
+        direccion_complemento: "San Salvador",
+        wompi_id_enlace: 987654,
+        wompi_url_enlace: "https://s.wompi.sv/987654",
+        wompi_url_enlace_largo: null,
+        document_id: "doc_paid",
+        client_ip: "203.0.113.9",
+        created_at: "2026-07-05T12:00:00.000Z",
+        updated_at: "2026-07-05T12:05:00.000Z",
+        expires_at: "2026-07-05T13:00:00.000Z"
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/donations/intents", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { intents: Array<{ id: string; status: string; numero_control: string | null }> };
+    // Newest first: the COMPLETED intent (12:00) precedes the PENDING one (10:00).
+    expect(body.intents.map((intent) => intent.id)).toEqual(["di_done", "di_pending"]);
+    expect(body.intents[0].numero_control).toBe("DTE-15-M001P004-000000000000042");
+    expect(body.intents[1].numero_control).toBeNull();
+  });
+});
+
+describe("document detail donor-data-verified flag", () => {
+  it("marks the document as donor-data-verified when a COMPLETED intent references it", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(testDocument({ id: "doc_paid" }));
+    db.donationIntents.push({
+      id: "di_done",
+      status: "COMPLETED",
+      amount_cents: 2550,
+      donor_name: "Beto Completo",
+      donor_document_type: "13",
+      donor_document: "000000000",
+      donor_email: "beto@example.org",
+      donor_phone: null,
+      direccion_departamento: "06",
+      direccion_municipio: "22",
+      direccion_distrito: "01",
+      direccion_complemento: "San Salvador",
+      wompi_id_enlace: 987654,
+      wompi_url_enlace: null,
+      wompi_url_enlace_largo: null,
+      document_id: "doc_paid",
+      client_ip: "203.0.113.9",
+      created_at: "2026-07-05T12:00:00.000Z",
+      updated_at: "2026-07-05T12:05:00.000Z",
+      expires_at: "2026-07-05T13:00:00.000Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_paid", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ donorDataVerified: true });
+  });
+
+  it("does not set the flag for a document with no completed intent", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(testDocument({ id: "doc_plain" }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_plain", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ donorDataVerified: false });
+  });
+});
+
 describe("user administration", () => {
   it("updates a user's profile, email, role, and disabled state", async () => {
     const db = new InMemoryD1();
@@ -3993,6 +4129,10 @@ class Statement {
     if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
       return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("FROM donation_intents WHERE document_id = ?") && this.sql.includes("status = 'COMPLETED'")) {
+      const documentId = String(this.args[0]);
+      return (this.db.donationIntents.find((intent) => intent.document_id === documentId && intent.status === "COMPLETED") ?? null) as T | null;
+    }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents") && this.sql.includes("client_ip = ?")) {
       const [clientIp, sinceIso] = this.args.map(String);
       return {
@@ -4032,6 +4172,20 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (this.sql.includes("FROM donation_intents") && this.sql.includes("LEFT JOIN dte_documents")) {
+      const limit = Number(this.args.at(-1) ?? 50);
+      const rows = [...this.db.donationIntents]
+        .sort(
+          (left, right) =>
+            String(right.created_at).localeCompare(String(left.created_at)) || String(right.id).localeCompare(String(left.id))
+        )
+        .slice(0, limit)
+        .map((intent) => {
+          const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
+          return { ...intent, numero_control: document?.numero_control ?? null };
+        });
+      return { results: rows as T[] };
+    }
     const orderByMatch = this.sql.match(/ORDER BY (created_at|received_at) ASC, id ASC LIMIT \?/);
     if (orderByMatch) {
       const column = orderByMatch[1];

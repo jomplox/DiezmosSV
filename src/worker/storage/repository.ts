@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -177,6 +177,33 @@ export class Repository {
       .bind(clientIp, sinceIso)
       .first<{ count: number }>();
     return Number(row?.count ?? 0);
+  }
+
+  // Newest-first listing for the admin "Donaciones en línea" panel (Task 5). The
+  // LEFT JOIN exposes the emitted CDE's numero_control for COMPLETED intents (which
+  // carry document_id) and leaves it null for every other status.
+  async listRecentDonationIntents(limit = 50): Promise<DonationIntentListItem[]> {
+    const rows = await this.db
+      .prepare(
+        `SELECT donation_intents.*, dte_documents.numero_control AS numero_control
+         FROM donation_intents
+         LEFT JOIN dte_documents ON dte_documents.id = donation_intents.document_id
+         ORDER BY donation_intents.created_at DESC, donation_intents.id DESC
+         LIMIT ?`
+      )
+      .bind(Math.min(Math.max(Math.trunc(limit), 1), 100))
+      .all<DonationIntentListItem>();
+    return rows.results ?? [];
+  }
+
+  // Single indexed lookup (idx_donation_intents_document_id, migration 0009) for the
+  // document detail's donor-data-verified badge: is there a COMPLETED intent that
+  // produced this CDE?
+  async getCompletedIntentForDocument(documentId: string): Promise<{ id: string } | null> {
+    return this.db
+      .prepare("SELECT id FROM donation_intents WHERE document_id = ? AND status = 'COMPLETED' LIMIT 1")
+      .bind(documentId)
+      .first<{ id: string }>();
   }
 
   async nextControlSequence(environment: Ambiente, controlPrefix: string): Promise<number> {

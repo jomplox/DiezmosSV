@@ -35,3 +35,6 @@ CREATE TABLE IF NOT EXISTS donation_intents (
 CREATE INDEX IF NOT EXISTS idx_donation_intents_status_expires_at ON donation_intents(status, expires_at);
 -- Per-IP throttle counts recent intents by created_at.
 CREATE INDEX IF NOT EXISTS idx_donation_intents_created_at ON donation_intents(created_at);
+-- The admin document detail (Task 5) looks up the COMPLETED intent that produced a
+-- given CDE by document_id to surface the "donor data verified" badge.
+CREATE INDEX IF NOT EXISTS idx_donation_intents_document_id ON donation_intents(document_id);

@@ -19,6 +19,22 @@ export interface DteDocument {
   contingency_period_id: string | null;
   created_at: string;
   updated_at: string;
+  // Set by the document detail fetch when a completed donation intent produced this
+  // CDE (donor data came from the validated /donar form, not the raw webhook).
+  donorDataVerified?: boolean;
+}
+
+export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
+
+export interface DonationIntentListItem {
+  id: string;
+  status: DonationIntentStatus;
+  amount_cents: number;
+  donor_name: string;
+  donor_email: string;
+  document_id: string | null;
+  numero_control: string | null;
+  created_at: string;
 }
 
 export interface DocumentListPage {

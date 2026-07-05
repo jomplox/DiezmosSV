@@ -1024,6 +1024,10 @@ select,
   min-width: 520px;
 }
 
+.online-donations-table table {
+  min-width: 720px;
+}
+
 .export-table tbody tr {
   cursor: default;
 }
@@ -2227,6 +2231,22 @@ td.numeric, th.numeric {
   color: #4b5960;
 }
 
+/* Donation-intent lifecycle badges (admin "Donaciones en línea" listing). */
+.status.completed {
+  background: #e6f6f3;
+  color: #00756f;
+}
+
+.status.link_created {
+  background: #fff3d7;
+  color: #855900;
+}
+
+.status.expired {
+  background: #eceff1;
+  color: #4b5960;
+}
+
 .detail-panel {
   padding: 16px;
   position: sticky;
@@ -2318,6 +2338,24 @@ dd {
   color: #52656c;
   background: #f5f7f8;
   border-color: #d8e0e3;
+}
+
+.donor-verified-badge {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  color: #006d66;
+  background: #edf9f7;
+  border: 1px solid #c8ebe7;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.donor-verified-badge svg {
+  flex-shrink: 0;
 }
 
 .legal-box div {

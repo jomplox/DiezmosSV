@@ -361,6 +361,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }));
   }
 
+  if (url.pathname === "/api/donations/intents" && request.method === "GET") {
+    requireRole(user, "VIEWER");
+    return jsonResponse({ intents: await repo.listRecentDonationIntents(50) });
+  }
+
   if (url.pathname === "/api/credentials") {
     return handleCredentialsRoute(request, env, repo, user);
   }
@@ -1025,7 +1030,10 @@ async function handleDocumentRoute(
 
   if (!action && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return jsonResponse({ document, audit: await repo.listAudit("dte_document", document.id) });
+    // donorDataVerified: this CDE was produced from a completed donation-intent, so
+    // the donor's data came from the validated /donar form rather than the raw webhook.
+    const donorDataVerified = (await repo.getCompletedIntentForDocument(document.id)) !== null;
+    return jsonResponse({ document, donorDataVerified, audit: await repo.listAudit("dte_document", document.id) });
   }
 
   if (action === "pdf" && request.method === "GET") {
