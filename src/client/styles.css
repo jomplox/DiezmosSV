@@ -2500,6 +2500,7 @@ pre {
     display: flex;
     max-width: 100%;
     overflow-x: auto;
+    mask-image: linear-gradient(to right, black 92%, transparent);
   }
 
   .sidebar nav button,
@@ -2568,8 +2569,17 @@ pre {
   }
 
   .topbar-actions {
-    align-items: stretch;
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .topbar-actions .contingency-banner {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .topbar-actions .icon-button {
+    flex: 0 0 auto;
   }
 
   .test-panel {

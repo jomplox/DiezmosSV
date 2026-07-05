@@ -236,6 +236,10 @@ export function App() {
   }, [query]);
 
   useEffect(() => {
+    document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
+  }, [view]);
+
+  useEffect(() => {
     if (!token) {
       return;
     }
