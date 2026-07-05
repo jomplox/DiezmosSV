@@ -39,6 +39,7 @@ import { defaultInvalidationForm, invalidationFormValidationMessage, invalidatio
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
 import {
   DONAR_AMOUNT_CHIPS,
+  DONAR_AUTOCLICK_INTERVAL_MS,
   DONAR_COMPLETED_MESSAGE,
   DONAR_FALLBACK_MESSAGE,
   DONAR_INTENT_PATH,
@@ -3122,6 +3123,9 @@ function DonarPage() {
   const [stage, setStage] = useState<DonarStage>("form");
   const [intent, setIntent] = useState<DonarIntent | null>(null);
   const widgetHostRef = useRef<HTMLDivElement | null>(null);
+  // Latches once the rendered Wompi button is auto-clicked so re-observing the
+  // (still-present) button never re-opens the modal. Reset per intent below.
+  const autoClickedRef = useRef(false);
 
   const update = (patch: Partial<DonationFormInput>) => setForm((current) => ({ ...current, ...patch }));
 
@@ -3167,6 +3171,8 @@ function DonarPage() {
     if (stage !== "widget" || !intent) {
       return;
     }
+    // Fresh intent: allow the button to be auto-clicked exactly once again.
+    autoClickedRef.current = false;
     const host = widgetHostRef.current;
     if (host) {
       host.innerHTML = "";
@@ -3179,14 +3185,34 @@ function DonarPage() {
       widget.setAttribute("data-cubrir-ancho", "true");
       host.appendChild(widget);
     }
+    // Instant handoff: poll the host for the button Wompi injects and click it once
+    // so the donor goes form → payment modal with no extra click. The manual button
+    // and "Continúe aquí" link stay visible as the backup (the modal can be closed
+    // and reopened). Guarded by autoClickedRef so it never double-fires.
+    const autoClick = window.setInterval(() => {
+      if (autoClickedRef.current || !host) {
+        window.clearInterval(autoClick);
+        return;
+      }
+      const button = host.querySelector("button");
+      if (button) {
+        autoClickedRef.current = true;
+        window.clearInterval(autoClick);
+        button.click();
+      }
+    }, DONAR_AUTOCLICK_INTERVAL_MS);
     const fallback = window.setTimeout(() => {
+      window.clearInterval(autoClick);
       const rendered = host?.querySelector("iframe, a, button");
       if (!rendered) {
         // Script failed to load or never enhanced the div: hosted redirect.
         window.location.href = intent.urlEnlace;
       }
     }, DONAR_SCRIPT_TIMEOUT_MS);
-    return () => window.clearTimeout(fallback);
+    return () => {
+      window.clearInterval(autoClick);
+      window.clearTimeout(fallback);
+    };
   }, [stage, intent]);
 
   // Poll the intent status while the widget modal is open; COMPLETED -> thank-you.

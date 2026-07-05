@@ -193,6 +193,34 @@ describe("donar page source contract", () => {
     expect(appSource).toContain("urlEnlace");
   });
 
+  it("auto-clicks the rendered Wompi button so the modal opens immediately after submit", () => {
+    // The effect that renders the widget div must poll/observe the host for the
+    // button Wompi injects and click it once, so form → modal needs no extra click.
+    const widgetEffect = appSource.indexOf("wompi_button_widget");
+    expect(widgetEffect).toBeGreaterThan(-1);
+    // Auto-click looks for the button in the host and invokes .click() on it.
+    expect(appSource).toContain('host.querySelector("button")');
+    const clickCall = appSource.indexOf(".click()", widgetEffect);
+    expect(clickCall).toBeGreaterThan(-1);
+    // The auto-click poll reuses the existing short script/render timeout budget.
+    expect(appSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
+  });
+
+  it("guards the auto-click with a ref so it never double-fires", () => {
+    // A dedicated ref (initialized false) latches once the button is clicked.
+    expect(appSource).toContain("autoClickedRef");
+    expect(appSource).toContain("useRef(false)");
+    // The guard is checked before clicking and set true after, so re-observing the
+    // (still-present) button does not re-open the modal.
+    const guardCheck = appSource.indexOf("autoClickedRef.current");
+    expect(guardCheck).toBeGreaterThan(-1);
+  });
+
+  it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
+    // The modal can be closed and reopened, so the manual path stays on screen.
+    expect(appSource).toContain("¿No se abre el pago? Continúe aquí");
+  });
+
   it("ships donation styles reusing the auth/card visual language", () => {
     expect(stylesSource).toContain(".donar-");
   });

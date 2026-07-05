@@ -1,4 +1,5 @@
 import { getEmisorConfig, isMockMode, requireSecret } from "../config";
+import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
 
@@ -9,6 +10,14 @@ const LINK_VALIDITY_HOURS = 1;
 // minimum). OFFSET pushes fechaFin safely before now; SPAN is the window width.
 const PAST_VIGENCIA_OFFSET_MINUTES = 60;
 const PAST_VIGENCIA_SPAN_MINUTES = 6;
+// app_settings key holding the cached client-credentials token as JSON
+// { token, expiresAt }. Cached across invocations so "Preparando el pago…" does
+// not pay for a token round-trip on every donation.
+const TOKEN_CACHE_KEY = "wompi_api_token";
+// Refresh margin: treat a token that expires within this window as already stale,
+// and shrink the stored lifetime by the same amount so we never present a token
+// that Wompi is about to reject at the boundary.
+const TOKEN_REFRESH_MARGIN_SECONDS = 60;
 
 // Thrown on any non-2xx from Wompi (token or link creation). The message carries
 // only the HTTP status + response text — never the client credentials.
@@ -31,8 +40,19 @@ interface WompiEnlacePagoResponse {
   urlEnlaceLargo: string;
 }
 
+interface CachedToken {
+  token: string;
+  expiresAt: string;
+}
+
 export class WompiApiService {
-  constructor(private readonly env: Env) {}
+  private readonly repo: Repository;
+
+  constructor(private readonly env: Env) {
+    // The service constructs its own Repository from env.DB (mirroring
+    // pipeline/auth) so it can cache the OAuth token in app_settings.
+    this.repo = new Repository(env.DB);
+  }
 
   async createPaymentLink(intent: DonationIntentRecord): Promise<WompiPaymentLink> {
     // Mock mode: deterministic fake link, no network. Mirrors MhClient's
@@ -44,10 +64,6 @@ export class WompiApiService {
         urlEnlaceLargo: `https://mock.wompi.sv/enlace-largo/${intent.id}`
       };
     }
-
-    // No token caching in v1: donation frequency is low enough that one token per
-    // link creation is fine, and it keeps the service stateless.
-    const token = await this.requestToken();
 
     const start = nowIso();
     const body = {
@@ -61,20 +77,15 @@ export class WompiApiService {
         fechaInicio: start,
         fechaFin: addHours(start, LINK_VALIDITY_HOURS)
       },
+      // Cards only: no puntoAgricola, cuotas, bitcoin, quickpay, or nequi.
+      formaPago: this.linkFormaPago(),
       // esMontoEditable/esCantidadEditable false pins the amount: the donor cannot
       // change the monto or quantity on Wompi's hosted sheet, so the paid amount
       // always matches the intent (and the CDE we later emit).
       configuracion: this.linkConfiguracion()
     };
 
-    const response = await fetch(ENLACE_PAGO_URL, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
+    const response = await this.authorizedFetch(ENLACE_PAGO_URL, "POST", body);
     if (!response.ok) {
       throw new WompiApiError(`Wompi rechazó la creación del enlace de pago: ${response.status} ${await response.text()}`);
     }
@@ -99,8 +110,6 @@ export class WompiApiService {
       return;
     }
 
-    const token = await this.requestToken();
-
     const end = nowIso();
     const start = addMinutes(end, -PAST_VIGENCIA_SPAN_MINUTES - PAST_VIGENCIA_OFFSET_MINUTES);
     const body = {
@@ -114,17 +123,13 @@ export class WompiApiService {
         fechaInicio: start,
         fechaFin: addMinutes(end, -PAST_VIGENCIA_OFFSET_MINUTES)
       },
+      // The PUT replaces the whole object, so formaPago and configuracion must be
+      // resent or Wompi would re-enable every payment method / re-email the donor.
+      formaPago: this.linkFormaPago(),
       configuracion: this.linkConfiguracion()
     };
 
-    const response = await fetch(`${ENLACE_PAGO_URL}/${intent.wompi_id_enlace}`, {
-      method: "PUT",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(body)
-    });
+    const response = await this.authorizedFetch(`${ENLACE_PAGO_URL}/${intent.wompi_id_enlace}`, "PUT", body);
     if (!response.ok) {
       throw new WompiApiError(`Wompi rechazó la desactivación del enlace de pago: ${response.status} ${await response.text()}`);
     }
@@ -134,16 +139,103 @@ export class WompiApiService {
     return `Donación ${displayName(this.env)}`;
   }
 
-  private linkConfiguracion(): { urlRedirect: string; urlWebhook: string; esMontoEditable: false; esCantidadEditable: false } {
+  // Cards-only forma de pago. The permitir/permite prefixes are intentionally
+  // inconsistent — they mirror the Wompi EnlaceFormaPago schema exactly.
+  private linkFormaPago(): {
+    permitirTarjetaCreditoDebido: boolean;
+    permitirPagoConPuntoAgricola: boolean;
+    permitirPagoEnCuotasAgricola: boolean;
+    permitirPagoEnBitcoin: boolean;
+    permitePagoQuickPay: boolean;
+    permitePagoNequi: boolean;
+  } {
+    return {
+      permitirTarjetaCreditoDebido: true,
+      permitirPagoConPuntoAgricola: false,
+      permitirPagoEnCuotasAgricola: false,
+      permitirPagoEnBitcoin: false,
+      permitePagoQuickPay: false,
+      permitePagoNequi: false
+    };
+  }
+
+  private linkConfiguracion(): {
+    urlRedirect: string;
+    urlWebhook: string;
+    esMontoEditable: false;
+    esCantidadEditable: false;
+    notificarTransaccionCliente: false;
+  } {
     const origin = requireSecret(this.env, "APP_ORIGIN");
     return {
       urlRedirect: `${origin}/donar/gracias`,
       urlWebhook: `${origin}/webhooks/wompi`,
       esMontoEditable: false,
-      esCantidadEditable: false
+      esCantidadEditable: false,
+      // We send the donor their CDE email ourselves; Wompi must not email them.
+      notificarTransaccionCliente: false
     };
   }
 
+  // Performs an authenticated Wompi request using the cached token when possible.
+  // A 401 with a cached token means the token was revoked server-side: invalidate
+  // the cache and retry ONCE with a freshly-minted token.
+  private async authorizedFetch(url: string, method: "POST" | "PUT", body: unknown): Promise<Response> {
+    const { token, fromCache } = await this.acquireToken();
+    const response = await this.sendAuthorized(url, method, body, token);
+    if (response.status === 401 && fromCache) {
+      await this.repo.setSetting(TOKEN_CACHE_KEY, "");
+      const fresh = await this.acquireToken();
+      return this.sendAuthorized(url, method, body, fresh.token);
+    }
+    return response;
+  }
+
+  private sendAuthorized(url: string, method: "POST" | "PUT", body: unknown, token: string): Promise<Response> {
+    return fetch(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+  }
+
+  // Returns a usable token, reusing the cache when it is not expiring soon.
+  // `fromCache` tells authorizedFetch whether a 401 is worth a fresh-token retry.
+  private async acquireToken(): Promise<{ token: string; fromCache: boolean }> {
+    const cached = await this.readCachedToken();
+    if (cached && !this.isExpiringSoon(cached.expiresAt)) {
+      return { token: cached.token, fromCache: true };
+    }
+    const token = await this.requestToken();
+    return { token, fromCache: false };
+  }
+
+  private async readCachedToken(): Promise<CachedToken | null> {
+    const raw = await this.repo.getSetting(TOKEN_CACHE_KEY);
+    if (!raw) {
+      return null;
+    }
+    try {
+      const parsed = JSON.parse(raw) as Partial<CachedToken>;
+      if (typeof parsed.token === "string" && parsed.token && typeof parsed.expiresAt === "string") {
+        return { token: parsed.token, expiresAt: parsed.expiresAt };
+      }
+    } catch {
+      // Corrupt cache value: treat as a miss and refetch.
+    }
+    return null;
+  }
+
+  private isExpiringSoon(expiresAt: string): boolean {
+    const remainingMs = new Date(expiresAt).getTime() - Date.now();
+    return !(remainingMs > TOKEN_REFRESH_MARGIN_SECONDS * 1000);
+  }
+
+  // Fetches a fresh client-credentials token and caches it with a safety margin
+  // shaved off its lifetime (expiresAt = now + (expires_in - margin)s).
   private async requestToken(): Promise<string> {
     const form = new URLSearchParams();
     form.set("grant_type", "client_credentials");
@@ -163,6 +255,9 @@ export class WompiApiService {
     if (!data.access_token) {
       throw new WompiApiError("Wompi no devolvió access_token en la respuesta de autenticación");
     }
+    const lifetimeSeconds = Math.max(0, (data.expires_in ?? 0) - TOKEN_REFRESH_MARGIN_SECONDS);
+    const expiresAt = new Date(Date.now() + lifetimeSeconds * 1000).toISOString();
+    await this.repo.setSetting(TOKEN_CACHE_KEY, JSON.stringify({ token: data.access_token, expiresAt } satisfies CachedToken));
     return data.access_token;
   }
 }

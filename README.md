@@ -440,7 +440,9 @@ data is **split** between the form and Wompi's hosted sheet:
   now asks for exclusively (they cannot be prefilled or disabled via the API).
 
 The Worker validates the form data, persists a **donation intent** (identity + address only; name and
-email are stored null), and mints a **single-use Wompi payment link** via the Wompi API. When the
+email are stored null), and mints a **single-use, cards-only Wompi payment link** via the Wompi API
+(tarjeta de crédito/débito únicamente — puntoAgricola, cuotas, Bitcoin, QuickPay, and Nequi are
+disabled; Wompi is also told **not** to email the donor, since the app sends the CDE itself). When the
 payment webhook arrives, the CDE `receptor` **merges** the two sources: `tipoDocumento` /
 `numDocumento` / `direccion` come from the intent (canonical catalog codes and a clean DUI), while
 `nombre` / `correo` come from the webhook (what the donor typed on Wompi's sheet); the telephone
