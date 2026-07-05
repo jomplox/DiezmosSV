@@ -1010,8 +1010,18 @@ select,
   font-variant-numeric: tabular-nums;
 }
 
+.export-panel .hint {
+  color: #52656c;
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
 .export-table table {
   min-width: 1120px;
+}
+
+.certificate-table table {
+  min-width: 520px;
 }
 
 .export-table tbody tr {

@@ -77,6 +77,37 @@ export function operationalAlertHtml(alert: OperationalAlertInput, originUrl: st
   ]);
 }
 
+export interface CertificateEmailInput {
+  organizationName: string;
+  donorName: string;
+  year: number;
+  count: number;
+  totalLabel: string;
+  isTestEnvironment: boolean;
+}
+
+export function certificateEmailHtml(input: CertificateEmailInput): string {
+  const testNote = input.isTestEnvironment
+    ? note("Esta constancia incluye documentos emitidos en el ambiente de pruebas del Ministerio de Hacienda; no tiene validez fiscal.")
+    : "";
+  const details = detailsCard([
+    ["Año", String(input.year)],
+    ["Donaciones", String(input.count)],
+    ["Total del año", input.totalLabel]
+  ]);
+  return emailDocument(input.organizationName, [
+    paragraphs(
+      `Estimado(a) ${input.donorName}:\n\n` +
+        `Adjuntamos su constancia de donaciones correspondiente al año ${input.year}. ` +
+        `El documento resume las donaciones que usted realizó y puede utilizarlo como respaldo. ` +
+        `Los comprobantes de donación electrónicos (CDE) individuales siguen siendo sus comprobantes fiscales.`
+    ),
+    details,
+    testNote,
+    footNote("Se adjunta la constancia anual en formato PDF.")
+  ]);
+}
+
 function alertBanner(kind: string, title: string): string {
   const isContingency = kind.startsWith("CONTINGENCY");
   const background = isContingency ? "#fdf3e1" : "#fdecec";

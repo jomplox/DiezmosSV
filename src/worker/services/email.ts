@@ -107,6 +107,28 @@ export class EmailService {
     return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
   }
 
+  async sendDonorCertificate(input: {
+    toEmail: string;
+    subject: string;
+    text: string;
+    html: string;
+    pdfBytes: Uint8Array;
+    filename: string;
+  }): Promise<unknown> {
+    const contentBase64 = bytesToBase64(input.pdfBytes);
+    const payload: EmailPayload = {
+      from: this.resolveFrom(),
+      to: input.toEmail,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: [{ filename: input.filename, contentType: "application/pdf", contentBase64 }]
+    };
+    return this.dispatch(payload, [
+      { filename: input.filename, type: "application/pdf", disposition: "attachment", content: input.pdfBytes }
+    ]);
+  }
+
   async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {
     const payload: EmailPayload = {
       from: this.resolveFrom(),

@@ -200,6 +200,8 @@ export function App() {
     rowCount: 0,
     amountTotal: "0.00"
   });
+  const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
+  const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
@@ -249,7 +251,7 @@ export function App() {
       return;
     }
     void refresh().catch(handleApiFailure);
-  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate]);
+  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear]);
 
   useEffect(() => {
     if (token) {
@@ -322,6 +324,7 @@ export function App() {
       }
       const params = exportParams(exportStartDate, exportEndDate);
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
     }
   }
 
@@ -494,6 +497,26 @@ export function App() {
       link.click();
       URL.revokeObjectURL(href);
       setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
+    });
+  }
+
+  async function sendAnnualCertificates() {
+    const preview = certificatePreview;
+    if (!preview || preview.withEmail === 0) {
+      setToast("No hay donantes con correo para el año seleccionado.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Se enviarán constancias del año ${preview.year} a ${preview.withEmail} donante(s) con correo. ` +
+        `${preview.withoutEmail} donante(s) sin correo se omitirán. ¿Desea continuar?`
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runAction("certificates-send", async () => {
+      const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, { method: "POST" });
+      setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
+      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
     });
   }
 
@@ -915,15 +938,25 @@ export function App() {
         )}
 
         {view === "exports" && can(user, "ADMIN") && (
-          <ExportPanel
-            startDate={exportStartDate}
-            endDate={exportEndDate}
-            preview={exportPreview}
-            busy={busy}
-            onStartDateChange={setExportStartDate}
-            onEndDateChange={setExportEndDate}
-            onDownload={downloadF960}
-          />
+          <>
+            <ExportPanel
+              startDate={exportStartDate}
+              endDate={exportEndDate}
+              preview={exportPreview}
+              busy={busy}
+              onStartDateChange={setExportStartDate}
+              onEndDateChange={setExportEndDate}
+              onDownload={downloadF960}
+            />
+            <AnnualCertificatePanel
+              year={certificateYear}
+              yearOptions={certificateYearOptions()}
+              preview={certificatePreview}
+              busy={busy === "certificates-send"}
+              onYearChange={setCertificateYear}
+              onSend={sendAnnualCertificates}
+            />
+          </>
         )}
 
         {view === "credentials" && (
@@ -1535,6 +1568,97 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+function certificateYearOptions(): number[] {
+  const current = new Date().getFullYear();
+  return [current, current - 1, current - 2, current - 3];
+}
+
+function AnnualCertificatePanel({
+  year,
+  yearOptions,
+  preview,
+  busy,
+  onYearChange,
+  onSend
+}: {
+  year: string;
+  yearOptions: number[];
+  preview: AnnualCertificatePreview | null;
+  busy: boolean;
+  onYearChange: (year: string) => void;
+  onSend: () => Promise<void>;
+}) {
+  const donors = preview?.donors ?? [];
+  const withEmail = preview?.withEmail ?? 0;
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Constancia anual de donaciones</h2>
+          <p>Envíe a cada donante el resumen de sus donaciones aceptadas del año.</p>
+        </div>
+        <FileSpreadsheet size={20} />
+      </div>
+      <div className="export-controls">
+        <label className="date-field">
+          <span>Año</span>
+          <select value={year} onChange={(event) => onYearChange(event.target.value)}>
+            {yearOptions.map((option) => (
+              <option key={option} value={String(option)}>
+                {option}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button className="primary" disabled={busy || withEmail === 0} onClick={() => void onSend()}>
+          <Download size={16} />
+          {busy ? "Enviando" : "Enviar constancias"}
+        </button>
+      </div>
+      <div className="export-summary">
+        <strong>{preview?.donorCount ?? 0}</strong>
+        <span>donantes</span>
+        <strong>{withEmail}</strong>
+        <span>con correo</span>
+        <strong>{preview?.totalLabel ?? "$0.00"}</strong>
+        <span>total</span>
+      </div>
+      <p className="hint">
+        Se enviará a los donantes con correo. Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.
+      </p>
+      <div className="table-scroll export-table certificate-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Donante</th>
+              <th className="numeric">Donaciones</th>
+              <th className="numeric">Total</th>
+              <th>Correo</th>
+            </tr>
+          </thead>
+          <tbody>
+            {donors.map((donor) => (
+              <tr key={donor.donorName + (donor.donorEmail ?? "")}>
+                <td>
+                  <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
+                </td>
+                <td className="numeric">{donor.count}</td>
+                <td className="numeric">{donor.totalLabel}</td>
+                <td>{donor.hasEmail ? "Sí" : "—"}</td>
+              </tr>
+            ))}
+            {donors.length === 0 && (
+              <tr>
+                <td colSpan={4}>Sin donaciones aceptadas para este año.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -4275,6 +4399,31 @@ interface F960Preview {
   rows: F960PreviewRow[];
   rowCount: number;
   amountTotal: string;
+}
+
+interface AnnualCertificatePreviewDonor {
+  donorName: string;
+  donorEmail: string | null;
+  hasEmail: boolean;
+  count: number;
+  totalLabel: string;
+  hasTestEnvironment: boolean;
+}
+
+interface AnnualCertificatePreview {
+  year: number;
+  donorCount: number;
+  withEmail: number;
+  withoutEmail: number;
+  totalLabel: string;
+  donors: AnnualCertificatePreviewDonor[];
+}
+
+interface AnnualCertificateSendResult {
+  year: number;
+  sent: number;
+  skipped: number;
+  failed: number;
 }
 
 interface F960PreviewRow {

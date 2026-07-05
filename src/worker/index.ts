@@ -7,6 +7,7 @@ import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError,
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
 import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates } from "./services/certificate";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -382,6 +383,37 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         "Content-Disposition": `attachment; filename="${selection.xlsxFilename}"`
       }
     });
+  }
+
+  if (url.pathname === "/api/certificates/annual" && request.method === "GET") {
+    requireRole(user, "ADMIN");
+    const yearParam = url.searchParams.get("year");
+    const yearError = certificateYearError(yearParam, new Date());
+    if (yearError) {
+      return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
+    }
+    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam)));
+  }
+
+  if (url.pathname === "/api/certificates/annual/send" && request.method === "POST") {
+    const actor = requireRole(user, "ADMIN");
+    const yearParam = url.searchParams.get("year");
+    const yearError = certificateYearError(yearParam, new Date());
+    if (yearError) {
+      return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
+    }
+    const year = Number(yearParam);
+    const result = await sendAnnualCertificates(env, repo, year, actor.id);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "DONOR_CERTIFICATES_RUN",
+      entityType: "donor_certificate_run",
+      entityId: String(year),
+      summary: `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
+      metadata: result
+    });
+    return jsonResponse(result);
   }
 
   const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);

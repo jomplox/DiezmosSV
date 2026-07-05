@@ -1694,6 +1694,211 @@ describe("F960 CSV export", () => {
   });
 });
 
+describe("annual donor certificates", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-05T12:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function seedYear(db: InMemoryD1): void {
+    db.documents.push(
+      testDocument({
+        id: "cert_ana_1",
+        donor_email: "ana@example.org",
+        donor_name: "Ana",
+        amount_cents: 2500,
+        issued_at: "2025-02-01T16:00:00.000Z",
+        numero_control: "DTE-15-M001P004-000000000000101"
+      }),
+      testDocument({
+        id: "cert_ana_2",
+        donor_email: "ana@example.org",
+        donor_name: "Ana",
+        amount_cents: 7501,
+        issued_at: "2025-05-10T16:00:00.000Z",
+        numero_control: "DTE-15-M001P004-000000000000102"
+      }),
+      testDocument({
+        id: "cert_noemail",
+        donor_email: null,
+        donor_name: "Sin Correo",
+        amount_cents: 4000,
+        issued_at: "2025-06-01T16:00:00.000Z",
+        numero_control: "DTE-15-M001P004-000000000000103"
+      }),
+      // Excluded: invalidated
+      testDocument({
+        id: "cert_invalid",
+        donor_email: "ana@example.org",
+        donor_name: "Ana",
+        status: "INVALIDATED",
+        amount_cents: 9999,
+        issued_at: "2025-07-01T16:00:00.000Z",
+        numero_control: "DTE-15-M001P004-000000000000104"
+      }),
+      // Excluded: different year
+      testDocument({
+        id: "cert_prev_year",
+        donor_email: "beto@example.org",
+        donor_name: "Beto",
+        amount_cents: 1000,
+        issued_at: "2024-12-31T16:00:00.000Z",
+        numero_control: "DTE-15-M001P004-000000000000105"
+      })
+    );
+  }
+
+  it("previews donors with counts, totals and email presence for a completed year", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual?year=2025", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      donorCount: number;
+      withEmail: number;
+      withoutEmail: number;
+      totalLabel: string;
+      donors: Array<{ donorName: string; hasEmail: boolean; count: number; totalLabel: string }>;
+    };
+    expect(body.donorCount).toBe(2);
+    expect(body.withEmail).toBe(1);
+    expect(body.withoutEmail).toBe(1);
+    expect(body.totalLabel).toBe("$140.01");
+    const ana = body.donors.find((donor) => donor.donorName === "Ana");
+    expect(ana).toMatchObject({ hasEmail: true, count: 2, totalLabel: "$100.01" });
+    const sinCorreo = body.donors.find((donor) => donor.donorName === "Sin Correo");
+    expect(sinCorreo).toMatchObject({ hasEmail: false, count: 1 });
+  });
+
+  it("rejects future years", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual?year=2027", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_certificate_year" });
+  });
+
+  it("forbids preview for non-admin roles", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual?year=2025", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(403);
+  });
+
+  it("sends one certificate per donor with email, attaches the PDF, and skips donors without email", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    const sent: Array<{ to: string; subject: string; attachments?: Array<{ filename: string; type: string; content: Uint8Array }> }> = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message as { to: string; subject: string });
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ year: 2025, sent: 1, skipped: 1, failed: 0 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe("ana@example.org");
+    expect(sent[0].subject).toBe("Constancia de donaciones 2025");
+    const attachments = sent[0].attachments ?? [];
+    expect(attachments).toHaveLength(1);
+    expect(attachments[0].filename).toBe("constancia-donaciones-2025.pdf");
+    expect(attachments[0].type).toBe("application/pdf");
+    expect(new TextDecoder("latin1").decode(attachments[0].content.slice(0, 5))).toBe("%PDF-");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DONOR_CERTIFICATE_SENT", entity_id: "2025:ana@example.org" })
+    );
+  });
+
+  it("re-run skips donors already sent and only retries the rest", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    db.audits.push({
+      id: "audit_prior",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "DONOR_CERTIFICATE_SENT",
+      entity_type: "donor_certificate",
+      entity_id: "2025:ana@example.org",
+      summary: "prior send",
+      created_at: "2026-07-01T00:00:00.000Z"
+    });
+    const sent: unknown[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message);
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    // Ana already sent (skipped), Sin Correo has no email (skipped), nothing left to send.
+    await expect(response.json()).resolves.toEqual({ year: 2025, sent: 0, skipped: 2, failed: 0 });
+    expect(sent).toHaveLength(0);
+  });
+
+  it("forbids send for non-admin roles", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
 describe("advanced CDE generation", () => {
   it("creates quick DTE records directly without a synthetic Wompi event", async () => {
     const db = new InMemoryD1();
@@ -3370,6 +3575,21 @@ class Statement {
       }
       lines.sort((left, right) => Number(left.line_no ?? 0) - Number(right.line_no ?? 0));
       return { results: lines as T[] };
+    }
+    if (this.sql.includes("FROM dte_documents") && this.sql.includes("ORDER BY issued_at ASC, id ASC")) {
+      // Annual donor certificate aggregation (Task 4): keyset-paged ACCEPTED-in-year read.
+      let documents = this.db.documents.filter((document) => document.status === "ACCEPTED");
+      const [startIso, endIso] = [String(this.args[0]), String(this.args[1])];
+      documents = documents.filter((document) => document.issued_at >= startIso && document.issued_at < endIso);
+      if (this.sql.includes("(issued_at, id) > (?, ?)")) {
+        const [afterIssued, afterId] = [String(this.args[2]), String(this.args[3])];
+        documents = documents.filter(
+          (document) => document.issued_at > afterIssued || (document.issued_at === afterIssued && document.id > afterId)
+        );
+      }
+      documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id));
+      const limit = Number(this.args.at(-1) ?? 500);
+      return { results: documents.slice(0, limit) as T[] };
     }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];

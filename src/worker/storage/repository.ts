@@ -206,6 +206,29 @@ export class Repository {
       .then((result) => result.results ?? []);
   }
 
+  // Keyset-paged read of ACCEPTED documents issued within [startIso, endIso) for the
+  // annual donor certificate (Task 4). Mirrors the retention paged-read style: a
+  // (issued_at, id) cursor bounds each page so a busy year is read in fixed chunks
+  // rather than one unpaged scan. INVALIDATED (and every non-ACCEPTED) status is
+  // excluded by the WHERE clause, matching the certificate's "accepted only" rule.
+  async listAcceptedDocumentsInYear(
+    range: { startIso: string; endIso: string },
+    cursor: { issuedAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<DteDocumentRecord[]> {
+    const conditions = ["status = 'ACCEPTED'", "issued_at >= ?", "issued_at < ?"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso];
+    if (cursor) {
+      conditions.push("(issued_at, id) > (?, ?)");
+      bindings.push(cursor.issuedAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(`SELECT * FROM dte_documents WHERE ${conditions.join(" AND ")} ORDER BY issued_at ASC, id ASC LIMIT ?`)
+      .bind(...bindings, limit)
+      .all<DteDocumentRecord>();
+    return rows.results ?? [];
+  }
+
   async updateDocumentSigned(id: string, signedJws: string): Promise<void> {
     await this.db
       .prepare("UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? WHERE id = ?")
