@@ -385,11 +385,6 @@ export function App() {
   }
 
   async function openAdvancedDte() {
-    const validationError = quickDteValidationMessage(testInput, { requireAmount: false });
-    if (validationError) {
-      setToast(validationError);
-      return;
-    }
     await runAction("advanced-template", async () => {
       const result = await api<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", token, { method: "POST", body: testInput });
       setAdvancedDteTemplate(result.draft);
@@ -2727,15 +2722,19 @@ function AdvancedDteModal({
               <ChevronLeft size={16} />
               Anterior
             </button>
-            <button disabled={busy || activeStep === advancedCdeSteps.length - 1} onClick={() => onStepChange(activeStep + 1)}>
-              Siguiente
-              <ChevronRight size={16} />
-            </button>
+            {activeStep !== advancedCdeSteps.length - 1 && (
+              <button disabled={busy} onClick={() => onStepChange(activeStep + 1)}>
+                Siguiente
+                <ChevronRight size={16} />
+              </button>
+            )}
           </div>
-          <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
-            <FlaskConical size={16} />
-            {busy ? "Generando" : "Generar avanzado"}
-          </button>
+          {activeStep === advancedCdeSteps.length - 1 && (
+            <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
+              <FlaskConical size={16} />
+              {busy ? "Generando" : "Generar avanzado"}
+            </button>
+          )}
         </footer>
       </section>
     </div>

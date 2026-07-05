@@ -1589,6 +1589,30 @@ describe("advanced CDE generation", () => {
     expect(body.draft.resumen.valorTotal).toBe(1);
   });
 
+  it("opens the advanced template with empty donor fields so the wizard can collect them", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced-template", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ amount: "", donorName: "", donorDocumentType: "13", donorDocument: "", donorEmail: "", donorPhone: "" })
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { draft: { receptor: { tipoDocumento: string; numDocumento: string; nombre: string } } };
+    expect(body.draft.receptor).toMatchObject({ tipoDocumento: "13", numDocumento: "", nombre: "" });
+  });
+
   it("stores a schema-valid advanced CDE draft and queues it for transmission", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];

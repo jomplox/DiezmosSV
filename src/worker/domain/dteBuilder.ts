@@ -29,6 +29,7 @@ interface AdvancedCdeBuildOptions {
   sequence: number;
   environment?: Ambiente;
   issuedAt?: Date;
+  allowEmptyDonor?: boolean;
 }
 
 export interface DirectCdeInput {
@@ -161,10 +162,10 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
   const donorName = cleanNullable(input.donorName);
   const donorDocumentType = cleanNullable(input.donorDocumentType) ?? config.defaultReceptorTipoDocumento;
   const donorDocument = cleanNullable(input.donorDocument);
-  if (!donorName) {
+  if (!donorName && !options.allowEmptyDonor) {
     throw new Error("Ingrese nombre del donante");
   }
-  if (!donorDocument) {
+  if (!donorDocument && !options.allowEmptyDonor) {
     throw new Error("Ingrese documento del donante");
   }
   const ambiente = options.environment ?? "00";
@@ -198,9 +199,9 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
     },
     receptor: {
       tipoDocumento: donorDocumentType,
-      numDocumento: donorDocument,
+      numDocumento: donorDocument ?? "",
       nrc: null,
-      nombre: donorName,
+      nombre: donorName ?? "",
       codActividad: null,
       descActividad: null,
       direccion: address
@@ -252,9 +253,11 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
       { campo: "Canal", etiqueta: "Canal", valor: "Donación offline" }
     ]
   };
-  validateCdeDui(document);
-  validateCdeCatalogs(document);
-  validateCde(document);
+  if (!options.allowEmptyDonor) {
+    validateCdeDui(document);
+    validateCdeCatalogs(document);
+    validateCde(document);
+  }
   return document;
 }
 

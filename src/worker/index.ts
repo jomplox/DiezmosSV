@@ -326,11 +326,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
     const input = (await request.json().catch(() => ({}))) as DirectCdeInput;
-    const donorFields = directDonorFields(input);
+    const donorFields = templateDonorFields(input);
     if (donorFields instanceof Response) return donorFields;
     try {
       const environment = await activeEmissionEnvironment(repo, env);
-      const draft = buildDirectCdeDocument({ ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) }, getEmisorConfig(env), { sequence: 1, environment });
+      const draft = buildDirectCdeDocument(
+        { ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) },
+        getEmisorConfig(env),
+        { sequence: 1, environment, allowEmptyDonor: true }
+      );
       return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
     } catch (error) {
       return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
@@ -625,6 +629,19 @@ function directDonorFields(input: DirectCdeInput): { donorName: string; donorDoc
   if (!donorDocument) {
     return jsonResponse({ error: "missing_donor_document" }, { status: 400 });
   }
+  const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
+  if (donorEmail && !normalizeEmail(donorEmail)) {
+    return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });
+  }
+  return { donorName, donorDocument, ...(donorEmail ? { donorEmail } : {}) };
+}
+
+// Unlike directDonorFields (shared with quick DTE creation), the advanced-template preview
+// only builds a draft for the wizard to edit further, so an empty donor name/document is
+// allowed here. Final generation (POST /api/test/dte/advanced) still validates the full MH schema.
+function templateDonorFields(input: DirectCdeInput): { donorName: string; donorDocument: string; donorEmail?: string } | Response {
+  const donorName = input.donorName?.trim() ?? "";
+  const donorDocument = input.donorDocument?.trim() ?? "";
   const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
   if (donorEmail && !normalizeEmail(donorEmail)) {
     return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });

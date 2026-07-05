@@ -67,3 +67,22 @@ describe("advanced CDE wizard defaults", () => {
     expect(validateAdvancedCdeForm(validForm())).toBeNull();
   });
 });
+
+describe("advanced CDE wizard footer", () => {
+  it("only shows Generar avanzado on the last step, not alongside Siguiente", () => {
+    const modalMatch = appSource.match(/function AdvancedDteModal\([\s\S]*?\n}\n/);
+    expect(modalMatch).not.toBeNull();
+    const modalSource = modalMatch?.[0] ?? "";
+    const footerMatch = modalSource.match(/<footer>[\s\S]*?<\/footer>/);
+    expect(footerMatch).not.toBeNull();
+    const footer = footerMatch?.[0] ?? "";
+    const siguienteIndex = footer.indexOf("Siguiente");
+    const generarIndex = footer.indexOf("Generar avanzado");
+    expect(siguienteIndex).toBeGreaterThan(-1);
+    expect(generarIndex).toBeGreaterThan(-1);
+    const lastStepGuardBeforeSiguiente = footer.lastIndexOf("activeStep !== advancedCdeSteps.length - 1", siguienteIndex);
+    const lastStepGuardBeforeGenerar = footer.lastIndexOf("activeStep === advancedCdeSteps.length - 1", generarIndex);
+    expect(lastStepGuardBeforeSiguiente).toBeGreaterThan(-1);
+    expect(lastStepGuardBeforeGenerar).toBeGreaterThan(-1);
+  });
+});
