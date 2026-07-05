@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { runRetentionExport } from "../../src/worker/services/retention";
+import { previousElSalvadorMonth, runRetentionExport } from "../../src/worker/services/retention";
 import { Repository } from "../../src/worker/storage/repository";
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -287,5 +287,22 @@ describe("runRetentionExport", () => {
     const failed = db.audits.find((audit) => audit.action === "RETENTION_EXPORT_FAILED");
     expect(failed).toBeTruthy();
     expect(String(failed?.summary)).toContain("R2 unavailable");
+  });
+});
+
+describe("previousElSalvadorMonth (UTC/El Salvador day seam)", () => {
+  it("treats 2026-08-01T05:59:00.000Z (July 31 23:59 El Salvador) as still-July, so previous month is June", () => {
+    const now = new Date("2026-08-01T05:59:00.000Z");
+    expect(previousElSalvadorMonth(now)).toBe("2026-06");
+  });
+
+  it("treats 2026-08-01T06:00:00.000Z (August 1 00:00 El Salvador) as already-August, so previous month is July", () => {
+    const now = new Date("2026-08-01T06:00:00.000Z");
+    expect(previousElSalvadorMonth(now)).toBe("2026-07");
+  });
+
+  it("rolls over the year correctly: 2027-01-01T06:00:00.000Z (Jan 1 El Salvador) -> previous month is 2026-12", () => {
+    const now = new Date("2027-01-01T06:00:00.000Z");
+    expect(previousElSalvadorMonth(now)).toBe("2026-12");
   });
 });

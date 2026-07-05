@@ -160,7 +160,7 @@ function concatBytes(chunks: Uint8Array[]): Uint8Array {
 // El Salvador calendar date is still the last day of the prior month, so the
 // "previous month" shifts back one further. Using Intl with the IANA zone
 // handles this correctly without hand-rolling the UTC-6 offset for `now` itself.
-function previousElSalvadorMonth(now: Date): string {
+export function previousElSalvadorMonth(now: Date): string {
   const { year, month } = elSalvadorYearMonth(now);
   const previous = month === 1 ? { year: year - 1, month: 12 } : { year, month: month - 1 };
   return `${previous.year}-${String(previous.month).padStart(2, "0")}`;
