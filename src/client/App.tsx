@@ -31,7 +31,7 @@ import {
   X,
   Users
 } from "lucide-react";
-import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { filterAuditEntries } from "./auditFilter";
@@ -100,6 +100,55 @@ const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof
   correo: Mail,
   plantillas: Braces
 };
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function useDialogDismiss(ref: RefObject<HTMLElement | null>, onDismiss: () => void, disabled: boolean) {
+  useEffect(() => {
+    ref.current?.focus();
+  }, [ref]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        if (!disabled) {
+          onDismiss();
+        }
+        return;
+      }
+      if (event.key !== "Tab") {
+        return;
+      }
+      const container = ref.current;
+      if (!container) {
+        return;
+      }
+      const focusable = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+        (element) => element.offsetParent !== null || element === document.activeElement
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        container.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (event.shiftKey) {
+        if (active === first || !container.contains(active)) {
+          event.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !container.contains(active)) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [ref, onDismiss, disabled]);
+}
 
 export function App() {
   const [token, setToken] = useState(() => localStorage.getItem("diezmos_token") ?? "");
@@ -729,7 +778,12 @@ export function App() {
               <div className="toolbar">
                 <label className="search">
                   <Search size={16} />
-                  <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar código, donante o correo" />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Buscar código, donante o correo"
+                    aria-label="Buscar código, donante o correo"
+                  />
                 </label>
                 <select value={status} onChange={(event) => setStatus(event.target.value)} disabled={view === "failures"}>
                   <option value="">Todos</option>
@@ -912,7 +966,11 @@ export function App() {
           onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
       )}
-      {toast && <button className="toast" onClick={() => setToast("")}>{toast}</button>}
+      {toast && (
+        <button className="toast" role="status" aria-live="polite" onClick={() => setToast("")}>
+          {toast}
+        </button>
+      )}
     </div>
   );
 }
@@ -2231,9 +2289,18 @@ function EmissionEnvironmentConfirmDialog({
 }) {
   const targetLabel = environmentLabel(targetEnvironment);
   const isProductionTarget = targetEnvironment === "01";
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useDialogDismiss(dialogRef, onCancel, busy);
   return (
     <div className="modal-backdrop">
-      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="emission-environment-confirm-title">
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="confirm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="emission-environment-confirm-title"
+      >
         <header>
           <div>
             <h2 id="emission-environment-confirm-title">Confirmar cambio de ambiente</h2>
@@ -2391,14 +2458,20 @@ function TestDtePanel({
         <p>Registre una donación recibida en persona y emita su comprobante al instante.</p>
       </div>
       <div className="test-grid">
-        <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" inputMode="decimal" />
-        <input className="quick-donor-name" value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Nombre o razón social" />
+        <input value={input.amount} onChange={(event) => onChange({ ...input, amount: event.target.value })} placeholder="Monto" aria-label="Monto" inputMode="decimal" />
+        <input className="quick-donor-name" value={input.donorName} onChange={(event) => onChange({ ...input, donorName: event.target.value })} placeholder="Nombre o razón social" aria-label="Nombre o razón social" />
         <span className="quick-document-type">
-          <CatalogSelect value={input.donorDocumentType} options={CAT022_DOCUMENT_TYPES} showCodes={false} onChange={(donorDocumentType) => onChange({ ...input, donorDocumentType })} />
+          <CatalogSelect
+            value={input.donorDocumentType}
+            options={CAT022_DOCUMENT_TYPES}
+            showCodes={false}
+            onChange={(donorDocumentType) => onChange({ ...input, donorDocumentType })}
+            ariaLabel="Tipo de documento del donante"
+          />
         </span>
-        <input value={input.donorDocument} onChange={(event) => onChange({ ...input, donorDocument: event.target.value })} placeholder="Documento" />
-        <input value={input.donorEmail} onChange={(event) => onChange({ ...input, donorEmail: event.target.value })} placeholder="Correo" type="email" />
-        <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Teléfono" />
+        <input value={input.donorDocument} onChange={(event) => onChange({ ...input, donorDocument: event.target.value })} placeholder="Documento" aria-label="Documento" />
+        <input value={input.donorEmail} onChange={(event) => onChange({ ...input, donorEmail: event.target.value })} placeholder="Correo" aria-label="Correo" type="email" />
+        <input value={input.donorPhone} onChange={(event) => onChange({ ...input, donorPhone: event.target.value })} placeholder="Teléfono" aria-label="Teléfono" />
         <button className="primary" disabled={busy} onClick={() => void onSubmit()}>
           <FlaskConical size={16} />
           {busy ? "Generando" : "Generar"}
@@ -2456,9 +2529,18 @@ function AdvancedDteModal({
       donorDescActividad: findCatalogOption(CAT019_ACTIVITIES, donorCodActividad)?.label ?? ""
     });
   };
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useDialogDismiss(dialogRef, onClose, false);
   return (
     <div className="modal-backdrop">
-      <section className="advanced-dte-modal" role="dialog" aria-modal="true" aria-labelledby="advanced-dte-title">
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="advanced-dte-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="advanced-dte-title"
+      >
         <header>
           <div>
             <h2 id="advanced-dte-title">Crear CDE avanzado</h2>
@@ -2681,17 +2763,19 @@ function CatalogSelect({
   options,
   onChange,
   placeholder,
-  showCodes = true
+  showCodes = true,
+  ariaLabel
 }: {
   value: string;
   options: readonly CatalogOption[];
   onChange: (value: string) => void;
   placeholder?: string;
   showCodes?: boolean;
+  ariaLabel?: string;
 }) {
   const selectedValue = catalogSelectValue(options, value);
   return (
-    <select value={selectedValue} onChange={(event) => onChange(event.target.value)}>
+    <select value={selectedValue} onChange={(event) => onChange(event.target.value)} aria-label={ariaLabel}>
       {(placeholder || !selectedValue) && <option value="">{placeholder ?? "Seleccione"}</option>}
       {options.map((option) => (
         <option key={`${option.code}-${option.label}`} value={option.code}>
@@ -2787,20 +2871,35 @@ function AuthScreen({
         )}
         {mode === "reset-request" && <p className="auth-hint">Ingrese su correo y le enviaremos un enlace para restablecer la contraseña.</p>}
         {mode === "reset-confirm" && <p className="auth-hint">Cree su nueva contraseña para completar el restablecimiento.</p>}
-        {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" />}
-        {mode !== "reset-confirm" && <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" type="email" />}
+        {mode === "bootstrap" && <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Nombre" aria-label="Nombre" />}
+        {mode !== "reset-confirm" && <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Correo" aria-label="Correo" type="email" />}
         {mode !== "reset-request" && (
           <input
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             placeholder={mode === "reset-confirm" ? "Nueva contraseña" : "Contraseña"}
+            aria-label={mode === "reset-confirm" ? "Nueva contraseña" : "Contraseña"}
             type="password"
           />
         )}
         {mode === "reset-confirm" && (
-          <input value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Confirme la nueva contraseña" type="password" />
+          <input
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+            placeholder="Confirme la nueva contraseña"
+            aria-label="Confirme la nueva contraseña"
+            type="password"
+          />
         )}
-        {mode === "bootstrap" && <input value={setupToken} onChange={(event) => setSetupToken(event.target.value)} placeholder="Token de configuración" type="password" />}
+        {mode === "bootstrap" && (
+          <input
+            value={setupToken}
+            onChange={(event) => setSetupToken(event.target.value)}
+            placeholder="Token de configuración"
+            aria-label="Token de configuración"
+            type="password"
+          />
+        )}
         {(localNotice || notice) && !error && <p className="auth-notice">{localNotice || notice}</p>}
         {error && <p className="error">{error}</p>}
         <button className="primary" type="submit">
@@ -3021,9 +3120,18 @@ function InvalidationConfirmDialog({
 }) {
   const windowInfo = invalidationWindowInfo(document, now);
   const formError = invalidationFormValidationMessage(form);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useDialogDismiss(dialogRef, onCancel, busy);
   return (
     <div className="modal-backdrop">
-      <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="invalidation-confirm-title">
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="confirm-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="invalidation-confirm-title"
+      >
         <header>
           <div>
             <h2 id="invalidation-confirm-title">Confirmar invalidación</h2>
@@ -3175,9 +3283,11 @@ function UserSettingsModal({
   const saving = busy === "user-settings";
   const resetting = busy === "user-password";
   const passwordReady = passwordPolicySatisfied(input.password);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useDialogDismiss(dialogRef, onClose, saving || resetting);
   return (
     <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="user-settings-title">
-      <section className="confirm-modal user-settings-modal">
+      <section ref={dialogRef} tabIndex={-1} className="confirm-modal user-settings-modal">
         <header>
           <div>
             <h2 id="user-settings-title">Ajustes de usuario</h2>
@@ -3295,8 +3405,8 @@ function UserCreateForm({
 }) {
   return (
     <div className="user-create">
-      <input value={input.name} onChange={(event) => onChange({ ...input, name: event.target.value })} placeholder="Nombre" />
-      <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} placeholder="Correo" type="email" />
+      <input value={input.name} onChange={(event) => onChange({ ...input, name: event.target.value })} placeholder="Nombre" aria-label="Nombre" />
+      <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} placeholder="Correo" aria-label="Correo" type="email" />
       <div className="role-create-field">
         <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })} aria-label="Rol">
 	          <option value="VIEWER">{roleLabel("VIEWER")}</option>
@@ -3310,6 +3420,7 @@ function UserCreateForm({
         value={input.password}
         onChange={(event) => onChange({ ...input, password: event.target.value })}
 	        placeholder="Contraseña inicial"
+	        aria-label="Contraseña inicial"
 	        title="10+ caracteres, mayúscula, minúscula, número y símbolo"
         type="password"
       />
