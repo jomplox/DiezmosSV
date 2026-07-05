@@ -1,9 +1,10 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
 import { buildCdeDocument, buildContingenciaEvent, cdeDocumentSummary } from "../domain/dteBuilder";
+import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { Repository } from "../storage/repository";
-import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
+import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
 import { EmailService } from "./email";
@@ -87,8 +88,9 @@ export class IssuancePipeline {
 
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
+    const intent = await this.correlateIntent(payload);
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment });
+    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride: intent ? donorOverrideFromIntent(intent) : undefined });
     const identifiers = extractCdeIdentifiers(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
@@ -128,12 +130,15 @@ export class IssuancePipeline {
         metadata: mhResult.raw
       });
       if (mhResult.accepted) {
+        if (intent) {
+          await this.completeIntent(intent, record.id);
+        }
         await this.emailReceipt(record);
       }
       return record;
     } catch (error) {
       if (error instanceof MhUnavailableError) {
-        return this.moveToContingency(record, payload, sequence, String(error.message));
+        return this.moveToContingency(record, payload, sequence, String(error.message), intent);
       }
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",
@@ -173,8 +178,12 @@ export class IssuancePipeline {
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     const config = getEmisorConfig(this.env);
+    // Re-apply the same intent correlation as processWompiEvent: without it, an
+    // operator retry would silently downgrade a rejected intent-backed CDE to the
+    // raw-webhook fallback donor data.
+    const intent = await this.correlateIntent(payload);
     const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
-    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment });
+    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
     const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     await this.repo.replaceDocumentPayload(record.id, {
@@ -207,6 +216,9 @@ export class IssuancePipeline {
       metadata: mhResult.raw
     });
     if (mhResult.accepted) {
+      if (intent) {
+        await this.completeIntent(intent, updated.id);
+      }
       await this.emailReceipt(updated);
     }
     return mhResult;
@@ -449,9 +461,17 @@ export class IssuancePipeline {
     return accepted;
   }
 
-  private async moveToContingency(record: DteDocumentRecord, payload: WompiWebhook, sequence: number, reason: string): Promise<DteDocumentRecord> {
+  private async moveToContingency(record: DteDocumentRecord, payload: WompiWebhook, sequence: number, reason: string, intent?: DonationIntentRecord | null): Promise<DteDocumentRecord> {
     const config = getEmisorConfig(this.env);
-    const contingencyDocument = buildCdeDocument(payload, config, { sequence, environment: record.environment, contingency: true });
+    // Preserve the donor override so a contingency rebuild never downgrades an
+    // intent-backed CDE to fallback donor data. The intent stays LINK_CREATED/EXPIRED
+    // — it is only marked COMPLETED once MH actually accepts (contingency sweep).
+    const contingencyDocument = buildCdeDocument(payload, config, {
+      sequence,
+      environment: record.environment,
+      contingency: true,
+      donorOverride: intent ? donorOverrideFromIntent(intent) : undefined
+    });
     const identifiers = extractCdeIdentifiers(contingencyDocument);
     const signedJws = await signMhDocument(contingencyDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     await this.repo.replaceDocumentPayload(record.id, {
@@ -480,6 +500,49 @@ export class IssuancePipeline {
     });
     await this.emailReceipt(updated);
     return updated;
+  }
+
+  // Resolve the donation intent this payment fulfills, or null for legacy/static-link
+  // payments. The intent id doubles as identificadorEnlaceComercio on the minted link
+  // (payload.IdExterno), with the raw enlace identifier as a fallback source. Only ids
+  // that look like an intent id ("di_" prefix) are looked up, so legacy static-link
+  // payloads skip the query entirely. LINK_CREATED and EXPIRED both correlate — a donor
+  // can pay in the link's final minute after our sweep expired the intent — but a
+  // COMPLETED intent must NOT correlate twice (a replayed webhook falls back to
+  // non-intent behavior; processWompiEvent is already idempotent per event).
+  private async correlateIntent(payload: WompiWebhook): Promise<DonationIntentRecord | null> {
+    const intentId = payload.IdExterno ?? payload.EnlacePago?.IdentificadorEnlaceComercio;
+    if (!intentId || !intentId.startsWith("di_")) {
+      return null;
+    }
+    const intent = await this.repo.getDonationIntent(intentId);
+    if (!intent || (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED")) {
+      return null;
+    }
+    // Money truth comes from Wompi: on a mismatch we audit and still correlate, but the
+    // CDE amount is left as the webhook's (buildCdeDocument derives it from the payload).
+    const eventAmountCents = amountCents(payload);
+    if (intent.amount_cents !== eventAmountCents) {
+      await this.repo.createAudit({
+        action: "DONATION_INTENT_AMOUNT_MISMATCH",
+        entityType: "donation_intent",
+        entityId: intent.id,
+        summary: `Monto de intención ${intent.amount_cents} ≠ monto del webhook ${eventAmountCents}; se usa el del webhook`,
+        metadata: { intentAmountCents: intent.amount_cents, eventAmountCents }
+      });
+    }
+    return intent;
+  }
+
+  private async completeIntent(intent: DonationIntentRecord, documentId: string): Promise<void> {
+    await this.repo.markIntentCompleted(intent.id, documentId);
+    await this.repo.createAudit({
+      action: "DONATION_INTENT_COMPLETED",
+      entityType: "donation_intent",
+      entityId: intent.id,
+      summary: `Intención ${intent.id} completada por el CDE ${documentId}`,
+      metadata: { documentId }
+    });
   }
 
   private async emailReceipt(record: DteDocumentRecord): Promise<void> {
@@ -530,6 +593,22 @@ export class IssuancePipeline {
       });
     }
   }
+}
+
+function donorOverrideFromIntent(intent: DonationIntentRecord): IntentDonorOverride {
+  return {
+    tipoDocumento: intent.donor_document_type,
+    numDocumento: intent.donor_document,
+    nombre: intent.donor_name,
+    correo: intent.donor_email,
+    telefono: intent.donor_phone,
+    direccion: {
+      departamento: intent.direccion_departamento,
+      municipio: intent.direccion_municipio,
+      distrito: intent.direccion_distrito,
+      complemento: intent.direccion_complemento
+    }
+  };
 }
 
 function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGeneracion: string; numeroControl: string } {

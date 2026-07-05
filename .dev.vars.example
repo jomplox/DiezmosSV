@@ -1,4 +1,8 @@
 WOMPI_API_SECRET="replace-with-wompi-secret"
+# OAuth client-credentials for minting single-use Wompi payment links (donor checkout).
+# Obtain from the Wompi dashboard; used against https://id.wompi.sv/connect/token.
+# WOMPI_CLIENT_ID="replace-with-wompi-client-id"
+# WOMPI_CLIENT_SECRET="replace-with-wompi-client-secret"
 BOOTSTRAP_OWNER_TOKEN="replace-with-one-time-owner-bootstrap-token"
 CLOUDFLARE_ACCOUNT_ID="replace-with-cloudflare-account-id-for-ui-secret-writes"
 CLOUDFLARE_API_TOKEN="replace-with-workers-secrets-edit-token-for-ui-secret-writes"

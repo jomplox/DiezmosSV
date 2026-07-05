@@ -45,6 +45,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 - [Deploy to Cloudflare](#-deploy-to-cloudflare)
 - [Configuration reference](#-configuration-reference)
 - [Wompi webhook](#-wompi-webhook)
+- [Online donations (/donar)](#-online-donations-donar)
 - [Admin panel & roles](#-admin-panel--roles)
 - [Document lifecycle](#-document-lifecycle)
 - [Data model](#-data-model)
@@ -425,6 +426,48 @@ ResultadoTransaccion = ExitosaAprobada
 |---|---|
 | `EsProductiva=false` | `00` (test) |
 | `EsProductiva=true` | `01` (production) |
+
+---
+
+## 💳 Online donations (`/donar`)
+
+Besides the legacy static Wompi payment link, the app serves a public **`/donar`** page where a donor
+fills in their own name, document, email, and address before paying. The Worker validates that data,
+persists a **donation intent**, and mints a **single-use Wompi payment link** via the Wompi API. When
+the payment webhook arrives, the intent's validated data (not the raw webhook) becomes the CDE
+`receptor` — so the receipt carries canonical catalog codes and a clean DUI.
+
+**Two new secrets** are required to call the Wompi API for the single-use link (the legacy static-link
+flow does not need them). Obtain `client_id` / `client_secret` from the Wompi merchant panel under
+**Datos del negocio**, then set them per environment:
+
+```bash
+npx wrangler secret put WOMPI_CLIENT_ID --env staging      # or --env production
+npx wrangler secret put WOMPI_CLIENT_SECRET --env staging   # or --env production
+```
+
+**Intent lifecycle** (`donation_intents.status`):
+
+| Status | Meaning |
+|---|---|
+| `PENDING` | Validated and persisted; the Wompi link is being minted. |
+| `LINK_CREATED` | Single-use payment link minted; awaiting the donor's payment. |
+| `COMPLETED` | Payment webhook correlated and the CDE was accepted by MH. Links to the emitted `document_id`. |
+| `EXPIRED` | The donor never paid; the cron sweep expired the unpaid intent. |
+
+**Correlation model** — the intent id doubles as `identificadorEnlaceComercio` on the minted link and
+comes back on the webhook as `IdExterno`. The pipeline looks up the intent by that id (only ids with
+the `di_` prefix are queried, so legacy static-link payments skip the lookup entirely). Money truth
+always comes from Wompi: if the webhook amount differs from the intent amount, the pipeline records a
+`DONATION_INTENT_AMOUNT_MISMATCH` audit entry and still correlates, using the webhook's amount on the
+CDE. A `COMPLETED` intent never correlates twice.
+
+**Admin visibility** — the **Exportar** view lists the last 50 online donations (status, amount, donor,
+date, and the emitted `numero de control` for completed ones). A CDE produced from a completed intent
+shows a **"Datos del donante verificados en el formulario de donación"** badge in its detail panel.
+
+> The legacy static Wompi payment link keeps working: those payments have no intent, so the CDE is
+> built from the raw webhook's fallback donor data exactly as before.
 
 ---
 

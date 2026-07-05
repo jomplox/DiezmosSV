@@ -24,6 +24,16 @@ const STATUS_LABELS: Record<string, string> = {
   SUBMITTED: "Transmitido"
 };
 
+// Donor-checkout intent lifecycle (donation_intents.status). Kept separate from
+// STATUS_LABELS because PENDING is shared with the CDE lifecycle but reads
+// differently for an online donation.
+const DONATION_INTENT_STATUS_LABELS: Record<string, string> = {
+  PENDING: "Pendiente",
+  LINK_CREATED: "Enlace creado",
+  COMPLETED: "Completada",
+  EXPIRED: "Vencida"
+};
+
 const ROLE_LABELS: Record<DisplayRole, string> = {
   VIEWER: "Consulta",
   OPERATOR: "Operador",
@@ -162,6 +172,11 @@ const CATALOG_LOWERCASE_WORDS = new Set(["a", "al", "con", "de", "del", "e", "el
 export function statusLabel(status: string | null | undefined): string {
   if (!status) return "Sin estado";
   return STATUS_LABELS[status] ?? readableCode(status);
+}
+
+export function donationIntentStatusLabel(status: string | null | undefined): string {
+  if (!status) return "Sin estado";
+  return DONATION_INTENT_STATUS_LABELS[status] ?? readableCode(status);
 }
 
 export function roleLabel(role: string | null | undefined): string {

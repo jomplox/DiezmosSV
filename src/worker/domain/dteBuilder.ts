@@ -18,11 +18,30 @@ import { assertValidDui, cleanDui, formatDui, isDuiDocumentType } from "../../sh
 import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
 
+// Receptor fields lifted from a correlated donation intent (donor-checkout). When
+// present they replace the fallback receptor derived from the raw Wompi payload,
+// so the CDE carries the donor's validated identity and real catalog-coded address
+// instead of the emisor geography. The DUI/catalog/schema guards below still run.
+export interface IntentDonorOverride {
+  tipoDocumento: string;
+  numDocumento: string;
+  nombre: string;
+  correo: string | null;
+  telefono: string | null;
+  direccion: {
+    departamento: string;
+    municipio: string;
+    distrito: string;
+    complemento: string;
+  };
+}
+
 interface CdeBuildOptions {
   sequence: number;
   environment?: Ambiente;
   issuedAt?: Date;
   contingency?: boolean;
+  donorOverride?: IntentDonorOverride;
 }
 
 interface AdvancedCdeBuildOptions {
@@ -84,6 +103,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   const donorIsDui = donorDocumentRaw !== null && cleanDui(donorDocumentRaw).length === 9;
   const donorDocumentType = donorIsDui ? "13" : "37";
   const donorDocument = donorIsDui ? formatDui(donorDocumentRaw) : donorDocumentRaw ?? "SIN-DOCUMENTO";
+  const override = options.donorOverride;
   const ambiente = options.environment ?? ambienteFromWompi(payload);
   const document = {
     identificacion: {
@@ -113,15 +133,15 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       codPuntoVenta: config.codPuntoVenta
     },
     receptor: {
-      tipoDocumento: donorDocumentType,
-      numDocumento: donorDocument,
+      tipoDocumento: override ? override.tipoDocumento : donorDocumentType,
+      numDocumento: override ? override.numDocumento : donorDocument,
       nrc: null,
-      nombre: name,
+      nombre: override ? override.nombre : name,
       codActividad: null,
       descActividad: null,
-      direccion: donorAddress(payload, config),
-      telefono: donorPhone,
-      correo: donorEmail,
+      direccion: override ? { ...override.direccion } : donorAddress(payload, config),
+      telefono: override ? override.telefono : donorPhone,
+      correo: override ? override.correo : donorEmail,
       codDomiciliado: payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2,
       codPais: payload.Cliente?.CodigoPais ?? config.defaultCodPais
     },

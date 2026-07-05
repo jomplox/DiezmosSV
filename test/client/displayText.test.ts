@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, catalogOptionLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, catalogOptionLabel, donationIntentStatusLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
   it("localizes internal status values for user-facing badges", () => {
@@ -51,6 +51,13 @@ describe("client display text", () => {
     expect(userFacingErrorMessage("MH auth failed: 401")).toBe("Falló la autenticación con el Ministerio de Hacienda: 401");
     expect(userFacingErrorMessage("MH unavailable: 503")).toBe("El Ministerio de Hacienda no está disponible: 503");
     expect(userFacingErrorMessage("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled")).toBe("Configure el servicio de correo antes de enviar comprobantes.");
+  });
+
+  it("localizes donation-intent status values in Spanish", () => {
+    expect(donationIntentStatusLabel("PENDING")).toBe("Pendiente");
+    expect(donationIntentStatusLabel("LINK_CREATED")).toBe("Enlace creado");
+    expect(donationIntentStatusLabel("COMPLETED")).toBe("Completada");
+    expect(donationIntentStatusLabel("EXPIRED")).toBe("Vencida");
   });
 
   it("normalizes catalog option capitalization without changing acronyms", () => {

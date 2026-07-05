@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DteDocumentRecord, WompiEventRecord, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -90,6 +90,120 @@ export class Repository {
 
   async getWompiEventByTransaction(transactionId: string): Promise<WompiEventRecord | null> {
     return this.db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
+  }
+
+  async createDonationIntent(input: {
+    id: string;
+    amountCents: number;
+    donorName: string;
+    donorDocumentType: "13" | "37";
+    donorDocument: string;
+    donorEmail: string;
+    donorPhone: string | null;
+    direccionDepartamento: string;
+    direccionMunicipio: string;
+    direccionDistrito: string;
+    direccionComplemento: string;
+    clientIp: string | null;
+    expiresAt: string;
+  }): Promise<DonationIntentRecord> {
+    await this.db
+      .prepare(
+        `INSERT INTO donation_intents (
+          id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
+          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, client_ip, expires_at
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .bind(
+        input.id,
+        input.amountCents,
+        input.donorName,
+        input.donorDocumentType,
+        input.donorDocument,
+        input.donorEmail,
+        input.donorPhone,
+        input.direccionDepartamento,
+        input.direccionMunicipio,
+        input.direccionDistrito,
+        input.direccionComplemento,
+        input.clientIp,
+        input.expiresAt
+      )
+      .run();
+    const record = await this.getDonationIntent(input.id);
+    if (!record) {
+      throw new Error("No se pudo leer la intención de donación creada");
+    }
+    return record;
+  }
+
+  async getDonationIntent(id: string): Promise<DonationIntentRecord | null> {
+    return this.db.prepare("SELECT * FROM donation_intents WHERE id = ?").bind(id).first<DonationIntentRecord>();
+  }
+
+  async attachIntentLink(id: string, link: WompiPaymentLink): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE donation_intents
+         SET wompi_id_enlace = ?, wompi_url_enlace = ?, wompi_url_enlace_largo = ?, status = 'LINK_CREATED', updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(link.idEnlace, link.urlEnlace, link.urlEnlaceLargo, nowIso(), id)
+      .run();
+  }
+
+  async markIntentCompleted(id: string, documentId: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE donation_intents SET status = 'COMPLETED', document_id = ?, updated_at = ? WHERE id = ?")
+      .bind(documentId, nowIso(), id)
+      .run();
+  }
+
+  // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
+  // rows past their expiry flip to EXPIRED. LINK_CREATED is included so an
+  // abandoned checkout (link minted, donor never paid) does not sit unexpired
+  // forever. Filters on (status, expires_at) — the index added in 0009.
+  async expireUnpaidIntentsBefore(nowIso: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
+      .bind(nowIso, nowIso)
+      .run();
+  }
+
+  // Per-IP throttle: counts intents created by one client_ip at or after sinceIso.
+  async countRecentIntentsByIp(clientIp: string, sinceIso: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS count FROM donation_intents WHERE client_ip = ? AND created_at >= ?")
+      .bind(clientIp, sinceIso)
+      .first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
+  // Newest-first listing for the admin "Donaciones en línea" panel (Task 5). The
+  // LEFT JOIN exposes the emitted CDE's numero_control for COMPLETED intents (which
+  // carry document_id) and leaves it null for every other status.
+  async listRecentDonationIntents(limit = 50): Promise<DonationIntentListItem[]> {
+    const rows = await this.db
+      .prepare(
+        `SELECT donation_intents.*, dte_documents.numero_control AS numero_control
+         FROM donation_intents
+         LEFT JOIN dte_documents ON dte_documents.id = donation_intents.document_id
+         ORDER BY donation_intents.created_at DESC, donation_intents.id DESC
+         LIMIT ?`
+      )
+      .bind(Math.min(Math.max(Math.trunc(limit), 1), 100))
+      .all<DonationIntentListItem>();
+    return rows.results ?? [];
+  }
+
+  // Single indexed lookup (idx_donation_intents_document_id, migration 0009) for the
+  // document detail's donor-data-verified badge: is there a COMPLETED intent that
+  // produced this CDE?
+  async getCompletedIntentForDocument(documentId: string): Promise<{ id: string } | null> {
+    return this.db
+      .prepare("SELECT id FROM donation_intents WHERE document_id = ? AND status = 'COMPLETED' LIMIT 1")
+      .bind(documentId)
+      .first<{ id: string }>();
   }
 
   async nextControlSequence(environment: Ambiente, controlPrefix: string): Promise<number> {

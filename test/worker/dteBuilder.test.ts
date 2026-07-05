@@ -174,6 +174,61 @@ describe("DTE builders", () => {
     ).toThrow(/catálogo/i);
   });
 
+  it("uses the intent donorOverride for the receptor with real donor-chosen catalog codes", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: undefined, Direccion: undefined } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+        donorOverride: {
+          tipoDocumento: "13",
+          numDocumento: "10000002-7",
+          nombre: "Ana Donante",
+          correo: "ana@example.org",
+          telefono: "70001111",
+          direccion: {
+            departamento: "05",
+            municipio: "24",
+            distrito: "01",
+            complemento: "Calle Donante 123, Antiguo Cuscatlán"
+          }
+        }
+      }
+    ) as Record<string, any>;
+
+    expect(document.receptor.tipoDocumento).toBe("13");
+    expect(document.receptor.numDocumento).toBe("10000002-7");
+    expect(document.receptor.nombre).toBe("Ana Donante");
+    expect(document.receptor.correo).toBe("ana@example.org");
+    expect(document.receptor.telefono).toBe("70001111");
+    // The whole payoff: the receptor address carries the donor's own catalog codes,
+    // not the emisor's default geography.
+    expect(document.receptor.direccion).toEqual({
+      departamento: "05",
+      municipio: "24",
+      distrito: "01",
+      complemento: "Calle Donante 123, Antiguo Cuscatlán"
+    });
+  });
+
+  it("still validates a DUI donorOverride before building a CDE for MH", () => {
+    expect(() =>
+      buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+        donorOverride: {
+          tipoDocumento: "13",
+          numDocumento: "00000000-9",
+          nombre: "Ana Donante",
+          correo: "ana@example.org",
+          telefono: null,
+          direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" }
+        }
+      })
+    ).toThrow(/DUI.*digito verificador/i);
+  });
+
   it("builds a schema-valid contingency event for queued CDEs", () => {
     const event = buildContingenciaEvent(emisorConfig, {
       ambiente: "00",

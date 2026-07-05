@@ -41,11 +41,55 @@ Cuando un donante paga por **Wompi**, todo ocurre solo:
 
 Usted no tiene que hacer nada en el caso normal. En **Documentos** verá el CDE con el
 estado **Aceptado** y su **Sello**. Solo intervenga si algo aparece en **Fallos** o si se
-abre una **Contingencia** (secciones 5 y 6).
+abre una **Contingencia** (secciones 6 y 7).
 
 ---
 
-## 3. CDE rápido para donaciones en persona
+## 3. Donaciones en línea (página /donar)
+
+Además del enlace de pago fijo de Wompi, la aplicación publica una página **/donar** donde el
+propio donante escribe sus datos (nombre, documento, correo y dirección) **antes** de pagar. Con
+esos datos el sistema arma el comprobante, así que el CDE sale con la información correcta del
+donante sin que usted tenga que capturarla.
+
+**Cómo funciona:**
+
+1. El donante abre la página **/donar**, completa el formulario y elige el monto.
+2. El sistema valida los datos y genera un **enlace de pago de un solo uso** en Wompi.
+3. Cuando el donante paga, Wompi avisa al sistema, que arma y transmite el CDE con los datos
+   del formulario y, al recibir el sello de Hacienda, envía el comprobante por correo.
+4. La página del donante muestra automáticamente la confirmación.
+
+**Qué significa cada estado de una donación en línea** (los verá en la sección **Exportar**):
+
+| Estado | Significado |
+|---|---|
+| **Pendiente** | Datos recibidos; se está generando el enlace de pago. |
+| **Enlace creado** | El enlace de pago ya existe; se espera que el donante pague. |
+| **Completada** | El pago se recibió y el CDE fue aceptado por Hacienda. Muestra su **Número de control**. |
+| **Vencida** | El donante nunca pagó y el enlace expiró. No requiere ninguna acción. |
+
+En la sección **Exportar** (rol Administrador o superior) verá la tarjeta **Donaciones en línea**
+con las últimas donaciones recibidas por este medio: estado, monto, donante, fecha y, para las
+**Completadas**, el número de control del CDE emitido. Cuando abra un CDE que provino de este
+formulario, en su detalle aparecerá la etiqueta **«Datos del donante verificados en el formulario
+de donación»**, que le indica que los datos del donante fueron capturados y validados por el propio
+donante, no tomados del aviso de pago.
+
+**El enlace de pago fijo sigue funcionando.** Si un donante paga por el enlace estático de siempre
+(sin pasar por /donar), el comprobante se emite igual, tomando los datos disponibles del aviso de
+pago de Wompi. Esas donaciones no aparecen en la lista de **Donaciones en línea** porque no pasaron
+por el formulario.
+
+> **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
+> `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del
+> negocio** y se configuran con `npx wrangler secret put WOMPI_CLIENT_ID --env staging|production`
+> (y lo mismo para `WOMPI_CLIENT_SECRET`). El enlace de pago fijo no los necesita. Si algo en esta
+> sección no funciona, contacte a soporte técnico.
+
+---
+
+## 4. CDE rápido para donaciones en persona
 
 Para una donación recibida en efectivo o fuera de Wompi, use el panel **CDE rápido** que
 aparece arriba en la sección **Documentos** (requiere rol Operador o superior):
@@ -60,7 +104,7 @@ pulse **CDE avanzado** y revise cada paso antes de generar.
 
 ---
 
-## 4. Qué significa cada estado
+## 5. Qué significa cada estado
 
 Cada CDE muestra una etiqueta de color con su estado:
 
@@ -77,7 +121,7 @@ Cada CDE muestra una etiqueta de color con su estado:
 
 ---
 
-## 5. Cuando aparece algo en Fallos
+## 6. Cuando aparece algo en Fallos
 
 La sección **Fallos** lista los CDE con errores o rechazos que requieren su atención.
 Seleccione el documento en la lista y, en el panel de detalle a la derecha:
@@ -95,7 +139,7 @@ indíquele el **Código de generación** del documento.
 
 ---
 
-## 6. Qué significa una Contingencia abierta
+## 7. Qué significa una Contingencia abierta
 
 Una **Contingencia** significa que Hacienda no estuvo disponible y el sistema emitió los CDE
 de forma local para no detener el servicio. **No cunda el pánico:** los comprobantes son
@@ -112,7 +156,7 @@ motivo); en el uso normal esto no es necesario.
 
 ---
 
-## 7. Cómo y cuándo invalidar un CDE
+## 8. Cómo y cuándo invalidar un CDE
 
 Se invalida un CDE cuando la donación no debía comprobarse (por ejemplo, un dato equivocado
 o una operación que se deja sin efecto). Reglas importantes:
@@ -136,7 +180,7 @@ desde el panel.
 
 ---
 
-## 8. Los correos de alerta
+## 9. Los correos de alerta
 
 Si en **Configuración → Correo** hay un **Correo para avisos operativos**, esa dirección
 recibirá automáticamente avisos cuando algo necesite atención:
@@ -153,7 +197,7 @@ escriba el correo en **Correo para avisos operativos** y pulse **Guardar correo 
 
 ---
 
-## 9. Exportar el F960
+## 10. Exportar el F960
 
 Para el informe **F960** y control interno, use la sección **Exportar** (rol Administrador o
 superior):
@@ -167,7 +211,7 @@ Solo se incluyen los CDE **Aceptados** del periodo elegido.
 
 ---
 
-## 10. Revisión mensual (2 minutos)
+## 11. Revisión mensual (2 minutos)
 
 Una vez al mes, dedique un par de minutos a confirmar que todo está en orden:
 
