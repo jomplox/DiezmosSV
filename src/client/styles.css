@@ -2065,6 +2065,10 @@ select,
   margin-bottom: 14px;
 }
 
+.stats.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .metric {
   border: 1px solid #e0e7e9;
   border-left-width: 4px;
@@ -2526,6 +2530,7 @@ pre {
     display: flex;
     max-width: 100%;
     overflow-x: auto;
+    -webkit-mask-image: linear-gradient(to right, black 92%, transparent);
     mask-image: linear-gradient(to right, black 92%, transparent);
   }
 

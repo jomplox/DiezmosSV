@@ -46,6 +46,10 @@ describe("advanced CDE wizard defaults", () => {
     expect(appSource).not.toContain("Dirección de prueba");
     expect(appSource).not.toContain("Donación de prueba");
     expect(appSource).not.toContain("Donante de Prueba");
+    expect(appSource).not.toContain("SIN-DOCUMENTO");
+    expect(appSource).not.toContain('"STAGING"');
+    expect(appSource).not.toContain("DiezmosSV Staging");
+    expect(appSource).not.toContain("donante@example.org");
   });
 
   it("gives descripcion and direccionComplemento helpful placeholder text instead of prefilled values", () => {

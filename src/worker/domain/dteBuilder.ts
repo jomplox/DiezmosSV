@@ -29,7 +29,13 @@ interface AdvancedCdeBuildOptions {
   sequence: number;
   environment?: Ambiente;
   issuedAt?: Date;
-  allowEmptyDonor?: boolean;
+}
+
+interface DirectCdeBuildOptions extends AdvancedCdeBuildOptions {
+  // Salta TODA la validación (presencia de donante, DUI, catálogos y esquema MH)
+  // para producir borradores editables con receptor vacío. Solo puede usarse en
+  // rutas de plantilla/vista previa; NUNCA en una ruta que firme o transmita.
+  templatePreview?: boolean;
 }
 
 export interface DirectCdeInput {
@@ -155,17 +161,17 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   return document;
 }
 
-export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConfig, options: AdvancedCdeBuildOptions): Record<string, unknown> {
+export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConfig, options: DirectCdeBuildOptions): Record<string, unknown> {
   const issuedAt = options.issuedAt ?? new Date();
   const { date, time } = mhDateTime(issuedAt);
   const amount = centsToAmount(amountToCents(input.amount));
   const donorName = cleanNullable(input.donorName);
   const donorDocumentType = cleanNullable(input.donorDocumentType) ?? config.defaultReceptorTipoDocumento;
   const donorDocument = cleanNullable(input.donorDocument);
-  if (!donorName && !options.allowEmptyDonor) {
+  if (!donorName && !options.templatePreview) {
     throw new Error("Ingrese nombre del donante");
   }
-  if (!donorDocument && !options.allowEmptyDonor) {
+  if (!donorDocument && !options.templatePreview) {
     throw new Error("Ingrese documento del donante");
   }
   const ambiente = options.environment ?? "00";
@@ -253,7 +259,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
       { campo: "Canal", etiqueta: "Canal", valor: "Donación offline" }
     ]
   };
-  if (!options.allowEmptyDonor) {
+  if (!options.templatePreview) {
     validateCdeDui(document);
     validateCdeCatalogs(document);
     validateCde(document);

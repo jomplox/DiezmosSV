@@ -105,6 +105,10 @@ const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 function useDialogDismiss(ref: RefObject<HTMLElement | null>, onDismiss: () => void, disabled: boolean) {
+  // El filtro offsetParent de abajo clasifica elementos position:fixed como no
+  // enfocables (offsetParent === null aunque sean visibles); ningún diálogo
+  // actual anida hijos fixed. El enfoque inicial asume que ningún hijo trae su
+  // propio autofocus: los efectos de hijos corren antes y este lo pisaría.
   useEffect(() => {
     ref.current?.focus();
   }, [ref]);
@@ -2936,7 +2940,7 @@ function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed
     return (
       <>
         <p className="stats-caption">Totales de la vista actual.</p>
-        <div className="stats">{fallidos}</div>
+        <div className="stats single">{fallidos}</div>
       </>
     );
   }
@@ -3536,15 +3540,18 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+const VIEW_SUBTITLES: Record<View, string> = {
+  documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
+  failures: "CDE con errores o rechazos que requieren su atención.",
+  contingency: "Contingencias ante el Ministerio de Hacienda: eventos, CDE pendientes y plazos.",
+  audit: "Historial de todas las acciones realizadas en el panel.",
+  users: "Cree cuentas y asigne roles de acceso al panel.",
+  credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo.",
+  exports: "Exporte los CDE aceptados para el F960 y control interno."
+};
+
 export function viewSubtitle(view: View): string {
-  if (view === "documents") return "Emita, envíe por correo y administre los comprobantes de donación (CDE).";
-  if (view === "failures") return "CDE con errores o rechazos que requieren su atención.";
-  if (view === "contingency") return "Contingencias ante el Ministerio de Hacienda: eventos, CDE pendientes y plazos.";
-  if (view === "audit") return "Historial de todas las acciones realizadas en el panel.";
-  if (view === "users") return "Cree cuentas y asigne roles de acceso al panel.";
-  if (view === "credentials") return "Credenciales del Ministerio de Hacienda, Wompi y correo.";
-  if (view === "exports") return "Exporte los CDE aceptados para el F960 y control interno.";
-  return "Operaciones administrativas y trazabilidad.";
+  return VIEW_SUBTITLES[view];
 }
 
 export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
@@ -3715,12 +3722,12 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
   return {
     donorName: "",
     donorTipoDocumento: "13",
-    donorDocument: "SIN-DOCUMENTO",
+    donorDocument: "",
     donorNrc: "",
     donorCodActividad: "",
     donorDescActividad: "",
-    donorEmail: "donante@example.org",
-    donorPhone: "00000000",
+    donorEmail: "",
+    donorPhone: "",
     codDomiciliado: "1",
     codPais: "SV",
     departamento: "06",
@@ -3737,13 +3744,13 @@ function defaultAdvancedCdeForm(): AdvancedCdeFormInput {
     valorTotal: "1.00",
     totalLetras: "",
     pagoCodigo: "01",
-    pagoReferencia: "STAGING",
+    pagoReferencia: "",
     documentoCodigo: "1",
     documentoDesc: "Referencia Wompi",
-    documentoDetalle: "DTE avanzado",
+    documentoDetalle: "",
     apendiceCampo: "Aplicativo",
     apendiceEtiqueta: "Aplicativo",
-    apendiceValor: "DiezmosSV Staging"
+    apendiceValor: ""
   };
 }
 
@@ -3810,7 +3817,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
   draft.receptor = {
     ...receptor,
     tipoDocumento: cleanText(form.donorTipoDocumento) || "13",
-    numDocumento: cleanText(form.donorDocument) || "SIN-DOCUMENTO",
+    numDocumento: cleanText(form.donorDocument),
     nrc: nullableText(form.donorNrc),
     nombre: cleanText(form.donorName),
     codActividad: nullableText(form.donorCodActividad),
@@ -3851,7 +3858,7 @@ function advancedDraftFromForm(template: Record<string, unknown> | null, form: A
         ...pago,
         codigo: cleanText(form.pagoCodigo) || "01",
         montoPago: valorTotal,
-        referencia: cleanText(form.pagoReferencia) || "STAGING"
+        referencia: cleanText(form.pagoReferencia)
       }
     ]
   };

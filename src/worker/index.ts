@@ -333,7 +333,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       const draft = buildDirectCdeDocument(
         { ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) },
         getEmisorConfig(env),
-        { sequence: 1, environment, allowEmptyDonor: true }
+        { sequence: 1, environment, templatePreview: true }
       );
       return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
     } catch (error) {
@@ -620,6 +620,14 @@ function normalizeEmail(value: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
+function donorEmailField(input: DirectCdeInput): { donorEmail?: string } | Response {
+  const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
+  if (donorEmail && !normalizeEmail(donorEmail)) {
+    return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });
+  }
+  return donorEmail ? { donorEmail } : {};
+}
+
 function directDonorFields(input: DirectCdeInput): { donorName: string; donorDocument: string; donorEmail?: string } | Response {
   const donorName = input.donorName?.trim();
   if (!donorName) {
@@ -629,24 +637,22 @@ function directDonorFields(input: DirectCdeInput): { donorName: string; donorDoc
   if (!donorDocument) {
     return jsonResponse({ error: "missing_donor_document" }, { status: 400 });
   }
-  const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
-  if (donorEmail && !normalizeEmail(donorEmail)) {
-    return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });
+  const email = donorEmailField(input);
+  if (email instanceof Response) {
+    return email;
   }
-  return { donorName, donorDocument, ...(donorEmail ? { donorEmail } : {}) };
+  return { donorName, donorDocument, ...email };
 }
 
 // Unlike directDonorFields (shared with quick DTE creation), the advanced-template preview
 // only builds a draft for the wizard to edit further, so an empty donor name/document is
 // allowed here. Final generation (POST /api/test/dte/advanced) still validates the full MH schema.
 function templateDonorFields(input: DirectCdeInput): { donorName: string; donorDocument: string; donorEmail?: string } | Response {
-  const donorName = input.donorName?.trim() ?? "";
-  const donorDocument = input.donorDocument?.trim() ?? "";
-  const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
-  if (donorEmail && !normalizeEmail(donorEmail)) {
-    return jsonResponse({ error: "invalid_donor_email", message: "Ingrese un correo válido" }, { status: 400 });
+  const email = donorEmailField(input);
+  if (email instanceof Response) {
+    return email;
   }
-  return { donorName, donorDocument, ...(donorEmail ? { donorEmail } : {}) };
+  return { donorName: input.donorName?.trim() ?? "", donorDocument: input.donorDocument?.trim() ?? "", ...email };
 }
 
 function advancedTemplateAmount(value: unknown): string | number {

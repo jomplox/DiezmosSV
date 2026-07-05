@@ -1688,6 +1688,48 @@ describe("advanced CDE generation", () => {
     expect(queued).toHaveLength(0);
   });
 
+  it("rejects final generation of a template draft whose receptor was left empty", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    const baseEnv = {
+      APP_ENV: "staging",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+    };
+
+    const templateResponse = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced-template", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ amount: "", donorName: "", donorDocumentType: "13", donorDocument: "", donorEmail: "", donorPhone: "" })
+      }),
+      env(db, baseEnv)
+    );
+    expect(templateResponse.status).toBe(200);
+    const { draft: emptyReceptorDraft } = (await templateResponse.json()) as { draft: Record<string, unknown> };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/test/dte/advanced", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ draft: emptyReceptorDraft })
+      }),
+      env(db, baseEnv)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_advanced_cde" });
+    expect(db.documents).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+  });
+
   it("rejects an advanced CDE draft with an invalid DUI check digit", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];

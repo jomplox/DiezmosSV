@@ -12,11 +12,11 @@ describe("visual consistency pack", () => {
     for (const match of monthHeaderMatches) {
       expect(match).toBe('<th className="numeric">Monto</th>');
     }
-    expect(stylesSource).toContain("td.numeric, th.numeric {\n  text-align: right;\n}");
+    expect(stylesSource).toMatch(/td\.numeric,\s*th\.numeric\s*\{\s*text-align:\s*right;\s*\}/);
   });
 
   it("gives table headers tighter letter spacing while keeping uppercase and color", () => {
-    const thRuleMatch = stylesSource.match(/th \{[^}]*\}/);
+    const thRuleMatch = stylesSource.match(/^th \{[^}]*\}/m);
     expect(thRuleMatch).not.toBeNull();
     const thRule = thRuleMatch?.[0] ?? "";
     expect(thRule).toContain("font-size: 12px;");
@@ -50,6 +50,6 @@ describe("visual consistency pack", () => {
   it("renames the credentials nav label to Configuración while keeping the subtitle and id", () => {
     expect(appSource).toContain('{ id: "credentials", label: "Configuración", icon: Settings, minRole: "OWNER" }');
     expect(appSource).not.toMatch(/label: "Credenciales", icon: Settings/);
-    expect(appSource).toContain('if (view === "credentials") return "Credenciales del Ministerio de Hacienda, Wompi y correo.";');
+    expect(appSource).toContain('credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo."');
   });
 });
