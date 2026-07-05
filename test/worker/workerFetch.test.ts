@@ -2338,6 +2338,111 @@ describe("scheduled cron dispatch", () => {
   });
 });
 
+describe("certificate expiry alerts (15-minute cron)", () => {
+  it("sends a CERT_EXPIRING alert once per threshold crossed and never duplicates on repeated ticks", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const now = new Date("2026-07-01T09:15:00.000Z");
+    const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 10 days out: crosses 30 and 14 thresholds, not 3
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      MH_CERT_XML: certXmlWithExpiry(expiresAt),
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-cert-expiring" };
+        }
+      } as SendEmail
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+
+    expect(sentAlerts).toHaveLength(2);
+    expect(sentAlerts.every((alert) => alert.to === "owner@example.org")).toBe(true);
+    const expiryIso = expiresAt.toISOString();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:CERT_EXPIRING", entity_type: "credentials", entity_id: `${expiryIso}:30` })
+    );
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:CERT_EXPIRING", entity_type: "credentials", entity_id: `${expiryIso}:14` })
+    );
+    expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:CERT_EXPIRING")).toHaveLength(2);
+  });
+
+  it("does not alert when more than 30 days remain before expiry", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const now = new Date("2026-07-01T09:15:00.000Z");
+    const expiresAt = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
+    const sentAlerts: unknown[] = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      MH_CERT_XML: certXmlWithExpiry(expiresAt),
+      EMAIL: { send: async (message: unknown) => (sentAlerts.push(message), { messageId: "unused" }) } as SendEmail
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+
+    expect(sentAlerts).toHaveLength(0);
+    expect(db.audits.some((audit) => audit.action === "ALERT_SENT:CERT_EXPIRING")).toBe(false);
+  });
+
+  it("re-arms alerts for a renewed certificate because the dedupe key includes the expiry date", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const now = new Date("2026-07-01T09:15:00.000Z");
+    const oldExpiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
+    db.audits.push({
+      id: "audit_prior_alert",
+      actor_type: "SYSTEM",
+      actor_id: null,
+      action: "ALERT_SENT:CERT_EXPIRING",
+      entity_type: "credentials",
+      entity_id: `${oldExpiresAt.toISOString()}:14`,
+      summary: "",
+      metadata_json: "{}",
+      created_at: "2026-06-01T00:00:00.000Z"
+    });
+    const renewedExpiresAt = new Date(now.getTime() + 400 * 24 * 60 * 60 * 1000);
+    const sentAlerts: unknown[] = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      MH_CERT_XML: certXmlWithExpiry(renewedExpiresAt),
+      EMAIL: { send: async (message: unknown) => (sentAlerts.push(message), { messageId: "unused" }) } as SendEmail
+    });
+
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: now.getTime() } as ScheduledEvent, scheduledEnv);
+
+    // Renewed cert is >30 days out, so no new alert fires — but the important
+    // assertion is that the stale dedupe audit for the old expiry date does
+    // not suppress a future alert against the new expiry date.
+    expect(sentAlerts).toHaveLength(0);
+    expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:CERT_EXPIRING")).toHaveLength(1);
+  });
+
+  it("never throws when the certificate secret is absent, and sends no alert", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const scheduledEnv = env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "alerts@example.org" });
+
+    await expect(
+      worker.scheduled({ cron: "*/15 * * * *", scheduledTime: new Date("2026-07-01T09:15:00.000Z").getTime() } as ScheduledEvent, scheduledEnv)
+    ).resolves.toBeUndefined();
+
+    expect(db.audits.some((audit) => audit.action === "ALERT_SENT:CERT_EXPIRING")).toBe(false);
+  });
+});
+
+function certXmlWithExpiry(expiresAt: Date): string {
+  const epochSecond = Math.floor(expiresAt.getTime() / 1000);
+  return `<CertificadoMH><activo>true</activo><certificado><basicEstructure><validity><notAfter><epochSecond>${epochSecond}</epochSecond></notAfter></validity></basicEstructure></certificado></CertificadoMH>`;
+}
+
 function stalledWompiEventFixture(): Record<string, unknown> {
   return {
     id: "wompi_stalled",

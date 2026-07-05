@@ -166,6 +166,7 @@ export interface CredentialStatus {
     writerMissing: string[];
   };
   groups: Record<string, CredentialStatusGroup>;
+  certificateExpiresAt: string | null;
 }
 
 export interface EmissionEnvironmentState {

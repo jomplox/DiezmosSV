@@ -1,3 +1,5 @@
+import { certificateExpiry } from "../domain/signer";
+import { getMhCertificateXml } from "../config";
 import type { Env } from "../types";
 
 type CredentialEnvironment = "test" | "production";
@@ -44,6 +46,7 @@ export interface CredentialStatus {
     wompi: SecretStatusGroup;
     email: SecretStatusGroup;
   };
+  certificateExpiresAt: string | null;
 }
 
 interface SecretText {
@@ -103,8 +106,19 @@ export function credentialStatus(env: Env): CredentialStatus {
       writerConfigured: writerMissing.length === 0,
       writerMissing
     },
-    groups: { mhTest, mhProduction, signer, issuer, wompi, email }
+    groups: { mhTest, mhProduction, signer, issuer, wompi, email },
+    certificateExpiresAt: readCertificateExpiresAt(env)
   };
+}
+
+// Absent/misconfigured cert secrets must never break the credentials status
+// response: getMhCertificateXml throws when MH_CERT_XML(_PART_*) are missing.
+function readCertificateExpiresAt(env: Env): string | null {
+  try {
+    return certificateExpiry(getMhCertificateXml(env)).expiresAt;
+  } catch {
+    return null;
+  }
 }
 
 export function buildCredentialSecretPatch(input: CredentialUpdateInput): SecretPatch {

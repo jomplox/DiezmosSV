@@ -70,6 +70,26 @@ describe("credential status", () => {
     expect(JSON.stringify(status)).not.toContain("wompi-secret");
     expect(JSON.stringify(status)).not.toContain("email-key");
   });
+
+  it("exposes the signer certificate expiry when the certificate carries a validity block", () => {
+    const notAfterSeconds = 1794097629;
+    const certXml = `<CertificadoMH><activo>true</activo><certificado><basicEstructure><validity><notAfter><epochSecond>${notAfterSeconds}</epochSecond></notAfter></validity></basicEstructure></certificado></CertificadoMH>`;
+    const status = credentialStatus(env({ MH_CERT_XML: certXml }));
+
+    expect(status.certificateExpiresAt).toBe(new Date(notAfterSeconds * 1000).toISOString());
+  });
+
+  it("reports a null certificate expiry without throwing when no certificate secret is configured", () => {
+    const status = credentialStatus(env({}));
+
+    expect(status.certificateExpiresAt).toBeNull();
+  });
+
+  it("reports a null certificate expiry without throwing when the configured certificate has no validity block", () => {
+    const status = credentialStatus(env({ MH_CERT_XML: "<CertificadoMH><activo>true</activo></CertificadoMH>" }));
+
+    expect(status.certificateExpiresAt).toBeNull();
+  });
 });
 
 describe("credential secret patch", () => {

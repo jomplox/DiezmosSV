@@ -1,6 +1,6 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
-import { signMhDocument } from "./domain/signer";
+import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
@@ -21,6 +21,7 @@ import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
 const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
+const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -84,6 +85,11 @@ export default {
     } catch (error) {
       console.error("Stalled Wompi event sweep failed", error);
     }
+    try {
+      await checkCertificateExpiry(env, new Repository(env.DB));
+    } catch (error) {
+      console.error("Certificate expiry check failed", error);
+    }
   }
 };
 
@@ -109,6 +115,38 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
       entityId
     });
     message.ack();
+  }
+}
+
+// Runs on every 15-minute cron tick. certificateExpiry never throws (an
+// unreadable/absent MH_CERT_XML yields expiresAt: null), so this simply
+// no-ops when there is nothing to check. Sends at most one alert per
+// threshold crossed (30/14/3 days), deduped by sendOperationalAlert's
+// audit-based mechanism keyed on `${expiresAt}:${threshold}` so a renewed
+// certificate (new expiresAt) re-arms every threshold.
+async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void> {
+  let certXml: string;
+  try {
+    certXml = getMhCertificateXml(env);
+  } catch {
+    return;
+  }
+  const { expiresAt } = certificateExpiry(certXml);
+  if (!expiresAt) {
+    return;
+  }
+  const remainingDays = Math.floor((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  for (const threshold of CERT_EXPIRY_ALERT_THRESHOLD_DAYS) {
+    if (remainingDays > threshold) {
+      continue;
+    }
+    await sendOperationalAlert(env, repo, {
+      kind: "CERT_EXPIRING",
+      title: "Certificado del firmador MH por vencer",
+      detail: `El certificado del firmador del Ministerio de Hacienda vence el ${expiresAt}. Quedan ${remainingDays} día(s).`,
+      entityType: "credentials",
+      entityId: `${expiresAt}:${threshold}`
+    });
   }
 }
 

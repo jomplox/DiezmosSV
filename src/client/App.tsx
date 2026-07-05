@@ -38,7 +38,7 @@ import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
 import { openNativeDatePicker } from "./datePicker";
-import { credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
+import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
@@ -1590,6 +1590,7 @@ function CredentialsPanel({
   const writerMissing = status?.target.writerMissing ?? [];
   const writerNeedsOnlyToken = writerMissing.length === 1 && writerMissing[0] === "CLOUDFLARE_API_TOKEN";
   const signerConfigured = credentialConfigured(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2");
+  const certificateExpiry = certificateExpiryStatus(status?.certificateExpiresAt ?? null);
   const [certificateFileError, setCertificateFileError] = useState("");
   const [webhookCopied, setWebhookCopied] = useState(false);
   const [writerCommandCopied, setWriterCommandCopied] = useState(false);
@@ -1803,6 +1804,12 @@ function CredentialsPanel({
                     <div className="credential-section-title span-2">
                       <h3>Firmador del Ministerio de Hacienda</h3>
                       <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
+                    </div>
+                    <div className={`legal-box ${certificateExpiry.tone} span-2`}>
+                      <ShieldCheck size={17} />
+                      <div>
+                        <strong>{certificateExpiry.label}</strong>
+                      </div>
                     </div>
                     <div className="credential-field-block span-2">
                       <CredentialFieldLabel label="Certificado firmador del Ministerio de Hacienda (.crt/.xml)" configured={signerConfigured} />
