@@ -14,7 +14,7 @@ import {
   isCat026DonationTypeCode,
   isCat032DomicileCode
 } from "../../shared/catalogs";
-import { assertValidDui, isDuiDocumentType } from "../../shared/dui";
+import { assertValidDui, cleanDui, formatDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
 
@@ -76,7 +76,14 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
   const name = donorName(payload);
   const donorEmail = payload.Cliente?.EMail?.trim() || null;
   const donorPhone = cleanNullable(payload.Cliente?.Celular);
-  const donorDocument = cleanNullable(payload.Cliente?.DocumentoIdentidad) ?? "SIN-DOCUMENTO";
+  // Wompi payment links only carry a free-form DocumentoIdentidad (often none at
+  // all): declare it as DUI ("13") solo when it has the 9 digits a DUI requires —
+  // the check-digit guard still rejects typos — and as Otro (CAT-022 "37") in
+  // every other case, so donations without documents remain emittable.
+  const donorDocumentRaw = cleanNullable(payload.Cliente?.DocumentoIdentidad);
+  const donorIsDui = donorDocumentRaw !== null && cleanDui(donorDocumentRaw).length === 9;
+  const donorDocumentType = donorIsDui ? "13" : "37";
+  const donorDocument = donorIsDui ? formatDui(donorDocumentRaw) : donorDocumentRaw ?? "SIN-DOCUMENTO";
   const ambiente = options.environment ?? ambienteFromWompi(payload);
   const document = {
     identificacion: {
@@ -106,7 +113,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       codPuntoVenta: config.codPuntoVenta
     },
     receptor: {
-      tipoDocumento: config.defaultReceptorTipoDocumento,
+      tipoDocumento: donorDocumentType,
       numDocumento: donorDocument,
       nrc: null,
       nombre: name,
@@ -210,14 +217,12 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
       nombre: donorName ?? "",
       codActividad: null,
       descActividad: null,
-      direccion: address
-        ? {
-            departamento: config.direccion.departamento,
-            municipio: config.direccion.municipio,
-            distrito: config.direccion.distrito,
-            complemento: address
-          }
-        : null,
+      direccion: {
+        departamento: config.direccion.departamento,
+        municipio: config.direccion.municipio,
+        distrito: config.direccion.distrito,
+        complemento: address ?? RECEPTOR_ADDRESS_FALLBACK
+      },
       telefono: cleanNullable(input.donorPhone),
       correo: cleanNullable(input.donorEmail),
       codDomiciliado: 1,
@@ -415,16 +420,18 @@ export function buildContingenciaEvent(config: EmisorConfig, input: ContingencyI
   return document;
 }
 
-function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig["direccion"] | null {
-  const complement = cleanNullable(payload.Cliente?.Direccion);
-  if (!complement) {
-    return null;
-  }
+// MH rejects receptor.direccion null bajo la Normativa de Cumplimiento
+// (codigoMsg 096: "Campo #/receptor/direccion contiene un valor inválido"),
+// so a donor without an address gets the emisor's geography with an explicit
+// "not provided" complemento instead of null.
+const RECEPTOR_ADDRESS_FALLBACK = "No proporcionada por el donante";
+
+function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig["direccion"] {
   return {
     departamento: config.direccion.departamento,
     municipio: config.direccion.municipio,
     distrito: config.direccion.distrito,
-    complemento: complement
+    complemento: cleanNullable(payload.Cliente?.Direccion) ?? RECEPTOR_ADDRESS_FALLBACK
   };
 }
 

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { buildAdvancedCdeDocument, buildCdeDocument, buildContingenciaEvent, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildCdeDocument, buildContingenciaEvent, buildDirectCdeDocument, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
 import type { DteDocumentRecord, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
+
+const FALLBACK_COMPLEMENTO = "No proporcionada por el donante";
 
 describe("DTE builders", () => {
   it("builds a schema-valid CDE from the Wompi webhook sample", () => {
@@ -17,6 +19,68 @@ describe("DTE builders", () => {
     expect(document.otrosDocumentos[0].codDocAsociado).toBe(1);
     expect(document.receptor.nombre).toBe("Donante Demo");
     expect(document.resumen.valorTotal).toBe(10);
+  });
+
+  it("builds a CDE for real payment-link payloads without document or address", () => {
+    const cliente: Record<string, unknown> = { ...wompiSample.Cliente };
+    delete cliente.DocumentoIdentidad;
+    delete cliente.Direccion;
+    const document = buildCdeDocument({ ...wompiSample, Cliente: cliente } as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+    }) as Record<string, any>;
+
+    expect(document.receptor.tipoDocumento).toBe("37");
+    expect(document.receptor.numDocumento).toBe("SIN-DOCUMENTO");
+    expect(document.receptor.direccion).toEqual({
+      departamento: emisorConfig.direccion.departamento,
+      municipio: emisorConfig.direccion.municipio,
+      distrito: emisorConfig.direccion.distrito,
+      complemento: FALLBACK_COMPLEMENTO
+    });
+  });
+
+  it("formats unhyphenated DUIs canonically in the CDE receptor", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "100000027" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+
+    expect(document.receptor.tipoDocumento).toBe("13");
+    expect(document.receptor.numDocumento).toBe("10000002-7");
+  });
+
+  it("classifies non-DUI donor documents as Otro (CAT-022 37)", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "P-A123456" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+
+    expect(document.receptor.tipoDocumento).toBe("37");
+    expect(document.receptor.numDocumento).toBe("P-A123456");
+  });
+
+  it("falls back to the emisor geography when the quick CDE has no donor address", () => {
+    const document = buildDirectCdeDocument(
+      { donorName: "Donante Directo", donorDocument: "SIN-DOCUMENTO", donorDocumentType: "37", amount: "5.00" },
+      emisorConfig,
+      { sequence: 3, environment: "00", issuedAt: new Date("2026-06-02T14:05:20.742-06:00") }
+    ) as Record<string, any>;
+
+    expect(document.receptor.direccion).toEqual({
+      departamento: emisorConfig.direccion.departamento,
+      municipio: emisorConfig.direccion.municipio,
+      distrito: emisorConfig.direccion.distrito,
+      complemento: FALLBACK_COMPLEMENTO
+    });
   });
 
   it("accepts valid DUI check-digit vectors in CDE receptor data", () => {
