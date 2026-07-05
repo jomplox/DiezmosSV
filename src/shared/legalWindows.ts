@@ -49,6 +49,17 @@ export function formatElSalvadorDateTime(iso: string): string {
   return `${value("day")}/${value("month")}/${value("year")}, ${value("hour")}:${value("minute")}`;
 }
 
+export function formatElSalvadorDate(iso: string): string {
+  const parts = new Intl.DateTimeFormat("es-SV", {
+    timeZone: EL_SALVADOR_TIME_ZONE,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).formatToParts(new Date(iso));
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("day")}/${value("month")}/${value("year")}`;
+}
+
 function endOfElSalvadorDayIso(date: LocalDateParts): string {
   return new Date(Date.UTC(date.year, date.month - 1, date.day, 23 + EL_SALVADOR_UTC_OFFSET_HOURS, 59, 59)).toISOString();
 }

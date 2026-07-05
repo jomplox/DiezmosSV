@@ -72,6 +72,7 @@ import {
   normalizeCat020CountryCode
 } from "../shared/catalogs";
 import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
+import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
@@ -2854,7 +2855,7 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
               <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
               <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
               <td className="mono">{document.sello_recibido ? shortCode(document.sello_recibido) : "—"}</td>
-              <td className="numeric">{new Date(document.created_at).toLocaleDateString()}</td>
+              <td className="numeric">{formatElSalvadorDate(document.created_at)}</td>
             </tr>
           ))}
         </tbody>
@@ -3099,7 +3100,7 @@ function AuditTable({ rows }: { rows: AuditRow[] }) {
         <thead><tr><th>Acción</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={row.id}><td>{auditActionLabel(row.action)}</td><td>{entityLabel(row.entity_type)}</td><td>{auditSummaryLabel(row.summary)}</td><td className="numeric">{new Date(row.created_at).toLocaleString()}</td></tr>
+            <tr key={row.id}><td>{auditActionLabel(row.action)}</td><td>{entityLabel(row.entity_type)}</td><td>{auditSummaryLabel(row.summary)}</td><td className="numeric">{formatElSalvadorDateTime(row.created_at)}</td></tr>
           ))}
         </tbody>
       </table>
