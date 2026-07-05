@@ -88,7 +88,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "audit", label: "Auditoría", icon: History },
   { id: "users", label: "Usuarios", icon: Users },
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
-  { id: "credentials", label: "Credenciales", icon: Settings, minRole: "OWNER" }
+  { id: "credentials", label: "Configuración", icon: Settings, minRole: "OWNER" }
 ];
 
 const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof FileText> = {
@@ -1143,7 +1143,7 @@ function ContingencyPanel({
                   <th>Estado</th>
                   <th>Código</th>
                   <th>Donante</th>
-                  <th>Monto</th>
+                  <th className="numeric">Monto</th>
                   <th>Fecha</th>
                 </tr>
               </thead>
@@ -1482,7 +1482,7 @@ function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
             <th>Fecha</th>
             <th>Donante</th>
             <th>Documento</th>
-            <th>Monto</th>
+            <th className="numeric">Monto</th>
             <th>Periodo</th>
             <th>Código de generación</th>
             <th>Sello</th>
@@ -2930,20 +2930,25 @@ function AuthScreen({
 
 function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed?: boolean }) {
   const counts = countByStatus(documents);
+  const fallidos = <Metric label="Fallidos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />;
   if (onlyFailed) {
     return (
-      <div className="stats">
-        <Metric label="Fallidos en esta vista" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
-      </div>
+      <>
+        <p className="stats-caption">Totales de la vista actual.</p>
+        <div className="stats">{fallidos}</div>
+      </>
     );
   }
   return (
-    <div className="stats">
-      <Metric label="Aceptados en esta vista" value={counts.ACCEPTED ?? 0} tone="ok" />
-      <Metric label="Fallidos en esta vista" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />
-      <Metric label="Contingencia en esta vista" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
-      <Metric label="Invalidados en esta vista" value={counts.INVALIDATED ?? 0} tone="neutral" />
-    </div>
+    <>
+      <p className="stats-caption">Totales de la vista actual.</p>
+      <div className="stats">
+        <Metric label="Aceptados" value={counts.ACCEPTED ?? 0} tone="ok" />
+        {fallidos}
+        <Metric label="Contingencia" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
+        <Metric label="Invalidados" value={counts.INVALIDATED ?? 0} tone="neutral" />
+      </div>
+    </>
   );
 }
 
@@ -2965,7 +2970,7 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
             <th>Estado</th>
             <th>Código</th>
             <th>Donante</th>
-            <th>Monto</th>
+            <th className="numeric">Monto</th>
             <th>Sello</th>
             <th>Fecha</th>
           </tr>
@@ -3108,11 +3113,14 @@ function DetailPanel({
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
-      <div className="json-preview-head">
-        <strong>JSON DTE</strong>
-        <span>Vista completa del documento emitido.</span>
-      </div>
-      <pre>{JSON.stringify(plain, null, 2)}</pre>
+      <details className="json-details">
+        <summary>Ver JSON completo</summary>
+        <div className="json-preview-head">
+          <strong>JSON DTE</strong>
+          <span>Vista completa del documento emitido.</span>
+        </div>
+        <pre>{JSON.stringify(plain, null, 2)}</pre>
+      </details>
     </aside>
   );
 }

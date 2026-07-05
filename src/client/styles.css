@@ -2052,6 +2052,12 @@ select,
   padding: 0;
 }
 
+.stats-caption {
+  font-size: 12px;
+  color: #61737a;
+  margin: 0 0 6px;
+}
+
 .stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2108,7 +2114,8 @@ table {
 
 th {
   color: #61737a;
-  font-size: 11px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
   text-align: left;
   padding: 11px 10px;
@@ -2140,6 +2147,10 @@ tbody tr.selected {
 .numeric {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+td.numeric, th.numeric {
+  text-align: right;
 }
 
 .stacked-cell {
@@ -2338,6 +2349,16 @@ dd {
 .json-preview-head span {
   color: #61737a;
   font-size: 12px;
+}
+
+.json-details summary {
+  color: #61737a;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.json-details .json-preview-head {
+  margin-top: 8px;
 }
 
 .danger {
