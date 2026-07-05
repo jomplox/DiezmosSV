@@ -3,7 +3,7 @@ import { buildCdeDocument, buildContingenciaEvent, cdeDocumentSummary } from "..
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { Repository } from "../storage/repository";
-import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, WompiWebhook } from "../types";
+import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
 import { EmailService } from "./email";
@@ -157,6 +157,59 @@ export class IssuancePipeline {
       });
       throw error;
     }
+  }
+
+  // A REJECTED verdict is MH's judgment on the document CONTENT: retransmitting
+  // the same signed JWS can only be rejected identically. Retrying a rejected
+  // Wompi CDE therefore rebuilds it from the original webhook (fresh
+  // codigoGeneracion and numeroControl, re-signed) before transmitting again.
+  async rebuildRejectedWompiDocument(record: DteDocumentRecord): Promise<MhResponse> {
+    if (!record.wompi_event_id) {
+      throw new Error("El documento no proviene de un evento Wompi");
+    }
+    const event = await this.repo.getWompiEventById(record.wompi_event_id);
+    if (!event) {
+      throw new Error(`Evento Wompi ${record.wompi_event_id} no encontrado`);
+    }
+    const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
+    const config = getEmisorConfig(this.env);
+    const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
+    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment });
+    const identifiers = extractCdeIdentifiers(rebuilt);
+    const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+    await this.repo.replaceDocumentPayload(record.id, {
+      codigoGeneracion: identifiers.codigoGeneracion,
+      numeroControl: identifiers.numeroControl,
+      plainJson: rebuilt,
+      signedJws,
+      status: "SIGNED"
+    });
+    const mhResult = await this.mh.transmitDte({
+      ambiente: record.environment,
+      version: 2,
+      tipoDte: "15",
+      codigoGeneracion: identifiers.codigoGeneracion,
+      signedJws
+    });
+    await this.repo.updateDocumentMhResult(record.id, {
+      status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
+      sello: mhResult.selloRecibido,
+      mhEstado: mhResult.estado,
+      observaciones: mhResult.observaciones,
+      acceptedAt: mhResult.accepted ? nowIso() : null
+    });
+    const updated = (await this.repo.getDteDocument(record.id)) ?? record;
+    await this.repo.createAudit({
+      action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
+      entityType: "dte_document",
+      entityId: updated.id,
+      summary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
+      metadata: mhResult.raw
+    });
+    if (mhResult.accepted) {
+      await this.emailReceipt(updated);
+    }
+    return mhResult;
   }
 
   async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
