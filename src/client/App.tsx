@@ -37,6 +37,25 @@ import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstr
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
+import {
+  DONAR_AMOUNT_CHIPS,
+  DONAR_COMPLETED_MESSAGE,
+  DONAR_FALLBACK_MESSAGE,
+  DONAR_INTENT_PATH,
+  DONAR_POLL_INTERVAL_MS,
+  DONAR_POLL_TIMEOUT_MS,
+  DONAR_SCRIPT_TIMEOUT_MS,
+  DONAR_THANK_YOU_BODY,
+  DONAR_THANK_YOU_TITLE,
+  DONAR_WOMPI_SCRIPT_URL,
+  donationFormValidationMessage,
+  graciasDisplayFromSearch,
+  isDonarGraciasPath,
+  isDonarPath,
+  widgetUrlFrom,
+  type DonationFormInput,
+  type DonorDocumentType
+} from "./donation";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
@@ -71,7 +90,7 @@ import {
   normalizeCatalogCode,
   normalizeCat020CountryCode
 } from "../shared/catalogs";
-import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
+import { cleanDui, formatDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
@@ -155,6 +174,18 @@ function useDialogDismiss(ref: RefObject<HTMLElement | null>, onDismiss: () => v
 }
 
 export function App() {
+  // Public donor-checkout routes render as standalone pages WITHOUT a session and
+  // never trigger the auth bootstrap/login flow. Branch on pathname before any of
+  // App's own hooks run so the hook order stays stable for a given URL (the page
+  // never transitions between these routes and the admin shell without a reload).
+  const pathname = window.location.pathname;
+  if (isDonarPath(pathname)) {
+    return <DonarPage />;
+  }
+  if (isDonarGraciasPath(pathname)) {
+    return <DonarGraciasPage />;
+  }
+
   const [token, setToken] = useState(() => localStorage.getItem("diezmos_token") ?? "");
   const [user, setUser] = useState<User | null>(() => {
     const stored = localStorage.getItem("diezmos_user");
@@ -2987,6 +3018,359 @@ function CatalogSelect({
 function catalogSelectValue(options: readonly CatalogOption[], value: unknown): string {
   const code = normalizeCatalogCode(value);
   return options.some((option) => option.code === code) ? code : "";
+}
+
+const emptyDonationForm: DonationFormInput = {
+  amount: "",
+  donorName: "",
+  donorDocumentType: "13",
+  donorDocument: "",
+  donorEmail: "",
+  donorPhone: "",
+  departamento: "",
+  municipio: "",
+  distrito: "",
+  complemento: ""
+};
+
+type DonarStage = "form" | "widget" | "thanks" | "closed";
+
+interface DonarIntent {
+  intentId: string;
+  urlEnlace: string;
+  urlEnlaceLargo: string;
+}
+
+// Public donation form + Wompi widget handoff. Renders WITHOUT a session.
+function DonarPage() {
+  const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [stage, setStage] = useState<DonarStage>("form");
+  const [intent, setIntent] = useState<DonarIntent | null>(null);
+  const widgetHostRef = useRef<HTMLDivElement | null>(null);
+
+  const update = (patch: Partial<DonationFormInput>) => setForm((current) => ({ ...current, ...patch }));
+
+  // Changing departamento resets the dependent selects.
+  const setDepartamento = (departamento: string) => update({ departamento, municipio: "", distrito: "" });
+
+  const municipalityOptions = getCat013Municipalities(form.departamento);
+  const districtOptions = getCat008Districts(form.departamento);
+
+  // Load the Wompi widget script only while this view is mounted (never on admin
+  // views). Injected once; the widget div is rendered after intent success.
+  useEffect(() => {
+    if (document.querySelector(`script[src="${DONAR_WOMPI_SCRIPT_URL}"]`)) {
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = DONAR_WOMPI_SCRIPT_URL;
+    script.async = true;
+    document.head.appendChild(script);
+  }, []);
+
+  // Listen for the thank-you page's postMessage (fired when it runs inside the
+  // widget iframe modal) so we can swap to the thank-you state directly.
+  useEffect(() => {
+    function onMessage(event: MessageEvent) {
+      if (event.data === DONAR_COMPLETED_MESSAGE) {
+        setStage("thanks");
+      }
+    }
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, []);
+
+  // Once an intent exists, render the widget button. If the script/widget does not
+  // render within a short timeout, fall back to the full-page hosted flow.
+  useEffect(() => {
+    if (stage !== "widget" || !intent) {
+      return;
+    }
+    const host = widgetHostRef.current;
+    if (host) {
+      host.innerHTML = "";
+      const widget = document.createElement("div");
+      widget.className = "wompi_button_widget";
+      widget.setAttribute("data-url-pago", widgetUrlFrom(intent.urlEnlaceLargo));
+      widget.setAttribute("data-render", "widget");
+      widget.setAttribute("data-color-fondo", "#007c75");
+      widget.setAttribute("data-color-texto", "#ffffff");
+      widget.setAttribute("data-cubrir-ancho", "true");
+      host.appendChild(widget);
+    }
+    const fallback = window.setTimeout(() => {
+      const rendered = host?.querySelector("iframe, a, button");
+      if (!rendered) {
+        // Script failed to load or never enhanced the div: hosted redirect.
+        window.location.href = intent.urlEnlace;
+      }
+    }, DONAR_SCRIPT_TIMEOUT_MS);
+    return () => window.clearTimeout(fallback);
+  }, [stage, intent]);
+
+  // Poll the intent status while the widget modal is open; COMPLETED -> thank-you.
+  // Stop after ~3 minutes with a neutral closing message.
+  useEffect(() => {
+    if (stage !== "widget" || !intent) {
+      return;
+    }
+    let cancelled = false;
+    const deadline = Date.now() + DONAR_POLL_TIMEOUT_MS;
+    const timer = window.setInterval(async () => {
+      if (cancelled) {
+        return;
+      }
+      if (Date.now() >= deadline) {
+        window.clearInterval(timer);
+        if (!cancelled) {
+          setStage("closed");
+        }
+        return;
+      }
+      try {
+        const result = await api<{ status: string }>(`${DONAR_INTENT_PATH}/${intent.intentId}/status`, "");
+        if (!cancelled && result.status === "COMPLETED") {
+          window.clearInterval(timer);
+          setStage("thanks");
+        }
+      } catch {
+        // Transient poll errors are ignored; the deadline still ends polling.
+      }
+    }, DONAR_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [stage, intent]);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    const message = donationFormValidationMessage(form);
+    if (message) {
+      setError(message);
+      return;
+    }
+    setError("");
+    setSubmitting(true);
+    try {
+      const created = await api<DonarIntent>(DONAR_INTENT_PATH, "", {
+        method: "POST",
+        body: {
+          amount: form.amount.trim(),
+          donorName: form.donorName.trim(),
+          donorDocumentType: form.donorDocumentType,
+          donorDocument: form.donorDocument.trim(),
+          donorEmail: form.donorEmail.trim(),
+          donorPhone: form.donorPhone.trim() || undefined,
+          departamento: form.departamento,
+          municipio: form.municipio,
+          distrito: form.distrito,
+          complemento: form.complemento.trim()
+        }
+      });
+      setIntent(created);
+      setStage("widget");
+    } catch (err) {
+      setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (stage === "thanks") {
+    return <DonarThankYou monto={form.amount.trim()} />;
+  }
+
+  return (
+    <div className="donar-screen">
+      <div className="donar-card card">
+        <ShieldCheck size={30} />
+        <h1>Haga su donación</h1>
+        <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
+
+        {stage === "widget" && intent && (
+          <div className="donar-handoff">
+            <p className="donar-intro">Pague de forma segura con Wompi. Al completar el pago, verá la confirmación aquí.</p>
+            <div className="donar-widget" ref={widgetHostRef} />
+            <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
+              ¿No se abre el pago? Continúe aquí
+            </button>
+          </div>
+        )}
+
+        {stage === "closed" && <p className="auth-notice">{DONAR_FALLBACK_MESSAGE}</p>}
+
+        {stage === "form" && (
+          <form className="donar-form" onSubmit={submit}>
+            <label>
+              <span>Nombre completo</span>
+              <input
+                value={form.donorName}
+                onChange={(event) => update({ donorName: event.target.value })}
+                placeholder="Nombre o razón social"
+                aria-label="Nombre completo"
+              />
+            </label>
+
+            <div className="donar-doc-row">
+              <label>
+                <span>Tipo de documento</span>
+                <select
+                  value={form.donorDocumentType}
+                  onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "" })}
+                  aria-label="Tipo de documento"
+                >
+                  <option value="13">DUI</option>
+                  <option value="37">Otro</option>
+                </select>
+              </label>
+              <label>
+                <span>Número de documento</span>
+                <input
+                  value={form.donorDocument}
+                  onChange={(event) => update({ donorDocument: event.target.value })}
+                  onBlur={() => {
+                    if (form.donorDocumentType === "13" && isValidDui(form.donorDocument)) {
+                      update({ donorDocument: formatDui(form.donorDocument) });
+                    }
+                  }}
+                  placeholder={form.donorDocumentType === "13" ? "00000000-0" : "Documento"}
+                  aria-label="Número de documento"
+                />
+              </label>
+            </div>
+
+            <label>
+              <span>Correo electrónico</span>
+              <input
+                value={form.donorEmail}
+                onChange={(event) => update({ donorEmail: event.target.value })}
+                placeholder="legacy-email-105@example.com"
+                aria-label="Correo electrónico"
+                type="email"
+              />
+            </label>
+
+            <label>
+              <span>Teléfono (opcional)</span>
+              <input
+                value={form.donorPhone}
+                onChange={(event) => update({ donorPhone: event.target.value })}
+                placeholder="0000-0000"
+                aria-label="Teléfono (opcional)"
+                type="tel"
+              />
+            </label>
+
+            <div className="donar-address-row">
+              <label>
+                <span>Departamento</span>
+                <CatalogSelect
+                  value={form.departamento}
+                  options={CAT012_DEPARTMENTS}
+                  onChange={setDepartamento}
+                  showCodes={false}
+                  placeholder="Seleccione"
+                  ariaLabel="Departamento"
+                />
+              </label>
+              <label>
+                <span>Municipio</span>
+                <CatalogSelect
+                  value={form.municipio}
+                  options={municipalityOptions}
+                  onChange={(municipio) => update({ municipio })}
+                  showCodes={false}
+                  placeholder="Seleccione"
+                  ariaLabel="Municipio"
+                />
+              </label>
+              <label>
+                <span>Distrito</span>
+                <CatalogSelect
+                  value={form.distrito}
+                  options={districtOptions}
+                  onChange={(distrito) => update({ distrito })}
+                  showCodes={false}
+                  placeholder="Seleccione"
+                  ariaLabel="Distrito"
+                />
+              </label>
+            </div>
+
+            <label>
+              <span>Dirección</span>
+              <textarea
+                value={form.complemento}
+                onChange={(event) => update({ complemento: event.target.value })}
+                placeholder="Dirección completa"
+                aria-label="Dirección"
+              />
+            </label>
+
+            <div className="donar-amount">
+              <span className="donar-amount-label">Monto</span>
+              <div className="donar-chips">
+                {DONAR_AMOUNT_CHIPS.map((chip) => (
+                  <button
+                    key={chip}
+                    type="button"
+                    className={form.amount === chip.toFixed(2) ? "donar-chip active" : "donar-chip"}
+                    onClick={() => update({ amount: chip.toFixed(2) })}
+                  >
+                    ${chip}
+                  </button>
+                ))}
+              </div>
+              <input
+                value={form.amount}
+                onChange={(event) => update({ amount: event.target.value })}
+                placeholder="Otro monto"
+                aria-label="Monto"
+                inputMode="decimal"
+              />
+            </div>
+
+            {error && <p className="error donar-error">{error}</p>}
+
+            <button className="primary" type="submit" disabled={submitting}>
+              {submitting ? "Preparando el pago…" : "Donar"}
+            </button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function DonarThankYou({ monto }: { monto?: string }) {
+  return (
+    <div className="donar-screen">
+      <div className="donar-card card donar-thanks">
+        <CheckCircle2 size={40} />
+        <h1>{DONAR_THANK_YOU_TITLE}</h1>
+        {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
+        <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
+      </div>
+    </div>
+  );
+}
+
+// Landing for the redirect fallback and Wompi's per-link redirect. Reads the query
+// string for DISPLAY ONLY (no trust decisions). If it is running inside the widget
+// iframe modal, it postMessages the parent so /donar can show the thank-you state.
+function DonarGraciasPage() {
+  const display = useMemo(() => graciasDisplayFromSearch(window.location.search), []);
+
+  useEffect(() => {
+    if (window.parent !== window) {
+      window.parent.postMessage(DONAR_COMPLETED_MESSAGE, "*");
+    }
+  }, []);
+
+  return <DonarThankYou monto={display.monto || undefined} />;
 }
 
 function AuthScreen({

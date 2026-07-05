@@ -2477,6 +2477,125 @@ pre {
   color: #0b5e57;
 }
 
+/* Public donor-checkout pages (/donar, /donar/gracias). Mobile-first; reuses the
+   auth/card visual language for brand consistency with the login screen. */
+.donar-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: start center;
+  padding: 24px 16px;
+}
+
+.donar-card {
+  width: min(560px, 100%);
+  padding: 24px;
+  display: grid;
+  gap: 14px;
+}
+
+.donar-card h1 {
+  font-size: 24px;
+  margin: 0;
+}
+
+.donar-intro {
+  color: #52656c;
+  font-size: 14px;
+  line-height: 1.4;
+  margin: 0;
+}
+
+.donar-form {
+  display: grid;
+  gap: 14px;
+}
+
+.donar-form label {
+  display: grid;
+  gap: 4px;
+  font-size: 13px;
+  color: #35474d;
+}
+
+.donar-doc-row,
+.donar-address-row {
+  display: grid;
+  gap: 12px;
+}
+
+.donar-amount {
+  display: grid;
+  gap: 8px;
+}
+
+.donar-amount-label {
+  font-size: 13px;
+  color: #35474d;
+}
+
+.donar-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.donar-chip {
+  flex: 1 1 auto;
+  min-width: 64px;
+  padding: 10px 12px;
+  border: 1px solid #cdd8da;
+  border-radius: 8px;
+  background: #ffffff;
+  cursor: pointer;
+}
+
+.donar-chip.active {
+  border-color: #007c75;
+  background: #edf9f7;
+  color: #006d66;
+  font-weight: 600;
+}
+
+.donar-error {
+  margin: 0;
+}
+
+.donar-handoff {
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+}
+
+.donar-widget {
+  min-height: 48px;
+  display: grid;
+  place-items: center;
+}
+
+.donar-thanks {
+  text-align: center;
+  justify-items: center;
+  color: #006d66;
+}
+
+.donar-thanks h1 {
+  color: #112327;
+}
+
+.donar-thanks-amount {
+  font-weight: 600;
+  margin: 0;
+}
+
+@media (min-width: 520px) {
+  .donar-doc-row {
+    grid-template-columns: 1fr 1.4fr;
+  }
+  .donar-address-row {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
 .toast-region {
   pointer-events: none;
 }
