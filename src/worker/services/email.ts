@@ -111,6 +111,18 @@ export class EmailService {
     return this.dispatch(payload, []);
   }
 
+  async sendOperationalAlert(input: { to: string; subject: string; text: string; html: string }): Promise<unknown> {
+    const payload: EmailPayload = {
+      from: this.env.EMAIL_FROM ?? "dte@example.org",
+      to: input.to,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: []
+    };
+    return this.dispatch(payload, []);
+  }
+
   private async dispatch(payload: EmailPayload, cfAttachments: CloudflareEmailAttachment[]): Promise<unknown> {
     if (isMockMode(this.env)) {
       return { mock: true, toEmail: payload.to, subject: payload.subject };

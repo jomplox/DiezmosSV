@@ -192,3 +192,7 @@ export interface EmailTemplateSettings {
   placeholders: string[];
   templates: Record<string, EmailTemplateValue>;
 }
+
+export interface AlertEmailState {
+  alertEmail: string;
+}

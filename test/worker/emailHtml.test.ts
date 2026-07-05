@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
+import { dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 describe("HTML email rendering", () => {
@@ -43,6 +43,43 @@ describe("HTML email rendering", () => {
     expect(html).toContain("José");
     expect(html).toContain('href="https://example.org/?reset=tok"');
     expect(html).toContain("45 minutos");
+  });
+
+  it("renders an operational alert with a red banner for failure kinds", () => {
+    const html = operationalAlertHtml(
+      {
+        kind: "DTE_FAILED",
+        title: "Fallo al emitir DTE",
+        detail: "El documento DTE-15-M001P004-000000000000009 falló: MH no disponible",
+        entityType: "dte_document",
+        entityId: "dte_1"
+      },
+      "https://worker.example.invalid/"
+    );
+
+    expect(html).toContain("<!DOCTYPE html");
+    expect(html).toContain("Fallo al emitir DTE");
+    expect(html).toContain("El documento DTE-15-M001P004-000000000000009 falló: MH no disponible");
+    expect(html).toContain("dte_1");
+    expect(html).toContain("https://worker.example.invalid/");
+    expect(html).toContain("#fdecec");
+  });
+
+  it("renders an operational alert with an amber banner for contingency kinds", () => {
+    const html = operationalAlertHtml(
+      {
+        kind: "CONTINGENCY_OPENED",
+        title: "Contingencia abierta",
+        detail: "Se abrió un período de contingencia automáticamente: MH no disponible",
+        entityType: "contingency_period",
+        entityId: "cont_1"
+      },
+      "https://worker.example.invalid/"
+    );
+
+    expect(html).toContain("Contingencia abierta");
+    expect(html).toContain("#fdf3e1");
+    expect(html).not.toContain("#fdecec");
   });
 });
 

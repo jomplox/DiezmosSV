@@ -33,6 +33,7 @@ const ROLE_LABELS: Record<DisplayRole, string> = {
 
 const AUDIT_ACTION_LABELS: Record<string, string> = {
   ADVANCED_CDE_ACCEPTED: "CDE avanzado aceptado",
+  ALERT_EMAIL_UPDATED: "Correo de alertas actualizado",
   ADVANCED_CDE_CREATED: "CDE avanzado creado",
   ADVANCED_CDE_FAILED: "CDE avanzado fallido",
   ADVANCED_CDE_REJECTED: "CDE avanzado rechazado",
@@ -181,7 +182,12 @@ export function catalogOptionLabel(label: string): string {
 
 export function auditActionLabel(action: string | null | undefined): string {
   if (!action) return "Acción";
-  return AUDIT_ACTION_LABELS[action] ?? readableCode(action);
+  if (AUDIT_ACTION_LABELS[action]) return AUDIT_ACTION_LABELS[action];
+  const alertSentKind = action.startsWith("ALERT_SENT:") ? action.slice("ALERT_SENT:".length) : null;
+  if (alertSentKind) return `Alerta enviada: ${auditActionLabel(alertSentKind)}`;
+  const alertFailedKind = action.startsWith("ALERT_FAILED:") ? action.slice("ALERT_FAILED:".length) : null;
+  if (alertFailedKind) return `Alerta fallida: ${auditActionLabel(alertFailedKind)}`;
+  return readableCode(action);
 }
 
 export function entityLabel(entity: string | null | undefined): string {

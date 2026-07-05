@@ -32,7 +32,7 @@ import {
   Users
 } from "lucide-react";
 import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
@@ -169,6 +169,7 @@ export function App() {
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings | null>(null);
   const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
+  const [alertEmailDraft, setAlertEmailDraft] = useState("");
   const [contingency, setContingency] = useState<ContingencyState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
@@ -302,14 +303,16 @@ export function App() {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, environmentResult, emailTemplateResult] = await Promise.all([
+      const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
         api<{ credentials: CredentialStatus }>("/api/credentials", token),
         api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
-        api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token)
+        api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token),
+        api<AlertEmailState>("/api/settings/alert-email", token)
       ]);
       setCredentials(credentialResult.credentials);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
       applyEmailTemplates(emailTemplateResult.emailTemplates);
+      applyAlertEmail(alertEmailResult.alertEmail);
     }
     if (view === "exports" && can(user, "ADMIN")) {
       if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
@@ -592,6 +595,21 @@ export function App() {
   function applyEmailTemplates(settings: EmailTemplateSettings) {
     setEmailTemplates(settings);
     setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
+  }
+
+  function applyAlertEmail(value: string) {
+    setAlertEmailDraft(value);
+  }
+
+  async function updateAlertEmail() {
+    await runAction("alert-email", async () => {
+      const result = await api<AlertEmailState>("/api/settings/alert-email", token, {
+        method: "PUT",
+        body: { alertEmail: alertEmailDraft.trim() }
+      });
+      applyAlertEmail(result.alertEmail);
+      setToast(result.alertEmail ? "Correo de alertas actualizado" : "Alertas operativas desactivadas");
+    });
   }
 
   async function updateEmailTemplates() {
@@ -914,10 +932,12 @@ export function App() {
             emissionEnvironment={emissionEnvironment}
             emailTemplates={emailTemplates}
             emailTemplateDraft={emailTemplateDraft}
+            alertEmailDraft={alertEmailDraft}
             input={credentialInput}
             busy={busy === "credentials"}
             emissionBusy={busy === "emission-environment"}
             templateBusy={busy === "email-templates"}
+            alertEmailBusy={busy === "alert-email"}
             writerBusy={busy === "credential-writer"}
             onChange={setCredentialInput}
             onSubmit={updateCredentials}
@@ -933,16 +953,20 @@ export function App() {
             }}
             onEmailTemplateSubmit={updateEmailTemplates}
             onEmissionEnvironmentChange={updateEmissionEnvironment}
+            onAlertEmailChange={setAlertEmailDraft}
+            onAlertEmailSubmit={updateAlertEmail}
             onBootstrapWriter={bootstrapCredentialWriter}
             onRefresh={async () => {
-              const [credentialResult, environmentResult, emailTemplateResult] = await Promise.all([
+              const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
                 api<{ credentials: CredentialStatus }>("/api/credentials", token),
                 api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
-                api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token)
+                api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token),
+                api<AlertEmailState>("/api/settings/alert-email", token)
               ]);
               setCredentials(credentialResult.credentials);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
+              applyAlertEmail(alertEmailResult.alertEmail);
             }}
           />
         )}
@@ -1519,16 +1543,20 @@ function CredentialsPanel({
   emissionEnvironment,
   emailTemplates,
   emailTemplateDraft,
+  alertEmailDraft,
   input,
   busy,
   emissionBusy,
   templateBusy,
+  alertEmailBusy,
   writerBusy,
   onChange,
   onSubmit,
   onEmailTemplateChange,
   onEmailTemplateSubmit,
   onEmissionEnvironmentChange,
+  onAlertEmailChange,
+  onAlertEmailSubmit,
   onBootstrapWriter,
   onRefresh
 }: {
@@ -1536,16 +1564,20 @@ function CredentialsPanel({
   emissionEnvironment: EmissionEnvironmentState | null;
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
+  alertEmailDraft: string;
   input: CredentialFormInput;
   busy: boolean;
   emissionBusy: boolean;
   templateBusy: boolean;
+  alertEmailBusy: boolean;
   writerBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
   onSubmit: () => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
   onEmailTemplateSubmit: () => Promise<void>;
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
+  onAlertEmailChange: (value: string) => void;
+  onAlertEmailSubmit: () => Promise<void>;
   onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
   onRefresh: () => Promise<void>;
 }) {
@@ -1862,6 +1894,29 @@ function CredentialsPanel({
                       <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_FROM", "Nuevo correo remitente")} type="email" />
                       <small>Usado como remitente tanto en Cloudflare Email como en el respaldo.</small>
                     </label>
+                    <div className="credential-field-block span-2">
+                      <div className="credential-section-title">
+                        <h3>Alertas operativas</h3>
+                      </div>
+                      <label>
+                        <span className="plain-field-label">Correo para avisos operativos</span>
+                        <input
+                          value={alertEmailDraft}
+                          onChange={(event) => onAlertEmailChange(event.target.value)}
+                          placeholder="admin@example.org"
+                          type="email"
+                        />
+                        <small>Recibirá avisos de fallos de emisión, contingencias y eventos estancados.</small>
+                      </label>
+                      <button
+                        className="primary"
+                        type="button"
+                        disabled={alertEmailBusy}
+                        onClick={() => void onAlertEmailSubmit()}
+                      >
+                        {alertEmailBusy ? "Guardando" : "Guardar correo de alertas"}
+                      </button>
+                    </div>
                   </div>
                 )}
 

@@ -813,6 +813,77 @@ describe("document retry", () => {
 });
 
 describe("contingency administration", () => {
+  it("sends an operational alert when a contingency period is opened manually", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+
+    const openResponse = await worker.fetch(
+      new Request("https://example.org/api/contingency/open", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          environment: "00",
+          tipoContingencia: 2,
+          reason: "MH TEST no disponible"
+        })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentAlerts.push(message as { to: string; subject: string });
+            return { messageId: "alert-contingency" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(openResponse.status).toBe(201);
+    const opened = (await openResponse.json()) as { contingency: { active: { id: string } } };
+    expect(sentAlerts).toHaveLength(1);
+    expect(sentAlerts[0].to).toBe("owner@example.org");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:CONTINGENCY_OPENED", entity_type: "contingency_period", entity_id: opened.contingency.active.id })
+    );
+  });
+
+  it("does not send a duplicate alert when reusing an already-open contingency period", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const sentAlerts: unknown[] = [];
+    const testEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/api/contingency/open", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible" })
+      }),
+      testEnv
+    );
+    await worker.fetch(
+      new Request("https://example.org/api/contingency/open", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible otra vez" })
+      }),
+      testEnv
+    );
+
+    expect(sentAlerts).toHaveLength(1);
+  });
+
   it("opens a manual contingency period and returns dashboard-ready state", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -1909,6 +1980,158 @@ describe("Wompi webhook integration", () => {
   });
 });
 
+describe("pipeline failure alerts", () => {
+  it("sends an operational alert when a Wompi-triggered DTE fails", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_alert_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      cliente: {
+        DocumentoIdentidad: "10000000-1",
+        Nombre: "Example",
+        Apellidos: "Person",
+        EMail: "donor@example.org",
+        Celular: "70000005",
+        CodigoPais: "SV",
+        CodigoRegion: "06"
+      }
+    });
+
+    const webhookResponse = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+    const { wompiEventId } = (await webhookResponse.json()) as { wompiEventId: string };
+
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-dte-failed" };
+        }
+      } as SendEmail
+      // MH_CERT_XML intentionally omitted so signing fails before reaching MH,
+      // deterministically driving the DTE into the FAILED path.
+    });
+
+    await expect(new IssuancePipeline(pipelineEnv).processWompiEvent(wompiEventId)).rejects.toThrow();
+
+    const failedDocument = db.documents.find((document) => document.wompi_event_id === wompiEventId);
+    expect(failedDocument?.status).toBe("FAILED");
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "DTE_FAILED", entity_id: failedDocument!.id }));
+    expect(sentAlerts).toHaveLength(1);
+    expect(sentAlerts[0].to).toBe("owner@example.org");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:DTE_FAILED", entity_type: "dte_document", entity_id: failedDocument!.id })
+    );
+  });
+
+  it("sends an operational alert when an advanced CDE fails", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(advancedFailingDocument("doc_advanced_fail"));
+
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-advanced-failed" };
+        }
+      } as SendEmail
+      // MH_CERT_XML intentionally omitted so signing fails deterministically.
+    });
+
+    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail")).rejects.toThrow();
+
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED", entity_id: "doc_advanced_fail" }));
+    expect(sentAlerts).toHaveLength(1);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:ADVANCED_CDE_FAILED", entity_type: "dte_document", entity_id: "doc_advanced_fail" })
+    );
+  });
+
+  it("does not fail the pipeline when the alert email provider throws", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(advancedFailingDocument("doc_advanced_fail_alert_error"));
+
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async () => {
+          throw new Error("destination address is not a verified address");
+        }
+      } as SendEmail
+    });
+
+    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_alert_error")).rejects.toThrow();
+
+    const document = db.documents.find((doc) => doc.id === "doc_advanced_fail_alert_error");
+    expect(document?.status).toBe("FAILED");
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED", entity_id: "doc_advanced_fail_alert_error" }));
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_FAILED:ADVANCED_CDE_FAILED", entity_type: "dte_document", entity_id: "doc_advanced_fail_alert_error" })
+    );
+  });
+
+  it("does not send a duplicate alert for a document that fails twice", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(advancedFailingDocument("doc_advanced_fail_twice"));
+
+    const sentAlerts: unknown[] = [];
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
+    });
+
+    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_twice")).rejects.toThrow();
+    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_twice")).rejects.toThrow();
+
+    expect(sentAlerts).toHaveLength(1);
+  });
+
+  it("does not send an alert when alert_email is unset", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(advancedFailingDocument("doc_advanced_fail_no_alert_email"));
+
+    const sentAlerts: unknown[] = [];
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
+    });
+
+    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_no_alert_email")).rejects.toThrow();
+
+    expect(sentAlerts).toHaveLength(0);
+  });
+});
+
 describe("issuance dead-letter and stalled-event sweep", () => {
   function deadLetterBatch(body: IssuanceMessage, queueName: string) {
     const ack = vi.fn();
@@ -1949,6 +2172,33 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     expect(retry).not.toHaveBeenCalled();
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "ISSUANCE_DEAD_LETTERED", entity_type: "wompi_event", entity_id: "wompi_dead" })
+    );
+  });
+
+  it("sends an operational alert for a dead-lettered issuance message", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const { batch } = deadLetterBatch({ wompiEventId: "wompi_dead_alert" }, "diezmossv-staging-issuance-example-dlq");
+
+    await worker.queue(
+      batch,
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentAlerts.push(message as { to: string; subject: string });
+            return { messageId: "alert-dead-letter" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(sentAlerts).toHaveLength(1);
+    expect(sentAlerts[0].to).toBe("owner@example.org");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:ISSUANCE_DEAD_LETTERED", entity_type: "wompi_event", entity_id: "wompi_dead_alert" })
     );
   });
 
@@ -1999,7 +2249,43 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     const stalledAudits = db.audits.filter((audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === "wompi_stalled");
     expect(stalledAudits).toHaveLength(1);
   });
+
+  it("sends a single operational alert even across repeated 15-minute cron runs", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.wompiEvents.push(stalledWompiEvent());
+    for (let i = 0; i < 3; i++) {
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+    }
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const scheduledEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queuedNoop(message) } as unknown as Queue<IssuanceMessage>,
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-stalled" };
+        }
+      } as SendEmail
+    });
+
+    // Simulate three consecutive 15-minute cron ticks after the event is already flagged stalled.
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+    await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+
+    expect(sentAlerts).toHaveLength(1);
+    expect(sentAlerts[0].to).toBe("owner@example.org");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:WOMPI_EVENT_STALLED", entity_type: "wompi_event", entity_id: "wompi_stalled" })
+    );
+  });
 });
+
+function queuedNoop(_message: IssuanceMessage): void {
+  // Sweep should not requeue once an event has already been flagged stalled.
+}
 
 describe("credential administration", () => {
   it("returns safe credential status to owners", async () => {
@@ -2202,6 +2488,90 @@ describe("email template settings", () => {
         }
       }
     });
+  });
+});
+
+describe("alert email setting", () => {
+  it("lets owners configure and read back the operational alert recipient", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const putResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "owner@example.org" })
+      }),
+      env(db)
+    );
+
+    expect(putResponse.status).toBe(200);
+    await expect(putResponse.json()).resolves.toMatchObject({ ok: true, alertEmail: "owner@example.org" });
+    expect(db.settings).toContainEqual(expect.objectContaining({ key: "alert_email", value: "owner@example.org", updated_by: "user_owner" }));
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "ALERT_EMAIL_UPDATED",
+      entity_type: "app_setting",
+      entity_id: "alert_email"
+    }));
+
+    const getResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({ alertEmail: "owner@example.org" });
+  });
+
+  it("allows clearing the alert email to disable alerting", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({ key: "alert_email", value: "owner@example.org", updated_by: "user_owner" });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, alertEmail: "" });
+  });
+
+  it("rejects a malformed alert email", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "correo-invalido" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_alert_email" });
+  });
+
+  it("rejects non-owners", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
   });
 });
 
@@ -2840,6 +3210,28 @@ function documentMatchesFtsQuery(document: DteDocumentRecord, query: string): bo
   ];
   const tokens = corpus.flatMap((value) => String(value ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? []);
   return prefixes.every((prefix) => tokens.some((token) => token.startsWith(prefix)));
+}
+
+function advancedFailingDocument(id: string): DteDocumentRecord {
+  return {
+    ...testDocument(),
+    id,
+    wompi_event_id: null,
+    status: "PENDING",
+    signed_jws: null,
+    plain_json: JSON.stringify({
+      emisor: { nombre: "ExamplePerson1" },
+      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
+      resumen: { valorTotal: 100 },
+      identificacion: {
+        fecEmi: "2026-06-26",
+        horEmi: "19:50:00",
+        ambiente: "00",
+        codigoGeneracion: "11111111-1111-4111-8111-111111111111",
+        numeroControl: "DTE-15-M001P004-000000000000999"
+      }
+    })
+  };
 }
 
 function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRecord {

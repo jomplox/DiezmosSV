@@ -5,6 +5,7 @@ import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } fro
 import { Repository } from "../storage/repository";
 import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DteDocumentRecord, Env, WompiWebhook } from "../types";
 import { addHours, nowIso } from "../utils/dates";
+import { sendOperationalAlert } from "./alerts";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
@@ -33,11 +34,19 @@ export class IssuancePipeline {
       const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
+          const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
           await this.repo.createAudit({
             action: "WOMPI_EVENT_STALLED",
             entityType: "wompi_event",
             entityId: eventId,
-            summary: `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`
+            summary
+          });
+          await sendOperationalAlert(this.env, this.repo, {
+            kind: "WOMPI_EVENT_STALLED",
+            title: "Evento Wompi sin procesar",
+            detail: summary,
+            entityType: "wompi_event",
+            entityId: eventId
           });
         }
         continue;
@@ -128,11 +137,19 @@ export class IssuancePipeline {
         mhEstado: "PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
+      const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
         action: "DTE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: error instanceof Error ? error.message : String(error)
+        summary: failureMessage
+      });
+      await sendOperationalAlert(this.env, this.repo, {
+        kind: "DTE_FAILED",
+        title: "Fallo al emitir DTE",
+        detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
+        entityType: "dte_document",
+        entityId: record.id
       });
       throw error;
     }
@@ -183,11 +200,19 @@ export class IssuancePipeline {
         mhEstado: "ADVANCED_PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
+      const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
         action: "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: error instanceof Error ? error.message : String(error)
+        summary: failureMessage
+      });
+      await sendOperationalAlert(this.env, this.repo, {
+        kind: "ADVANCED_CDE_FAILED",
+        title: "Fallo al emitir CDE avanzado",
+        detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
+        entityType: "dte_document",
+        entityId: record.id
       });
       throw error;
     }
@@ -388,6 +413,13 @@ export class IssuancePipeline {
       entityId: updated.id,
       summary: reason,
       metadata: { contingencyPeriodId: periodId }
+    });
+    await sendOperationalAlert(this.env, this.repo, {
+      kind: "CONTINGENCY_OPENED",
+      title: "Contingencia abierta",
+      detail: `Se abrió un período de contingencia automáticamente: ${reason}`,
+      entityType: "contingency_period",
+      entityId: periodId
     });
     await this.emailReceipt(updated);
     return updated;

@@ -30,6 +30,13 @@ describe("client display text", () => {
     expect(auditActionLabel("ISSUANCE_DEAD_LETTERED")).toBe("Emisión agotó reintentos en cola");
     expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
     expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
+    expect(auditActionLabel("ALERT_EMAIL_UPDATED")).toBe("Correo de alertas actualizado");
+    expect(auditActionLabel("ALERT_SENT:DTE_FAILED")).toBe("Alerta enviada: DTE fallido");
+    expect(auditActionLabel("ALERT_SENT:ADVANCED_CDE_FAILED")).toBe("Alerta enviada: CDE avanzado fallido");
+    expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Contingencia abierta");
+    expect(auditActionLabel("ALERT_SENT:ISSUANCE_DEAD_LETTERED")).toBe("Alerta enviada: Emisión agotó reintentos en cola");
+    expect(auditActionLabel("ALERT_SENT:WOMPI_EVENT_STALLED")).toBe("Alerta enviada: Evento Wompi sin procesar — revisar");
+    expect(auditActionLabel("ALERT_FAILED:DTE_FAILED")).toBe("Alerta fallida: DTE fallido");
     expect(userFacingErrorMessage("Invalid credentials")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("Credenciales inválidas")).toBe("Correo o contraseña incorrectos.");
     expect(userFacingErrorMessage("MH auth failed")).toBe("Falló la autenticación con el Ministerio de Hacienda.");

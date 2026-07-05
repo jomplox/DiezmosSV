@@ -54,6 +54,37 @@ export function passwordResetEmailHtml(name: string, link: string, expiresMinute
   ]);
 }
 
+export interface OperationalAlertInput {
+  kind: string;
+  title: string;
+  detail: string;
+  entityType: string;
+  entityId: string;
+}
+
+export function operationalAlertHtml(alert: OperationalAlertInput, originUrl: string): string {
+  const banner = alertBanner(alert.kind, alert.title);
+  const details = detailsCard([
+    ["Tipo de evento", alert.kind],
+    ["Entidad", alert.entityType],
+    ["Identificador", alert.entityId]
+  ]);
+  return emailDocument("ExamplePerson1", [
+    banner,
+    paragraphs(alert.detail),
+    details,
+    note(`Revise el panel de administración para más detalles: ${originUrl}`)
+  ]);
+}
+
+function alertBanner(kind: string, title: string): string {
+  const isContingency = kind.startsWith("CONTINGENCY");
+  const background = isContingency ? "#fdf3e1" : "#fdecec";
+  const border = isContingency ? "#ecd196" : "#f2b8b5";
+  const color = isContingency ? "#7a5c00" : "#8c1d18";
+  return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:${background};border:1px solid ${border};color:${color};font-weight:bold;text-align:center;">${escapeHtml(title)}</div>`;
+}
+
 function emailDocument(organizationName: string, blocks: string[]): string {
   return `<!DOCTYPE html>
 <html lang="es">

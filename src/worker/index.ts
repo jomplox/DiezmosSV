@@ -2,6 +2,7 @@ import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { signMhDocument } from "./domain/signer";
 import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
+import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import { EmailService } from "./services/email";
@@ -77,11 +78,21 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
   for (const message of batch.messages) {
     const documentId = message.body.advancedDocumentId;
     const wompiEventId = message.body.wompiEventId;
+    const entityType = documentId ? "dte_document" : "wompi_event";
+    const entityId = documentId ?? wompiEventId ?? "desconocido";
+    const summary = "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión";
     await repo.createAudit({
       action: "ISSUANCE_DEAD_LETTERED",
-      entityType: documentId ? "dte_document" : "wompi_event",
-      entityId: documentId ?? wompiEventId ?? "desconocido",
-      summary: "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión"
+      entityType,
+      entityId,
+      summary
+    });
+    await sendOperationalAlert(env, repo, {
+      kind: "ISSUANCE_DEAD_LETTERED",
+      title: "Mensaje de emisión agotó reintentos",
+      detail: summary,
+      entityType,
+      entityId
     });
     message.ack();
   }
@@ -221,6 +232,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return handleEmailTemplatesRoute(request, repo, user);
   }
 
+  if (url.pathname === "/api/settings/alert-email") {
+    return handleAlertEmailRoute(request, repo, user);
+  }
+
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {
     requireRole(user, "ADMIN");
     const selection = await f960Selection(repo, url);
@@ -295,6 +310,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       summary: reason,
       metadata: { environment, tipoContingencia }
     });
+    if (!existing) {
+      await sendOperationalAlert(env, repo, {
+        kind: "CONTINGENCY_OPENED",
+        title: "Contingencia abierta",
+        detail: `Se abrió un período de contingencia manualmente: ${reason}`,
+        entityType: "contingency_period",
+        entityId: periodId
+      });
+    }
     return jsonResponse({ contingency: await contingencyState(repo) }, { status: existing ? 200 : 201 });
   }
 
@@ -511,6 +535,33 @@ async function handleEmailTemplatesRoute(request: Request, repo: Repository, use
     }
     throw error;
   }
+}
+
+async function handleAlertEmailRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method === "GET") {
+    requireRole(user, "OWNER");
+    return jsonResponse({ alertEmail: (await repo.getSetting(ALERT_EMAIL_SETTING_KEY)) ?? "" });
+  }
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  const body = (await request.json().catch(() => ({}))) as { alertEmail?: unknown };
+  const raw = typeof body.alertEmail === "string" ? body.alertEmail.trim() : "";
+  if (raw && !normalizeEmail(raw)) {
+    return jsonResponse({ error: "invalid_alert_email", message: "Ingrese un correo válido." }, { status: 400 });
+  }
+  await repo.setSetting(ALERT_EMAIL_SETTING_KEY, raw, actor.id);
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "ALERT_EMAIL_UPDATED",
+    entityType: "app_setting",
+    entityId: ALERT_EMAIL_SETTING_KEY,
+    summary: raw ? `Correo de alertas configurado a ${raw}` : "Correo de alertas desactivado",
+    metadata: { alertEmail: raw }
+  });
+  return jsonResponse({ ok: true, alertEmail: raw });
 }
 
 async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
