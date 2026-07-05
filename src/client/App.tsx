@@ -3074,6 +3074,12 @@ function DonarPage() {
   // widget iframe modal) so we can swap to the thank-you state directly.
   useEffect(() => {
     function onMessage(event: MessageEvent) {
+      // The gracias page inside the modal iframe is same-origin. Reject any other
+      // origin so the Wompi widget iframe (or anything it embeds) cannot spoof the
+      // thank-you state without a payment.
+      if (event.origin !== window.location.origin) {
+        return;
+      }
       if (event.data === DONAR_COMPLETED_MESSAGE) {
         setStage("thanks");
       }
@@ -3366,7 +3372,9 @@ function DonarGraciasPage() {
 
   useEffect(() => {
     if (window.parent !== window) {
-      window.parent.postMessage(DONAR_COMPLETED_MESSAGE, "*");
+      // Parent and child share the origin; scope the message to it so an unexpected
+      // intermediate frame never receives the completion signal.
+      window.parent.postMessage(DONAR_COMPLETED_MESSAGE, window.location.origin);
     }
   }, []);
 

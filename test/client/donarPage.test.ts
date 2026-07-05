@@ -190,4 +190,26 @@ describe("donar page source contract", () => {
   it("ships donation styles reusing the auth/card visual language", () => {
     expect(stylesSource).toContain(".donar-");
   });
+
+  it("enforces the postMessage origin on the DONAR_COMPLETED_MESSAGE listener", () => {
+    // The gracias page inside the modal iframe is same-origin, so the listener must
+    // reject messages whose origin differs from window.location.origin — otherwise the
+    // Wompi widget iframe (which holds window.parent) could spoof the thank-you state.
+    const listenerStart = appSource.indexOf("function onMessage(event: MessageEvent)");
+    expect(listenerStart).toBeGreaterThan(-1);
+    const completedCheck = appSource.indexOf("DONAR_COMPLETED_MESSAGE", listenerStart);
+    expect(completedCheck).toBeGreaterThan(-1);
+    const originCheck = appSource.indexOf("event.origin !== window.location.origin", listenerStart);
+    expect(originCheck).toBeGreaterThan(-1);
+    // The origin guard must appear before (or with) the message check, inside the listener.
+    expect(originCheck).toBeLessThan(completedCheck);
+  });
+
+  it("posts the completed message to the same origin, never the wildcard target", () => {
+    const senderStart = appSource.indexOf("window.parent.postMessage(DONAR_COMPLETED_MESSAGE");
+    expect(senderStart).toBeGreaterThan(-1);
+    const senderCall = appSource.slice(senderStart, senderStart + 120);
+    expect(senderCall).toContain("window.location.origin");
+    expect(senderCall).not.toContain('"*"');
+  });
 });
