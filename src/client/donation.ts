@@ -46,11 +46,14 @@ export const GIVEBUTTER_US_COUNTRY_CODE = "US";
 // child (iframe/shadow content) within this window, show the hosted-page fallback.
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
 
+// The US door funds the SAME mother church as the SV door — FMCE is only the US
+// giving vehicle, never a different beneficiary. The copy says so explicitly.
 export const GIVEBUTTER_INTRO =
-  "Su donación se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501(c)(3)); recibirá un recibo deducible de impuestos en EE. UU. por correo.";
-export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done directamente en givebutter.com";
-export const GIVEBUTTER_FALLBACK_CTA = "Donar en givebutter.com";
-export const GIVEBUTTER_ESCAPE_HATCH = "¿Necesita comprobante fiscal salvadoreño (CDE)? Continúe con el formulario";
+  "Su diezmo u ofrenda apoya a Misión ExampleOrganization en El Salvador. Se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501(c)(3)) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+// "GiveButter" is the brand style (capital G, capital B) and is the anchor text — no
+// raw URL is ever shown to the donor.
+export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done en GiveButter";
+export const GIVEBUTTER_FALLBACK_CTA = "Donar en GiveButter";
 export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
 // Shown under the EE. UU. door's Givebutter block: the widget is English-only.
 export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en inglés.";
@@ -63,10 +66,17 @@ export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en in
 // skipping the extranjero mechanics. A "Cambiar opción" link returns here.
 export type DonarDoor = "sv" | "eeuu";
 
-export const DONAR_LANDING_HEADING = "Haga su donación";
-export const DONAR_LANDING_SUBTITLE = "Elija a dónde desea dirigir su donación.";
+export const DONAR_LANDING_HEADING = "Diezmos y Ofrendas";
+// Residence-based framing: the doors differ by the donor's residence / payment rail /
+// tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
+export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
+export const DONAR_LANDING_UNIFIER =
+  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador.";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
+// Per-door descriptor: the real differentiator is the tax receipt, not the destination.
+export const DONAR_DOOR_SV_DESC = "Comprobante fiscal salvadoreño (CDE)";
 export const DONAR_DOOR_EEUU_LABEL = "EE. UU.";
+export const DONAR_DOOR_EEUU_DESC = "Recibo deducible de impuestos en EE. UU.";
 export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
 
 // Optional deep-link: /donar?ruta=sv or ?ruta=eeuu preselects a door. Read once
@@ -141,7 +151,7 @@ export function givebutterHostedUrl(input: { amount: string; monthly: boolean })
   return query ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${query}` : `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}`;
 }
 
-export const DONAR_THANK_YOU_TITLE = "Su donación fue recibida.";
+export const DONAR_THANK_YOU_TITLE = "Dios le bendiga. Su aportación fue recibida.";
 export const DONAR_THANK_YOU_BODY =
   "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.";
 export const DONAR_FALLBACK_MESSAGE =
@@ -153,6 +163,18 @@ export const DONAR_COMPLETED_MESSAGE = "diezmos:donation-completed";
 
 // All five CAT-022 receptor document types the /donar form accepts.
 export type DonorDocumentType = "13" | "36" | "37" | "03" | "02";
+
+// Diezmo vs Ofrenda, the REQUIRED first field on the SV (Wompi/CDE) form. "" is the
+// unselected state (the form client-validates it as required before submitting).
+export type DonarGiftType = "DIEZMO" | "OFRENDA";
+export const DONAR_GIFT_TYPE_DIEZMO = "DIEZMO" as const;
+export const DONAR_GIFT_TYPE_OFRENDA = "OFRENDA" as const;
+// Chip labels (monochrome chips, like the monto chips; active inverts to black).
+export const DONAR_GIFT_TYPE_LABEL: Record<DonarGiftType, string> = {
+  DIEZMO: "Diezmo",
+  OFRENDA: "Ofrenda"
+};
+export const DONAR_GIFT_TYPE_FIELD_LABEL = "Tipo";
 
 // The 00 codes across CAT-008/012/013 are "Otro (Para extranjeros)": a foreign
 // donor stores 00/00/00 geography plus their CAT-020 country (donor_pais).
@@ -173,6 +195,8 @@ export const DONAR_DOMESTIC_DEPARTMENTS = CAT012_DEPARTMENTS.filter((option) => 
 // cardholder) and the foreign-residence fields.
 export interface DonationFormInput {
   amount: string;
+  // Diezmo vs Ofrenda: "" until the donor picks a chip. Required on the SV path.
+  giftType: DonarGiftType | "";
   donorDocumentType: DonorDocumentType;
   donorDocument: string;
   donorName: string;
@@ -200,6 +224,13 @@ export function isDonarGraciasPath(pathname: string): boolean {
 // Otro (37). Name and email are NOT validated here — the donor enters them on
 // Wompi's hosted sheet (razón social is the one exception, for NIT donors).
 export function donationFormValidationMessage(input: DonationFormInput): string {
+  // The SV form requires the donor to state whether the gift is a diezmo or an
+  // ofrenda before anything else. (The US/Givebutter path renders no fiscal form and
+  // never reaches this validator.)
+  if (input.giftType !== "DIEZMO" && input.giftType !== "OFRENDA") {
+    return "Seleccione si es diezmo u ofrenda.";
+  }
+
   const amount = Number.parseFloat(input.amount.trim());
   if (!input.amount.trim() || !Number.isFinite(amount)) {
     return "Ingrese un monto válido en dólares.";
@@ -268,6 +299,9 @@ export function donationFormValidationMessage(input: DonationFormInput): string 
 export function donationIntentBody(form: DonationFormInput): Record<string, unknown> {
   return {
     amount: form.amount.trim(),
+    // Diezmo/Ofrenda: sent only when chosen (the SV form always sends it after
+    // client validation); omitted otherwise so the server keeps its null default.
+    giftType: form.giftType || undefined,
     donorDocumentType: form.donorDocumentType,
     donorDocument: form.donorDocument.trim(),
     donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,

@@ -49,15 +49,21 @@ test("public donation form submits and reaches the Wompi handoff state", async (
   await page.goto("/donar");
 
   // The public page opens on the two-door chooser (renders without a session).
-  await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continuar" })).toHaveCount(0);
 
   // Door 1 (El Salvador y el mundo) opens the SV fiscal (Wompi + CDE) form.
   await page.getByRole("button", { name: "El Salvador y el mundo" }).click();
 
+  // The SV form is now headed by the diezmo/ofrenda framing.
+  await expect(page.getByRole("heading", { name: "Entregue su diezmo u ofrenda" })).toBeVisible();
+
   // Name and email are entered on Wompi's sheet, not here — the form no longer has them.
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
+
+  // Required first field: pick Diezmo (or Ofrenda) before the form can be submitted.
+  await page.getByRole("button", { name: "Diezmo", exact: true }).click();
 
   // Default document type is DUI (13).
   await page.getByLabel("Número de documento").fill(DONOR.dui);
@@ -71,7 +77,7 @@ test("public donation form submits and reaches the Wompi handoff state", async (
   // Quick-amount chip sets the monto.
   await page.getByLabel("Monto").fill(DONOR.amount);
 
-  await page.getByRole("button", { name: "Donar" }).click();
+  await page.getByRole("button", { name: "Continuar al pago" }).click();
 
   // Handoff state: either the widget host + fallback link appear, or the app
   // performs the graceful full-page redirect to the mock hosted flow. Both are
@@ -88,16 +94,19 @@ test("public donation form submits and reaches the Wompi handoff state", async (
 
 test("the EE. UU. door routes straight to the Givebutter (FMCE) block", async ({ page }) => {
   await page.goto("/donar");
-  await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
 
   // Door 2 (EE. UU.) opens the Givebutter block directly — no extranjero toggle.
   await page.getByRole("button", { name: "EE. UU." }).click();
+
+  // The US flow has its own heading.
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas — EE. UU." })).toBeVisible();
 
   // The extranjero mechanics are skipped entirely: no toggle, no país, no SV form.
   await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
   await expect(page.getByLabel("Dirección")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Donar" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Continuar al pago" })).toHaveCount(0);
 
   // Pick a quick amount for the widget prefill.
   await page.getByLabel("Monto").fill("25.00");
@@ -107,13 +116,16 @@ test("the EE. UU. door routes straight to the Givebutter (FMCE) block", async ({
   await expect(page.getByText("El formulario de pago se muestra en inglés.")).toBeVisible();
   await expect(page.locator("givebutter-giving-form")).toHaveAttribute("campaign", "example-campaign");
 
-  // The always-visible "done directly on givebutter.com" hint links to the slug URL.
-  const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done directamente en givebutter.com" });
+  // The escape hatch back to the SV fiscal form is GONE.
+  await expect(page.getByText("¿Necesita comprobante fiscal salvadoreño (CDE)?")).toHaveCount(0);
+
+  // The always-visible hint uses the human "GiveButter" anchor text (no raw URL).
+  const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done en GiveButter" });
   await expect(hint).toHaveAttribute("href", /givebutter\.com\/example-campaign/);
   await expect(hint).toHaveAttribute("href", /amount=25/);
 
   // The stubbed widget never renders, so the prominent fallback CTA appears too.
-  const fallback = page.getByRole("link", { name: "Donar en givebutter.com" });
+  const fallback = page.getByRole("link", { name: "Donar en GiveButter" });
   await expect(fallback).toBeVisible({ timeout: 10_000 });
   await expect(fallback).toHaveAttribute("href", /givebutter\.com\/example-campaign\?amount=25/);
 
@@ -126,7 +138,7 @@ test("the EE. UU. door routes straight to the Givebutter (FMCE) block", async ({
 test("thank-you page shows the webhook-driven CDE copy", async ({ page }) => {
   await page.goto("/donar/gracias?monto=1.00&idTransaccion=TEST");
 
-  await expect(page.getByRole("heading", { name: "Su donación fue recibida." })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toBeVisible();
   await expect(
     page.getByText("Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.")
   ).toBeVisible();

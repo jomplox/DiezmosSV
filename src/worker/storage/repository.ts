@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -108,15 +108,19 @@ export class Repository {
     direccionComplemento: string;
     // CAT-020 country for the foreign path (00/00/00 geography); null domestic.
     donorPais: string | null;
+    // Diezmo/Ofrenda (SV flow only); null for legacy and US paths.
+    giftType: DonationGiftType | null;
     clientIp: string | null;
     expiresAt: string;
   }): Promise<DonationIntentRecord> {
+    // gift_type is appended LAST (after expires_at) to preserve the positional bind
+    // indices the donationIntents unit tests assert (donor_pais at 12, etc.).
     await this.db
       .prepare(
         `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
-          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at
-        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.id,
@@ -132,7 +136,8 @@ export class Repository {
         input.direccionComplemento,
         input.donorPais,
         input.clientIp,
-        input.expiresAt
+        input.expiresAt,
+        input.giftType
       )
       .run();
     const record = await this.getDonationIntent(input.id);
@@ -169,11 +174,13 @@ export class Repository {
   // Wompi links of exactly the rows it is about to expire. Read this BEFORE the
   // UPDATE (afterwards the rows no longer match) — its results feed
   // WompiApiService.deactivatePaymentLink.
-  async listIntentsExpiringBefore(nowIso: string): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status">>> {
+  async listIntentsExpiringBefore(nowIso: string): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>> {
+    // gift_type is projected so the deactivation sweep can resend the SAME
+    // nombreProducto the create sent (a PUT replaces the whole link object).
     const result = await this.db
-      .prepare("SELECT id, wompi_id_enlace, amount_cents, status FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
+      .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
       .bind(nowIso)
-      .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status">>();
+      .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>();
     return result.results;
   }
 

@@ -70,6 +70,7 @@ describe("donation intents repository", () => {
       direccionDistrito: "01",
       direccionComplemento: "San Salvador",
       donorPais: null,
+      giftType: null,
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z"
     });
@@ -81,6 +82,8 @@ describe("donation intents repository", () => {
     expect(insert!.sql).toContain("'PENDING'");
     // The 0011 column set: donor_pais rides between the address and the client ip.
     expect(insert!.sql).toContain("donor_pais");
+    // The 0012 column: gift_type is appended LAST so existing positional binds hold.
+    expect(insert!.sql).toContain("gift_type");
     expect(insert!.args).toContain("2026-07-05T13:00:00.000Z");
     expect(insert!.args).toContain(2550);
     expect(insert!.args).toContain("203.0.113.9");
@@ -89,6 +92,8 @@ describe("donation intents repository", () => {
     expect(insert!.args[5]).toBeNull();
     // donor_pais is bound null for a domestic intent (position 12, after complemento).
     expect(insert!.args[11]).toBeNull();
+    // gift_type is the LAST bind (index 14, after expires_at at 13); null here.
+    expect(insert!.args[14]).toBeNull();
   });
 
   it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
@@ -108,6 +113,7 @@ describe("donation intents repository", () => {
       direccionDistrito: "00",
       direccionComplemento: "742 Evergreen Terrace, Springfield",
       donorPais: "US",
+      giftType: "DIEZMO",
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z"
     });
@@ -117,6 +123,9 @@ describe("donation intents repository", () => {
     expect(insert!.args).toContain("Empresa Ejemplo, S.A. de C.V.");
     expect(insert!.args).toContain("US");
     expect(insert!.args).toContain("0614-280390-112-1");
+    // A chosen gift type is bound as the last INSERT arg.
+    expect(insert!.args).toContain("DIEZMO");
+    expect(insert!.args[14]).toBe("DIEZMO");
   });
 
   it("reads a single intent by id", async () => {
@@ -203,6 +212,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     direccion_distrito: "01",
     direccion_complemento: "San Salvador",
     donor_pais: null,
+    gift_type: null,
     wompi_id_enlace: null,
     wompi_url_enlace: null,
     wompi_url_enlace_largo: null,

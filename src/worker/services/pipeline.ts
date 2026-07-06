@@ -617,7 +617,11 @@ function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWeb
       distrito: intent.direccion_distrito,
       complemento: intent.direccion_complemento
     },
-    ...(intent.donor_pais ? { codPais: intent.donor_pais, codDomiciliado: 2 as const } : {})
+    ...(intent.donor_pais ? { codPais: intent.donor_pais, codDomiciliado: 2 as const } : {}),
+    // Diezmo/Ofrenda rides through here so the "TipoAportacion" apéndice line
+    // survives every issuance path (normal, rejected-rebuild, contingency), all of
+    // which build the override from this single helper.
+    ...(intent.gift_type ? { giftType: intent.gift_type } : {})
   };
 }
 

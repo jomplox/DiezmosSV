@@ -187,6 +187,13 @@ export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "E
 // (mirrors the CHECK constraint from migration 0011).
 export type DonationIntentDocumentType = "36" | "13" | "37" | "03" | "02";
 
+// Donor-facing "Tipo" on the SV (Wompi/CDE) flow: is the gift a diezmo or an
+// ofrenda? Informational only — the legal CDE descripcion stays "DONACIÓN" — but it
+// drives the Wompi payment-sheet product name and a CDE apéndice line. Nullable
+// everywhere: the US (Givebutter/FMCE) path and legacy rows never carry it
+// (mirrors the CHECK constraint from migration 0012).
+export type DonationGiftType = "DIEZMO" | "OFRENDA";
+
 export interface DonationIntentRecord {
   id: string;
   status: DonationIntentStatus;
@@ -208,6 +215,8 @@ export interface DonationIntentRecord {
   // Foreign-donor path: CAT-020 country (never "SV") when the direccion carries the
   // 00/00/00 "Otro (Para extranjeros)" geography; null for domestic intents.
   donor_pais: string | null;
+  // Diezmo vs Ofrenda (SV/Wompi/CDE flow only). Null for the US path and legacy rows.
+  gift_type: DonationGiftType | null;
   wompi_id_enlace: number | null;
   wompi_url_enlace: string | null;
   wompi_url_enlace_largo: string | null;

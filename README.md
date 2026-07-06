@@ -477,11 +477,18 @@ the CDE pipeline**. There is **no backend involvement**: no intent is created, n
 Givebutter emails its own tax receipt. The widget script (`widgets.givebutter.com`) is injected only
 when this path first activates (never on admin views, never for non-US donors), and the chosen amount
 plus an optional **"Donación mensual"** toggle (`frequency=monthly`) are prefilled into the page URL for
-the widget. If the embedded form does not render within ~4 s, a prominent **"Donar en givebutter.com"**
-link to `https://givebutter.com/example-campaign?amount=…` (opens in a new tab) is shown; a small version of
-that link is always present beneath the form. An escape hatch — **"¿Necesita comprobante fiscal
-salvadoreño (CDE)?"** — reveals the normal SV fiscal (Wompi + CDE) form for a US resident who does want
-a CDE. All Givebutter constants (account, campaign, script URL) live in `src/client/donation.ts`.
+the widget. If the embedded form does not render within ~4 s, a prominent **"Donar en GiveButter"**
+link to `https://givebutter.com/example-campaign?amount=…` (opens in a new tab) is shown; a small **"Done en
+GiveButter"** version of that link is always present beneath the form (GiveButter is the anchor text —
+no raw URL is shown). There is **no escape hatch** back to the SV form: the donor deliberately chose the
+EE. UU. door, and **"← Cambiar opción"** is the way back. All Givebutter constants (account, campaign,
+script URL) live in `src/client/donation.ts`.
+
+Both doors fund the **same** mother church in El Salvador — Friends of Misión ExampleOrganization (the US
+501(c)(3)) is only the US giving vehicle, never a different beneficiary; the copy is residence-based, not
+destination-based. On the SV path the donor first states whether the gift is a **diezmo** or an
+**ofrenda** (a required chip selector); that choice names the Wompi payment sheet and rides on the CDE
+apéndice as an informational `TipoAportacion` line, while the legal `descripcion` stays **`DONACIÓN`**.
 
 The Worker validates the form data, persists a **donation intent** (identity + address only; name and
 email are stored null, except the empresa razón social), and mints a **single-use, cards-only Wompi
@@ -652,6 +659,11 @@ certificates, or production Wompi payloads in commits, fixtures, or screenshots.
 
 Licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
 Copyright © 2026 Example Person.
+
+### Third-party assets
+
+The two donation-door flag icons are inlined from [HatScripts/circle-flags](https://github.com/HatScripts/circle-flags)
+(`sv.svg`, `us.svg`), licensed under the **MIT License**.
 
 <div align="center">
 <sub>Built for the church accountant who'd rather not run a server. ✦</sub>

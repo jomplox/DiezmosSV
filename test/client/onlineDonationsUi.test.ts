@@ -8,12 +8,20 @@ describe("online donations UI contract", () => {
   it("renders the online-donations card with usted-form copy in the Exportar view", () => {
     expect(appSource).toContain("Donaciones en línea");
     expect(appSource).toContain("Últimas donaciones recibidas desde el formulario público de donación.");
-    // Table columns: estado, monto, donante, fecha, and numero de control for COMPLETED.
+    // Table columns: estado, tipo, monto, donante, fecha, and numero de control for COMPLETED.
     expect(appSource).toContain("<th>Estado</th>");
+    expect(appSource).toContain("<th>Tipo</th>");
     expect(appSource).toContain(">Monto</th>");
     expect(appSource).toContain("<th>Donante</th>");
     expect(appSource).toContain("<th>Fecha</th>");
     expect(appSource).toContain("<th>Número de control</th>");
+  });
+
+  it("renders a Tipo cell mapping the intent gift_type to Diezmo/Ofrenda or an em dash", () => {
+    expect(appSource).toContain("donationGiftTypeLabel(intent.gift_type)");
+    // The helper maps the enum to donor-facing labels, defaulting to the em dash.
+    expect(appSource).toContain('return "Diezmo";');
+    expect(appSource).toContain('return "Ofrenda";');
   });
 
   it("shows the Spanish empty state when there are no online donations", () => {
