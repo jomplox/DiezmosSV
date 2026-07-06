@@ -126,7 +126,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
   // The assurance subtitle names the US tax-deductible receipt in formal IRS terms.
   await expect(
-    page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.")
+    page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.")
   ).toBeVisible();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Donación mensual" })).toBeVisible();

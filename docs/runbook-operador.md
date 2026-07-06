@@ -112,7 +112,7 @@ por el formulario.
 **Donantes en Estados Unidos (NO reciben CDE — es intencional).** Si en /donar el donante marca
 «Resido en el extranjero» y elige **Estados Unidos**, desaparecen los campos fiscales salvadoreños y
 la página muestra el formulario de **Givebutter** de *Friends of Misión ExampleOrganization (FMCE)*, la
-entidad 501(c)(3) estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
+entidad 501c3 estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
 no un CDE salvadoreño, así que esas donaciones se procesan por completo en Givebutter: **no pasan por
 Wompi, no generan una donación en línea, no aparecen en la lista de Exportar y no se emite ningún CDE.**
 El propio Givebutter le envía al donante su recibo. Si el donante en realidad sí quiere un CDE
