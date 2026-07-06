@@ -21,7 +21,21 @@ import {
   validateIntentInput
 } from "./services/donations";
 import { EmailService } from "./services/email";
-import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import {
+  BRANDING_ACCENT_COLOR_SETTING_KEY,
+  BRANDING_DISPLAY_NAME_SETTING_KEY,
+  BRANDING_LOGO_MAX_BYTES,
+  BRANDING_LOGO_OBJECT_KEY,
+  BRANDING_LOGO_SETTING_KEY,
+  BrandingValidationError,
+  loadEmailBranding,
+  normalizeBrandingAccentColor,
+  normalizeBrandingDisplayName,
+  normalizeBrandingLogoContentType,
+  parseBrandingLogoMeta,
+  parseBrandingSettings
+} from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates } from "./services/certificate";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
@@ -263,6 +277,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
   }
 
+  // Public branding read: the login screen needs the display name, accent color, and
+  // logo version BEFORE any session exists, so these two routes are unauthenticated.
+  if (url.pathname === "/api/branding" && request.method === "GET") {
+    return handlePublicBrandingRoute(repo);
+  }
+
+  if (url.pathname === "/api/branding/logo" && request.method === "GET") {
+    return handleBrandingLogoStream(env, repo);
+  }
+
   // Public donor checkout: unauthenticated, runs before any role check. A body with
   // only { amount, giftType } is a DRAFT create (the wizard mints the Wompi link in the
   // background on Paso 1→2); a body carrying donor data is a full create (the fallback
@@ -387,7 +411,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
           if (created) {
             const link = `${url.origin}/?reset=${created.token}`;
             try {
-              await new EmailService(env).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
+              const resetBranding = await loadEmailBranding(repo);
+              await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
               await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
             } catch (error) {
               await repo.createAudit({
@@ -448,6 +473,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/settings/email-templates") {
     return handleEmailTemplatesRoute(request, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/branding") {
+    return handleBrandingRoute(request, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/branding/logo") {
+    return handleBrandingLogoRoute(request, env, repo, user);
   }
 
   if (url.pathname === "/api/settings/alert-email") {
@@ -849,6 +882,138 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
   return jsonResponse({ ok: true, alertEmail: raw });
 }
 
+// Public branding read (unauthenticated): the login screen consumes this before any
+// session. logoVersion is the cache-busting token clients append to the logo stream
+// URL; null when no logo is stored so the client falls back to the built-in mark.
+async function handlePublicBrandingRoute(repo: Repository): Promise<Response> {
+  const branding = parseBrandingSettings(
+    await repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    await repo.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY)
+  );
+  const logo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+  return jsonResponse({
+    displayName: branding.displayName,
+    accentColor: branding.accentColor,
+    logoVersion: logo?.version ?? null
+  });
+}
+
+// Public branding logo stream (unauthenticated). A church-uploaded SVG can embed
+// scripts, so the response is locked down: a strict CSP that blocks scripts and any
+// subresource fetch, plus nosniff. The short cache keeps the login/header logo snappy
+// while still turning over when the version query changes.
+async function handleBrandingLogoStream(env: Env, repo: Repository): Promise<Response> {
+  const meta = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+  if (!meta) {
+    return notFound();
+  }
+  const object = await env.ARCHIVE.get(BRANDING_LOGO_OBJECT_KEY);
+  if (!object) {
+    return notFound();
+  }
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": object.httpMetadata?.contentType ?? meta.contentType,
+      "Cache-Control": "public, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "script-src 'none'; default-src 'none'; style-src 'unsafe-inline'"
+    }
+  });
+}
+
+// Write branding name + color (OWNER). Both fields are required; validation errors
+// carry Spanish messages. The audit never logs anything sensitive (name/color only).
+async function handleBrandingRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  const body = (await request.json().catch(() => ({}))) as { displayName?: unknown; accentColor?: unknown };
+  let displayName: string;
+  let accentColor: string;
+  try {
+    displayName = normalizeBrandingDisplayName(body.displayName);
+    accentColor = normalizeBrandingAccentColor(body.accentColor);
+  } catch (error) {
+    if (error instanceof BrandingValidationError) {
+      return jsonResponse({ error: "invalid_branding", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  await repo.setSetting(BRANDING_DISPLAY_NAME_SETTING_KEY, displayName, actor.id);
+  await repo.setSetting(BRANDING_ACCENT_COLOR_SETTING_KEY, accentColor, actor.id);
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "BRANDING_UPDATED",
+    entityType: "app_setting",
+    entityId: BRANDING_DISPLAY_NAME_SETTING_KEY,
+    summary: `Marca actualizada: ${displayName}`,
+    metadata: { displayName, accentColor }
+  });
+  return jsonResponse({ ok: true, displayName, accentColor });
+}
+
+// Upload (PUT) or remove (DELETE) the branding logo (OWNER). The binary goes to R2
+// under BRANDING_LOGO_OBJECT_KEY; its metadata mirrors into app_settings so the public
+// reads stay a single D1 lookup. The audit records the content type and size, never
+// the bytes.
+async function handleBrandingLogoRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method === "DELETE") {
+    const actor = requireRole(user, "OWNER");
+    await env.ARCHIVE.delete(BRANDING_LOGO_OBJECT_KEY);
+    await repo.setSetting(BRANDING_LOGO_SETTING_KEY, "", actor.id);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "BRANDING_LOGO_REMOVED",
+      entityType: "app_setting",
+      entityId: BRANDING_LOGO_SETTING_KEY,
+      summary: "Logo de marca eliminado",
+      metadata: {}
+    });
+    return jsonResponse({ ok: true, logoVersion: null });
+  }
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  let contentType: string;
+  try {
+    contentType = normalizeBrandingLogoContentType(request.headers.get("Content-Type"));
+  } catch (error) {
+    if (error instanceof BrandingValidationError) {
+      return jsonResponse({ error: "invalid_branding_logo", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return jsonResponse({ error: "invalid_branding_logo", message: "El archivo del logo está vacío." }, { status: 400 });
+  }
+  if (bytes.byteLength > BRANDING_LOGO_MAX_BYTES) {
+    return jsonResponse({ error: "invalid_branding_logo", message: "El logo no puede superar los 512 KB." }, { status: 400 });
+  }
+  // crypto.randomUUID gives a cache-busting version without a wall-clock read.
+  const version = crypto.randomUUID();
+  await env.ARCHIVE.put(BRANDING_LOGO_OBJECT_KEY, bytes, { httpMetadata: { contentType } });
+  await repo.setSetting(
+    BRANDING_LOGO_SETTING_KEY,
+    JSON.stringify({ contentType, size: bytes.byteLength, version }),
+    actor.id
+  );
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "BRANDING_LOGO_UPDATED",
+    entityType: "app_setting",
+    entityId: BRANDING_LOGO_SETTING_KEY,
+    summary: "Logo de marca actualizado",
+    metadata: { contentType, size: bytes.byteLength }
+  });
+  return jsonResponse({ ok: true, logoVersion: version });
+}
+
 async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
   const configured = ambienteValue(await repo.getSetting(EMISSION_ENVIRONMENT_SETTING));
   return configured ?? defaultEmissionEnvironment(env);
@@ -1173,7 +1338,8 @@ async function handleDocumentRoute(
     }
     try {
       const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-      const response = await new EmailService(env, templates).sendReceipt(document, toEmail);
+      const branding = await loadEmailBranding(repo);
+      const response = await new EmailService(env, templates, branding).sendReceipt(document, toEmail);
       await repo.recordEmailDelivery({
         documentId: document.id,
         toEmail,
@@ -1311,7 +1477,8 @@ async function handleDocumentRoute(
       if (invalidatedDocument.donor_email) {
         try {
           const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-          const emailResponse = await new EmailService(env, templates).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
+          const branding = await loadEmailBranding(repo);
+          const emailResponse = await new EmailService(env, templates, branding).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
           await repo.recordEmailDelivery({
             documentId: document.id,
             toEmail: invalidatedDocument.donor_email,

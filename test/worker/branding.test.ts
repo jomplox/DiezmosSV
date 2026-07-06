@@ -1,0 +1,142 @@
+import { describe, expect, it } from "vitest";
+import {
+  BRANDING_DEFAULTS,
+  BRANDING_LOGO_MAX_BYTES,
+  BRANDING_LOGO_CONTENT_TYPES,
+  BrandingValidationError,
+  brandingLogoExtension,
+  normalizeBrandingAccentColor,
+  normalizeBrandingDisplayName,
+  normalizeBrandingLogoContentType,
+  parseBrandingLogoMeta,
+  parseBrandingSettings
+} from "../../src/worker/services/branding";
+
+describe("normalizeBrandingDisplayName", () => {
+  it("trims surrounding whitespace", () => {
+    expect(normalizeBrandingDisplayName("  Iglesia Central  ")).toBe("Iglesia Central");
+  });
+
+  it("rejects an empty name in Spanish", () => {
+    expect(() => normalizeBrandingDisplayName("   ")).toThrow(BrandingValidationError);
+    try {
+      normalizeBrandingDisplayName("");
+    } catch (error) {
+      expect((error as Error).message).toContain("nombre");
+    }
+  });
+
+  it("rejects a name longer than 80 characters", () => {
+    expect(() => normalizeBrandingDisplayName("a".repeat(81))).toThrow(BrandingValidationError);
+  });
+
+  it("accepts a name of exactly 80 characters", () => {
+    const name = "a".repeat(80);
+    expect(normalizeBrandingDisplayName(name)).toBe(name);
+  });
+
+  it("rejects a non-string value", () => {
+    expect(() => normalizeBrandingDisplayName(42 as unknown as string)).toThrow(BrandingValidationError);
+  });
+});
+
+describe("normalizeBrandingAccentColor", () => {
+  it("lowercases a valid #rrggbb color", () => {
+    expect(normalizeBrandingAccentColor("#0F766E")).toBe("#0f766e");
+  });
+
+  it("accepts an already-lowercase color", () => {
+    expect(normalizeBrandingAccentColor("#007c75")).toBe("#007c75");
+  });
+
+  it("rejects a 3-digit shorthand color in Spanish", () => {
+    expect(() => normalizeBrandingAccentColor("#fff")).toThrow(BrandingValidationError);
+    try {
+      normalizeBrandingAccentColor("#fff");
+    } catch (error) {
+      expect((error as Error).message).toContain("color");
+    }
+  });
+
+  it("rejects a color without the leading hash", () => {
+    expect(() => normalizeBrandingAccentColor("0f766e")).toThrow(BrandingValidationError);
+  });
+
+  it("rejects a color with non-hex characters", () => {
+    expect(() => normalizeBrandingAccentColor("#12345g")).toThrow(BrandingValidationError);
+  });
+});
+
+describe("normalizeBrandingLogoContentType", () => {
+  it("accepts the three supported content types", () => {
+    for (const type of BRANDING_LOGO_CONTENT_TYPES) {
+      expect(normalizeBrandingLogoContentType(type)).toBe(type);
+    }
+  });
+
+  it("strips charset parameters from the content type", () => {
+    expect(normalizeBrandingLogoContentType("image/svg+xml; charset=utf-8")).toBe("image/svg+xml");
+  });
+
+  it("rejects an unsupported content type", () => {
+    expect(() => normalizeBrandingLogoContentType("image/gif")).toThrow(BrandingValidationError);
+  });
+
+  it("rejects a missing content type", () => {
+    expect(() => normalizeBrandingLogoContentType(null)).toThrow(BrandingValidationError);
+  });
+});
+
+describe("brandingLogoExtension", () => {
+  it("maps each content type to a file extension", () => {
+    expect(brandingLogoExtension("image/svg+xml")).toBe("svg");
+    expect(brandingLogoExtension("image/png")).toBe("png");
+    expect(brandingLogoExtension("image/jpeg")).toBe("jpg");
+  });
+});
+
+describe("parseBrandingSettings", () => {
+  it("returns the defaults when nothing is stored", () => {
+    expect(parseBrandingSettings(null, null)).toEqual({
+      displayName: BRANDING_DEFAULTS.displayName,
+      accentColor: BRANDING_DEFAULTS.accentColor
+    });
+  });
+
+  it("returns stored values over defaults", () => {
+    expect(parseBrandingSettings("Iglesia Central", "#123456")).toEqual({
+      displayName: "Iglesia Central",
+      accentColor: "#123456"
+    });
+  });
+});
+
+describe("parseBrandingLogoMeta", () => {
+  it("returns null when unset", () => {
+    expect(parseBrandingLogoMeta(null)).toBeNull();
+  });
+
+  it("parses stored JSON metadata", () => {
+    const meta = parseBrandingLogoMeta(JSON.stringify({ contentType: "image/png", size: 1234, version: "abc" }));
+    expect(meta).toEqual({ contentType: "image/png", size: 1234, version: "abc" });
+  });
+
+  it("returns null for malformed JSON", () => {
+    expect(parseBrandingLogoMeta("{not json")).toBeNull();
+  });
+
+  it("returns null when the content type is not a supported logo type", () => {
+    expect(parseBrandingLogoMeta(JSON.stringify({ contentType: "image/gif", size: 1, version: "x" }))).toBeNull();
+  });
+});
+
+describe("branding constants", () => {
+  it("caps uploads at 512 KB", () => {
+    expect(BRANDING_LOGO_MAX_BYTES).toBe(512 * 1024);
+  });
+
+  it("defaults to the historical ExamplePerson1 brand", () => {
+    expect(BRANDING_DEFAULTS.displayName).toBe("ExamplePerson1");
+    expect(BRANDING_DEFAULTS.accentColor).toBe("#0f766e");
+  });
+});
