@@ -61,6 +61,13 @@ describe("credentialSectionState", () => {
   test("marks neutral sections as ready because they do not map to a secret group", () => {
     expect(credentialSectionState("ambiente", status)).toBe("ready");
     expect(credentialSectionState("plantillas", status)).toBe("ready");
+    expect(credentialSectionState("marca", status)).toBe("ready");
+  });
+
+  test("registers a white-label branding section", () => {
+    expect(credentialSettingsSections.find((section) => section.id === "marca")).toMatchObject({
+      label: "Marca"
+    });
   });
 
   test("marks a section pending when any mapped secret group is not ready", () => {

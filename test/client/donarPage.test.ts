@@ -1127,9 +1127,11 @@ describe("monochrome donor-facing restyle", () => {
     }
   });
 
-  it("leaves the admin teal accent (#007c75) present elsewhere in the sheet", () => {
-    // The admin keeps its palette; the teal must still appear on non-donor rules.
+  it("keeps the admin accent on non-donor rules, now driven by the white-label variable", () => {
+    // The admin keeps its teal accent, but it is now sourced from var(--accent, …) so
+    // a single branding setting recolors the whole panel. (The former hardcoded
+    // #007c75 was replaced sheet-wide; the donor rules above stay monochrome.)
     const withoutDonar = stylesSource.replace(/\.donar-[\w-]*[^{]*\{[^}]*\}/g, "");
-    expect(withoutDonar).toContain("#007c75");
+    expect(withoutDonar).toContain("var(--accent, #0f766e)");
   });
 });
