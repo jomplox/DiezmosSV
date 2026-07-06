@@ -95,7 +95,8 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await page.getByLabel("Dirección").fill("San Salvador, El Salvador");
 
   // Entering Paso 3 creates the payment intent.
-  await page.getByRole("button", { name: "Continuar al pago" }).click();
+  // The submit names the donor's own gift (entrega framing — never "pago").
+  await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
 
   // Paso 3 — Pago. The summary line recaps the Paso 1 choice with an Editar way
   // back, above the Wompi handoff.
@@ -109,7 +110,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible({ timeout: 15_000 });
   await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
-  await expect(page.getByRole("button", { name: "¿No se abre el pago? Continúe aquí" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "¿No se muestra el formulario? Continúe aquí" })).toBeVisible();
   expect(page.url()).toContain("/donar");
 });
 
@@ -137,7 +138,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
   await expect(page.getByLabel("Dirección")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Continuar al pago" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Continuar con su/ })).toHaveCount(0);
 
   // A quick-amount chip fills the hero input.
   await page.getByRole("button", { name: "$25", exact: true }).click();
@@ -149,7 +150,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Única · $25.00")).toBeVisible();
   await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
-  await expect(page.getByText("El formulario de pago se muestra en inglés.")).toBeVisible();
+  await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
   await expect(page.locator("givebutter-giving-form")).toHaveAttribute("campaign", "example-campaign");
 
   // The escape hatch back to the SV fiscal form is GONE.
@@ -183,7 +184,7 @@ test("thank-you page shows the webhook-driven CDE copy", async ({ page }) => {
 
   await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toBeVisible();
   await expect(
-    page.getByText("Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.")
+    page.getByText("Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme.")
   ).toBeVisible();
   // Monto is displayed from the query string (display only).
   await expect(page.getByText("Monto: $1.00")).toBeVisible();

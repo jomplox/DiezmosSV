@@ -22,6 +22,7 @@ import {
   DONAR_WIDGET_DELAYED_MESSAGE,
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
@@ -364,8 +365,9 @@ describe("donar widget handoff", () => {
   });
 
   it("closes the poll with a neutral message that never implies failure", () => {
+    // Entrega framing: these are diezmos y ofrendas, never "pagos".
     expect(DONAR_FALLBACK_MESSAGE).toBe(
-      "Si completó el pago, recibirá su comprobante (CDE) por correo electrónico. Puede cerrar esta página."
+      "Si completó su entrega, recibirá su comprobante de donación por correo electrónico. Puede cerrar esta página."
     );
   });
 });
@@ -387,9 +389,9 @@ describe("donar thank-you page", () => {
 
   it("uses the webhook-driven thank-you copy with a religious blessing", () => {
     expect(DONAR_THANK_YOU_TITLE).toBe("Dios le bendiga. Su aportación fue recibida.");
-    // The CDE-by-email line (with the fiscal "comprobante (CDE)" wording) is unchanged.
+    // User-centered wording: "comprobante de donación", no CDE initials, no "pago".
     expect(DONAR_THANK_YOU_BODY).toBe(
-      "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme."
+      "Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme."
     );
   });
 });
@@ -453,8 +455,11 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("donarAmountDisplay(");
   });
 
-  it("changes the submit label to the diezmo-framed 'Continuar al pago'", () => {
-    expect(donarSource).toContain("Continuar al pago");
+  it("frames the Paso 2 submit around the chosen gift, never a 'pago'", () => {
+    // The label names the donor's own diezmo or ofrenda (giftType is always set on
+    // the SV door — Diezmo is preselected).
+    expect(donarSource).toContain("Continuar con su ofrenda");
+    expect(donarSource).toContain("Continuar con su diezmo");
     expect(donarSource).not.toContain('"Donar"');
   });
 
@@ -553,7 +558,7 @@ describe("donar wizard source contract", () => {
   });
 
   it("disables the submit button while preparing the payment", () => {
-    expect(donarSource).toContain("Preparando el pago…");
+    expect(donarSource).toContain("Preparando su entrega…");
   });
 
   it("validates per step: Paso 1 gates on the step-1 rules, Paso 2 on the rest", () => {
@@ -587,11 +592,11 @@ describe("donar wizard source contract", () => {
     const assignments = donarSource.match(/window\.location\.href\s*=/g) ?? [];
     expect(assignments).toHaveLength(1);
     const at = donarSource.indexOf("window.location.href =");
-    expect(donarSource.slice(at, at + 260)).toContain("¿No se abre el pago? Continúe aquí");
+    expect(donarSource.slice(at, at + 260)).toContain("¿No se muestra el formulario? Continúe aquí");
     // The slow path renders a prominent hosted-checkout anchor, not a redirect.
     expect(donarSource).toContain("DONAR_WIDGET_FALLBACK_CTA");
     expect(donarSource).toContain("donar-widget-fallback");
-    expect(DONAR_WIDGET_FALLBACK_CTA).toBe("Continuar al pago en Wompi");
+    expect(DONAR_WIDGET_FALLBACK_CTA).toBe("Continuar en Wompi");
   });
 
   it("shows a loading indicator until the embedded checkout loads", () => {
@@ -602,7 +607,7 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("DONAR_WIDGET_DELAYED_MESSAGE");
     expect(donarSource).toContain("onLoad");
     expect(donarSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
-    expect(DONAR_WIDGET_LOADING_MESSAGE).toContain("Preparando el pago");
+    expect(DONAR_WIDGET_LOADING_MESSAGE).toContain("Preparando su entrega");
     expect(DONAR_WIDGET_DELAYED_MESSAGE).toContain("Wompi");
     // Spinner is announced to assistive tech and styled monochrome in CSS.
     expect(donarSource).toContain('role="status"');
@@ -613,9 +618,17 @@ describe("donar wizard source contract", () => {
     expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
+  it("preconnects to the checkout host while the donor fills the form", () => {
+    // DNS + TLS to pagos.wompi.sv are warmed on wizard mount, so the Paso 3 embed
+    // skips connection setup on mobile networks.
+    expect(donarSource).toContain('"preconnect"');
+    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    expect(DONAR_WOMPI_CHECKOUT_ORIGIN).toBe("https://pagos.wompi.sv");
+  });
+
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
-    expect(donarSource).toContain("¿No se abre el pago? Continúe aquí");
+    expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {
@@ -858,7 +871,7 @@ describe("two-door landing copy", () => {
   });
 
   it("tells EE. UU. donors the payment form is in English", () => {
-    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario de pago se muestra en inglés.");
+    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario se muestra en inglés.");
   });
 });
 

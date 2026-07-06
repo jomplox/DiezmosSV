@@ -33,6 +33,7 @@ import {
   DONAR_WIDGET_DELAYED_MESSAGE,
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
@@ -328,6 +329,18 @@ export function DonarPage() {
     }
     summaryEditRef.current?.focus();
   }, [door, step]);
+
+  // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
+  // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
+  useEffect(() => {
+    if (document.querySelector(`link[rel="preconnect"][href="${DONAR_WOMPI_CHECKOUT_ORIGIN}"]`)) {
+      return;
+    }
+    const link = document.createElement("link");
+    link.rel = "preconnect";
+    link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
+    document.head.appendChild(link);
+  }, []);
 
   // Inject the Givebutter widget script ONLY when the US donation path first becomes
   // active — never on admin views, never for non-US donors. Guarded like the Wompi
@@ -693,7 +706,7 @@ export function DonarPage() {
 
         {/* Paso 2 — Sus datos (SV door only). Documento + dirección, roomy single
             column. Entering Paso 3 creates the payment intent, so the submit
-            label is the diezmo-framed "Continuar al pago". */}
+            label names the chosen gift ("Continuar con su diezmo/ofrenda"). */}
         {step === 2 && !usDonation && (
           <form className="donar-form donar-step" onSubmit={continueToPago}>
             <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
@@ -821,7 +834,7 @@ export function DonarPage() {
 
             {error && <p className="error donar-error">{error}</p>}
             <button className="primary" type="submit" disabled={submitting}>
-              {submitting ? "Preparando el pago…" : "Continuar al pago"}
+              {submitting ? "Preparando su entrega…" : form.giftType === "OFRENDA" ? "Continuar con su ofrenda" : "Continuar con su diezmo"}
             </button>
           </form>
         )}
@@ -873,7 +886,7 @@ export function DonarPage() {
 
             {stage === "widget" && intent && (
               <div className="donar-handoff">
-                <p className="donar-intro">Pague de forma segura con Wompi. Al completar el pago, verá la confirmación aquí.</p>
+                <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
                 {handoff === "loading" && (
                   <div className="donar-widget-loading" role="status">
                     <span className="donar-spinner" aria-hidden="true" />
@@ -891,11 +904,11 @@ export function DonarPage() {
                 <iframe
                   className="donar-embed"
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
-                  title="Pago seguro con Wompi"
+                  title="Entrega segura con Wompi"
                   onLoad={() => setHandoff("ready")}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
-                  ¿No se abre el pago? Continúe aquí
+                  ¿No se muestra el formulario? Continúe aquí
                 </button>
               </div>
             )}
