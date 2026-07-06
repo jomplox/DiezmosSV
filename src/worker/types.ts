@@ -226,6 +226,11 @@ export interface DonationIntentRecord {
   wompi_url_enlace_largo: string | null;
   document_id: string | null;
   client_ip: string | null;
+  // Wompi payment marker (migration 0016): stamped by the webhook the moment an
+  // approved payment for this intent arrives — independent of status. COMPLETED still
+  // means the CDE was accepted by MH; paid_at means the donor paid. The donor-facing
+  // "thanks" keys on paid_at, not on MH acceptance. Null until (and unless) paid.
+  paid_at: string | null;
   created_at: string;
   updated_at: string;
   expires_at: string;

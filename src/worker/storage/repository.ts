@@ -221,6 +221,18 @@ export class Repository {
       .run();
   }
 
+  // Stamp the donor's payment (migration 0016). Called by the Wompi webhook when an
+  // approved payment correlates to this intent. Deliberately does NOT touch status:
+  // COMPLETED stays reserved for MH acceptance of the CDE. The `paid_at IS NULL` guard
+  // makes it idempotent — a webhook replay never moves the timestamp, and an unknown or
+  // already-paid intent simply matches nothing (no-op, no error).
+  async markIntentPaid(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE donation_intents SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL")
+      .bind(nowIso(), nowIso(), id)
+      .run();
+  }
+
   // The intents the next expireUnpaidIntentsBefore(nowIso) call will flip: same
   // (status, expires_at) predicate as the UPDATE, so the sweep can deactivate the
   // Wompi links of exactly the rows it is about to expire. Read this BEFORE the

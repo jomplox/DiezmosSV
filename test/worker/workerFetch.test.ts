@@ -639,14 +639,32 @@ describe("donation intents", () => {
     }
   });
 
-  it("returns only the status for a known intent id", async () => {
+  it("returns the status and paid flag for a known intent id", async () => {
     const db = new InMemoryD1();
-    db.donationIntents.push({ id: "di_known", status: "LINK_CREATED", donor_name: "Secreto", donor_document: "10000001-9" });
+    db.donationIntents.push({ id: "di_known", status: "LINK_CREATED", donor_name: "Secreto", donor_document: "10000001-9", paid_at: null });
 
     const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_known/status"), env(db));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED" });
+    // Backward-compatible: status unchanged, paid added. Unpaid intent → paid:false.
+    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED", paid: false });
+  });
+
+  it("reports paid:true once paid_at is stamped (donor thanks keys on payment, not MH acceptance)", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_paidflag",
+      status: "LINK_CREATED",
+      donor_name: "Secreto",
+      donor_document: "10000001-9",
+      paid_at: "2026-07-04T12:30:00.000Z"
+    });
+
+    const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_paidflag/status"), env(db));
+
+    expect(response.status).toBe(200);
+    // Status is still LINK_CREATED (CDE not yet accepted) but the donor already paid.
+    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED", paid: true });
   });
 
   it("returns 404 for an unknown intent id", async () => {
@@ -3288,6 +3306,212 @@ describe("Wompi webhook integration", () => {
     });
     expect(db.wompiEvents).toHaveLength(0);
     expect(queued).toHaveLength(0);
+  });
+
+  it("marks the correlated intent paid_at when an approved di_ webhook arrives", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_paidmark",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_paid_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_paidmark"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.paid_at).toBeTruthy();
+    // The payment marker never advances the intent status — COMPLETED still means MH
+    // accepted the CDE, which only the pipeline sets.
+    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.status).toBe("LINK_CREATED");
+  });
+
+  it("also correlates paid_at from EnlacePago.IdentificadorEnlaceComercio when IdExterno is absent", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_enlacepaid",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_enlace_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      enlacePago: { IdentificadorEnlaceComercio: "di_enlacepaid" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.donationIntents.find((row) => row.id === "di_enlacepaid")?.paid_at).toBeTruthy();
+  });
+
+  it("does not change paid_at on a replayed webhook for an already-paid intent", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_replay",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: "2026-07-04T12:30:00.000Z"
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_replay_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_replay"
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    // markIntentPaid is idempotent (WHERE paid_at IS NULL): the first stamp stands.
+    expect(db.donationIntents.find((row) => row.id === "di_replay")?.paid_at).toBe("2026-07-04T12:30:00.000Z");
+  });
+
+  it("leaves non-intent (legacy static-link) webhooks unaffected — no intent, no error", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_legacy_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      enlacePago: { IdentificadorEnlaceComercio: "DONACION-123" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    // Still processed and queued; nothing to mark paid, no crash.
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ inserted: true, queued: true });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("never lets a paid-marker failure (unknown di_ intent) break webhook processing", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    // A di_ id that has no matching intent row — the marker must no-op, not 500.
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_orphan_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_does_not_exist"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ inserted: true });
+    expect(db.wompiEvents).toHaveLength(1);
+  });
+
+  it("does not mark paid_at for a declined di_ webhook", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_declined",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_declined_tx_1",
+      ResultadoTransaccion: "Rechazada",
+      EsProductiva: false,
+      IdExterno: "di_declined"
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(db.donationIntents.find((row) => row.id === "di_declined")?.paid_at ?? null).toBeNull();
   });
 });
 
@@ -6233,6 +6457,9 @@ class Statement {
         wompi_url_enlace_largo: null,
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
+        // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
+        // never on create — a fresh intent has not been paid.
+        paid_at: null,
         created_at: "2026-06-26T01:46:47.015Z",
         updated_at: "2026-06-26T01:46:47.015Z",
         expires_at: String(expiresAt)
@@ -6285,6 +6512,17 @@ class Statement {
         intent.status = "COMPLETED";
         intent.document_id = documentId == null ? null : String(documentId);
         intent.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE donation_intents SET paid_at = ?")) {
+      // markIntentPaid: SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL.
+      // Idempotent (the IS NULL guard) — the first stamp stands, so a webhook replay never
+      // overwrites it. An unknown or already-paid id simply matches nothing.
+      const [paidAt, updatedAt, id] = this.args.map((value) => (value == null ? null : String(value)));
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent && (intent.paid_at == null || intent.paid_at === "")) {
+        intent.paid_at = paidAt;
+        intent.updated_at = updatedAt;
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {

@@ -255,10 +255,37 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     entityId: record.id,
     summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
   });
+  // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
+  // regardless of it. The donor-facing "thanks" keys on paid_at (the PAYMENT), not on
+  // COMPLETED (the CDE's MH acceptance, which the async pipeline sets and can lag).
+  // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
+  // bad/unknown intent id must never break webhook processing.
+  await markIntentPaidFromWebhook(repo, payload);
   if (inserted && isApprovedDonation(payload)) {
     await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
   }
   return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued: inserted && isApprovedDonation(payload) }, { status: inserted ? 202 : 200 });
+}
+
+// Marks the donation intent this approved webhook fulfills as paid, keyed on the same
+// intent-id correlation the pipeline uses (payload.IdExterno, falling back to the raw
+// enlace identifier). Only "di_"-prefixed ids of approved donations touch the DB, so
+// legacy static-link payloads skip it entirely. Never throws: any failure is swallowed
+// so a bad intent id can never 500 the webhook — the paid marker is a UI convenience,
+// not a correctness gate (the pipeline still owns COMPLETED and the comprobante).
+async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook): Promise<void> {
+  try {
+    if (!isApprovedDonation(payload)) {
+      return;
+    }
+    const intentId = payload.IdExterno ?? payload.EnlacePago?.IdentificadorEnlaceComercio;
+    if (!intentId || !intentId.startsWith("di_")) {
+      return;
+    }
+    await repo.markIntentPaid(intentId);
+  } catch (error) {
+    console.error("No se pudo marcar la intención como pagada", error);
+  }
 }
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
@@ -360,7 +387,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Enumeration-safe: unknown ids get the same shape a foreign id would.
       return jsonResponse({ error: "intent_not_found" }, { status: 404 });
     }
-    return jsonResponse({ status: intent.status });
+    // status stays for backward compatibility (COMPLETED = CDE accepted by MH). paid
+    // reflects the payment marker (paid_at), so the donor's wizard can show "thanks" the
+    // moment Wompi confirms the payment, without waiting on MH acceptance.
+    return jsonResponse({ status: intent.status, paid: intent.paid_at != null });
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {

@@ -1,0 +1,18 @@
+-- Marcador de pago del donante (2026-07-06): el asistente público /donar mostraba el
+-- "Gracias" solo cuando la intención llegaba a COMPLETED, y COMPLETED solo se alcanza
+-- cuando el Ministerio de Hacienda ACEPTA el CDE. Esa aceptación puede tardar de
+-- segundos a minutos (o fallar), así que un donante que ya pagó dentro del checkout
+-- embebido de Wompi se quedaba mirando una pantalla que nunca reaccionaba.
+--
+-- paid_at desacopla lo que el donante ve (el PAGO) de lo que significa COMPLETED (la
+-- aceptación del CDE por MH). El webhook de Wompi estampa paid_at de forma síncrona en
+-- cuanto llega un pago aprobado correlacionado con la intención (id "di_"), sin tocar
+-- el status: COMPLETED sigue significando "CDE aceptado por Hacienda". El endpoint de
+-- estado expone paid = (paid_at IS NOT NULL) para que la UI muestre el agradecimiento
+-- en cuanto se registra el pago, mientras el comprobante definitivo sigue su curso.
+--
+-- Solo se AGREGA una columna nullable: no se reconstruye la tabla (nunca se reconstruye
+-- una tabla PADRE de FK; fallo documentado en 0014). ADD COLUMN es una operación en
+-- sitio, segura sobre datos existentes — las filas previas quedan con paid_at NULL, que
+-- es exactamente lo correcto (no hay evidencia de pago registrada para ellas).
+ALTER TABLE donation_intents ADD COLUMN paid_at TEXT;
