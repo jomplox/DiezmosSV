@@ -51,8 +51,19 @@ import {
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
+  GIVEBUTTER_CAMPAIGN,
+  GIVEBUTTER_ESCAPE_HATCH,
+  GIVEBUTTER_FALLBACK_CTA,
+  GIVEBUTTER_FALLBACK_HINT,
+  GIVEBUTTER_INTRO,
+  GIVEBUTTER_MONTHLY_LABEL,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
+  GIVEBUTTER_SCRIPT_URL,
   donationFormValidationMessage,
   donationIntentBody,
+  givebutterHostedUrl,
+  givebutterPrefillParams,
+  isUsDonation,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
   isDonarPath,
@@ -3300,10 +3311,20 @@ function DonarPage() {
   const [submitting, setSubmitting] = useState(false);
   const [stage, setStage] = useState<DonarStage>("form");
   const [intent, setIntent] = useState<DonarIntent | null>(null);
+  // US-donor (Givebutter) path state: monthly-gift toggle and the escape hatch that
+  // reveals the SV fiscal (CDE) form even when país === US.
+  const [monthly, setMonthly] = useState(false);
+  const [forceFiscal, setForceFiscal] = useState(false);
+  const [givebutterFallback, setGivebutterFallback] = useState(false);
   const widgetHostRef = useRef<HTMLDivElement | null>(null);
+  const givebutterHostRef = useRef<HTMLDivElement | null>(null);
   // Latches once the rendered Wompi button is auto-clicked so re-observing the
   // (still-present) button never re-opens the modal. Reset per intent below.
   const autoClickedRef = useRef(false);
+
+  // When to render the Givebutter block instead of the SV fiscal fields: a US
+  // resident who has NOT taken the escape hatch to the CDE form.
+  const usDonation = isUsDonation(form) && !forceFiscal;
 
   const update = (patch: Partial<DonationFormInput>) => setForm((current) => ({ ...current, ...patch }));
 
@@ -3324,6 +3345,69 @@ function DonarPage() {
     script.async = true;
     document.head.appendChild(script);
   }, []);
+
+  // Inject the Givebutter widget script ONLY when the US donation path first becomes
+  // active — never on admin views, never for non-US donors. Guarded like the Wompi
+  // injection so it loads at most once per page load.
+  useEffect(() => {
+    if (!usDonation) {
+      return;
+    }
+    if (document.querySelector(`script[src="${GIVEBUTTER_SCRIPT_URL}"]`)) {
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = GIVEBUTTER_SCRIPT_URL;
+    script.async = true;
+    document.head.appendChild(script);
+  }, [usDonation]);
+
+  // While the US path is active: write the chosen amount (and frequency=monthly when
+  // toggled) into the page URL query so the widget prefills, then run the same
+  // render probe as the Wompi widget — if the giving form has not rendered any child
+  // within the timeout, surface the hosted-page fallback link. On leave (country
+  // change / extranjero uncheck / escape hatch) the query is restored so the fiscal
+  // path is clean.
+  useEffect(() => {
+    if (!usDonation) {
+      return;
+    }
+    setGivebutterFallback(false);
+    const params = new URLSearchParams(window.location.search);
+    params.delete("amount");
+    params.delete("frequency");
+    for (const [key, value] of Object.entries(givebutterPrefillParams({ amount: form.amount, monthly }))) {
+      params.set(key, value);
+    }
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+
+    const probe = window.setTimeout(() => {
+      const host = givebutterHostRef.current;
+      const element = host?.querySelector("givebutter-giving-form");
+      // The widget renders its UI as a child iframe/form OR inside the custom
+      // element's shadow root. An *empty* shadow root does not count: the element
+      // upgrades and attaches a shadow root even when it rejects the account/campaign
+      // (e.g. "Invalid ?acct= format"), so require actual rendered content — a light-
+      // DOM iframe/form, or a non-empty shadow root — before suppressing the fallback.
+      const lightRendered = !!host?.querySelector("iframe, form");
+      const shadowRendered = !!(element?.shadowRoot && element.shadowRoot.childElementCount > 0);
+      if (!lightRendered && !shadowRendered) {
+        setGivebutterFallback(true);
+      }
+    }, GIVEBUTTER_RENDER_TIMEOUT_MS);
+
+    return () => {
+      window.clearTimeout(probe);
+      // Drop only OUR prefill params from the live URL (never a stale snapshot), so
+      // any query the donor arrived with survives and the fiscal/Wompi path is clean.
+      const leaving = new URLSearchParams(window.location.search);
+      leaving.delete("amount");
+      leaving.delete("frequency");
+      const rest = leaving.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
+    };
+  }, [usDonation, form.amount, monthly]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -3477,45 +3561,47 @@ function DonarPage() {
 
         {stage === "form" && (
           <form className="donar-form" onSubmit={submit}>
-            <div className="donar-doc-row">
-              <label>
-                <span>Tipo de documento</span>
-                <select
-                  value={form.donorDocumentType}
-                  onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "", donorName: "" })}
-                  aria-label="Tipo de documento"
-                >
-                  {/* CAT-022 "36" is labeled "Empresa" (donor-facing only; stored
-                      code stays 36): many natural persons hold legacy personal
-                      NITs and a literal "NIT" option would bait them into the
-                      razón-social requirement. Empresas donate under NIT. */}
-                  <option value="13">DUI</option>
-                  <option value="36">Empresa</option>
-                  <option value="37">Otro</option>
-                  <option value="03">Pasaporte</option>
-                  <option value="02">Carnet de Residente</option>
-                </select>
-              </label>
-              <label>
-                <span>{form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}</span>
-                <input
-                  value={form.donorDocument}
-                  onChange={(event) => update({ donorDocument: event.target.value })}
-                  onBlur={() => {
-                    if (form.donorDocumentType === "13" && isValidDui(form.donorDocument)) {
-                      update({ donorDocument: formatDui(form.donorDocument) });
-                    }
-                    if (form.donorDocumentType === "36" && isValidNitFormat(form.donorDocument)) {
-                      update({ donorDocument: formatNit(form.donorDocument) });
-                    }
-                  }}
-                  placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
-                  aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
-                />
-              </label>
-            </div>
+            {!usDonation && (
+              <div className="donar-doc-row">
+                <label>
+                  <span>Tipo de documento</span>
+                  <select
+                    value={form.donorDocumentType}
+                    onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "", donorName: "" })}
+                    aria-label="Tipo de documento"
+                  >
+                    {/* CAT-022 "36" is labeled "Empresa" (donor-facing only; stored
+                        code stays 36): many natural persons hold legacy personal
+                        NITs and a literal "NIT" option would bait them into the
+                        razón-social requirement. Empresas donate under NIT. */}
+                    <option value="13">DUI</option>
+                    <option value="36">Empresa</option>
+                    <option value="37">Otro</option>
+                    <option value="03">Pasaporte</option>
+                    <option value="02">Carnet de Residente</option>
+                  </select>
+                </label>
+                <label>
+                  <span>{form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}</span>
+                  <input
+                    value={form.donorDocument}
+                    onChange={(event) => update({ donorDocument: event.target.value })}
+                    onBlur={() => {
+                      if (form.donorDocumentType === "13" && isValidDui(form.donorDocument)) {
+                        update({ donorDocument: formatDui(form.donorDocument) });
+                      }
+                      if (form.donorDocumentType === "36" && isValidNitFormat(form.donorDocument)) {
+                        update({ donorDocument: formatNit(form.donorDocument) });
+                      }
+                    }}
+                    placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
+                    aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
+                  />
+                </label>
+              </div>
+            )}
 
-            {form.donorDocumentType === "36" && (
+            {!usDonation && form.donorDocumentType === "36" && (
               <label>
                 <span>Razón social</span>
                 <input
@@ -3527,22 +3613,28 @@ function DonarPage() {
               </label>
             )}
 
-            <label>
-              <span>Teléfono (opcional)</span>
-              <input
-                value={form.donorPhone}
-                onChange={(event) => update({ donorPhone: event.target.value })}
-                placeholder="0000-0000"
-                aria-label="Teléfono (opcional)"
-                type="tel"
-              />
-            </label>
+            {!usDonation && (
+              <label>
+                <span>Teléfono (opcional)</span>
+                <input
+                  value={form.donorPhone}
+                  onChange={(event) => update({ donorPhone: event.target.value })}
+                  placeholder="0000-0000"
+                  aria-label="Teléfono (opcional)"
+                  type="tel"
+                />
+              </label>
+            )}
 
             <label className="donar-foreign-toggle">
               <input
                 type="checkbox"
                 checked={form.foreignResident}
-                onChange={(event) => update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" })}
+                onChange={(event) => {
+                  setForceFiscal(false);
+                  setMonthly(false);
+                  update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" });
+                }}
                 aria-label="Resido en el extranjero"
               />
               <span>Resido en el extranjero</span>
@@ -3554,7 +3646,13 @@ function DonarPage() {
                 <CatalogSelect
                   value={form.pais}
                   options={DONAR_FOREIGN_COUNTRIES}
-                  onChange={(pais) => update({ pais })}
+                  onChange={(pais) => {
+                    // Switching country away from US must leave the Givebutter path
+                    // cleanly (the prefill effect cleanup restores the URL).
+                    setForceFiscal(false);
+                    setMonthly(false);
+                    update({ pais });
+                  }}
                   showCodes={false}
                   placeholder="Seleccione"
                   ariaLabel="País"
@@ -3598,16 +3696,18 @@ function DonarPage() {
               </div>
             )}
 
-            <label>
-              <span>Dirección</span>
-              <textarea
-                value={form.complemento}
-                onChange={(event) => update({ complemento: event.target.value })}
-                placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
-                aria-label="Dirección"
-                maxLength={200}
-              />
-            </label>
+            {!usDonation && (
+              <label>
+                <span>Dirección</span>
+                <textarea
+                  value={form.complemento}
+                  onChange={(event) => update({ complemento: event.target.value })}
+                  placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
+                  aria-label="Dirección"
+                  maxLength={200}
+                />
+              </label>
+            )}
 
             <div className="donar-amount">
               <span className="donar-amount-label">Monto</span>
@@ -3632,11 +3732,60 @@ function DonarPage() {
               />
             </div>
 
-            {error && <p className="error donar-error">{error}</p>}
+            {usDonation ? (
+              <div className="donar-givebutter">
+                <label className="donar-foreign-toggle">
+                  <input
+                    type="checkbox"
+                    checked={monthly}
+                    onChange={(event) => setMonthly(event.target.checked)}
+                    aria-label={GIVEBUTTER_MONTHLY_LABEL}
+                  />
+                  <span>{GIVEBUTTER_MONTHLY_LABEL}</span>
+                </label>
 
-            <button className="primary" type="submit" disabled={submitting}>
-              {submitting ? "Preparando el pago…" : "Donar"}
-            </button>
+                <p className="donar-intro">{GIVEBUTTER_INTRO}</p>
+
+                {/* Givebutter reads amount/frequency from the host page URL (set via
+                    history.replaceState in the prefill effect). The custom element is
+                    upgraded by the widgets.givebutter.com script injected on this path. */}
+                <div className="donar-givebutter-widget" ref={givebutterHostRef}>
+                  <givebutter-giving-form campaign={GIVEBUTTER_CAMPAIGN} />
+                </div>
+
+                {givebutterFallback && (
+                  <a
+                    className="primary donar-givebutter-fallback"
+                    href={givebutterHostedUrl({ amount: form.amount, monthly })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {GIVEBUTTER_FALLBACK_CTA}
+                  </a>
+                )}
+
+                <a
+                  className="donar-givebutter-hint"
+                  href={givebutterHostedUrl({ amount: form.amount, monthly })}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  {GIVEBUTTER_FALLBACK_HINT}
+                </a>
+
+                <button type="button" className="link-button donar-givebutter-escape" onClick={() => setForceFiscal(true)}>
+                  {GIVEBUTTER_ESCAPE_HATCH}
+                </button>
+              </div>
+            ) : (
+              <>
+                {error && <p className="error donar-error">{error}</p>}
+
+                <button className="primary" type="submit" disabled={submitting}>
+                  {submitting ? "Preparando el pago…" : "Donar"}
+                </button>
+              </>
+            )}
           </form>
         )}
       </div>

@@ -14,8 +14,21 @@ import {
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
+  GIVEBUTTER_ACCOUNT_ID,
+  GIVEBUTTER_CAMPAIGN,
+  GIVEBUTTER_ESCAPE_HATCH,
+  GIVEBUTTER_FALLBACK_CTA,
+  GIVEBUTTER_FALLBACK_HINT,
+  GIVEBUTTER_INTRO,
+  GIVEBUTTER_MONTHLY_LABEL,
+  GIVEBUTTER_RENDER_TIMEOUT_MS,
+  GIVEBUTTER_SCRIPT_URL,
+  GIVEBUTTER_US_COUNTRY_CODE,
   donationFormValidationMessage,
   donationIntentBody,
+  givebutterHostedUrl,
+  givebutterPrefillParams,
+  isUsDonation,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
   isDonarPath,
@@ -408,5 +421,124 @@ describe("donar page source contract", () => {
     const senderCall = appSource.slice(senderStart, senderStart + 120);
     expect(senderCall).toContain("window.location.origin");
     expect(senderCall).not.toContain('"*"');
+  });
+});
+
+describe("givebutter constants", () => {
+  it("pins the FMCE account id and example-campaign campaign", () => {
+    expect(GIVEBUTTER_ACCOUNT_ID).toBe("EXAMPLEACCT00001");
+    expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
+  });
+
+  it("pins the official Givebutter widget script URL scoped to the account", () => {
+    expect(GIVEBUTTER_SCRIPT_URL).toBe("https://widgets.givebutter.com/latest.umd.cjs?acct=EXAMPLEACCT00001");
+    expect(GIVEBUTTER_SCRIPT_URL).toContain(`acct=${GIVEBUTTER_ACCOUNT_ID}`);
+  });
+
+  it("routes only US residents to Givebutter (CAT-020 código US)", () => {
+    expect(GIVEBUTTER_US_COUNTRY_CODE).toBe("US");
+  });
+
+  it("uses the same short render-probe budget as the Wompi fallback", () => {
+    expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
+  });
+});
+
+describe("givebutter US-path detection", () => {
+  const base = { foreignResident: false, pais: "" };
+
+  it("activates only when the donor is a foreign resident in the US", () => {
+    expect(isUsDonation({ foreignResident: true, pais: "US" })).toBe(true);
+    // Foreign but not US → stays on the Wompi + CDE path.
+    expect(isUsDonation({ foreignResident: true, pais: "MX" })).toBe(false);
+    // US selected but extranjero unchecked (impossible via UI, guarded anyway).
+    expect(isUsDonation({ foreignResident: false, pais: "US" })).toBe(false);
+    expect(isUsDonation(base)).toBe(false);
+  });
+});
+
+describe("givebutter prefill and hosted-url helpers", () => {
+  it("writes amount and (when monthly) frequency=monthly for the widget URL prefill", () => {
+    expect(givebutterPrefillParams({ amount: "25.00", monthly: false })).toEqual({ amount: "25" });
+    expect(givebutterPrefillParams({ amount: "25", monthly: true })).toEqual({ amount: "25", frequency: "monthly" });
+    // A blank/invalid amount contributes no amount param.
+    expect(givebutterPrefillParams({ amount: "", monthly: false })).toEqual({});
+    expect(givebutterPrefillParams({ amount: "0", monthly: true })).toEqual({ frequency: "monthly" });
+    // Cents are preserved.
+    expect(givebutterPrefillParams({ amount: "12.50", monthly: false })).toEqual({ amount: "12.5" });
+  });
+
+  it("builds the hosted-page fallback link with the slug and prefill query", () => {
+    expect(givebutterHostedUrl({ amount: "25.00", monthly: false })).toBe(
+      "https://givebutter.com/example-campaign?amount=25"
+    );
+    expect(givebutterHostedUrl({ amount: "25", monthly: true })).toBe(
+      "https://givebutter.com/example-campaign?amount=25&frequency=monthly"
+    );
+    // No amount yet → bare slug URL (still valid).
+    expect(givebutterHostedUrl({ amount: "", monthly: false })).toBe("https://givebutter.com/example-campaign");
+    // The slug is used in the hosted URL (definitely works per Givebutter share URLs).
+    expect(givebutterHostedUrl({ amount: "10", monthly: false })).toContain(GIVEBUTTER_CAMPAIGN);
+  });
+});
+
+describe("givebutter donar page source contract", () => {
+  const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+
+  it("collapses the SV fiscal fields when the US Givebutter path is active", () => {
+    // The form branches on isUsDonation(form): documento/razón social/teléfono/
+    // dirección must NOT render for a US resident (only monto + monthly + widget).
+    expect(donarSource).toContain("isUsDonation(");
+  });
+
+  it("shows the FMCE explanation and the example-campaign giving form", () => {
+    expect(appSource).toContain("GIVEBUTTER_INTRO");
+    expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
+    expect(GIVEBUTTER_INTRO).toContain("501(c)(3)");
+    // The embedded custom element targets the campaign.
+    expect(donarSource).toContain("givebutter-giving-form");
+    expect(donarSource).toContain("GIVEBUTTER_CAMPAIGN");
+  });
+
+  it("injects the Givebutter script only for the US path, once per page load", () => {
+    expect(appSource).toContain("GIVEBUTTER_SCRIPT_URL");
+    // Guarded like the Wompi injection: a querySelector check prevents a second tag.
+    expect(appSource).toContain('script[src="${GIVEBUTTER_SCRIPT_URL}"]');
+  });
+
+  it("prefills the amount/frequency into the page URL via history.replaceState", () => {
+    expect(appSource).toContain("givebutterPrefillParams(");
+    expect(appSource).toContain("history.replaceState");
+  });
+
+  it("removes the prefill params when leaving the US path (clean unmount)", () => {
+    // The effect cleanup restores the URL so the fiscal fields / Wompi path is clean.
+    expect(appSource).toContain("GIVEBUTTER_RENDER_TIMEOUT_MS");
+  });
+
+  it("renders the mandatory hosted-page fallback link with the slug URL", () => {
+    expect(appSource).toContain("givebutterHostedUrl(");
+    expect(appSource).toContain("GIVEBUTTER_FALLBACK_CTA");
+    expect(appSource).toContain("GIVEBUTTER_FALLBACK_HINT");
+    // Opens in a new tab.
+    expect(donarSource).toContain('target="_blank"');
+  });
+
+  it("offers a Donación mensual toggle mapping to frequency=monthly", () => {
+    expect(appSource).toContain("GIVEBUTTER_MONTHLY_LABEL");
+    expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
+  });
+
+  it("offers the escape hatch back to the SV fiscal (CDE) form", () => {
+    expect(appSource).toContain("GIVEBUTTER_ESCAPE_HATCH");
+    expect(GIVEBUTTER_ESCAPE_HATCH).toContain("CDE");
+  });
+
+  it("leaves the Wompi intent path untouched (non-US donors still submit an intent)", () => {
+    // The non-US path still posts a donation intent through the shared helpers.
+    expect(donarSource).toContain("donationIntentBody(");
+    expect(donarSource).toContain("DONAR_INTENT_PATH");
+    // No Givebutter-specific backend endpoint is introduced.
+    expect(appSource).not.toContain("/api/givebutter");
   });
 });
