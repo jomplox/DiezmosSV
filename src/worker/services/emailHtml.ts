@@ -3,6 +3,10 @@ import type { DteDocumentRecord } from "../types";
 // Fallback accent for an unbranded deployment (matches BRANDING_DEFAULTS.accentColor).
 // White-label callers thread a church's own color through the *Options.brandColor.
 const DEFAULT_BRAND_COLOR = "#0f766e";
+
+// Contacto de soporte oficial para ambas vías (SV y EE. UU.): se muestra una sola
+// vez en el pie compartido, así TODOS los correos lo heredan.
+const SUPPORT_EMAIL = "legacy-contact-1@example.com";
 const DEFAULT_ORGANIZATION_NAME = "ExamplePerson1";
 const TEXT_COLOR = "#1f2a2e";
 const MUTED_COLOR = "#52656c";
@@ -167,7 +171,7 @@ function emailDocument(organizationName: string, brandColor: string, blocks: str
             </tr>
             <tr>
               <td style="padding:16px 28px;border-top:1px solid ${BORDER_COLOR};font-family:Arial,Helvetica,sans-serif;font-size:11px;color:${MUTED_COLOR};">
-                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.
+                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.<br />¿Dudas o necesita ayuda? Escríbanos a <a href="mailto:${SUPPORT_EMAIL}" style="color:#595959;">${SUPPORT_EMAIL}</a>.
               </td>
             </tr>
           </table>

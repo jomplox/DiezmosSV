@@ -16,6 +16,7 @@ import {
   DONAR_POLL_TIMEOUT_MS,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
+  DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
@@ -521,7 +522,10 @@ describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
     // Religious framing: the SV fiscal form heading names the aportación, now
     // flagged with the El Salvador emoji instead of a textual path identifier.
-    expect(donarSource).toContain("Entregue su diezmo u ofrenda 🇸🇻");
+    // Both doors share the same general title — only the lane flag differs (the US
+    // side set the copy standard; the SV side matches it).
+    expect(donarSource).toContain("Diezmos y Ofrendas 🇸🇻");
+    expect(donarSource).not.toContain("Entregue su diezmo u ofrenda");
     expect(donarSource).toContain("Tipo de documento");
     expect(donarSource).toContain("Teléfono (opcional)");
     expect(donarSource).toContain("Departamento");
@@ -600,7 +604,8 @@ describe("donar wizard source contract", () => {
   it("assures each door's donor of the legal document their path produces on Paso 1", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
-    expect(donarSource).toContain("Recibirá su comprobante de donación en su dirección de correo electrónico.");
+    // Formal register mirroring the US lane's "recibo oficial ... (IRS 501c3)".
+    expect(donarSource).toContain("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.");
     expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });
@@ -806,6 +811,16 @@ describe("donar wizard source contract", () => {
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
     expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
+  });
+
+  it("shows the official support contact on the donor screens", () => {
+    // legacy-contact-1@example.com is the official support contact for BOTH lanes. It renders as
+    // a discreet mailto line at the bottom of the donor card — subordinate to the
+    // flow, never competing with it.
+    expect(donarSource).toContain("DONAR_SUPPORT_EMAIL");
+    expect(DONAR_SUPPORT_EMAIL).toBe("legacy-contact-1@example.com");
+    expect(donarSource).toContain("mailto:");
+    expect(stylesSource).toContain(".donar-support");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {

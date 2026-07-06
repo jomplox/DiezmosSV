@@ -27,6 +27,7 @@ import {
   DONAR_ROUTE_PARAM,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
+  DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
@@ -255,6 +256,16 @@ function UsFlagIcon() {
 // buggy or hostile frame must not collapse the embed or blow the layout open.
 function clampEmbedHeight(height: number): number {
   return Math.min(Math.max(Math.round(height), 320), 2400);
+}
+
+// Official support contact for both lanes — a discreet mailto line at the bottom of
+// every donor card, visually subordinate to the giving flow.
+function DonarSupport() {
+  return (
+    <p className="donar-support">
+      ¿Dudas o necesita ayuda? Escríbanos a <a href={`mailto:${DONAR_SUPPORT_EMAIL}`}>{DONAR_SUPPORT_EMAIL}</a>
+    </p>
+  );
 }
 
 // Public donation wizard + Wompi/Givebutter handoff. Renders WITHOUT a session.
@@ -752,6 +763,7 @@ export function DonarPage() {
               <span className="donar-door-desc">{DONAR_DOOR_EEUU_DESC}</span>
             </button>
           </div>
+          <DonarSupport />
         </div>
       </div>
     );
@@ -789,7 +801,7 @@ export function DonarPage() {
         <div className="donar-glyph">
           <ShieldCheck size={28} />
         </div>
-        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Entregue su diezmo u ofrenda 🇸🇻"}</h1>
+        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Diezmos y Ofrendas 🇸🇻"}</h1>
 
         {/* Paso 1 assurance: right under the heading, name the legal document this
             door produces — reassurance of the door the donor just chose. */}
@@ -797,7 +809,7 @@ export function DonarPage() {
           <p className="donar-assurance">
             {usDonation
               ? "Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico."
-              : "Recibirá su comprobante de donación en su dirección de correo electrónico."}
+              : "Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico."}
           </p>
         )}
 
@@ -1092,6 +1104,8 @@ export function DonarPage() {
             {stage === "closed" && <p className="auth-notice">{DONAR_FALLBACK_MESSAGE}</p>}
           </div>
         )}
+
+        <DonarSupport />
       </div>
     </div>
   );
@@ -1106,6 +1120,7 @@ export function DonarThankYou({ monto }: { monto?: string }) {
         </div>
         <h1>{DONAR_THANK_YOU_TITLE}</h1>
         {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
+        <DonarSupport />
         <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
       </div>
     </div>
