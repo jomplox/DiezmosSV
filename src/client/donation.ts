@@ -24,6 +24,76 @@ export const DONAR_AUTOCLICK_INTERVAL_MS = 150;
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;
 
+// ── US donors → Givebutter / Friends of Misión ExampleOrganization (FMCE) ────────────
+//
+// A US-resident donor gets NO Salvadoran CDE (useless to a US taxpayer); their
+// gift belongs on the US 501(c)(3)'s books and yields a US-deductible receipt from
+// Givebutter. When "Resido en el extranjero" is checked AND país === "US", the SV
+// fiscal fields collapse and the embedded Givebutter giving form takes over. No
+// backend involvement: no intent, no webhook, no migration.
+//
+// Account 000000, campaign "example-campaign" ("Mis Diezmos y Ofrendas",
+// https://givebutter.com/example-campaign). The campaign attribute is UNVERIFIED for the
+// vanity slug (docs say six-character code); the controller can swap this constant
+// for the dashboard short code if the empirical probe shows the slug is rejected.
+export const GIVEBUTTER_ACCOUNT_ID = "000000";
+export const GIVEBUTTER_CAMPAIGN = "example-campaign";
+export const GIVEBUTTER_SCRIPT_URL = "https://widgets.givebutter.com/latest.umd.cjs?acct=000000";
+// The CAT-020 código for Estados Unidos: the only foreign country that routes to
+// Givebutter (every other país stays on the Wompi + CDE path).
+export const GIVEBUTTER_US_COUNTRY_CODE = "US";
+// Same probe budget as the Wompi widget: if the custom element has not rendered a
+// child (iframe/shadow content) within this window, show the hosted-page fallback.
+export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
+
+export const GIVEBUTTER_INTRO =
+  "Su donación se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501(c)(3)); recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done directamente en givebutter.com";
+export const GIVEBUTTER_FALLBACK_CTA = "Donar en givebutter.com";
+export const GIVEBUTTER_ESCAPE_HATCH = "¿Necesita comprobante fiscal salvadoreño (CDE)? Continúe con el formulario";
+export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
+
+// True when the donor is a US resident, i.e. the Givebutter path should replace the
+// SV fiscal form. Amount is orthogonal (checked separately before mounting).
+export function isUsDonation(form: Pick<DonationFormInput, "foreignResident" | "pais">): boolean {
+  return form.foreignResident && form.pais === GIVEBUTTER_US_COUNTRY_CODE;
+}
+
+// Normalizes the entered monto to a plain dollar string for the widget/URL prefill.
+// Returns "" for a blank/invalid amount so the caller can omit the query param.
+export function givebutterAmountParam(amount: string): string {
+  const parsed = Number.parseFloat(amount.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return "";
+  }
+  // Whole dollars render without a trailing ".00"; cents are preserved.
+  return Number.isInteger(parsed) ? String(parsed) : String(parsed);
+}
+
+// Query params the Givebutter widget reads from the HOST page URL (written via
+// history.replaceState before mounting, removed when leaving the US path). Monthly
+// maps to frequency=monthly; a one-time gift carries no frequency param.
+export function givebutterPrefillParams(input: { amount: string; monthly: boolean }): Record<string, string> {
+  const params: Record<string, string> = {};
+  const amount = givebutterAmountParam(input.amount);
+  if (amount) {
+    params.amount = amount;
+  }
+  if (input.monthly) {
+    params.frequency = "monthly";
+  }
+  return params;
+}
+
+// The mandatory hosted-page fallback link. Works with the vanity slug in all cases
+// (Givebutter resolves the slug in share URLs), so it is safe even if the embedded
+// custom element ends up needing the six-character code.
+export function givebutterHostedUrl(input: { amount: string; monthly: boolean }): string {
+  const params = new URLSearchParams(givebutterPrefillParams(input));
+  const query = params.toString();
+  return query ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${query}` : `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}`;
+}
+
 export const DONAR_THANK_YOU_TITLE = "Su donación fue recibida.";
 export const DONAR_THANK_YOU_BODY =
   "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.";

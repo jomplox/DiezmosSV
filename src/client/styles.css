@@ -2675,6 +2675,30 @@ pre {
   place-items: center;
 }
 
+/* US-donor Givebutter block: the FMCE explanation + embedded giving form that
+   replaces the SV fiscal fields when país === US. */
+.donar-givebutter {
+  display: grid;
+  gap: 12px;
+}
+
+.donar-givebutter-widget {
+  min-height: 64px;
+}
+
+.donar-givebutter-fallback {
+  text-align: center;
+  text-decoration: none;
+}
+
+.donar-givebutter-hint,
+.donar-givebutter-escape {
+  font-size: 12px;
+  color: #52656c;
+  text-align: center;
+  justify-self: center;
+}
+
 .donar-thanks {
   text-align: center;
   justify-items: center;
