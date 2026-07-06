@@ -317,7 +317,12 @@ export class Repository {
     const limit = normalizeDocumentListLimit(params.limit);
     const filters: string[] = [];
     const bindings: Array<string | number> = [];
-    if (params.status) {
+    if (params.status === "TRANSMISSION_PENDING") {
+      // Estado VIRTUAL "En trámite": transmisión diferida = SIGNED + marcador. No es
+      // un valor real de dte_documents.status (el CHECK no se pudo ampliar en D1);
+      // un SIGNED transitorio de pipeline (sin marcador) queda fuera a propósito.
+      filters.push("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL");
+    } else if (params.status) {
       filters.push("dte_documents.status = ?");
       bindings.push(params.status);
     }
@@ -422,12 +427,29 @@ export class Repository {
     await this.db.prepare("UPDATE dte_documents SET status = 'INVALIDATED', updated_at = ? WHERE id = ?").bind(nowIso(), id).run();
   }
 
+  // Marca un CDE como diferido: estado SIGNED + transmission_deferred_at (no hay un
+  // valor de status nuevo — dte_documents es padre de cuatro FKs y D1 no puede
+  // reconstruir la tabla para ampliar su CHECK). El marcador NO se limpia al resolver:
+  // queda como evidencia histórica ("estuvo diferido desde"), y es el status al salir
+  // de SIGNED (ACCEPTED/REJECTED) lo que retira al documento del barrido de reintento.
+  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET status = 'SIGNED', transmission_deferred_at = ?, sello_recibido = NULL,
+             mh_estado = ?, mh_observaciones_json = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(nowIso(), "MH_NO_DISPONIBLE", JSON.stringify([reason]), nowIso(), id)
+      .run();
+  }
+
   // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
   // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
-  async listTransmissionPendingDocuments(limit = 100): Promise<DteDocumentRecord[]> {
+  async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
-      .prepare("SELECT * FROM dte_documents WHERE status = ? ORDER BY created_at ASC LIMIT ?")
-      .bind("TRANSMISSION_PENDING", Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL ORDER BY created_at ASC LIMIT ?")
+      .bind("SIGNED", Math.min(Math.max(Math.trunc(limit), 1), 500))
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
   }

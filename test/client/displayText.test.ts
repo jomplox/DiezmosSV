@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
   it("localizes internal status values for user-facing badges", () => {
@@ -10,6 +10,20 @@ describe("client display text", () => {
     expect(statusLabel("TRANSMISSION_PENDING")).toBe("En trámite");
     expect(statusLabel("EVENT_ACCEPTED")).toBe("Evento aceptado");
     expect(statusLabel("BATCH_SENT")).toBe("Lote enviado");
+  });
+
+  it("derives En trámite from the deferred marker while plain SIGNED stays Firmado", () => {
+    // Deferred state is stored as SIGNED + transmission_deferred_at (no dedicated
+    // status value: D1 cannot rebuild the FK-parent table to widen its CHECK).
+    const deferred = { status: "SIGNED", transmission_deferred_at: "2026-07-06T10:00:00.000Z" };
+    expect(documentDisplayStatus(deferred)).toBe("TRANSMISSION_PENDING");
+    expect(statusLabel(documentDisplayStatus(deferred))).toBe("En trámite");
+    // Plain SIGNED (mid-pipeline transient, no marker) keeps its normal label.
+    const plainSigned = { status: "SIGNED", transmission_deferred_at: null };
+    expect(documentDisplayStatus(plainSigned)).toBe("SIGNED");
+    expect(statusLabel(documentDisplayStatus(plainSigned))).toBe("Firmado");
+    // A resolved doc keeps the marker as history but its status wins.
+    expect(documentDisplayStatus({ status: "ACCEPTED", transmission_deferred_at: "2026-07-06T10:00:00.000Z" })).toBe("ACCEPTED");
   });
 
   it("localizes roles and environments without changing stored values", () => {

@@ -213,7 +213,7 @@ export class IssuancePipeline {
         // normal, ya firmado) se difiere y el cron lo transmitirá al volver MH.
         const reason = String(error.message);
         await this.deferTransmission(record.id, reason);
-        return { accepted: false, estado: "TRANSMISSION_PENDING", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
+        return { accepted: false, estado: "TRANSMISION_DIFERIDA", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
       }
       throw error;
     }
@@ -312,12 +312,13 @@ export class IssuancePipeline {
   // admite los tipos de DTE 01, 03, 04, 05, 06, 07, 11, 14 y 18 — el CDE (tipo 15)
   // está EXCLUIDO en la propia capa de validación de MH, por lo que un CDE jamás se
   // emite en contingencia. El manejo de una caída de MH es "transmisión diferida por
-  // reintento": el documento (forma NORMAL, ya firmado) queda TRANSMISSION_PENDING,
-  // el donante recibe de inmediato su comprobante TRANSITORIO, y este barrido del
+  // reintento": el documento (forma NORMAL, ya firmado) queda SIGNED con el marcador
+  // transmission_deferred_at (D1 no puede reconstruir dte_documents para ampliar su
+  // CHECK de status), el donante recibe de inmediato su comprobante TRANSITORIO, y este
   // cron de 15 minutos reintenta la transmisión hasta obtener el sello definitivo
   // (o un rechazo real de MH, que sigue el flujo normal de rechazados).
   async retryDeferredTransmissions(): Promise<{ transmitted: number; rejected: number; pending: number }> {
-    const docs = await this.repo.listTransmissionPendingDocuments();
+    const docs = await this.repo.listDeferredTransmissionDocuments();
     let transmitted = 0;
     let rejected = 0;
     let pending = 0;
@@ -340,6 +341,9 @@ export class IssuancePipeline {
         if (!record.signed_jws) {
           await this.repo.updateDocumentSigned(record.id, signedJws);
         }
+        // El status sale de SIGNED (ACCEPTED/REJECTED) y con eso el documento deja de
+        // aparecer en listDeferredTransmissionDocuments; transmission_deferred_at se
+        // conserva a propósito como evidencia histórica de que estuvo diferido.
         await this.repo.updateDocumentMhResult(record.id, {
           status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
           sello: mhResult.selloRecibido,
@@ -369,7 +373,7 @@ export class IssuancePipeline {
         }
       } catch (error) {
         // MH sigue sin responder (u otro fallo transitorio): el documento permanece
-        // TRANSMISSION_PENDING sin auditoría por tick — auditar cada reintento de un
+        // diferido (SIGNED + marcador) sin auditoría por tick — auditar cada reintento de un
         // cron de 15 minutos sería puro ruido. La visibilidad la da la alerta de
         // backlog de alertOnDeferredBacklog.
         if (!(error instanceof MhUnavailableError)) {
@@ -386,9 +390,10 @@ export class IssuancePipeline {
   // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
   // del documento más antiguo la dispara UNA sola vez por atasco.
   private async alertOnDeferredBacklog(): Promise<void> {
-    const remaining = await this.repo.listTransmissionPendingDocuments();
+    const remaining = await this.repo.listDeferredTransmissionDocuments();
     const cutoff = new Date(Date.now() - DEFERRED_ALERT_AGE_MS).toISOString();
-    const overdue = remaining.filter((record) => String(record.created_at) < cutoff);
+    // La antigüedad se mide desde el MOMENTO del deferimiento, no desde la creación.
+    const overdue = remaining.filter((record) => String(record.transmission_deferred_at ?? record.created_at) < cutoff);
     if (overdue.length === 0) {
       return;
     }
@@ -405,12 +410,7 @@ export class IssuancePipeline {
   // inmediato el comprobante TRANSITORIO — pdf.ts imprime "TRANSITORIO" como sello
   // cuando sello_recibido es null — y el cron reintenta la transmisión.
   private async deferTransmission(documentId: string, reason: string): Promise<DteDocumentRecord> {
-    await this.repo.updateDocumentMhResult(documentId, {
-      status: "TRANSMISSION_PENDING",
-      sello: null,
-      mhEstado: "MH_NO_DISPONIBLE",
-      observaciones: [reason]
-    });
+    await this.repo.markDocumentTransmissionDeferred(documentId, reason);
     const updated = await this.repo.getDteDocument(documentId);
     if (!updated) {
       throw new Error(`Documento DTE ${documentId} no encontrado al diferir su transmisión`);

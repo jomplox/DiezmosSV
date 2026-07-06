@@ -17,6 +17,9 @@ export interface DteDocument {
   issued_at: string;
   accepted_at: string | null;
   contingency_period_id: string | null;
+  // Deferred-transmission marker: deferred = SIGNED + this timestamp (kept after
+  // resolution as historical evidence). The UI renders it as "En trámite".
+  transmission_deferred_at: string | null;
   created_at: string;
   updated_at: string;
   // Set by the document detail fetch when a completed donation intent produced this

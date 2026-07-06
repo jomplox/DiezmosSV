@@ -158,7 +158,7 @@ function statusBanner(record: DteDocumentRecord): string {
   if (record.status === "INVALIDATED") {
     return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:#fdecec;border:1px solid #f2b8b5;color:#8c1d18;font-weight:bold;text-align:center;">DOCUMENTO INVALIDADO</div>`;
   }
-  if (record.status === "CONTINGENCY_PENDING" || record.status === "TRANSMISSION_PENDING") {
+  if (record.status === "CONTINGENCY_PENDING" || (record.status === "SIGNED" && record.transmission_deferred_at)) {
     // Banner en negrita: el adjunto es PROVISIONAL (sello TRANSITORIO); la versión
     // definitiva con Sello de Recepción llega automáticamente al aceptar MH.
     return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:#fdf3e1;border:1px solid #ecd196;color:#7a5c00;font-weight:bold;text-align:center;">COMPROBANTE TRANSITORIO</div>`;
