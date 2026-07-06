@@ -82,7 +82,7 @@ export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
 export const GIVEBUTTER_FREQ_ONCE_LABEL = "Única";
 export const GIVEBUTTER_FREQ_MONTHLY_LABEL = "Mensual";
 // Shown under the EE. UU. door's Givebutter block: the widget is English-only.
-export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en inglés.";
+export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario se muestra en inglés.";
 
 // ── Two-door donation landing ───────────────────────────────────────────────
 //
@@ -179,17 +179,22 @@ export function givebutterHostedUrl(input: { amount: string; monthly: boolean })
 
 export const DONAR_THANK_YOU_TITLE = "Dios le bendiga. Su aportación fue recibida.";
 export const DONAR_THANK_YOU_BODY =
-  "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.";
+  "Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme.";
 export const DONAR_FALLBACK_MESSAGE =
-  "Si completó el pago, recibirá su comprobante (CDE) por correo electrónico. Puede cerrar esta página.";
+  "Si completó su entrega, recibirá su comprobante de donación por correo electrónico. Puede cerrar esta página.";
 
-// Paso 3 handoff states: spinner copy while the embedded Wompi widget prepares,
-// and the manual hosted-checkout CTA when it takes longer than the render budget.
-// Leaving the page is always donor-initiated — never an automatic redirect.
-export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando el pago seguro…";
+// Paso 3 handoff states: spinner copy while the embedded checkout prepares, and the
+// manual hosted-checkout CTA when it takes longer than the render budget. Leaving the
+// page is always donor-initiated — never an automatic redirect. Wording rule for every
+// donor-facing string: these are diezmos y ofrendas — an ENTREGA, never a "pago"
+// (Wompi is still named where it builds trust in the secure card step).
+export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando su entrega segura…";
 export const DONAR_WIDGET_DELAYED_MESSAGE =
-  "El pago está tardando más de lo esperado. Puede continuar en la página segura de Wompi:";
-export const DONAR_WIDGET_FALLBACK_CTA = "Continuar al pago en Wompi";
+  "Esto está tardando más de lo esperado. Puede continuar su entrega en la página segura de Wompi:";
+export const DONAR_WIDGET_FALLBACK_CTA = "Continuar en Wompi";
+
+// Preconnect target for the Paso 3 embed: DNS + TLS are warmed on wizard mount.
+export const DONAR_WOMPI_CHECKOUT_ORIGIN = "https://pagos.wompi.sv";
 
 // postMessage payload the thank-you page sends to its opener (the /donar view)
 // when it detects it is running inside the widget iframe modal.
