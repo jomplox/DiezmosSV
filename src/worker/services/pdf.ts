@@ -161,9 +161,110 @@ function drawPartyBox(
   drawKeyValue(page, "Actividad económica:", clean(options.activity), left, options.y + options.height - 38, valueX - left, options.regular, options.bold, 7.2, black);
   drawKeyValue(page, "NRC:", options.nrc ?? "", left, options.y + options.height - 60, 26, options.regular, options.bold, 7.2, black);
   drawKeyValue(page, options.documentLabel, options.documentNumber ?? "", docX, options.y + options.height - 60, 22, options.regular, options.bold, 7.2, black);
-  options.addressLines.slice(0, 3).forEach((line, index) => {
-    page.drawText(line, { x: left, y: options.y + 26 - index * 10.5, size: 7.1, font: options.regular, color: black });
+  const addressFontSize = 7.1;
+  const innerWidth = options.width - 12;
+  const wrapped = clampLines(
+    options.addressLines.flatMap((line) => wrapText(line, options.regular, addressFontSize, innerWidth)),
+    3,
+    options.regular,
+    addressFontSize,
+    innerWidth
+  );
+  wrapped.forEach((line, index) => {
+    page.drawText(line, { x: left, y: options.y + 26 - index * 10.5, size: addressFontSize, font: options.regular, color: black });
   });
+}
+
+function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const source = clean(text);
+  if (!source) {
+    return [];
+  }
+  if (font.widthOfTextAtSize(source, size) <= maxWidth) {
+    return [source];
+  }
+  const lines: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+  };
+  // Prefer breaking at ", " and " / " so multi-word geographic segments (e.g. "SAN SALVADOR
+  // ESTE") stay whole; only fall back to word/character breaks when a single segment is itself
+  // wider than the box.
+  for (const segment of splitAddressSegments(source)) {
+    const candidate = current ? `${current} ${segment}` : segment;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    flush();
+    if (font.widthOfTextAtSize(segment, size) <= maxWidth) {
+      current = segment;
+      continue;
+    }
+    for (const fragment of wrapWords(segment, font, size, maxWidth)) {
+      lines.push(fragment);
+    }
+  }
+  flush();
+  return lines;
+}
+
+function splitAddressSegments(source: string): string[] {
+  return source
+    .split(/(?<=,)\s+|\s+(?=\/(?:\s|$))/)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function wrapWords(segment: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const lines: string[] = [];
+  let current = "";
+  for (const word of segment.split(" ")) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+    if (font.widthOfTextAtSize(word, size) <= maxWidth) {
+      current = word;
+    } else {
+      lines.push(truncateToWidth(word, font, size, maxWidth));
+    }
+  }
+  if (current) {
+    lines.push(current);
+  }
+  return lines;
+}
+
+function truncateToWidth(text: string, font: PDFFont, size: number, maxWidth: number): string {
+  const ellipsis = "…";
+  if (font.widthOfTextAtSize(ellipsis, size) > maxWidth) {
+    return ellipsis;
+  }
+  let truncated = text;
+  while (truncated && font.widthOfTextAtSize(`${truncated}${ellipsis}`, size) > maxWidth) {
+    truncated = truncated.slice(0, -1);
+  }
+  return `${truncated}${ellipsis}`;
+}
+
+function clampLines(lines: string[], maxLines: number, font: PDFFont, size: number, maxWidth: number): string[] {
+  if (lines.length <= maxLines) {
+    return lines;
+  }
+  const kept = lines.slice(0, maxLines);
+  const last = kept[maxLines - 1];
+  kept[maxLines - 1] = last.endsWith("…") ? last : truncateToWidth(last, font, size, maxWidth);
+  return kept;
 }
 
 function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont, bold: PDFFont): void {
@@ -263,7 +364,11 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
 function emisorLines(emisor: Party): string[] {
   const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
   const address = [addressText(emisor.direccion), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
-  return [establishment, `• ${address} /`, `Correo: ${emisor.correo ?? ""}`].filter(Boolean);
+  // The box clamps at 3 rendered lines and a full geographic address wraps onto
+  // two of them, so the correo rides on the (short) establishment line — a fourth
+  // logical line would be clamped away.
+  const correo = emisor.correo ? `Correo: ${emisor.correo}` : "";
+  return [[establishment, correo].filter(Boolean).join(" / "), `• ${address} /`].filter(Boolean);
 }
 
 function receptorContactLine(receptor: Party): string {
