@@ -449,6 +449,7 @@ function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRe
     wompi_url_enlace_largo: null,
     document_id: null,
     client_ip: null,
+    paid_at: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",
     expires_at: "2026-07-05T13:00:00.000Z",
