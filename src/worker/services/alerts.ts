@@ -1,5 +1,6 @@
 import type { Env } from "../types";
 import type { Repository } from "../storage/repository";
+import { loadEmailBranding } from "./branding";
 import { operationalAlertHtml } from "./emailHtml";
 import { EmailService } from "./email";
 
@@ -24,8 +25,9 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
     if (alreadySent > 0) {
       return;
     }
-    const html = operationalAlertHtml(alert, originUrl(env));
-    await new EmailService(env).sendOperationalAlert({
+    const branding = await loadEmailBranding(repo);
+    const html = operationalAlertHtml(alert, originUrl(env), branding);
+    await new EmailService(env, undefined, branding).sendOperationalAlert({
       to: recipient,
       subject: alert.title,
       text: alert.detail,
