@@ -59,11 +59,15 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Door 1 (El Salvador y el mundo) opens the SV fiscal (Wompi + CDE) wizard.
   await page.getByRole("button", { name: "El Salvador y el mundo" }).click();
 
-  // Paso 1 — Monto. The diezmo/ofrenda framing heads the card; the step
-  // indicator and the segmented control render; the hero input is auto-focused.
-  await expect(page.getByRole("heading", { name: "Entregue su diezmo u ofrenda" })).toBeVisible();
+  // Paso 1 — Monto. The diezmo/ofrenda framing (flagged 🇸🇻) heads the card; the
+  // step indicator and the segmented control render; the hero input is auto-focused.
+  await expect(page.getByRole("heading", { name: "Entregue su diezmo u ofrenda 🇸🇻" })).toBeVisible();
+  // The assurance subtitle names the CDE this SV path produces.
+  await expect(page.getByText("Recibirá su comprobante de donación electrónico (CDE) por correo.")).toBeVisible();
   await expect(page.getByText("Paso 1 de 3")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Tipo" })).toBeVisible();
+  // Diezmo is preselected on mount.
+  await expect(page.getByRole("radio", { name: "Diezmo" })).toBeChecked();
   await expect(page.getByLabel("Monto")).toBeFocused();
 
   // The old "Otro monto" afterthought field is gone: the hero input IS the monto.
@@ -72,7 +76,8 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Paso 2 fields are NOT on this screen (one concern per step).
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
 
-  // Segmented control: pick Diezmo (real radio). Continue requires it + amount.
+  // Diezmo is already preselected; .check() is a no-op that confirms it. Continue
+  // requires a tipo + amount, both now satisfied.
   await page.getByRole("radio", { name: "Diezmo" }).check();
   await page.getByLabel("Monto").fill(DONOR.amount);
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
@@ -122,9 +127,11 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
   await page.getByRole("button", { name: "EE. UU." }).click();
 
-  // Paso 1 — Monto. The US flow has its own heading and a 2-step count; the
-  // monthly toggle is the segmented control (Única | Mensual, real radios).
-  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas — EE. UU." })).toBeVisible();
+  // Paso 1 — Monto. The US flow has its own heading (flagged 🇺🇸) and a 2-step
+  // count; the monthly toggle is the segmented control (Única | Mensual, real radios).
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
+  // The assurance subtitle names the US tax-deductible receipt this path produces.
+  await expect(page.getByText("Recibirá un recibo deducible de impuestos en EE. UU. por correo.")).toBeVisible();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Donación mensual" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();

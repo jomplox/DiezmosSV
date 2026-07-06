@@ -662,8 +662,9 @@ Copyright © 2026 Example Person.
 
 ### Third-party assets
 
-The two donation-door flag icons are inlined from [HatScripts/circle-flags](https://github.com/HatScripts/circle-flags)
-(`sv.svg`, `us.svg`), licensed under the **MIT License**.
+The EE. UU. donation-door flag icon is inlined from [HatScripts/circle-flags](https://github.com/HatScripts/circle-flags)
+(`us.svg`), licensed under the **MIT License**. The El Salvador door uses the church's own flag asset
+(`src/client/assets/sv-flag.png`).
 
 <div align="center">
 <sub>Built for the church accountant who'd rather not run a server. ✦</sub>

@@ -2640,6 +2640,18 @@ pre {
   text-wrap: balance;
 }
 
+/* Paso 1 assurance: names the legal document this door produces, right under the
+   heading — Gotham Book gray, sitting just below the title. */
+.donar-assurance {
+  margin: -4px 0 0;
+  font-size: 13.5px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: #595959;
+  text-align: center;
+  text-wrap: balance;
+}
+
 /* Wizard chrome: back affordance left, "Paso n de m" right. */
 .donar-card-top {
   display: flex;
