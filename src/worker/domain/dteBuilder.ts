@@ -1,4 +1,4 @@
-import type { Ambiente, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
+import type { Ambiente, DonationGiftType, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
 import { mhDateTime } from "../utils/dates";
 import { generationCode, numeroControl } from "../utils/ids";
 import {
@@ -39,7 +39,24 @@ export interface IntentDonorOverride {
   // builder keeps its payload-derived codPais/codDomiciliado behavior.
   codPais?: string;
   codDomiciliado?: 1 | 2;
+  // Diezmo vs Ofrenda: when the correlated intent carries a gift_type, an
+  // informational "TipoAportacion" line is appended to the CDE apéndice. The legal
+  // cuerpoDocumento.descripcion stays "DONACIÓN" regardless — the tipo is metadata.
+  giftType?: DonationGiftType;
 }
+
+// The legal donation description, pinned to the church's real production convention
+// (see examples/DTE-15-M001P004-000000000006702.json: uppercase, accented). Wompi
+// payment links carry a free-form NombreProducto (e.g. "Testing") that must NEVER
+// leak into the fiscal document — the descripcion is a constant, not donor input.
+const CDE_DONATION_DESCRIPCION = "DONACIÓN";
+
+// Donor-facing labels for the informational apéndice line, hard-coded from the enum
+// so no raw client string ever reaches the CDE.
+const GIFT_TYPE_APENDICE_LABEL: Record<DonationGiftType, string> = {
+  DIEZMO: "Diezmo",
+  OFRENDA: "Ofrenda"
+};
 
 interface CdeBuildOptions {
   sequence: number;
@@ -164,7 +181,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
         cantidad: payload.Cantidad ?? 1,
         codigo: payload.IdExterno?.slice(0, 25) || "DONACION",
         uniMedida: config.defaultUnidadMedida,
-        descripcion: payload.EnlacePago?.NombreProducto || "Diezmos y ofrendas",
+        descripcion: CDE_DONATION_DESCRIPCION,
         tipoDepreciacion: 0,
         valorUni: amount,
         valor: amount
@@ -184,7 +201,12 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
     apendice: [
       { campo: "IdTransaccion", etiqueta: "Wompi", valor: payload.IdTransaccion },
       { campo: "Autorizacion", etiqueta: "Código de autorización", valor: payload.CodigoAutorizacion ?? "N/D" },
-      { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" }
+      { campo: "Aplicativo", etiqueta: "Aplicativo", valor: payload.Aplicativo?.Nombre ?? "Wompi" },
+      // Informational "Tipo" line, present only when the correlated intent carries a
+      // gift_type. The legal descripcion above stays "DONACIÓN"; this is metadata.
+      ...(override?.giftType
+        ? [{ campo: "TipoAportacion", etiqueta: "Tipo", valor: GIFT_TYPE_APENDICE_LABEL[override.giftType] }]
+        : [])
     ]
   };
   validateCdeDui(document);
@@ -267,7 +289,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
         cantidad: 1,
         codigo: "DONACION",
         uniMedida: config.defaultUnidadMedida,
-        descripcion: "Donación offline",
+        descripcion: CDE_DONATION_DESCRIPCION,
         tipoDepreciacion: 0,
         valorUni: amount,
         valor: amount

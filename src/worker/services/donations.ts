@@ -7,7 +7,7 @@ import {
 } from "../../shared/catalogs";
 import { formatDui, isValidDui } from "../../shared/dui";
 import { formatNit, isValidNitFormat } from "../../shared/nit";
-import type { DonationIntentDocumentType, Env } from "../types";
+import type { DonationGiftType, DonationIntentDocumentType, Env } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { Repository } from "../storage/repository";
@@ -35,6 +35,12 @@ const INTENT_DOCUMENT_TYPES: readonly DonationIntentDocumentType[] = ["36", "13"
 
 function isIntentDocumentType(value: unknown): value is DonationIntentDocumentType {
   return typeof value === "string" && (INTENT_DOCUMENT_TYPES as readonly string[]).includes(value);
+}
+
+const GIFT_TYPES: readonly DonationGiftType[] = ["DIEZMO", "OFRENDA"];
+
+function isGiftType(value: unknown): value is DonationGiftType {
+  return typeof value === "string" && (GIFT_TYPES as readonly string[]).includes(value);
 }
 
 // Per-IP throttle: at most 5 intent creations per rolling 15 minutes.
@@ -67,6 +73,11 @@ export interface ValidatedIntentInput {
   direccionDistrito: string;
   direccionComplemento: string;
   donorPais: string | null;
+  // Diezmo vs Ofrenda. The /donar SV form client-validates this as required and
+  // always sends it; the server ACCEPTS absent (null) so legacy callers and the US
+  // (Givebutter) path — which never send it — keep working. Present-but-invalid is
+  // rejected (invalid_gift_type).
+  giftType: DonationGiftType | null;
 }
 
 // Parses dollars (string like "25.50" or a number) into integer cents inside the
@@ -97,6 +108,17 @@ function requireString(value: unknown): string {
 // name the empresa instead of the cardholder.
 export function validateIntentInput(body: Record<string, unknown>): ValidatedIntentInput {
   const amountCents = parseAmountCents(body.amount);
+
+  // Diezmo/Ofrenda: absent (null/undefined/"") is allowed and stays null — legacy and
+  // US paths never send it. Present-but-invalid is rejected so a malformed client
+  // cannot slip an arbitrary tipo into the payment sheet or the CDE apéndice.
+  let giftType: DonationGiftType | null = null;
+  if (body.giftType != null && body.giftType !== "") {
+    if (!isGiftType(body.giftType)) {
+      throw new IntentValidationError("invalid_gift_type", "Seleccione el tipo de aportación: diezmo u ofrenda.");
+    }
+    giftType = body.giftType;
+  }
 
   const donorDocumentType = body.donorDocumentType;
   if (!isIntentDocumentType(donorDocumentType)) {
@@ -193,7 +215,8 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
     direccionMunicipio,
     direccionDistrito,
     direccionComplemento,
-    donorPais
+    donorPais,
+    giftType
   };
 }
 
@@ -244,6 +267,7 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
     direccionDistrito: input.direccionDistrito,
     direccionComplemento: input.direccionComplemento,
     donorPais: input.donorPais,
+    giftType: input.giftType,
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS)
   });

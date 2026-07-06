@@ -43,13 +43,18 @@ import {
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_COMPLETED_MESSAGE,
   DONAR_DOMESTIC_DEPARTMENTS,
+  DONAR_DOOR_EEUU_DESC,
   DONAR_DOOR_EEUU_LABEL,
+  DONAR_DOOR_SV_DESC,
   DONAR_DOOR_SV_LABEL,
   DONAR_FALLBACK_MESSAGE,
   DONAR_FOREIGN_COUNTRIES,
+  DONAR_GIFT_TYPE_FIELD_LABEL,
+  DONAR_GIFT_TYPE_LABEL,
   DONAR_INTENT_PATH,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
+  DONAR_LANDING_UNIFIER,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
   DONAR_ROUTE_PARAM,
@@ -59,7 +64,6 @@ import {
   DONAR_WOMPI_SCRIPT_URL,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
-  GIVEBUTTER_ESCAPE_HATCH,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
   GIVEBUTTER_INTRO,
@@ -78,6 +82,7 @@ import {
   isDonarPath,
   widgetUrlFrom,
   type DonarDoor,
+  type DonarGiftType,
   type DonationFormInput,
   type DonorDocumentType
 } from "./donation";
@@ -1801,6 +1806,17 @@ function AnnualCertificatePanel({
   );
 }
 
+// Admin "Tipo" column label: Diezmo / Ofrenda / — for legacy and US-path intents.
+function donationGiftTypeLabel(giftType: DonationIntentListItem["gift_type"]): string {
+  if (giftType === "DIEZMO") {
+    return "Diezmo";
+  }
+  if (giftType === "OFRENDA") {
+    return "Ofrenda";
+  }
+  return "—";
+}
+
 function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }) {
   return (
     <section className="single-panel export-panel">
@@ -1816,6 +1832,7 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
           <thead>
             <tr>
               <th>Estado</th>
+              <th>Tipo</th>
               <th className="numeric">Monto</th>
               <th>Donante</th>
               <th className="numeric">Fecha</th>
@@ -1830,6 +1847,7 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
                     {donationIntentStatusLabel(intent.status).toUpperCase()}
                   </span>
                 </td>
+                <td>{donationGiftTypeLabel(intent.gift_type)}</td>
                 <td className="numeric">{formatMoneyCents(intent.amount_cents)}</td>
                 <td>{intent.document_donor_name ?? "—"}</td>
                 <td className="numeric">{formatDateTime(intent.created_at)}</td>
@@ -1838,7 +1856,7 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
             ))}
             {intents.length === 0 && (
               <tr>
-                <td colSpan={5}>Sin donaciones en línea todavía.</td>
+                <td colSpan={6}>Sin donaciones en línea todavía.</td>
               </tr>
             )}
           </tbody>
@@ -3295,6 +3313,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 
 const emptyDonationForm: DonationFormInput = {
   amount: "",
+  giftType: "",
   donorDocumentType: "13",
   donorDocument: "",
   donorName: "",
@@ -3333,9 +3352,11 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the El Salvador flag (azul-blanco-azul bands, official #0F47AF, no
-// escudo at this size) overlapping in front of a thin monochrome line-art globe.
-// aria-hidden: the door button's text label is the single accessible name.
+// Door 1 icon: the El Salvador circle flag (HatScripts/circle-flags, MIT) overlapping
+// the lower-right of a thin monochrome line-art globe. The flag SVG is inlined
+// verbatim (self-hosted, no runtime fetch), scaled into the lower-right quadrant with
+// a white ring so it reads clearly against the globe. aria-hidden: the door button's
+// text label is the single accessible name.
 function SvWorldIcon() {
   return (
     <svg
@@ -3347,60 +3368,57 @@ function SvWorldIcon() {
     >
       {/* Line-art globe behind the flag. */}
       <g fill="none" stroke="#595959" strokeWidth="1.5">
-        <circle cx="52" cy="40" r="30" />
-        <ellipse cx="52" cy="40" rx="12" ry="30" />
-        <ellipse cx="52" cy="40" rx="24" ry="30" />
-        <line x1="22" y1="40" x2="82" y2="40" />
-        <path d="M 27 25 Q 52 33 77 25" />
-        <path d="M 27 55 Q 52 47 77 55" />
+        <circle cx="44" cy="40" r="30" />
+        <ellipse cx="44" cy="40" rx="12" ry="30" />
+        <ellipse cx="44" cy="40" rx="24" ry="30" />
+        <line x1="14" y1="40" x2="74" y2="40" />
+        <path d="M 19 25 Q 44 33 69 25" />
+        <path d="M 19 55 Q 44 47 69 55" />
       </g>
-      {/* SV flag in front, lower-right, casting a subtle white gap around itself. */}
-      <g>
-        <rect x="30" y="52" width="52" height="34" rx="2" fill="#ffffff" stroke="#eeeeee" strokeWidth="2" />
-        <rect x="32" y="54" width="48" height="10" fill="#0F47AF" />
-        <rect x="32" y="64" width="48" height="10" fill="#ffffff" />
-        <rect x="32" y="74" width="48" height="10" fill="#0F47AF" />
+      {/* El Salvador circle flag (circle-flags sv.svg, MIT), lower-right, with a white
+          ring so it separates from the globe lines behind it. */}
+      <g transform="translate(50 50)">
+        <circle cx="21" cy="21" r="24" fill="#ffffff" />
+        <g transform="scale(0.08203)">
+          <mask id="sv-flag-a">
+            <circle cx="256" cy="256" r="256" fill="#fff" />
+          </mask>
+          <g mask="url(#sv-flag-a)">
+            <path fill="#0052b4" d="M0 0h512v144.7l-40.5 112.6 40.5 110V512H0V367.3l42.2-114L0 144.7z" />
+            <path fill="#eee" d="M0 144.7h512v222.6H0z" />
+            <path fill="#ffda44" d="m204.6 267.1 51.4-89 51.4 89z" />
+            <path fill="#6da544" d="M322.8 296.5 256 330l-66.8-33.4V252h133.6z" />
+            <path fill="#ffda44" d="m319 182-23.6 23.5a55.5 55.5 0 0 1-39.4 95 55.7 55.7 0 0 1-39.3-95L193 182a89 89 0 1 0 126 0z" />
+          </g>
+        </g>
       </g>
     </svg>
   );
 }
 
-// Door 2 icon: a simplified US flag — 13 stripes (#B22234 / #fff), blue canton
-// (#3C3B6E) with a plain white dot grid standing in for the stars at this scale.
+// Door 2 icon: the United States circle flag (HatScripts/circle-flags, MIT), inlined
+// verbatim (self-hosted, no runtime fetch) so the previous hand-drawn flag's glitch
+// is gone. aria-hidden: the door button's text label is the single accessible name.
 function UsFlagIcon() {
-  const stripes = Array.from({ length: 13 }, (_, i) => i);
-  const stripeHeight = 68 / 13;
-  const stars: Array<{ cx: number; cy: number }> = [];
-  for (let row = 0; row < 5; row += 1) {
-    for (let col = 0; col < 5; col += 1) {
-      stars.push({ cx: 20 + col * 7, cy: 18 + row * 6 });
-    }
-  }
   return (
     <svg
       className="donar-door-icon"
-      viewBox="0 0 96 96"
+      viewBox="0 0 512 512"
       aria-hidden="true"
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
     >
-      <g>
-        {stripes.map((i) => (
-          <rect
-            key={i}
-            x="14"
-            y={14 + i * stripeHeight}
-            width="68"
-            height={stripeHeight}
-            fill={i % 2 === 0 ? "#B22234" : "#ffffff"}
-          />
-        ))}
-        {/* Blue canton over the top-left, ~7 stripes tall, ~40% wide. */}
-        <rect x="14" y="14" width="30" height={stripeHeight * 7} fill="#3C3B6E" />
-        {stars.map((star, index) => (
-          <circle key={index} cx={star.cx} cy={star.cy} r="1.4" fill="#ffffff" />
-        ))}
-        <rect x="14" y="14" width="68" height="68" fill="none" stroke="#eeeeee" strokeWidth="1" />
+      <mask id="us-flag-a">
+        <circle cx="256" cy="256" r="256" fill="#fff" />
+      </mask>
+      <g mask="url(#us-flag-a)">
+        <path fill="#eee" d="M256 0h256v64l-32 32 32 32v64l-32 32 32 32v64l-32 32 32 32v64l-256 32L0 448v-64l32-32-32-32v-64z" />
+        <path fill="#d80027" d="M224 64h288v64H224Zm0 128h288v64H256ZM0 320h512v64H0Zm0 128h512v64H0Z" />
+        <path fill="#0052b4" d="M0 0h256v256H0Z" />
+        <path
+          fill="#eee"
+          d="m187 243 57-41h-70l57 41-22-67zm-81 0 57-41H93l57 41-22-67zm-81 0 57-41H12l57 41-22-67zm162-81 57-41h-70l57 41-22-67zm-81 0 57-41H93l57 41-22-67zm-81 0 57-41H12l57 41-22-67Zm162-82 57-41h-70l57 41-22-67Zm-81 0 57-41H93l57 41-22-67zm-81 0 57-41H12l57 41-22-67Z"
+        />
       </g>
     </svg>
   );
@@ -3421,7 +3439,6 @@ function DonarPage() {
   // US-donor (Givebutter) path state: monthly-gift toggle and the escape hatch that
   // reveals the SV fiscal (CDE) form even when país === US.
   const [monthly, setMonthly] = useState(false);
-  const [forceFiscal, setForceFiscal] = useState(false);
   const [givebutterFallback, setGivebutterFallback] = useState(false);
   const widgetHostRef = useRef<HTMLDivElement | null>(null);
   const givebutterHostRef = useRef<HTMLDivElement | null>(null);
@@ -3431,8 +3448,8 @@ function DonarPage() {
 
   // When to render the Givebutter block instead of the SV fiscal fields: the EE.
   // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
-  // The escape hatch (forceFiscal) always returns to the SV fiscal (CDE) form.
-  const usDonation = (door === "eeuu" || isUsDonation(form)) && !forceFiscal;
+  // "← Cambiar opción" is the only way back — the donor deliberately chose the door.
+  const usDonation = door === "eeuu" || isUsDonation(form);
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
   // existing query, e.g. the Givebutter amount/frequency prefill) so a refresh
@@ -3447,8 +3464,7 @@ function DonarPage() {
     }
     const query = params.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
-    // Leaving a door resets the escape hatch / monthly toggle so each entry is clean.
-    setForceFiscal(false);
+    // Leaving a door resets the monthly toggle so each entry is clean.
     setMonthly(false);
     setDoor(next);
   };
@@ -3675,14 +3691,19 @@ function DonarPage() {
           <OrganizationLogo />
           <h1>{DONAR_LANDING_HEADING}</h1>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
+          {/* Unifying line: both doors fund the same mother church in El Salvador —
+              they differ by residence / payment rail / tax receipt, not beneficiary. */}
+          <p className="donar-landing-unifier">{DONAR_LANDING_UNIFIER}</p>
           <div className="donar-doors">
             <button type="button" className="donar-door" onClick={() => chooseDoor("sv")}>
               <SvWorldIcon />
               <span className="donar-door-label">{DONAR_DOOR_SV_LABEL}</span>
+              <span className="donar-door-desc">{DONAR_DOOR_SV_DESC}</span>
             </button>
             <button type="button" className="donar-door" onClick={() => chooseDoor("eeuu")}>
               <UsFlagIcon />
               <span className="donar-door-label">{DONAR_DOOR_EEUU_LABEL}</span>
+              <span className="donar-door-desc">{DONAR_DOOR_EEUU_DESC}</span>
             </button>
           </div>
         </div>
@@ -3699,7 +3720,7 @@ function DonarPage() {
           </button>
         )}
         <ShieldCheck size={30} />
-        <h1>Haga su donación</h1>
+        <h1>{usDonation ? "Diezmos y Ofrendas — EE. UU." : "Entregue su diezmo u ofrenda"}</h1>
         {!usDonation && (
           <>
             <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
@@ -3721,6 +3742,27 @@ function DonarPage() {
 
         {stage === "form" && (
           <form className="donar-form" onSubmit={submit}>
+            {/* Required first field: Diezmo or Ofrenda. Monochrome chips like the
+                monto chips — the active one inverts to black. SV path only. */}
+            {!usDonation && (
+              <div className="donar-gift-type">
+                <span className="donar-amount-label">{DONAR_GIFT_TYPE_FIELD_LABEL}</span>
+                <div className="donar-chips" role="group" aria-label={DONAR_GIFT_TYPE_FIELD_LABEL}>
+                  {(["DIEZMO", "OFRENDA"] as DonarGiftType[]).map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      className={form.giftType === option ? "donar-chip active" : "donar-chip"}
+                      aria-pressed={form.giftType === option}
+                      onClick={() => update({ giftType: option })}
+                    >
+                      {DONAR_GIFT_TYPE_LABEL[option]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {!usDonation && (
               <div className="donar-doc-row">
                 <label>
@@ -3796,7 +3838,6 @@ function DonarPage() {
                     type="checkbox"
                     checked={form.foreignResident}
                     onChange={(event) => {
-                      setForceFiscal(false);
                       setMonthly(false);
                       update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" });
                     }}
@@ -3814,7 +3855,6 @@ function DonarPage() {
                       onChange={(pais) => {
                         // Switching country away from US must leave the Givebutter path
                         // cleanly (the prefill effect cleanup restores the URL).
-                        setForceFiscal(false);
                         setMonthly(false);
                         update({ pais });
                       }}
@@ -3940,17 +3980,13 @@ function DonarPage() {
                 >
                   {GIVEBUTTER_FALLBACK_HINT}
                 </a>
-
-                <button type="button" className="link-button donar-givebutter-escape" onClick={() => setForceFiscal(true)}>
-                  {GIVEBUTTER_ESCAPE_HATCH}
-                </button>
               </div>
             ) : (
               <>
                 {error && <p className="error donar-error">{error}</p>}
 
                 <button className="primary" type="submit" disabled={submitting}>
-                  {submitting ? "Preparando el pago…" : "Donar"}
+                  {submitting ? "Preparando el pago…" : "Continuar al pago"}
                 </button>
               </>
             )}
