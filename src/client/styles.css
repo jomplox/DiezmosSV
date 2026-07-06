@@ -1,7 +1,44 @@
+/* Gotham — the church's official brand font, self-hosted as latin-subset woff2
+   (see src/client/fonts/, generated from the licensed OTFs). Four weights:
+   Book 400, Medium 500, Bold 700, Black 900. font-display: swap keeps text
+   visible during load. The global body stack below makes Gotham cover the entire
+   web UI — donor pages AND admin. */
+@font-face {
+  font-family: "Gotham";
+  src: url("./fonts/gotham-book.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Gotham";
+  src: url("./fonts/gotham-medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Gotham";
+  src: url("./fonts/gotham-bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Gotham";
+  src: url("./fonts/gotham-black.woff2") format("woff2");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
 :root {
   color: #1b2328;
   background: #ffffff;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: "Gotham", -apple-system, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
 }
@@ -15,6 +52,7 @@ body {
   min-width: 320px;
   min-height: 100vh;
   background: #f7f9fa;
+  font-family: "Gotham", -apple-system, "Segoe UI", sans-serif;
 }
 
 button,
@@ -2555,13 +2593,16 @@ pre {
   color: #0b5e57;
 }
 
-/* Public donor-checkout pages (/donar, /donar/gracias). Mobile-first; reuses the
-   auth/card visual language for brand consistency with the login screen. */
+/* Public donor-checkout pages (/donar, /donar/gracias). Mobile-first, monochrome
+   Gotham minimalism: black text on white, gray borders (#ddd/#eee), secondary
+   text #595959. The ONLY color on the landing comes from the two flag icons.
+   This palette is scoped to the donor-facing views; the admin keeps its own. */
 .donar-screen {
   min-height: 100vh;
   display: grid;
   place-items: start center;
   padding: 24px 16px;
+  background: #ffffff;
 }
 
 .donar-card {
@@ -2569,27 +2610,47 @@ pre {
   padding: 24px;
   display: grid;
   gap: 14px;
+  background: #ffffff;
+  border: 1px solid #eee;
+  border-radius: 10px;
 }
 
 .donar-card h1 {
-  font-size: 24px;
+  font-size: 26px;
   margin: 0;
+  font-weight: 900;
+  letter-spacing: -0.01em;
+  color: #000000;
+  text-wrap: balance;
 }
 
 .donar-intro {
-  color: #52656c;
+  color: #595959;
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
   margin: 0;
 }
 
 /* Tells the donor that name + email are collected on Wompi's sheet, not this form. */
 .donar-note {
-  color: #52656c;
+  color: #595959;
   font-size: 13px;
   line-height: 1.4;
   margin: 0;
   font-style: italic;
+}
+
+/* Primary donor button: black fill, white text (overrides the teal .primary). */
+.donar-card .primary {
+  background: #000000;
+  color: #ffffff;
+  border-color: #000000;
+  font-weight: 700;
+}
+
+.donar-card .primary:hover {
+  background: #111111;
+  border-color: #111111;
 }
 
 .donar-form {
@@ -2601,7 +2662,21 @@ pre {
   display: grid;
   gap: 4px;
   font-size: 13px;
-  color: #35474d;
+  color: #333333;
+}
+
+.donar-form input,
+.donar-form select,
+.donar-form textarea {
+  border: 1px solid #ddd;
+  border-radius: 8px;
+}
+
+.donar-form input:focus,
+.donar-form select:focus,
+.donar-form textarea:focus {
+  outline: none;
+  border-color: #000000;
 }
 
 .donar-doc-row,
@@ -2623,7 +2698,7 @@ pre {
   width: 16px;
   height: 16px;
   margin: 0;
-  accent-color: #007c75;
+  accent-color: #000000;
 }
 
 .donar-amount {
@@ -2633,7 +2708,7 @@ pre {
 
 .donar-amount-label {
   font-size: 13px;
-  color: #35474d;
+  color: #333333;
 }
 
 .donar-chips {
@@ -2646,16 +2721,18 @@ pre {
   flex: 1 1 auto;
   min-width: 64px;
   padding: 10px 12px;
-  border: 1px solid #cdd8da;
+  border: 1px solid #ddd;
   border-radius: 8px;
   background: #ffffff;
+  color: #000000;
   cursor: pointer;
 }
 
+/* Active amount chip inverts to solid black (no teal wash). */
 .donar-chip.active {
-  border-color: #007c75;
-  background: #edf9f7;
-  color: #006d66;
+  border-color: #000000;
+  background: #000000;
+  color: #ffffff;
   font-weight: 600;
 }
 
@@ -2675,8 +2752,115 @@ pre {
   place-items: center;
 }
 
-/* US-donor Givebutter block: the FMCE explanation + embedded giving form that
-   replaces the SV fiscal fields when país === US. */
+/* ── Two-door landing: the chooser shown before any form. ─────────────────── */
+.donar-landing {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  text-align: center;
+}
+
+.donar-logo {
+  width: min(260px, 70%);
+  height: auto;
+  display: block;
+  margin: 4px auto 2px;
+}
+
+.donar-logo path {
+  fill: #000000;
+}
+
+.donar-landing-subtitle {
+  color: #595959;
+  font-size: 14px;
+  line-height: 1.45;
+  margin: 0 0 8px;
+}
+
+.donar-doors {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.donar-door {
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  aspect-ratio: 1 / 1;
+  align-content: center;
+  padding: 24px;
+  border: 1px solid #ddd;
+  border-radius: 12px;
+  background: #ffffff;
+  color: #000000;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+.donar-door:hover,
+.donar-door:focus-visible {
+  border-color: #000000;
+  transform: translateY(-3px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+  outline: none;
+}
+
+.donar-door:active {
+  transform: translateY(-1px) scale(0.99);
+}
+
+.donar-door:focus-visible {
+  outline: 2px solid #000000;
+  outline-offset: 2px;
+}
+
+.donar-door-icon {
+  width: 96px;
+  height: 96px;
+  display: block;
+}
+
+.donar-door-label {
+  font-size: 20px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .donar-door {
+    transition: border-color 160ms ease;
+  }
+  .donar-door:hover,
+  .donar-door:focus-visible,
+  .donar-door:active {
+    transform: none;
+    box-shadow: none;
+  }
+}
+
+/* Cambiar opción — a quiet back link to the chooser, top-left of a door path. */
+.donar-change-door {
+  justify-self: start;
+  border: 0;
+  background: transparent;
+  color: #595959;
+  font-size: 13px;
+  padding: 4px 0;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.donar-change-door:hover {
+  color: #000000;
+  border-color: transparent;
+}
+
+/* US-donor Givebutter block: the FMCE explanation + embedded giving form. */
 .donar-givebutter {
   display: grid;
   gap: 12px;
@@ -2684,6 +2868,13 @@ pre {
 
 .donar-givebutter-widget {
   min-height: 64px;
+}
+
+/* Givebutter cannot be localized: the widget always renders in English. */
+.donar-english-notice {
+  font-size: 12px;
+  color: #595959;
+  margin: 0;
 }
 
 .donar-givebutter-fallback {
@@ -2694,7 +2885,7 @@ pre {
 .donar-givebutter-hint,
 .donar-givebutter-escape {
   font-size: 12px;
-  color: #52656c;
+  color: #595959;
   text-align: center;
   justify-self: center;
 }
@@ -2702,11 +2893,11 @@ pre {
 .donar-thanks {
   text-align: center;
   justify-items: center;
-  color: #006d66;
+  color: #000000;
 }
 
 .donar-thanks h1 {
-  color: #112327;
+  color: #000000;
 }
 
 .donar-thanks-amount {
@@ -2720,6 +2911,9 @@ pre {
   }
   .donar-address-row {
     grid-template-columns: repeat(3, 1fr);
+  }
+  .donar-doors {
+    grid-template-columns: 1fr 1fr;
   }
 }
 

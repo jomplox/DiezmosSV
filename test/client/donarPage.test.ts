@@ -16,6 +16,7 @@ import {
   DONAR_WOMPI_SCRIPT_URL,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
+  GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_ESCAPE_HATCH,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
@@ -24,6 +25,14 @@ import {
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   GIVEBUTTER_SCRIPT_URL,
   GIVEBUTTER_US_COUNTRY_CODE,
+  DONAR_CHANGE_DOOR_LABEL,
+  DONAR_DOOR_EEUU_LABEL,
+  DONAR_DOOR_SV_LABEL,
+  DONAR_LANDING_HEADING,
+  DONAR_LANDING_SUBTITLE,
+  DONAR_ROUTE_PARAM,
+  doorFromSearch,
+  routeParamForDoor,
   donationFormValidationMessage,
   donationIntentBody,
   givebutterHostedUrl,
@@ -540,5 +549,162 @@ describe("givebutter donar page source contract", () => {
     expect(donarSource).toContain("DONAR_INTENT_PATH");
     // No Givebutter-specific backend endpoint is introduced.
     expect(appSource).not.toContain("/api/givebutter");
+  });
+});
+
+describe("two-door landing deep-link helpers", () => {
+  it("reads ?ruta=sv / ?ruta=eeuu into a door, ignoring anything else", () => {
+    expect(doorFromSearch("?ruta=sv")).toBe("sv");
+    expect(doorFromSearch("?ruta=eeuu")).toBe("eeuu");
+    expect(doorFromSearch("?ruta=SV")).toBeNull();
+    expect(doorFromSearch("?ruta=other")).toBeNull();
+    expect(doorFromSearch("")).toBeNull();
+    // The prefill params the US path also writes never confuse the door read.
+    expect(doorFromSearch("?amount=25&frequency=monthly&ruta=eeuu")).toBe("eeuu");
+  });
+
+  it("maps a chosen door back to its ?ruta value (null clears it)", () => {
+    expect(routeParamForDoor("sv")).toBe("sv");
+    expect(routeParamForDoor("eeuu")).toBe("eeuu");
+    expect(routeParamForDoor(null)).toBeNull();
+    expect(DONAR_ROUTE_PARAM).toBe("ruta");
+  });
+});
+
+describe("two-door landing copy", () => {
+  it("uses the Gotham-Black heading and a one-line subtitle", () => {
+    expect(DONAR_LANDING_HEADING).toBe("Haga su donación");
+    expect(DONAR_LANDING_SUBTITLE.length).toBeGreaterThan(0);
+  });
+
+  it("labels the two doors and the change-option link", () => {
+    expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
+    expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
+    expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
+  });
+
+  it("tells EE. UU. donors the payment form is in English", () => {
+    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario de pago se muestra en inglés.");
+  });
+});
+
+describe("two-door landing source contract", () => {
+  // The donor-landing surface begins at the inline icon components (OrganizationLogo,
+  // SvWorldIcon, UsFlagIcon) which sit right above DonarPage and are only used there.
+  const donarSource = appSource.slice(appSource.indexOf("function OrganizationLogo"));
+
+  it("renders the landing heading, subtitle, and both door labels", () => {
+    expect(appSource).toContain("DONAR_LANDING_HEADING");
+    expect(appSource).toContain("DONAR_LANDING_SUBTITLE");
+    expect(appSource).toContain("DONAR_DOOR_SV_LABEL");
+    expect(appSource).toContain("DONAR_DOOR_EEUU_LABEL");
+  });
+
+  it("draws the two door icons as inline SVGs: SV flag + globe, and the US flag", () => {
+    // Both door icons are hand-drawn inline <svg>. The SV flag uses the official
+    // azul (#0F47AF); the globe is monochrome line-art in the secondary gray.
+    expect(donarSource).toContain("<svg");
+    // The SV flag blue and a globe (circle) marker.
+    expect(donarSource).toContain("#0F47AF");
+    // The US flag canton blue.
+    expect(donarSource).toContain("#3C3B6E");
+    // The US flag stripe red.
+    expect(donarSource).toContain("#B22234");
+  });
+
+  it("reuses the default logo vector paths on the landing", () => {
+    // The landing shows the default logo. Its vector paths come from orgLogo.ts.
+    expect(appSource).toContain("ORG_LOGO_PATHS");
+  });
+
+  it("routes door 1 to the existing SV fiscal form and door 2 to the Givebutter block", () => {
+    // A door state gates which view renders. Door 1 keeps the SV form (documento,
+    // dirección, extranjero path); door 2 renders the Givebutter block directly.
+    expect(donarSource).toMatch(/door === "sv"|door === "eeuu"|setDoor\(/);
+    expect(donarSource).toContain("setDoor");
+  });
+
+  it("shows the change-option link from either door path", () => {
+    expect(appSource).toContain("DONAR_CHANGE_DOOR_LABEL");
+  });
+
+  it("shows the English-form notice on the EE. UU. door", () => {
+    expect(appSource).toContain("GIVEBUTTER_ENGLISH_NOTICE");
+  });
+
+  it("reads the deep-link on mount and writes it back via history.replaceState", () => {
+    expect(appSource).toContain("doorFromSearch(");
+    expect(appSource).toContain("routeParamForDoor(");
+    // The door write composes with the URL, never clobbering existing params.
+    expect(appSource).toContain("history.replaceState");
+  });
+});
+
+describe("Gotham brand webfonts + global stack", () => {
+  it("registers @font-face for Book/Medium/Bold/Black with font-display: swap", () => {
+    const faces = stylesSource.match(/@font-face\s*\{[^}]*\}/g) ?? [];
+    expect(faces.length).toBeGreaterThanOrEqual(4);
+    // Every declared face is the Gotham family, self-hosted as woff2, swap display.
+    const gothamFaces = faces.filter((face) => /font-family:\s*"Gotham"/.test(face));
+    expect(gothamFaces.length).toBeGreaterThanOrEqual(4);
+    for (const face of gothamFaces) {
+      expect(face).toContain("woff2");
+      expect(face).toContain("font-display: swap");
+    }
+    // The four brand weights: 400 (Book), 500 (Medium), 700 (Bold), 900 (Black).
+    for (const weight of ["400", "500", "700", "900"]) {
+      expect(gothamFaces.some((face) => face.includes(`font-weight: ${weight}`))).toBe(true);
+    }
+  });
+
+  it("points each face at a self-hosted woff2 under ./fonts (no external host)", () => {
+    const faces = (stylesSource.match(/@font-face\s*\{[^}]*\}/g) ?? []).filter((face) =>
+      /font-family:\s*"Gotham"/.test(face)
+    );
+    for (const face of faces) {
+      expect(face).toMatch(/url\(["']?\.\/fonts\/gotham-[a-z]+\.woff2["']?\)/);
+      // No CDN / remote font source.
+      expect(face).not.toMatch(/https?:/);
+    }
+  });
+
+  it("sets the global Gotham-first stack on body (covers admin too)", () => {
+    const bodyRule = stylesSource.match(/(^|\})\s*body\s*\{[^}]*\}/m)?.[0] ?? "";
+    expect(bodyRule).toContain('"Gotham"');
+    expect(bodyRule).toContain("-apple-system");
+    // Gotham is the first family in the stack.
+    expect(bodyRule).toMatch(/font-family:\s*"Gotham"/);
+  });
+});
+
+describe("monochrome donor-facing restyle", () => {
+  // The donor-facing views (/donar + /donar/gracias) drop teal accents for the
+  // monochrome Gotham language: black buttons/chips, gray borders. The admin
+  // palette is untouched — only its font changes via the global body stack.
+  it("styles the donor primary button/active chip in black (#000/#111), not teal", () => {
+    const donarPrimary = stylesSource.match(/\.donar-card\s+\.primary\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(donarPrimary).toMatch(/#000|#111/i);
+    expect(donarPrimary).not.toContain("#007c75");
+
+    const activeChip = stylesSource.match(/\.donar-chip\.active\s*\{[^}]*\}/)?.[0] ?? "";
+    // Active chip inverts to black instead of the teal wash.
+    expect(activeChip).toMatch(/#000|#111/i);
+    expect(activeChip).not.toContain("#007c75");
+    expect(activeChip).not.toContain("#edf9f7");
+  });
+
+  it("keeps the teal accent out of every donor (.donar-) rule", () => {
+    const donarRules = stylesSource.match(/\.donar-[\w-]*[^{]*\{[^}]*\}/g) ?? [];
+    expect(donarRules.length).toBeGreaterThan(0);
+    for (const rule of donarRules) {
+      expect(rule, `teal leaked into: ${rule.slice(0, 40)}`).not.toContain("#007c75");
+      expect(rule).not.toContain("#006d66");
+    }
+  });
+
+  it("leaves the admin teal accent (#007c75) present elsewhere in the sheet", () => {
+    // The admin keeps its palette; the teal must still appear on non-donor rules.
+    const withoutDonar = stylesSource.replace(/\.donar-[\w-]*[^{]*\{[^}]*\}/g, "");
+    expect(withoutDonar).toContain("#007c75");
   });
 });

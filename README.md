@@ -122,6 +122,12 @@ flowchart TB
 Only events with `ResultadoTransaccion = ExitosaAprobada` are issued. Everything that touches MH,
 Wompi, or the donor is recorded in D1 and the audit log.
 
+The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
+SV fiscal form (Wompi + CDE), and **EE. UU.** routes straight to the Givebutter (FMCE) block for a
+US-deductible receipt (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
+and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
+licensed OTFs are never committed; only the generated woff2 subsets are.
+
 ---
 
 ## ☁️ Cloudflare architecture

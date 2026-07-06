@@ -52,6 +52,53 @@ export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done dir
 export const GIVEBUTTER_FALLBACK_CTA = "Donar en givebutter.com";
 export const GIVEBUTTER_ESCAPE_HATCH = "¿Necesita comprobante fiscal salvadoreño (CDE)? Continúe con el formulario";
 export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
+// Shown under the EE. UU. door's Givebutter block: the widget is English-only.
+export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en inglés.";
+
+// ── Two-door donation landing ───────────────────────────────────────────────
+//
+// /donar opens on a chooser: the donor picks where their gift goes before any
+// form appears. Card 1 (El Salvador y el mundo) opens the existing SV fiscal
+// (Wompi + CDE) form; Card 2 (EE. UU.) opens the Givebutter block directly,
+// skipping the extranjero mechanics. A "Cambiar opción" link returns here.
+export type DonarDoor = "sv" | "eeuu";
+
+export const DONAR_LANDING_HEADING = "Haga su donación";
+export const DONAR_LANDING_SUBTITLE = "Elija a dónde desea dirigir su donación.";
+export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
+export const DONAR_DOOR_EEUU_LABEL = "EE. UU.";
+export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
+
+// Optional deep-link: /donar?ruta=sv or ?ruta=eeuu preselects a door. Read once
+// on mount; the chooser writes it back via history.replaceState so a refresh
+// keeps the door. Any other value (or absence) leaves the donor on the chooser.
+export const DONAR_ROUTE_PARAM = "ruta";
+export const DONAR_ROUTE_SV = "sv";
+export const DONAR_ROUTE_EEUU = "eeuu";
+
+export function doorFromSearch(search: string): DonarDoor | null {
+  const value = new URLSearchParams(search).get(DONAR_ROUTE_PARAM);
+  if (value === DONAR_ROUTE_SV) {
+    return "sv";
+  }
+  if (value === DONAR_ROUTE_EEUU) {
+    return "eeuu";
+  }
+  return null;
+}
+
+// The ?ruta value for a chosen door (null clears it). Used to compose the query
+// via history.replaceState WITHOUT clobbering the Givebutter amount/frequency
+// prefill the US path already writes.
+export function routeParamForDoor(door: DonarDoor | null): string | null {
+  if (door === "sv") {
+    return DONAR_ROUTE_SV;
+  }
+  if (door === "eeuu") {
+    return DONAR_ROUTE_EEUU;
+  }
+  return null;
+}
 
 // True when the donor is a US resident, i.e. the Givebutter path should replace the
 // SV fiscal form. Amount is orthogonal (checked separately before mounting).
