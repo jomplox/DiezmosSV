@@ -179,6 +179,35 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.locator("givebutter-giving-form")).toHaveCount(0);
 });
 
+test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns to the SV datos", async ({ page }) => {
+  // Regression: a donor on the SV door who checks "Resido en el extranjero" and picks
+  // Estados Unidos is forwarded to the Givebutter path (intended), but used to be
+  // TRAPPED there — Atrás only walked the US steps and re-picking the SV door kept the
+  // lingering foreignResident+US form state, re-forwarding forever.
+  await page.goto("/donar?ruta=sv");
+  await page.getByLabel("Monto").fill("25.00");
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByLabel("Número de documento").fill("10000001-9");
+
+  // Forward: extranjero + Estados Unidos → the US (Givebutter) path takes over.
+  await page.getByLabel("Resido en el extranjero").check();
+  await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
+  await expect(page.getByText("Paso 2 de 2")).toBeVisible();
+
+  // THE ESCAPE: Atrás returns to the SV datos screen — datos intact, extranjero still
+  // checked, país cleared back to "Seleccione" so the donor can re-choose or uncheck.
+  await page.getByRole("button", { name: /Atrás/ }).click();
+  await expect(page.getByText("Paso 2 de 3")).toBeVisible();
+  await expect(page.getByLabel("Número de documento")).toHaveValue("10000001-9");
+  await expect(page.getByLabel("Resido en el extranjero")).toBeChecked();
+  await expect(page.getByLabel("País")).toHaveValue("");
+
+  // Unchecking restores the domestic SV fields.
+  await page.getByLabel("Resido en el extranjero").uncheck();
+  await expect(page.getByLabel("Departamento")).toBeVisible();
+});
+
 test("thank-you page shows the webhook-driven CDE copy", async ({ page }) => {
   await page.goto("/donar/gracias?monto=1.00&idTransaccion=TEST");
 

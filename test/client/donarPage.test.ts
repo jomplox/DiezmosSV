@@ -734,6 +734,22 @@ describe("donar wizard source contract", () => {
     expect(DONAR_WOMPI_CHECKOUT_ORIGIN).toBe("https://pagos.wompi.sv");
   });
 
+  it("never traps a form-forwarded US donor: Atrás and door choices clear the forwarding state", () => {
+    // A donor on the SV door who checks extranjero + Estados Unidos is forwarded to
+    // the Givebutter path. Two escape hatches must exist:
+    // 1. Atrás from the takeover returns to the SV datos screen by clearing the país
+    //    (datos intact, extranjero still checked, país back to "Seleccione").
+    const goBackStart = donarSource.indexOf("function goBack()");
+    expect(goBackStart).toBeGreaterThan(-1);
+    const goBack = donarSource.slice(goBackStart, donarSource.indexOf("function editAmount"));
+    expect(goBack).toContain('update({ pais: "" })');
+    // 2. Explicitly choosing a door always beats leftover forwarding state.
+    const chooseDoorStart = donarSource.indexOf("const chooseDoor");
+    expect(chooseDoorStart).toBeGreaterThan(-1);
+    const chooseDoor = donarSource.slice(chooseDoorStart, donarSource.indexOf("setDoor(next)"));
+    expect(chooseDoor).toContain('foreignResident: false, pais: ""');
+  });
+
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
     expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
