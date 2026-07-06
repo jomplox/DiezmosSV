@@ -154,7 +154,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       nombre: override ? override.nombre : name,
       codActividad: null,
       descActividad: null,
-      direccion: override ? intentReceptorDireccion(override.direccion, override.codPais, config) : donorAddress(payload, config),
+      direccion: override ? intentReceptorDireccion(override.direccion, override.codPais) : donorAddress(payload, config),
       telefono: override ? override.telefono : donorPhone,
       correo: override ? override.correo : donorEmail,
       codDomiciliado: override?.codDomiciliado ?? (payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2),
@@ -434,28 +434,23 @@ function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig
   };
 }
 
-// Normativa campos 47-49: el código 00 "Otro (Para extranjeros)" existe para
-// departamento y municipio, pero CAT-008 NO define un distrito 00 y MH rechaza la
-// direccion 00/00/00 completa bajo la Normativa de Cumplimiento (codigoMsg 096,
-// verificado en ambiente 00 el 2026-07-06). El receptor extranjero ya queda marcado
-// fiscalmente por codPais + codDomiciliado 2, así que su direccion viaja con la
-// geografía del emisor — la misma convención que MH ya acepta para donantes sin
-// dirección — y el complemento conserva el país y la dirección extranjera reales.
+// Normativa, receptor extranjero (codDomiciliado 2): MH rechaza CUALQUIER objeto
+// direccion — tanto el 00/00/00 del marcador de extranjeros (CAT-008 no define un
+// distrito 00) como una geografía SV válida — con codigoMsg 096 "Campo
+// #/receptor/direccion contiene un valor inválido" (ambas variantes verificadas en
+// ambiente 00 el 2026-07-06). El esquema fe-cd-v2 permite direccion null y la tabla
+// de validaciones marca el distrito del receptor como "cuando aplique": para un no
+// domiciliado no aplica. La direccion viaja null; el país del donante ya está en
+// codPais y su dirección extranjera queda registrada en la intención (D1).
 function intentReceptorDireccion(
   direccion: { departamento: string; municipio: string; distrito: string; complemento: string },
-  codPais: string | undefined,
-  config: EmisorConfig
-): EmisorConfig["direccion"] {
+  codPais: string | undefined
+): EmisorConfig["direccion"] | null {
   if (direccion.departamento !== "00") {
     return { ...direccion };
   }
-  const country = CAT020_COUNTRIES.find((option) => option.code === codPais)?.label ?? codPais ?? "Extranjero";
-  return {
-    departamento: config.direccion.departamento,
-    municipio: config.direccion.municipio,
-    distrito: config.direccion.distrito,
-    complemento: `${country}: ${direccion.complemento}`.slice(0, 200)
-  };
+  void codPais;
+  return null;
 }
 
 function validateCdeDui(document: Record<string, unknown>): void {
