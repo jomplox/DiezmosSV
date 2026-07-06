@@ -5283,6 +5283,266 @@ describe("audit actor context", () => {
   });
 });
 
+describe("branding", () => {
+  function ownerDb(): InMemoryD1 {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    return db;
+  }
+
+  function authed(role: string): InMemoryD1 {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: `user_${role.toLowerCase()}`, email: `${role.toLowerCase()}@example.org`, name: role, role };
+    return db;
+  }
+
+  it("returns the defaults for the public branding endpoint before anything is set", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/branding"), env(db));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      displayName: "ExamplePerson1",
+      accentColor: "#0f766e",
+      logoVersion: null
+    });
+  });
+
+  it("reflects a saved name and color on the public branding endpoint", async () => {
+    const db = ownerDb();
+    const put = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "  Iglesia Central  ", accentColor: "#123ABC" })
+      }),
+      env(db)
+    );
+    expect(put.status).toBe(200);
+    await expect(put.json()).resolves.toMatchObject({ ok: true, displayName: "Iglesia Central", accentColor: "#123abc" });
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_UPDATED", entity_type: "app_setting" });
+
+    const response = await worker.fetch(new Request("https://example.org/api/branding"), env(db));
+    await expect(response.json()).resolves.toMatchObject({ displayName: "Iglesia Central", accentColor: "#123abc", logoVersion: null });
+  });
+
+  it("rejects a bad hex color with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#zzz" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_branding");
+    expect(body.message).toContain("color");
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects an empty name with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "   ", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding" });
+  });
+
+  it("rejects an 81-character name", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "a".repeat(81), accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding" });
+  });
+
+  it("forbids a VIEWER from writing branding", async () => {
+    const db = authed("VIEWER");
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("forbids an OPERATOR from writing branding", async () => {
+    const db = authed("OPERATOR");
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("requires a session to write branding", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(401);
+  });
+
+  const logoCases: Array<{ contentType: string; ext: string }> = [
+    { contentType: "image/svg+xml", ext: "svg" },
+    { contentType: "image/png", ext: "png" },
+    { contentType: "image/jpeg", ext: "jpg" }
+  ];
+
+  for (const { contentType } of logoCases) {
+    it(`stores a ${contentType} logo and serves it with hardening headers`, async () => {
+      const db = ownerDb();
+      const archive = new FakeArchiveBucket();
+      const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+
+      const put = await worker.fetch(
+        new Request("https://example.org/api/settings/branding/logo", {
+          method: "PUT",
+          headers: { Authorization: "Bearer test-token", "Content-Type": contentType },
+          body: bytes
+        }),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      expect(put.status).toBe(200);
+      const putBody = (await put.json()) as { ok: boolean; logoVersion: string };
+      expect(putBody.ok).toBe(true);
+      expect(putBody.logoVersion).toBeTruthy();
+      expect(archive.putCalls.at(-1)?.key).toBe("branding/logo");
+      expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_LOGO_UPDATED" });
+
+      const publicBranding = await worker.fetch(
+        new Request("https://example.org/api/branding"),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: putBody.logoVersion });
+
+      const logo = await worker.fetch(
+        new Request("https://example.org/api/branding/logo"),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      expect(logo.status).toBe(200);
+      expect(logo.headers.get("Content-Type")).toBe(contentType);
+      expect(logo.headers.get("Cache-Control")).toBe("public, max-age=300");
+      expect(logo.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(logo.headers.get("Content-Security-Policy")).toBe("script-src 'none'; default-src 'none'; style-src 'unsafe-inline'");
+      await expect(logo.arrayBuffer()).resolves.toEqual(bytes.buffer);
+    });
+  }
+
+  it("rejects a logo upload with an unsupported content type", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/gif" },
+        body: new Uint8Array([1, 2, 3])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding_logo" });
+    expect(archive.putCalls).toHaveLength(0);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects a logo upload larger than 512 KB", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const bytes = new Uint8Array(512 * 1024 + 1);
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: bytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding_logo" });
+    expect(archive.putCalls).toHaveLength(0);
+  });
+
+  it("returns 404 for the logo stream when none is stored", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/branding/logo"), env(db));
+    expect(response.status).toBe(404);
+  });
+
+  it("removes a stored logo and records an audit", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([9, 9, 9])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    const remove = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(remove.status).toBe(200);
+    await expect(remove.json()).resolves.toMatchObject({ ok: true });
+    expect(archive.deleteCalls).toContain("branding/logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_LOGO_REMOVED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: null });
+  });
+
+  it("forbids a non-owner from uploading a logo", async () => {
+    const db = authed("ADMIN");
+    const archive = new FakeArchiveBucket();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([1, 2, 3])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(403);
+    expect(archive.putCalls).toHaveLength(0);
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -5317,14 +5577,25 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
 // directly but still need a well-typed ARCHIVE binding on Env.
 class FakeArchiveBucket {
   readonly objects = new Map<string, Uint8Array>();
+  readonly contentTypes = new Map<string, string>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
   readonly headCalls: string[] = [];
+  readonly deleteCalls: string[] = [];
 
-  async put(key: string, value: unknown): Promise<R2Object> {
+  async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
     const bytes = value instanceof Uint8Array ? value : utf8Bytes(String(value));
     this.objects.set(key, bytes);
+    if (options?.httpMetadata?.contentType) {
+      this.contentTypes.set(key, options.httpMetadata.contentType);
+    }
     this.putCalls.push({ key, bytes });
     return { key } as R2Object;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    this.objects.delete(key);
+    this.contentTypes.delete(key);
   }
 
   async head(key: string): Promise<R2Object | null> {
@@ -5339,9 +5610,12 @@ class FakeArchiveBucket {
     }
     // The backups service consumes get() via arrayBuffer(); expose exactly that,
     // plus a body stream so a downloaded response can be streamed like production R2.
+    // httpMetadata carries the stored content type back to the branding logo route.
     return {
       key,
       body: new Response(bytes).body,
+      size: bytes.byteLength,
+      httpMetadata: this.contentTypes.has(key) ? { contentType: this.contentTypes.get(key) } : {},
       arrayBuffer: async () =>
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
     } as unknown as R2ObjectBody;
