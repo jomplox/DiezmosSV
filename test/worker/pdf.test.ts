@@ -81,6 +81,14 @@ describe("DTE PDF rendering", () => {
     expect(overrun).toEqual([]);
   });
 
+  it("keeps the emisor correo visible even when the wrapped address takes two lines", async () => {
+    // The emisor box clamps at 3 rendered lines. With the real church address the
+    // wrapped address needs two of them, so the correo must ride on the (short)
+    // establishment line instead of occupying a fourth line that would be clamped.
+    const text = await renderToText(testDocument());
+    expect(text).toContain("legacy-contact-4@example.com");
+  });
+
   it("keeps short addresses on a single unwrapped line", async () => {
     const document = withReceptor(testDocument(), {
       direccion: { departamento: "06", municipio: "23", distrito: "03", complemento: "Col 1" },

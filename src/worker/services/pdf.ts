@@ -364,7 +364,11 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
 function emisorLines(emisor: Party): string[] {
   const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
   const address = [addressText(emisor.direccion), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
-  return [establishment, `• ${address} /`, `Correo: ${emisor.correo ?? ""}`].filter(Boolean);
+  // The box clamps at 3 rendered lines and a full geographic address wraps onto
+  // two of them, so the correo rides on the (short) establishment line — a fourth
+  // logical line would be clamped away.
+  const correo = emisor.correo ? `Correo: ${emisor.correo}` : "";
+  return [[establishment, correo].filter(Boolean).join(" / "), `• ${address} /`].filter(Boolean);
 }
 
 function receptorContactLine(receptor: Party): string {
