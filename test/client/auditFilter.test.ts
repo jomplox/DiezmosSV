@@ -23,6 +23,16 @@ describe("audit entry filtering", () => {
     expect(filterAuditEntries(entries, "DONANTE@")).toHaveLength(1);
     expect(filterAuditEntries(entries, "dte_123")).toHaveLength(1);
   });
+
+  it("matches on the resolved actor name, email, and IP", () => {
+    const withActor: AuditRow[] = [
+      entry({ action: "USER_UPDATED", actor_name: "Ada Admin", actor_email: "ada@example.org", actor_ip: "190.86.1.2" }),
+      entry({ action: "LOGIN", actor_name: "Bob Viewer", actor_email: "bob@example.org", actor_ip: "10.0.0.9" })
+    ];
+    expect(filterAuditEntries(withActor, "ada admin")).toHaveLength(1);
+    expect(filterAuditEntries(withActor, "bob@example.org")).toHaveLength(1);
+    expect(filterAuditEntries(withActor, "190.86.1.2")).toHaveLength(1);
+  });
 });
 
 function entry(overrides: Partial<AuditRow>): AuditRow {

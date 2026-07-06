@@ -2255,6 +2255,97 @@ td.numeric, th.numeric {
   min-width: 0;
 }
 
+/* Auditoría actor/context columns */
+.audit-actor {
+  font-weight: 600;
+  color: #26383d;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-ip {
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #4a5c62;
+  white-space: nowrap;
+}
+
+.audit-expand-cell {
+  width: 34px;
+  padding-right: 0;
+}
+
+.audit-expand-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #61737a;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.audit-expand-toggle:hover {
+  background: #e7f3f1;
+  color: #1c7d70;
+}
+
+.audit-expand-toggle.expanded {
+  transform: rotate(180deg);
+  color: #1c7d70;
+}
+
+.audit-detail-row td {
+  background: #f7fbfb;
+  padding-top: 10px;
+  padding-bottom: 14px;
+}
+
+.audit-detail-row:hover td {
+  background: #f7fbfb;
+}
+
+.audit-context-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 22px;
+  margin: 0;
+}
+
+.audit-context-item {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.audit-context-item dt {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #7a8b91;
+}
+
+.audit-context-value {
+  font-size: 13px;
+  color: #26383d;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-detail-empty {
+  font-size: 13px;
+  color: #7a8b91;
+}
+
 .stacked-cell .secondary {
   color: #60747c;
   font-size: 12px;

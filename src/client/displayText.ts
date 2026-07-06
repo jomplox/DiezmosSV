@@ -1,3 +1,5 @@
+import type { AuditActorContext, AuditRow } from "./types";
+
 export type DisplayRole = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -237,6 +239,53 @@ export function auditSummaryLabel(summary: string | null | undefined): string {
   if (exported) return `${exported[1]} filas exportadas`;
   return summary;
 }
+
+// Resolves the "Usuario" column: prefer the joined display name, then email, then a
+// shortened actor id. SYSTEM rows (no actor) render as "Sistema".
+export function auditActorLabel(row: Pick<AuditRow, "actor_type" | "actor_id" | "actor_name" | "actor_email">): string {
+  if (row.actor_type !== "USER") return "Sistema";
+  const name = row.actor_name?.trim();
+  if (name) return name;
+  const email = row.actor_email?.trim();
+  if (email) return email;
+  const id = row.actor_id?.trim();
+  if (id) return id.length > 12 ? `${id.slice(0, 12)}…` : id;
+  return "Usuario";
+}
+
+// Parses the stored actor_context JSON blob defensively; malformed/absent blobs
+// (older rows predate migration 0013) yield null.
+export function parseAuditContext(raw: string | null | undefined): AuditActorContext | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? (parsed as AuditActorContext) : null;
+  } catch {
+    return null;
+  }
+}
+
+// "San Salvador, SV" from city + country; falls back to whichever is present.
+export function auditLocationLabel(context: AuditActorContext | null): string | null {
+  if (!context) return null;
+  const parts = [context.city?.trim(), context.country?.trim()].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(", ") : null;
+}
+
+// "TLSv1.3 · HTTP/2" style protocol summary for the context detail.
+export function auditProtocolLabel(context: AuditActorContext | null): string | null {
+  if (!context) return null;
+  const parts = [context.tlsVersion?.trim(), context.httpProtocol?.trim()].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+export const AUDIT_CONTEXT_LABELS = {
+  location: "Ubicación",
+  isp: "ISP",
+  browser: "Navegador",
+  protocol: "TLS/Protocolo",
+  ip: "IP"
+} as const;
 
 export function userFacingErrorMessage(message: string): string {
   const cleaned = message.trim();
