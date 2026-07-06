@@ -6,20 +6,16 @@ import { isValidNitFormat } from "../shared/nit";
 // import the pure helpers. The two routes render WITHOUT a session and never
 // touch the auth bootstrap flow (see App.tsx path branching).
 
-export const DONAR_WOMPI_SCRIPT_URL = "https://pagos.wompi.sv/js/wompi.pagos.js";
 export const DONAR_INTENT_PATH = "/api/donations/intent";
 
-// Poll the intent status every ~5s while the widget modal is open; stop after
+// Poll the intent status every ~5s while the embedded checkout is open; stop after
 // ~3 minutes with a neutral closing message (covers slow MH, deferred
 // transmission while MH is down, and abandoned checkouts — never implies failure).
 export const DONAR_POLL_INTERVAL_MS = 5_000;
 export const DONAR_POLL_TIMEOUT_MS = 180_000;
-// If the Wompi script never loads or the widget button never renders within this
-// window, fall back to the full-page hosted flow (window.location.href).
+// If the embedded checkout iframe has not loaded within this window, surface the
+// hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
-// Poll the widget host this often (up to DONAR_SCRIPT_TIMEOUT_MS) for the button
-// Wompi injects, then auto-click it once so the payment modal opens immediately.
-export const DONAR_AUTOCLICK_INTERVAL_MS = 150;
 
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;
@@ -186,6 +182,14 @@ export const DONAR_THANK_YOU_BODY =
   "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.";
 export const DONAR_FALLBACK_MESSAGE =
   "Si completó el pago, recibirá su comprobante (CDE) por correo electrónico. Puede cerrar esta página.";
+
+// Paso 3 handoff states: spinner copy while the embedded Wompi widget prepares,
+// and the manual hosted-checkout CTA when it takes longer than the render budget.
+// Leaving the page is always donor-initiated — never an automatic redirect.
+export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando el pago seguro…";
+export const DONAR_WIDGET_DELAYED_MESSAGE =
+  "El pago está tardando más de lo esperado. Puede continuar en la página segura de Wompi:";
+export const DONAR_WIDGET_FALLBACK_CTA = "Continuar al pago en Wompi";
 
 // postMessage payload the thank-you page sends to its opener (the /donar view)
 // when it detects it is running inside the widget iframe modal.
