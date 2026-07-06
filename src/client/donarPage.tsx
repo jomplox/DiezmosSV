@@ -60,7 +60,6 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
-import svFlag from "./assets/sv-flag.png";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -165,11 +164,9 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the church's own El Salvador flag asset (src/client/assets/sv-flag.png,
-// the civil blue-white-blue tricolor) overlapping the lower-right of a thin monochrome
-// line-art globe. The flag is a rounded-corner rectangle (~16:9) sitting on a white
-// backing card so it separates cleanly from the globe lines behind it — the same
-// "drops onto the globe's lower right" relationship as the previous circle flag.
+// Door 1 icon: the El Salvador circle flag (HatScripts/circle-flags, MIT) overlapping
+// the lower-right of a thin monochrome line-art globe — matching the US door's circle
+// style so the flag reads prominently at card size. Inlined verbatim (self-hosted).
 // aria-hidden: the door button's text label is the single accessible name.
 function SvWorldIcon() {
   return (
@@ -180,32 +177,32 @@ function SvWorldIcon() {
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Rounded-corner clip for the flag image (subtle ~4px radius). */}
-      <clipPath id="sv-flag-clip">
-        <rect x="47" y="58" width="44" height="24.75" rx="4" ry="4" />
-      </clipPath>
       {/* Line-art globe behind the flag. */}
       <g fill="none" stroke="#595959" strokeWidth="1.5">
-        <circle cx="44" cy="40" r="30" />
-        <ellipse cx="44" cy="40" rx="12" ry="30" />
-        <ellipse cx="44" cy="40" rx="24" ry="30" />
-        <line x1="14" y1="40" x2="74" y2="40" />
-        <path d="M 19 25 Q 44 33 69 25" />
-        <path d="M 19 55 Q 44 47 69 55" />
+        <circle cx="42" cy="38" r="30" />
+        <ellipse cx="42" cy="38" rx="12" ry="30" />
+        <ellipse cx="42" cy="38" rx="24" ry="30" />
+        <line x1="12" y1="38" x2="72" y2="38" />
+        <path d="M 17 23 Q 42 31 67 23" />
+        <path d="M 17 53 Q 42 45 67 53" />
       </g>
-      {/* White backing card (the "drop"): a slightly larger rounded rect behind the
-          flag so it reads clearly against the globe strokes. */}
-      <rect x="44.5" y="55.5" width="49" height="29.75" rx="5.5" ry="5.5" fill="#ffffff" />
-      {/* The church's own flag PNG, clipped to a rounded rectangle in the lower-right. */}
-      <image
-        href={svFlag}
-        x="47"
-        y="58"
-        width="44"
-        height="24.75"
-        preserveAspectRatio="xMidYMid slice"
-        clipPath="url(#sv-flag-clip)"
-      />
+      {/* El Salvador circle flag (circle-flags sv.svg, MIT), lower-right, sized up for
+          prominence with a white ring separating it from the globe lines. */}
+      <g transform="translate(44 44)">
+        <circle cx="25" cy="25" r="28" fill="#ffffff" />
+        <g transform="scale(0.09766)">
+          <mask id="sv-flag-a">
+            <circle cx="256" cy="256" r="256" fill="#fff" />
+          </mask>
+          <g mask="url(#sv-flag-a)">
+            <path fill="#0052b4" d="M0 0h512v144.7l-40.5 112.6 40.5 110V512H0V367.3l42.2-114L0 144.7z" />
+            <path fill="#eee" d="M0 144.7h512v222.6H0z" />
+            <path fill="#ffda44" d="m204.6 267.1 51.4-89 51.4 89z" />
+            <path fill="#6da544" d="M322.8 296.5 256 330l-66.8-33.4V252h133.6z" />
+            <path fill="#ffda44" d="m319 182-23.6 23.5a55.5 55.5 0 0 1-39.4 95 55.7 55.7 0 0 1-39.3-95L193 182a89 89 0 1 0 126 0z" />
+          </g>
+        </g>
+      </g>
     </svg>
   );
 }
@@ -654,8 +651,8 @@ export function DonarPage() {
         {step === 1 && (
           <p className="donar-assurance">
             {usDonation
-              ? "Recibirá un recibo deducible de impuestos en EE. UU. por correo."
-              : "Recibirá su comprobante de donación electrónico (CDE) por correo."}
+              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico."
+              : "Recibirá su comprobante de donación en su dirección de correo electrónico."}
           </p>
         )}
 
