@@ -58,11 +58,13 @@ donante se **dividen** entre el formulario y la pantalla de pago de Wompi:
 Con esas dos fuentes el sistema arma el comprobante, así que el CDE sale con la información correcta
 del donante sin que usted tenga que capturarla.
 
-**Tipos de documento aceptados en /donar:** DUI (con validación del dígito verificador), NIT (14
-dígitos), Pasaporte y Carnet de Residente (de 5 a 30 caracteres) y Otro (texto libre). Cuando el
-donante elige **NIT** —por ejemplo, una empresa— el formulario le pide también la **razón social**, y
-es esa razón social (no el nombre de la tarjeta con la que se pagó) la que aparece como donante en el
-comprobante.
+**Tipos de documento aceptados en /donar:** DUI (con validación del dígito verificador), Empresa,
+Otro (texto libre), Pasaporte y Carnet de Residente (de 5 a 30 caracteres). Las empresas donan con
+NIT y razón social: cuando el donante elige **Empresa**, el formulario le pide el **NIT de la
+empresa** (14 dígitos) y la **razón social**, y es esa razón social (no el nombre de la tarjeta con
+la que se pagó) la que aparece como donante en el comprobante. La opción se llama «Empresa» y no
+«NIT» a propósito: muchas personas naturales todavía conservan un NIT personal antiguo, pero para
+donar como persona natural el documento correcto es el DUI.
 
 **Donantes en el extranjero:** el formulario tiene la casilla **«Resido en el extranjero»**. Al
 marcarla, en lugar de departamento/municipio/distrito el donante elige su **país** y escribe su
