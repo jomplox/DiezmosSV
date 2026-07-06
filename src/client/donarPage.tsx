@@ -3,7 +3,6 @@ import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   DONAR_AMOUNT_CHIPS,
-  DONAR_AUTOCLICK_INTERVAL_MS,
   DONAR_BACK_LABEL,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_COMPLETED_MESSAGE,
@@ -31,7 +30,9 @@ import {
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WOMPI_SCRIPT_URL,
+  DONAR_WIDGET_DELAYED_MESSAGE,
+  DONAR_WIDGET_FALLBACK_CTA,
+  DONAR_WIDGET_LOADING_MESSAGE,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
@@ -252,11 +253,12 @@ export function DonarPage() {
   // control) and the render-probe fallback for the embedded giving form.
   const [monthly, setMonthly] = useState(false);
   const [givebutterFallback, setGivebutterFallback] = useState(false);
-  const widgetHostRef = useRef<HTMLDivElement | null>(null);
+  // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
+  // (spinner), "ready" once it has, "delayed" when the render budget elapses first
+  // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
+  // still flips to "ready").
+  const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed">("loading");
   const givebutterHostRef = useRef<HTMLDivElement | null>(null);
-  // Latches once the rendered Wompi button is auto-clicked so re-observing the
-  // (still-present) button never re-opens the modal. Reset per intent below.
-  const autoClickedRef = useRef(false);
   // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
   // field, and the summary's Editar control (Paso 3 / the US embed step).
   const heroInputRef = useRef<HTMLInputElement | null>(null);
@@ -326,18 +328,6 @@ export function DonarPage() {
     }
     summaryEditRef.current?.focus();
   }, [door, step]);
-
-  // Load the Wompi widget script only while this view is mounted (never on admin
-  // views). Injected once; the widget div is rendered after intent success.
-  useEffect(() => {
-    if (document.querySelector(`script[src="${DONAR_WOMPI_SCRIPT_URL}"]`)) {
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = DONAR_WOMPI_SCRIPT_URL;
-    script.async = true;
-    document.head.appendChild(script);
-  }, []);
 
   // Inject the Givebutter widget script ONLY when the US donation path first becomes
   // active — never on admin views, never for non-US donors. Guarded like the Wompi
@@ -421,57 +411,25 @@ export function DonarPage() {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  // Once an intent exists, render the widget button. If the script/widget does not
-  // render within a short timeout, fall back to the full-page hosted flow.
+  // Once an intent exists, Paso 3 embeds the checkout directly (iframe below). This
+  // effect only drives the waiting UI: spinner from entry, and if the iframe has not
+  // fired onLoad within the render budget, the manual hosted-checkout CTA appears —
+  // never a redirect. The iframe keeps loading underneath; its onLoad flips to
+  // "ready" whenever it lands.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
     }
-    // Fresh intent: allow the button to be auto-clicked exactly once again.
-    autoClickedRef.current = false;
-    const host = widgetHostRef.current;
-    if (host) {
-      host.innerHTML = "";
-      const widget = document.createElement("div");
-      widget.className = "wompi_button_widget";
-      widget.setAttribute("data-url-pago", widgetUrlFrom(intent.urlEnlaceLargo));
-      widget.setAttribute("data-render", "widget");
-      widget.setAttribute("data-color-fondo", "#007c75");
-      widget.setAttribute("data-color-texto", "#ffffff");
-      widget.setAttribute("data-cubrir-ancho", "true");
-      host.appendChild(widget);
-    }
-    // Instant handoff: poll the host for the button Wompi injects and click it once
-    // so the donor goes form → payment modal with no extra click. The manual button
-    // and "Continúe aquí" link stay visible as the backup (the modal can be closed
-    // and reopened). Guarded by autoClickedRef so it never double-fires.
-    const autoClick = window.setInterval(() => {
-      if (autoClickedRef.current || !host) {
-        window.clearInterval(autoClick);
-        return;
-      }
-      const button = host.querySelector("button");
-      if (button) {
-        autoClickedRef.current = true;
-        window.clearInterval(autoClick);
-        button.click();
-      }
-    }, DONAR_AUTOCLICK_INTERVAL_MS);
-    const fallback = window.setTimeout(() => {
-      window.clearInterval(autoClick);
-      const rendered = host?.querySelector("iframe, a, button");
-      if (!rendered) {
-        // Script failed to load or never enhanced the div: hosted redirect.
-        window.location.href = intent.urlEnlace;
-      }
+    setHandoff("loading");
+    const slow = window.setTimeout(() => {
+      setHandoff((current) => (current === "loading" ? "delayed" : current));
     }, DONAR_SCRIPT_TIMEOUT_MS);
     return () => {
-      window.clearInterval(autoClick);
-      window.clearTimeout(fallback);
+      window.clearTimeout(slow);
     };
   }, [stage, intent]);
 
-  // Poll the intent status while the widget modal is open; COMPLETED -> thank-you.
+  // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
   // Stop after ~3 minutes with a neutral closing message.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
@@ -532,7 +490,7 @@ export function DonarPage() {
   }
 
   // Paso 2 → Paso 3. Entering the pago step creates the payment intent: validate
-  // the datos, POST the intent, then advance into the handoff (widget auto-open,
+  // the datos, POST the intent, then advance into the handoff (embedded checkout,
   // polling, and fallbacks unchanged). On error the donor stays on Paso 2.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
@@ -908,7 +866,7 @@ export function DonarPage() {
         )}
 
         {/* Paso 3 — Pago (SV door). Summary line above the existing Wompi
-            handoff: widget auto-open, manual backup, polling, neutral close. */}
+            handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
           <div className="donar-step">
             {summary}
@@ -916,7 +874,26 @@ export function DonarPage() {
             {stage === "widget" && intent && (
               <div className="donar-handoff">
                 <p className="donar-intro">Pague de forma segura con Wompi. Al completar el pago, verá la confirmación aquí.</p>
-                <div className="donar-widget" ref={widgetHostRef} />
+                {handoff === "loading" && (
+                  <div className="donar-widget-loading" role="status">
+                    <span className="donar-spinner" aria-hidden="true" />
+                    {DONAR_WIDGET_LOADING_MESSAGE}
+                  </div>
+                )}
+                {handoff === "delayed" && (
+                  <div className="donar-widget-delayed">
+                    <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
+                    <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
+                      {DONAR_WIDGET_FALLBACK_CTA}
+                    </a>
+                  </div>
+                )}
+                <iframe
+                  className="donar-embed"
+                  src={widgetUrlFrom(intent.urlEnlaceLargo)}
+                  title="Pago seguro con Wompi"
+                  onLoad={() => setHandoff("ready")}
+                />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
                   ¿No se abre el pago? Continúe aquí
                 </button>

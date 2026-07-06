@@ -19,7 +19,9 @@ import {
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WOMPI_SCRIPT_URL,
+  DONAR_WIDGET_DELAYED_MESSAGE,
+  DONAR_WIDGET_FALLBACK_CTA,
+  DONAR_WIDGET_LOADING_MESSAGE,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
@@ -353,10 +355,6 @@ describe("donar widget handoff", () => {
     );
   });
 
-  it("pins the official Wompi widget script URL", () => {
-    expect(DONAR_WOMPI_SCRIPT_URL).toBe("https://pagos.wompi.sv/js/wompi.pagos.js");
-  });
-
   it("polls the public intent status endpoint every ~5s and stops after ~3 minutes", () => {
     expect(DONAR_INTENT_PATH).toBe("/api/donations/intent");
     expect(DONAR_POLL_INTERVAL_MS).toBe(5_000);
@@ -563,39 +561,56 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("donationStep2ValidationMessage(");
   });
 
-  it("loads the Wompi widget script only from the donar view and renders the widget button", () => {
-    expect(donarSource).toContain("DONAR_WOMPI_SCRIPT_URL");
-    expect(donarSource).toContain("wompi_button_widget");
-    expect(donarSource).toContain('"data-render", "widget"');
-    expect(donarSource).toContain('"data-url-pago"');
+  it("renders the Wompi checkout embedded in Paso 3 via a plain iframe", () => {
+    // The checkout page (urlEnlaceLargo + esWidget=1) allows cross-origin framing —
+    // verified live: no X-Frame-Options, no frame-ancestors — and Wompi's own modal
+    // widget iframes the exact same URL with a plain {src, onLoad} iframe. Embedding
+    // it directly keeps the donor inside the wizard: no popup, no overlay.
+    expect(donarSource).toContain("<iframe");
+    expect(donarSource).toContain('className="donar-embed"');
+    expect(donarSource).toContain("src={widgetUrlFrom(intent.urlEnlaceLargo)}");
+    expect(stylesSource).toContain(".donar-embed");
   });
 
-  it("falls back to a full-page redirect to urlEnlace when the widget cannot render", () => {
-    expect(donarSource).toContain("window.location.href");
-    expect(donarSource).toContain("urlEnlace");
+  it("ships no Wompi script machinery: the embed needs no script, scan, or auto-click", () => {
+    // wompi.pagos.js scans for .wompi_button_widget divs exactly once at script
+    // evaluation (fragile in an SPA whose div appears on Paso 3), and its
+    // button+modal flow needed an auto-click. The inline iframe replaces all of it.
+    expect(donarSource).not.toContain("wompi_button_widget");
+    expect(donarSource).not.toContain("DONAR_WOMPI_SCRIPT_URL");
+    expect(donarSource).not.toContain("autoClickedRef");
   });
 
-  it("auto-clicks the rendered Wompi button so the modal opens immediately after submit", () => {
-    // The effect that renders the widget div must poll/observe the host for the
-    // button Wompi injects and click it once, so form → modal needs no extra click.
-    const widgetEffect = donarSource.indexOf("wompi_button_widget");
-    expect(widgetEffect).toBeGreaterThan(-1);
-    // Auto-click looks for the button in the host and invokes .click() on it.
-    expect(donarSource).toContain('host.querySelector("button")');
-    const clickCall = donarSource.indexOf(".click()", widgetEffect);
-    expect(clickCall).toBeGreaterThan(-1);
-    // The auto-click poll reuses the existing short script/render timeout budget.
+  it("never auto-redirects away from Paso 3 — leaving is always donor-initiated", () => {
+    // Exactly one window.location.href assignment exists in the wizard: the manual
+    // "Continúe aquí" backup button under the embed.
+    const assignments = donarSource.match(/window\.location\.href\s*=/g) ?? [];
+    expect(assignments).toHaveLength(1);
+    const at = donarSource.indexOf("window.location.href =");
+    expect(donarSource.slice(at, at + 260)).toContain("¿No se abre el pago? Continúe aquí");
+    // The slow path renders a prominent hosted-checkout anchor, not a redirect.
+    expect(donarSource).toContain("DONAR_WIDGET_FALLBACK_CTA");
+    expect(donarSource).toContain("donar-widget-fallback");
+    expect(DONAR_WIDGET_FALLBACK_CTA).toBe("Continuar al pago en Wompi");
+  });
+
+  it("shows a loading indicator until the embedded checkout loads", () => {
+    // handoff: "loading" (spinner) → "ready" via the iframe's onLoad; if the render
+    // budget (DONAR_SCRIPT_TIMEOUT_MS) elapses first, "delayed" adds the hosted CTA
+    // while the iframe keeps loading underneath.
+    expect(donarSource).toContain("DONAR_WIDGET_LOADING_MESSAGE");
+    expect(donarSource).toContain("DONAR_WIDGET_DELAYED_MESSAGE");
+    expect(donarSource).toContain("onLoad");
     expect(donarSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
-  });
-
-  it("guards the auto-click with a ref so it never double-fires", () => {
-    // A dedicated ref (initialized false) latches once the button is clicked.
-    expect(donarSource).toContain("autoClickedRef");
-    expect(donarSource).toContain("useRef(false)");
-    // The guard is checked before clicking and set true after, so re-observing the
-    // (still-present) button does not re-open the modal.
-    const guardCheck = donarSource.indexOf("autoClickedRef.current");
-    expect(guardCheck).toBeGreaterThan(-1);
+    expect(DONAR_WIDGET_LOADING_MESSAGE).toContain("Preparando el pago");
+    expect(DONAR_WIDGET_DELAYED_MESSAGE).toContain("Wompi");
+    // Spinner is announced to assistive tech and styled monochrome in CSS.
+    expect(donarSource).toContain('role="status"');
+    expect(stylesSource).toContain(".donar-spinner");
+    // Reduced-motion users get a static indicator, not a spinning ring.
+    const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
+    expect(reducedMotion).toBeGreaterThan(-1);
+    expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
