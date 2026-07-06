@@ -60,6 +60,7 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
+import svFlag from "./assets/sv-flag.png";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -121,7 +122,10 @@ function DonarSelect({
 
 const emptyDonationForm: DonationFormInput = {
   amount: "",
-  giftType: "",
+  // Diezmo is preselected on mount: the SV Paso 1 segmented control lands checked,
+  // so the "elija un tipo" validation is only ever a safety net. The donor can still
+  // switch to Ofrenda. (The US door ignores giftType entirely.)
+  giftType: "DIEZMO",
   donorDocumentType: "13",
   donorDocument: "",
   donorName: "",
@@ -161,11 +165,12 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the El Salvador circle flag (HatScripts/circle-flags, MIT) overlapping
-// the lower-right of a thin monochrome line-art globe. The flag SVG is inlined
-// verbatim (self-hosted, no runtime fetch), scaled into the lower-right quadrant with
-// a white ring so it reads clearly against the globe. aria-hidden: the door button's
-// text label is the single accessible name.
+// Door 1 icon: the church's own El Salvador flag asset (src/client/assets/sv-flag.png,
+// the civil blue-white-blue tricolor) overlapping the lower-right of a thin monochrome
+// line-art globe. The flag is a rounded-corner rectangle (~16:9) sitting on a white
+// backing card so it separates cleanly from the globe lines behind it — the same
+// "drops onto the globe's lower right" relationship as the previous circle flag.
+// aria-hidden: the door button's text label is the single accessible name.
 function SvWorldIcon() {
   return (
     <svg
@@ -175,6 +180,10 @@ function SvWorldIcon() {
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
     >
+      {/* Rounded-corner clip for the flag image (subtle ~4px radius). */}
+      <clipPath id="sv-flag-clip">
+        <rect x="47" y="58" width="44" height="24.75" rx="4" ry="4" />
+      </clipPath>
       {/* Line-art globe behind the flag. */}
       <g fill="none" stroke="#595959" strokeWidth="1.5">
         <circle cx="44" cy="40" r="30" />
@@ -184,23 +193,19 @@ function SvWorldIcon() {
         <path d="M 19 25 Q 44 33 69 25" />
         <path d="M 19 55 Q 44 47 69 55" />
       </g>
-      {/* El Salvador circle flag (circle-flags sv.svg, MIT), lower-right, with a white
-          ring so it separates from the globe lines behind it. */}
-      <g transform="translate(50 50)">
-        <circle cx="21" cy="21" r="24" fill="#ffffff" />
-        <g transform="scale(0.08203)">
-          <mask id="sv-flag-a">
-            <circle cx="256" cy="256" r="256" fill="#fff" />
-          </mask>
-          <g mask="url(#sv-flag-a)">
-            <path fill="#0052b4" d="M0 0h512v144.7l-40.5 112.6 40.5 110V512H0V367.3l42.2-114L0 144.7z" />
-            <path fill="#eee" d="M0 144.7h512v222.6H0z" />
-            <path fill="#ffda44" d="m204.6 267.1 51.4-89 51.4 89z" />
-            <path fill="#6da544" d="M322.8 296.5 256 330l-66.8-33.4V252h133.6z" />
-            <path fill="#ffda44" d="m319 182-23.6 23.5a55.5 55.5 0 0 1-39.4 95 55.7 55.7 0 0 1-39.3-95L193 182a89 89 0 1 0 126 0z" />
-          </g>
-        </g>
-      </g>
+      {/* White backing card (the "drop"): a slightly larger rounded rect behind the
+          flag so it reads clearly against the globe strokes. */}
+      <rect x="44.5" y="55.5" width="49" height="29.75" rx="5.5" ry="5.5" fill="#ffffff" />
+      {/* The church's own flag PNG, clipped to a rounded rectangle in the lower-right. */}
+      <image
+        href={svFlag}
+        x="47"
+        y="58"
+        width="44"
+        height="24.75"
+        preserveAspectRatio="xMidYMid slice"
+        clipPath="url(#sv-flag-clip)"
+      />
     </svg>
   );
 }
@@ -642,7 +647,17 @@ export function DonarPage() {
         <div className="donar-glyph">
           <ShieldCheck size={28} />
         </div>
-        <h1>{usDonation ? "Diezmos y Ofrendas — EE. UU." : "Entregue su diezmo u ofrenda"}</h1>
+        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Entregue su diezmo u ofrenda 🇸🇻"}</h1>
+
+        {/* Paso 1 assurance: right under the heading, name the legal document this
+            door produces — reassurance of the door the donor just chose. */}
+        {step === 1 && (
+          <p className="donar-assurance">
+            {usDonation
+              ? "Recibirá un recibo deducible de impuestos en EE. UU. por correo."
+              : "Recibirá su comprobante de donación electrónico (CDE) por correo."}
+          </p>
+        )}
 
         {/* Paso 1 — Monto. Shared by both doors: a segmented control on top
             (Diezmo|Ofrenda on the SV door, Única|Mensual on the US door), the
