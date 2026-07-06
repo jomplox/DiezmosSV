@@ -1,6 +1,9 @@
 import type { DteDocumentRecord } from "../types";
 
-const BRAND_COLOR = "#0f766e";
+// Fallback accent for an unbranded deployment (matches BRANDING_DEFAULTS.accentColor).
+// White-label callers thread a church's own color through the *Options.brandColor.
+const DEFAULT_BRAND_COLOR = "#0f766e";
+const DEFAULT_ORGANIZATION_NAME = "ExamplePerson1";
 const TEXT_COLOR = "#1f2a2e";
 const MUTED_COLOR = "#52656c";
 const BORDER_COLOR = "#dfe6e8";
@@ -8,6 +11,7 @@ const CARD_BACKGROUND = "#f7f9fa";
 
 export interface DteEmailHtmlOptions {
   organizationName: string;
+  brandColor?: string;
 }
 
 export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, options: DteEmailHtmlOptions): string {
@@ -25,7 +29,8 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
     ["Sello de recepción", record.sello_recibido ?? "Pendiente"],
     ["Ambiente", record.environment === "01" ? "Producción" : "Pruebas"]
   ]);
-  return emailDocument(options.organizationName, [
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
+  return emailDocument(options.organizationName, brandColor, [
     banner,
     paragraphs(bodyText),
     details,
@@ -34,19 +39,31 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
   ]);
 }
 
-export function passwordResetEmailHtml(name: string, link: string, expiresMinutes: number): string {
+export interface BrandingEmailOptions {
+  organizationName: string;
+  brandColor?: string;
+}
+
+export function passwordResetEmailHtml(
+  name: string,
+  link: string,
+  expiresMinutes: number,
+  options: BrandingEmailOptions = { organizationName: DEFAULT_ORGANIZATION_NAME }
+): string {
+  const organizationName = options.organizationName || DEFAULT_ORGANIZATION_NAME;
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   const safeLink = escapeHtml(link);
   const button = `
     <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px auto;">
       <tr>
-        <td style="border-radius:8px;background:${BRAND_COLOR};">
+        <td style="border-radius:8px;background:${brandColor};">
           <a href="${safeLink}" style="display:inline-block;padding:12px 28px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">Crear nueva contraseña</a>
         </td>
       </tr>
     </table>`;
-  return emailDocument("ExamplePerson1", [
+  return emailDocument(organizationName, brandColor, [
     paragraphs(
-      `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ExamplePerson1. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
+      `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ${organizationName}. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
     ),
     button,
     note(`Si el botón no funciona, copie y pegue este enlace en su navegador: ${link}`),
@@ -62,14 +79,20 @@ export interface OperationalAlertInput {
   entityId: string;
 }
 
-export function operationalAlertHtml(alert: OperationalAlertInput, originUrl: string): string {
+export function operationalAlertHtml(
+  alert: OperationalAlertInput,
+  originUrl: string,
+  options: BrandingEmailOptions = { organizationName: DEFAULT_ORGANIZATION_NAME }
+): string {
+  const organizationName = options.organizationName || DEFAULT_ORGANIZATION_NAME;
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   const banner = alertBanner(alert.kind, alert.title);
   const details = detailsCard([
     ["Tipo de evento", alert.kind],
     ["Entidad", alert.entityType],
     ["Identificador", alert.entityId]
   ]);
-  return emailDocument("ExamplePerson1", [
+  return emailDocument(organizationName, brandColor, [
     banner,
     paragraphs(alert.detail),
     details,
@@ -84,6 +107,7 @@ export interface CertificateEmailInput {
   count: number;
   totalLabel: string;
   isTestEnvironment: boolean;
+  brandColor?: string;
 }
 
 export function certificateEmailHtml(input: CertificateEmailInput): string {
@@ -95,7 +119,7 @@ export function certificateEmailHtml(input: CertificateEmailInput): string {
     ["Donaciones", String(input.count)],
     ["Total del año", input.totalLabel]
   ]);
-  return emailDocument(input.organizationName, [
+  return emailDocument(input.organizationName, input.brandColor ?? DEFAULT_BRAND_COLOR, [
     paragraphs(
       `Estimado(a) ${input.donorName}:\n\n` +
         `Adjuntamos su constancia de donaciones correspondiente al año ${input.year}. ` +
@@ -118,7 +142,7 @@ function alertBanner(kind: string, title: string): string {
   return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:${background};border:1px solid ${border};color:${color};font-weight:bold;text-align:center;">${escapeHtml(title)}</div>`;
 }
 
-function emailDocument(organizationName: string, blocks: string[]): string {
+function emailDocument(organizationName: string, brandColor: string, blocks: string[]): string {
   return `<!DOCTYPE html>
 <html lang="es">
   <head>
@@ -131,7 +155,7 @@ function emailDocument(organizationName: string, blocks: string[]): string {
         <td align="center">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid ${BORDER_COLOR};border-radius:10px;overflow:hidden;">
             <tr>
-              <td style="background:${BRAND_COLOR};padding:18px 28px;">
+              <td style="background:${brandColor};padding:18px 28px;">
                 <span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">${escapeHtml(organizationName)}</span><br />
                 <span style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#d2eae7;">Comprobante de Donación Electrónico</span>
               </td>
@@ -143,7 +167,7 @@ function emailDocument(organizationName: string, blocks: string[]): string {
             </tr>
             <tr>
               <td style="padding:16px 28px;border-top:1px solid ${BORDER_COLOR};font-family:Arial,Helvetica,sans-serif;font-size:11px;color:${MUTED_COLOR};">
-                Correo generado automáticamente por ExamplePerson1. Por favor no responda a este mensaje.
+                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.
               </td>
             </tr>
           </table>

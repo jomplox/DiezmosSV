@@ -3,6 +3,7 @@ import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
 import { getEmisorConfig } from "../config";
 import type { Env } from "../types";
+import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { certificateEmailHtml } from "./emailHtml";
 
@@ -342,7 +343,10 @@ export async function sendAnnualCertificates(env: Env, repo: Repository, year: n
   const emisorConfig = getEmisorConfig(env);
   const emisor: CertificateEmisor = { nombre: emisorConfig.nombreComercial || emisorConfig.nombre, numDocumento: emisorConfig.numDocumento };
   const donors = await aggregateAnnualDonors(repo, year);
-  const email = new EmailService(env);
+  // The certificate keeps the emisor's legal name (it is a fiscal document), but the
+  // email chrome still picks up the church's accent color.
+  const branding = await loadEmailBranding(repo);
+  const email = new EmailService(env, undefined, { organizationName: emisor.nombre, brandColor: branding.brandColor });
   const issuedOnLabel = elSalvadorDateLabel(new Date().toISOString());
   const result: AnnualCertificateSendResult = { year, sent: 0, skipped: 0, failed: 0 };
 
@@ -373,7 +377,8 @@ export async function sendAnnualCertificates(env: Env, repo: Repository, year: n
           year,
           count: donor.count,
           totalLabel,
-          isTestEnvironment: donor.hasTestEnvironment
+          isTestEnvironment: donor.hasTestEnvironment,
+          brandColor: branding.brandColor
         }),
         pdfBytes,
         filename: `constancia-donaciones-${year}.pdf`
