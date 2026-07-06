@@ -11,12 +11,10 @@ import { expect, test } from "@playwright/test";
  * door shares Paso 1 and reveals the embedded Givebutter form on Paso 2.
  *
  * In mock mode (MOCK_EXTERNAL_SERVICES="true") the backend returns deterministic
- * mock Wompi links (https://mock.wompi.sv/...). The real Wompi widget script is
- * loaded from pagos.wompi.sv, but it cannot act on a mock URL, so this test only
- * asserts the HANDOFF state (the widget area appears, or the app attempts the
- * graceful full-page fallback to urlEnlace). It never depends on real Wompi
- * network access: requests to mock.wompi.sv / pagos.wompi.sv are stubbed so
- * nothing leaves the sandbox.
+ * mock Wompi links (https://mock.wompi.sv/...). Paso 3 embeds the checkout page
+ * (urlEnlaceLargo + esWidget=1) directly in an iframe — no Wompi script, no
+ * modal, never an automatic redirect. Requests to mock.wompi.sv are stubbed so
+ * the iframe loads a placeholder and nothing leaves the sandbox.
  *
  * See playwright.config.ts / e2e/smoke.spec.ts for how to run locally with an
  * isolated wrangler state dir (PW_PERSIST_TO="$(mktemp -d)").
@@ -30,11 +28,8 @@ const DONOR = {
 };
 
 test.beforeEach(async ({ context }) => {
-  // Keep everything inside the sandbox: stub the Wompi CDN script and any
-  // navigation to the mock hosted-payment host so no real network egress occurs.
-  await context.route("https://pagos.wompi.sv/**", (route) =>
-    route.fulfill({ status: 200, contentType: "application/javascript", body: "/* stubbed wompi widget */" })
-  );
+  // Keep everything inside the sandbox: stub the mock hosted-payment host (the
+  // embed iframe src in mock mode) so no real network egress occurs.
   await context.route("https://mock.wompi.sv/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock wompi hosted flow</body></html>" })
   );
@@ -62,8 +57,9 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Paso 1 — Monto. The diezmo/ofrenda framing (flagged 🇸🇻) heads the card; the
   // step indicator and the segmented control render; the hero input is auto-focused.
   await expect(page.getByRole("heading", { name: "Entregue su diezmo u ofrenda 🇸🇻" })).toBeVisible();
-  // The assurance subtitle names the CDE this SV path produces.
-  await expect(page.getByText("Recibirá su comprobante de donación electrónico (CDE) por correo.")).toBeVisible();
+  // The assurance subtitle names the comprobante this SV path produces (user-centered
+  // copy: donors know "DTE", not the CDE initials).
+  await expect(page.getByText("Recibirá su comprobante de donación en su dirección de correo electrónico.")).toBeVisible();
   await expect(page.getByText("Paso 1 de 3")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Tipo" })).toBeVisible();
   // Diezmo is preselected on mount.
@@ -107,17 +103,14 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await expect(page.getByText("Diezmo · $1.00")).toBeVisible();
   await expect(page.getByRole("button", { name: "Editar" })).toBeVisible();
 
-  // Handoff state: either the widget host + fallback link appear, or the app
-  // performs the graceful full-page redirect to the mock hosted flow. Both are
-  // acceptable "handoff attempted" outcomes in mock mode.
-  const fallbackLink = page.getByRole("button", { name: "¿No se abre el pago? Continúe aquí" });
-  await Promise.race([
-    fallbackLink.waitFor({ state: "visible", timeout: 15_000 }),
-    page.waitForURL("https://mock.wompi.sv/**", { timeout: 15_000 })
-  ]);
-
-  const handedOff = (await fallbackLink.count()) > 0 || page.url().startsWith("https://mock.wompi.sv/");
-  expect(handedOff).toBe(true);
+  // Handoff: the checkout is EMBEDDED in the wizard card — an iframe pointing at
+  // the payment link with the esWidget flag — with the manual backup link below.
+  // There is no automatic redirect: the donor stays on /donar.
+  const embed = page.locator("iframe.donar-embed");
+  await expect(embed).toBeVisible({ timeout: 15_000 });
+  await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
+  await expect(page.getByRole("button", { name: "¿No se abre el pago? Continúe aquí" })).toBeVisible();
+  expect(page.url()).toContain("/donar");
 });
 
 test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", async ({ page }) => {
@@ -130,8 +123,10 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // Paso 1 — Monto. The US flow has its own heading (flagged 🇺🇸) and a 2-step
   // count; the monthly toggle is the segmented control (Única | Mensual, real radios).
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
-  // The assurance subtitle names the US tax-deductible receipt this path produces.
-  await expect(page.getByText("Recibirá un recibo deducible de impuestos en EE. UU. por correo.")).toBeVisible();
+  // The assurance subtitle names the US tax-deductible receipt in formal IRS terms.
+  await expect(
+    page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.")
+  ).toBeVisible();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Donación mensual" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
