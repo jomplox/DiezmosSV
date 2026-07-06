@@ -56,10 +56,10 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
 
   // Paso 1 — Monto. The diezmo/ofrenda framing (flagged 🇸🇻) heads the card; the
   // step indicator and the segmented control render; the hero input is auto-focused.
-  await expect(page.getByRole("heading", { name: "Entregue su diezmo u ofrenda 🇸🇻" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇸🇻" })).toBeVisible();
   // The assurance subtitle names the comprobante this SV path produces (user-centered
   // copy: donors know "DTE", not the CDE initials).
-  await expect(page.getByText("Recibirá su comprobante de donación en su dirección de correo electrónico.")).toBeVisible();
+  await expect(page.getByText("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.")).toBeVisible();
   await expect(page.getByText("Paso 1 de 3")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Tipo" })).toBeVisible();
   // Diezmo is preselected on mount.

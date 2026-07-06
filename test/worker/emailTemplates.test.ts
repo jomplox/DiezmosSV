@@ -19,6 +19,23 @@ function fakeRecord(): DteDocumentRecord {
   } as unknown as DteDocumentRecord;
 }
 
+import { readFileSync as __readEmailHtmlSource } from "node:fs";
+import { resolve as __resolveEmailHtml } from "node:path";
+
+describe("email support contact", () => {
+  it("every HTML email footer carries the official support contact", () => {
+    // legacy-contact-1@example.com is the official support contact for both lanes; the shared
+    // emailDocument chrome renders it once, so every template inherits it.
+    const emailHtmlSource = __readEmailHtmlSource(
+      __resolveEmailHtml(import.meta.dirname, "../../src/worker/services/emailHtml.ts"),
+      "utf8"
+    );
+    expect(emailHtmlSource).toContain("SUPPORT_EMAIL");
+    expect(emailHtmlSource).toContain("legacy-contact-1@example.com");
+    expect(emailHtmlSource).toContain("mailto:");
+  });
+});
+
 describe("email template defaults", () => {
   it("spells out the tax authority in donor-facing defaults", () => {
     const invalidation = EMAIL_TEMPLATE_DEFINITIONS.find((definition) => definition.type === "dteInvalidation");

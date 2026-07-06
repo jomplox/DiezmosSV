@@ -3062,6 +3062,20 @@ pre {
   color: #000000;
 }
 
+/* Official support contact: last element of every donor card, deliberately the
+   quietest text on screen. */
+.donar-support {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #8c8c8c;
+  text-align: center;
+}
+
+.donar-support a {
+  color: #595959;
+  text-decoration: underline;
+}
+
 /* Paso 3: the Wompi checkout embedded directly in the wizard card. The page
    (urlEnlaceLargo + esWidget=1) runs ~830px tall and scrolls internally when
    the viewport gives it less. */

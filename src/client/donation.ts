@@ -101,6 +101,9 @@ export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario se muestra en inglés.";
 export type DonarDoor = "sv" | "eeuu";
 
 export const DONAR_LANDING_HEADING = "Diezmos y Ofrendas";
+// Official support contact for BOTH lanes (SV fiscal + EE. UU./Givebutter). Rendered
+// as a discreet mailto line at the bottom of every donor screen and in email footers.
+export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
 // tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
