@@ -7,7 +7,7 @@ import {
 } from "../../shared/catalogs";
 import { formatDui, isValidDui } from "../../shared/dui";
 import { formatNit, isValidNitFormat } from "../../shared/nit";
-import type { DonationGiftType, DonationIntentDocumentType, Env } from "../types";
+import type { DonationGiftType, DonationIntentDocumentType, DonationIntentRecord, Env } from "../types";
 import { addHours, nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { Repository } from "../storage/repository";
@@ -59,11 +59,11 @@ export class IntentValidationError extends Error {
   }
 }
 
-// Name and email are collected on Wompi's hosted sheet (which requires and now asks
-// only for those two), so the intent carries identity + address only — plus the
-// razón social for NIT (36) donors and the CAT-020 país on the foreign path.
-export interface ValidatedIntentInput {
-  amountCents: number;
+// The donor's fiscal data: identity + address, the razón social for NIT (36) donors,
+// and the CAT-020 país on the foreign path. Name and email are collected on Wompi's
+// hosted sheet (which requires and now asks only for those two), so they are not here.
+// This is the payload the /datos completion endpoint accepts and the full create embeds.
+export interface ValidatedDonorData {
   donorDocumentType: DonationIntentDocumentType;
   donorDocument: string;
   donorName: string | null;
@@ -73,10 +73,24 @@ export interface ValidatedIntentInput {
   direccionDistrito: string;
   direccionComplemento: string;
   donorPais: string | null;
+}
+
+// The full donor-checkout body: amount + gift type + the donor's fiscal data.
+export interface ValidatedIntentInput extends ValidatedDonorData {
+  amountCents: number;
   // Diezmo vs Ofrenda. The /donar SV form client-validates this as required and
   // always sends it; the server ACCEPTS absent (null) so legacy callers and the US
   // (Givebutter) path — which never send it — keep working. Present-but-invalid is
   // rejected (invalid_gift_type).
+  giftType: DonationGiftType | null;
+}
+
+// A draft intent carries only the amount and (optionally) the gift type — the values
+// known when the SV donor ENTERS Paso 2, so the Wompi link can be minted in the
+// background before the fiscal data exists. The donor data is attached later via the
+// /datos completion endpoint.
+export interface ValidatedDraftIntentInput {
+  amountCents: number;
   giftType: DonationGiftType | null;
 }
 
@@ -101,25 +115,35 @@ function requireString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
-// Full server-side validation of a donor-checkout body. Every branch throws an
-// IntentValidationError with its own code so the route can map it to a 400. Name and
-// email are neither accepted nor validated (the donor enters them on Wompi's sheet)
-// — except the razón social, required for NIT (36) donors so the comprobante can
-// name the empresa instead of the cardholder.
-export function validateIntentInput(body: Record<string, unknown>): ValidatedIntentInput {
-  const amountCents = parseAmountCents(body.amount);
-
-  // Diezmo/Ofrenda: absent (null/undefined/"") is allowed and stays null — legacy and
-  // US paths never send it. Present-but-invalid is rejected so a malformed client
-  // cannot slip an arbitrary tipo into the payment sheet or the CDE apéndice.
-  let giftType: DonationGiftType | null = null;
-  if (body.giftType != null && body.giftType !== "") {
-    if (!isGiftType(body.giftType)) {
-      throw new IntentValidationError("invalid_gift_type", "Seleccione el tipo de aportación: diezmo u ofrenda.");
-    }
-    giftType = body.giftType;
+// Diezmo/Ofrenda: absent (null/undefined/"") is allowed and stays null — legacy and
+// US paths never send it. Present-but-invalid is rejected so a malformed client cannot
+// slip an arbitrary tipo into the payment sheet or the CDE apéndice.
+function parseGiftType(value: unknown): DonationGiftType | null {
+  if (value == null || value === "") {
+    return null;
   }
+  if (!isGiftType(value)) {
+    throw new IntentValidationError("invalid_gift_type", "Seleccione el tipo de aportación: diezmo u ofrenda.");
+  }
+  return value;
+}
 
+// A draft body (background link mint on Paso 1→2): only amount + optional gift type.
+// The donor data is attached later by /datos, so it is neither present nor validated
+// here. Amount validation and the gift-type rule are IDENTICAL to the full create.
+export function validateDraftIntentInput(body: Record<string, unknown>): ValidatedDraftIntentInput {
+  return {
+    amountCents: parseAmountCents(body.amount),
+    giftType: parseGiftType(body.giftType)
+  };
+}
+
+// Validates just the donor's fiscal data (identity + address + optional razón
+// social / país). Shared verbatim by the full create and the /datos completion, so
+// both raise the same codes and messages. Name and email are neither accepted nor
+// validated (the donor enters them on Wompi's sheet) — except the razón social,
+// required for NIT (36) donors so the comprobante can name the empresa.
+export function validateDonorData(body: Record<string, unknown>): ValidatedDonorData {
   const donorDocumentType = body.donorDocumentType;
   if (!isIntentDocumentType(donorDocumentType)) {
     throw new IntentValidationError(
@@ -206,7 +230,6 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
   }
 
   return {
-    amountCents,
     donorDocumentType,
     donorDocument,
     donorName,
@@ -215,9 +238,44 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
     direccionMunicipio,
     direccionDistrito,
     direccionComplemento,
-    donorPais,
-    giftType
+    donorPais
   };
+}
+
+// Full server-side validation of a donor-checkout body: amount + gift type + the
+// donor's fiscal data. Every branch throws an IntentValidationError with its own
+// code so the route can map it to a 400.
+export function validateIntentInput(body: Record<string, unknown>): ValidatedIntentInput {
+  return {
+    amountCents: parseAmountCents(body.amount),
+    giftType: parseGiftType(body.giftType),
+    ...validateDonorData(body)
+  };
+}
+
+// The /datos completion runs the exact same donor-data validation as the full create;
+// this alias names it at the route without duplicating the rules.
+export const validateDatosInput = validateDonorData;
+
+// The donor-data field names a create body carries. A body with NONE of them (only
+// amount + optional gift type) is a DRAFT create (background link mint on Paso 1→2);
+// a body with ANY of them is a full create. Absence — not emptiness — is the signal, so
+// a client that (wrongly) sends an empty donorDocument still takes the full-create path
+// and gets the proper validation error rather than a silent draft.
+const DONOR_DATA_KEYS = [
+  "donorDocumentType",
+  "donorDocument",
+  "donorName",
+  "donorPhone",
+  "departamento",
+  "municipio",
+  "distrito",
+  "complemento",
+  "pais"
+] as const;
+
+export function isDraftIntentBody(body: Record<string, unknown>): boolean {
+  return DONOR_DATA_KEYS.every((key) => body[key] === undefined);
 }
 
 export function intentThrottleSinceIso(): string {
@@ -246,10 +304,45 @@ export class IntentLinkError extends Error {
   }
 }
 
-// Orchestrates one intent: persist PENDING, mint the single-use Wompi link, attach
-// it (LINK_CREATED), and audit — recording amount + document TYPE only, never the
+// The default document type for a DRAFT intent. donor_document_type stays NOT NULL
+// (its CHECK cannot be widened without another table rebuild), so a draft — which has
+// no document type yet — stores a placeholder that the /datos completion overwrites
+// with the donor's real type. It is never surfaced while donor_document is NULL: the
+// correlation guard skips such rows, and the admin panel shows document data from the
+// completed CDE, not the draft.
+const DRAFT_DOCUMENT_TYPE: DonationIntentDocumentType = "13";
+
+// Mints the single-use Wompi link for a freshly persisted PENDING intent, attaches it
+// (→ LINK_CREATED), and audits — recording amount + document TYPE only, never the
 // document number. Throws IntentLinkError if Wompi fails, after the PENDING row is
-// already persisted so it can expire.
+// already persisted so it can expire on the cron sweep. Shared by the full create and
+// the background draft create so both mint links identically.
+async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
+  let link;
+  try {
+    link = await new WompiApiService(env).createPaymentLink(intent);
+  } catch (error) {
+    if (error instanceof WompiApiError) {
+      throw new IntentLinkError(error.message);
+    }
+    throw error;
+  }
+
+  await repo.attachIntentLink(intent.id, link);
+  await repo.createAudit({
+    action: "DONATION_INTENT_CREATED",
+    entityType: "donation_intent",
+    entityId: intent.id,
+    summary: `Intención de donación por ${(intent.amount_cents / 100).toFixed(2)} USD`,
+    metadata: { amountCents: intent.amount_cents, donorDocumentType: intent.donor_document_type }
+  });
+
+  return { intentId: intent.id, urlEnlace: link.urlEnlace, urlEnlaceLargo: link.urlEnlaceLargo };
+}
+
+// Orchestrates one full intent: persist PENDING with the donor's fiscal data, mint the
+// link, and return the three link fields (response shape unchanged). This is the
+// fallback path for a client without a usable premint draft.
 export async function createDonationIntent(env: Env, repo: Repository, input: ValidatedIntentInput, clientIp: string): Promise<CreatedIntent> {
   const start = nowIso();
   const intent = await repo.createDonationIntent({
@@ -272,24 +365,70 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS)
   });
 
-  let link;
-  try {
-    link = await new WompiApiService(env).createPaymentLink(intent);
-  } catch (error) {
-    if (error instanceof WompiApiError) {
-      throw new IntentLinkError(error.message);
-    }
-    throw error;
-  }
+  return mintLinkForIntent(env, repo, intent);
+}
 
-  await repo.attachIntentLink(intent.id, link);
-  await repo.createAudit({
-    action: "DONATION_INTENT_CREATED",
-    entityType: "donation_intent",
-    entityId: intent.id,
-    summary: `Intención de donación por ${(input.amountCents / 100).toFixed(2)} USD`,
-    metadata: { amountCents: input.amountCents, donorDocumentType: input.donorDocumentType }
+// Orchestrates a DRAFT intent: persist PENDING with amount + gift type only (donor
+// document + address NULL), then mint the link exactly as the full create does
+// (identificadorEnlaceComercio = intent id). The donor's fiscal data is attached later
+// via applyIntentDatos with a fast D1-only call, keeping the ~6 s Wompi mint off the
+// donor's Paso 2 submit.
+export async function createDraftDonationIntent(env: Env, repo: Repository, input: ValidatedDraftIntentInput, clientIp: string): Promise<CreatedIntent> {
+  const start = nowIso();
+  const intent = await repo.createDonationIntent({
+    id: newId("di"),
+    amountCents: input.amountCents,
+    donorName: null,
+    // Placeholder type (see DRAFT_DOCUMENT_TYPE): never surfaced while the document is NULL.
+    donorDocumentType: DRAFT_DOCUMENT_TYPE,
+    donorDocument: null,
+    donorEmail: null,
+    donorPhone: null,
+    direccionDepartamento: null,
+    direccionMunicipio: null,
+    direccionDistrito: null,
+    direccionComplemento: null,
+    donorPais: null,
+    giftType: input.giftType,
+    clientIp,
+    expiresAt: addHours(start, INTENT_VALIDITY_HOURS)
   });
 
-  return { intentId: intent.id, urlEnlace: link.urlEnlace, urlEnlaceLargo: link.urlEnlaceLargo };
+  return mintLinkForIntent(env, repo, intent);
+}
+
+// Signals the /datos endpoint that the target intent cannot accept donor data: either
+// it does not exist (404) or it is already COMPLETED (409). The route maps `code` to
+// the matching HTTP status.
+export class IntentDatosError extends Error {
+  constructor(
+    readonly code: "intent_not_found" | "intent_already_completed",
+    readonly httpStatus: 404 | 409,
+    message: string
+  ) {
+    super(message);
+    this.name = "IntentDatosError";
+  }
+}
+
+// Attaches the donor's fiscal data to a minted draft (fast D1-only, no Wompi call). It
+// NEVER changes amount or gift type — those were locked when the link was minted.
+// Rejects an unknown id (404) or a COMPLETED intent (409). LINK_CREATED and EXPIRED are
+// both allowed: a donor may finish in the link's last minute after the sweep expired it.
+export async function applyIntentDatos(repo: Repository, intentId: string, data: ValidatedDonorData): Promise<void> {
+  const intent = await repo.getDonationIntent(intentId);
+  if (!intent) {
+    throw new IntentDatosError("intent_not_found", 404, "No se encontró la intención de donación.");
+  }
+  if (intent.status === "COMPLETED") {
+    throw new IntentDatosError("intent_already_completed", 409, "La intención de donación ya fue completada.");
+  }
+  await repo.updateIntentDatos(intentId, data);
+  await repo.createAudit({
+    action: "DONATION_INTENT_DATOS_ATTACHED",
+    entityType: "donation_intent",
+    entityId: intentId,
+    summary: `Datos fiscales adjuntados a la intención ${intentId}`,
+    metadata: { donorDocumentType: data.donorDocumentType }
+  });
 }

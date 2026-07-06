@@ -107,13 +107,16 @@ export class Repository {
     // are nullable; donorName carries the razón social for NIT (36) intents only.
     donorName: string | null;
     donorDocumentType: DonationIntentDocumentType;
-    donorDocument: string;
+    // Document + address are nullable so a DRAFT intent (background link mint on
+    // Paso 1→2, before the fiscal data exists) can be persisted; the /datos endpoint
+    // fills them in later. A full create passes them all non-null.
+    donorDocument: string | null;
     donorEmail: string | null;
     donorPhone: string | null;
-    direccionDepartamento: string;
-    direccionMunicipio: string;
-    direccionDistrito: string;
-    direccionComplemento: string;
+    direccionDepartamento: string | null;
+    direccionMunicipio: string | null;
+    direccionDistrito: string | null;
+    direccionComplemento: string | null;
     // CAT-020 country for the foreign path (00/00/00 geography); null domestic.
     donorPais: string | null;
     // Diezmo/Ofrenda (SV flow only); null for legacy and US paths.
@@ -167,6 +170,47 @@ export class Repository {
          WHERE id = ?`
       )
       .bind(link.idEnlace, link.urlEnlace, link.urlEnlaceLargo, nowIso(), id)
+      .run();
+  }
+
+  // Attaches the donor's fiscal data to a minted draft (the /datos completion). Amount,
+  // gift type, status, and the Wompi link are deliberately NOT in the SET clause: those
+  // were locked when the link was minted, and datos must never move them.
+  async updateIntentDatos(
+    id: string,
+    data: {
+      donorDocumentType: DonationIntentDocumentType;
+      donorDocument: string;
+      donorName: string | null;
+      donorPhone: string | null;
+      direccionDepartamento: string;
+      direccionMunicipio: string;
+      direccionDistrito: string;
+      direccionComplemento: string;
+      donorPais: string | null;
+    }
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE donation_intents
+         SET donor_document_type = ?, donor_document = ?, donor_name = ?, donor_phone = ?,
+             direccion_departamento = ?, direccion_municipio = ?, direccion_distrito = ?,
+             direccion_complemento = ?, donor_pais = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(
+        data.donorDocumentType,
+        data.donorDocument,
+        data.donorName,
+        data.donorPhone,
+        data.direccionDepartamento,
+        data.direccionMunicipio,
+        data.direccionDistrito,
+        data.direccionComplemento,
+        data.donorPais,
+        nowIso(),
+        id
+      )
       .run();
   }
 

@@ -6,12 +6,18 @@ import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
+  applyIntentDatos,
   clientIpFrom,
   createDonationIntent,
+  createDraftDonationIntent,
+  IntentDatosError,
   IntentLinkError,
   intentThrottleSinceIso,
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
+  isDraftIntentBody,
+  validateDatosInput,
+  validateDraftIntentInput,
   validateIntentInput
 } from "./services/donations";
 import { EmailService } from "./services/email";
@@ -257,7 +263,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
   }
 
-  // Public donor checkout: unauthenticated, runs before any role check.
+  // Public donor checkout: unauthenticated, runs before any role check. A body with
+  // only { amount, giftType } is a DRAFT create (the wizard mints the Wompi link in the
+  // background on Paso 1→2); a body carrying donor data is a full create (the fallback
+  // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
     const clientIp = clientIpFrom(request);
     const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
@@ -265,10 +274,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Short-circuit before any validation/persistence so a throttled attempt is cheap.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const draft = isDraftIntentBody(body);
     let input;
     try {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      input = validateIntentInput(body);
+      input = draft ? validateDraftIntentInput(body) : validateIntentInput(body);
     } catch (error) {
       if (error instanceof IntentValidationError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
@@ -276,12 +286,44 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     try {
-      const created = await createDonationIntent(env, repo, input, clientIp);
+      const created = draft
+        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp)
+        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp);
       return jsonResponse(created, { status: 201 });
     } catch (error) {
       if (error instanceof IntentLinkError) {
         // Intent stays PENDING and expires harmlessly on the cron sweep.
         return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
+      }
+      throw error;
+    }
+  }
+
+  // Public datos completion: attaches the donor's fiscal data to a minted draft with a
+  // fast D1-only call (no Wompi). Same per-IP throttle as create (cheap but public).
+  const intentDatosMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/datos$/);
+  if (intentDatosMatch && request.method === "POST") {
+    const clientIp = clientIpFrom(request);
+    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
+    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    let data;
+    try {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      data = validateDatosInput(body);
+    } catch (error) {
+      if (error instanceof IntentValidationError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    try {
+      await applyIntentDatos(repo, intentDatosMatch[1], data);
+      return jsonResponse({ ok: true });
+    } catch (error) {
+      if (error instanceof IntentDatosError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
       }
       throw error;
     }
