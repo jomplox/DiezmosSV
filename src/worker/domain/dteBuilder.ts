@@ -8,6 +8,7 @@ import {
   isCat014UnitCode,
   isCat017PaymentFormCode,
   isCat019ActivityCode,
+  CAT020_COUNTRIES,
   isCat020CountryCode,
   isCat021AssociatedDocumentCode,
   isCat022DocumentTypeCode,
@@ -153,7 +154,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       nombre: override ? override.nombre : name,
       codActividad: null,
       descActividad: null,
-      direccion: override ? { ...override.direccion } : donorAddress(payload, config),
+      direccion: override ? intentReceptorDireccion(override.direccion, override.codPais, config) : donorAddress(payload, config),
       telefono: override ? override.telefono : donorPhone,
       correo: override ? override.correo : donorEmail,
       codDomiciliado: override?.codDomiciliado ?? (payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2),
@@ -430,6 +431,30 @@ function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig
     municipio: config.direccion.municipio,
     distrito: config.direccion.distrito,
     complemento: cleanNullable(payload.Cliente?.Direccion) ?? RECEPTOR_ADDRESS_FALLBACK
+  };
+}
+
+// Normativa campos 47-49: el código 00 "Otro (Para extranjeros)" existe para
+// departamento y municipio, pero CAT-008 NO define un distrito 00 y MH rechaza la
+// direccion 00/00/00 completa bajo la Normativa de Cumplimiento (codigoMsg 096,
+// verificado en ambiente 00 el 2026-07-06). El receptor extranjero ya queda marcado
+// fiscalmente por codPais + codDomiciliado 2, así que su direccion viaja con la
+// geografía del emisor — la misma convención que MH ya acepta para donantes sin
+// dirección — y el complemento conserva el país y la dirección extranjera reales.
+function intentReceptorDireccion(
+  direccion: { departamento: string; municipio: string; distrito: string; complemento: string },
+  codPais: string | undefined,
+  config: EmisorConfig
+): EmisorConfig["direccion"] {
+  if (direccion.departamento !== "00") {
+    return { ...direccion };
+  }
+  const country = CAT020_COUNTRIES.find((option) => option.code === codPais)?.label ?? codPais ?? "Extranjero";
+  return {
+    departamento: config.direccion.departamento,
+    municipio: config.direccion.municipio,
+    distrito: config.direccion.distrito,
+    complemento: `${country}: ${direccion.complemento}`.slice(0, 200)
   };
 }
 
