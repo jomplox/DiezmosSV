@@ -25,12 +25,14 @@ describe("visual consistency pack", () => {
     expect(thRule).toContain("color: #61737a;");
   });
 
-  it("uses single-word stat labels with one shared caption line in both Stats branches", () => {
+  it("uses short stat labels with one shared caption line in both Stats branches", () => {
     expect(appSource).not.toContain("en esta vista");
     expect(appSource).toContain('<p className="stats-caption">Totales de la vista actual.</p>');
     expect(appSource).toContain('<Metric label="Aceptados"');
     expect(appSource).toContain('<Metric label="Fallidos"');
-    expect(appSource).toContain('<Metric label="Contingencia"');
+    // "En trámite" = transmisión diferida (TRANSMISSION_PENDING), replacing the
+    // removed contingency metric; matches the status badge wording.
+    expect(appSource).toContain('<Metric label="En trámite"');
     expect(appSource).toContain('<Metric label="Invalidados"');
     expect(stylesSource).toContain(".stats-caption");
   });

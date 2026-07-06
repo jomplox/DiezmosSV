@@ -266,22 +266,6 @@ export interface MhResponse {
   raw: unknown;
 }
 
-export interface MhLoteSubmitResponse {
-  accepted: boolean;
-  estado: string;
-  codigoLote: string | null;
-  observaciones: string[];
-  raw: unknown;
-}
-
-export interface MhLoteConsultaResponse {
-  estado: string;
-  procesados: Array<Record<string, unknown>>;
-  rechazados: Array<Record<string, unknown>>;
-  observaciones: string[];
-  raw: unknown;
-}
-
 export interface SignedArtifact {
   plainJson: Record<string, unknown>;
   jws: string;

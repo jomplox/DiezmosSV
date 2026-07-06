@@ -1710,117 +1710,51 @@ describe("document retry", () => {
   });
 });
 
-describe("contingency administration", () => {
-  it("sends an operational alert when a contingency period is opened manually", async () => {
+describe("contingency history (read-only)", () => {
+  // La emisión en contingencia del CDE se eliminó: el Anexo de validaciones del
+  // evento de contingencia (campo 35) no admite el tipo 15. Los periodos históricos
+  // siguen visibles en solo lectura; las rutas de apertura/barrido ya no existen.
+  it("no longer exposes the contingency open/sweep routes", async () => {
     const db = new InMemoryD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-    const sentAlerts: Array<{ to: string; subject: string }> = [];
 
-    const openResponse = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 2,
-          reason: "MH TEST no disponible"
-        })
-      }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMAIL_FROM: "alerts@example.org",
-        EMAIL: {
-          send: async (message: unknown) => {
-            sentAlerts.push(message as { to: string; subject: string });
-            return { messageId: "alert-contingency" };
-          }
-        } as SendEmail
-      })
-    );
-
-    expect(openResponse.status).toBe(201);
-    const opened = (await openResponse.json()) as { contingency: { active: { id: string } } };
-    expect(sentAlerts).toHaveLength(1);
-    expect(sentAlerts[0].to).toBe("owner@example.org");
-    expect(db.audits).toContainEqual(
-      expect.objectContaining({ action: "ALERT_SENT:CONTINGENCY_OPENED", entity_type: "contingency_period", entity_id: opened.contingency.active.id })
-    );
-  });
-
-  it("does not send a duplicate alert when reusing an already-open contingency period", async () => {
-    const db = new InMemoryD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-    const sentAlerts: unknown[] = [];
-    const testEnv = env(db, {
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
-    });
-
-    await worker.fetch(
+    const open = await worker.fetch(
       new Request("https://example.org/api/contingency/open", {
         method: "POST",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
         body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible" })
       }),
-      testEnv
+      env(db)
     );
-    await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
+    expect(open.status).toBe(404);
+    expect(db.contingencies).toHaveLength(0);
+
+    const sweep = await worker.fetch(
+      new Request("https://example.org/api/contingency/sweep", {
         method: "POST",
-        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible otra vez" })
-      }),
-      testEnv
-    );
-
-    expect(sentAlerts).toHaveLength(1);
-  });
-
-  it("opens a manual contingency period and returns dashboard-ready state", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-
-    const openResponse = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 2,
-          reason: "MH TEST no disponible"
-        })
+        headers: { Authorization: "Bearer test-token" }
       }),
       env(db)
     );
+    expect(sweep.status).toBe(404);
+  });
 
-    expect(openResponse.status).toBe(201);
-    const opened = (await openResponse.json()) as {
-      contingency: {
-        active: { id: string; status: string; reason: string; tipo_contingencia: number };
-        summary: { open: number; pending: number };
-      };
-    };
-    expect(opened.contingency.active).toMatchObject({
-      status: "OPEN",
-      reason: "MH TEST no disponible",
-      tipo_contingencia: 2
+  it("still serves historical contingency state for the read-only view", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.contingencies.push({
+      id: "cont_hist_1",
+      environment: "00",
+      status: "CLOSED",
+      reason: "MH TEST no disponible (histórico)",
+      tipo_contingencia: 2,
+      started_at: "2026-06-20T01:00:00.000Z",
+      ended_at: "2026-06-20T04:00:00.000Z",
+      event_id: null,
+      event_sello: null,
+      transmit_deadline_at: null,
+      created_at: "2026-06-20T01:00:00.000Z"
     });
-    expect(opened.contingency.summary).toMatchObject({ open: 1, pending: 0 });
-    expect(db.audits).toContainEqual(expect.objectContaining({
-      action: "CONTINGENCY_OPENED",
-      entity_type: "contingency_period",
-      entity_id: opened.contingency.active.id
-    }));
-
     db.documents.push({
       ...testDocument(),
       id: "doc_contingency",
@@ -1828,7 +1762,7 @@ describe("contingency administration", () => {
       sello_recibido: null,
       mh_estado: "CONTINGENCY_PENDING",
       accepted_at: null,
-      contingency_period_id: opened.contingency.active.id
+      contingency_period_id: "cont_hist_1"
     });
 
     const stateResponse = await worker.fetch(
@@ -1841,11 +1775,7 @@ describe("contingency administration", () => {
     expect(stateResponse.status).toBe(200);
     await expect(stateResponse.json()).resolves.toMatchObject({
       contingency: {
-        active: {
-          id: opened.contingency.active.id,
-          status: "OPEN",
-          event_deadline_at: null
-        },
+        active: null,
         pendingDocuments: [
           {
             id: "doc_contingency",
@@ -1854,111 +1784,16 @@ describe("contingency administration", () => {
         ],
         periods: [
           {
-            id: opened.contingency.active.id,
-            status: "OPEN"
+            id: "cont_hist_1",
+            status: "CLOSED"
           }
         ],
         summary: {
           pending: 1,
-          open: 1,
-          eventAccepted: 0,
-          closed: 0,
-          failed: 0
+          open: 0,
+          closed: 1
         }
       }
-    });
-  });
-
-  it("requires a reason when opening contingency type 5", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
-
-    const response = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 5,
-          reason: ""
-        })
-      }),
-      env(db)
-    );
-
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "missing_contingency_reason" });
-  });
-
-  it("submits contingency CDEs through a lote after the event is accepted", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
-    db.contingencies.push({
-      id: "cont_1",
-      environment: "00",
-      status: "OPEN",
-      reason: "MH TEST no disponible",
-      tipo_contingencia: 2,
-      started_at: "2026-06-26T01:00:00.000Z",
-      ended_at: null,
-      event_id: null,
-      event_sello: null,
-      transmit_deadline_at: null,
-      created_at: "2026-06-26T01:00:00.000Z"
-    });
-    db.documents.push({
-      ...testDocument(),
-      id: "doc_contingency",
-      status: "CONTINGENCY_PENDING",
-      signed_jws: "signed-cde-jws",
-      sello_recibido: null,
-      mh_estado: "CONTINGENCY_PENDING",
-      accepted_at: null,
-      contingency_period_id: "cont_1"
-    });
-    const certPassword = "correct horse battery staple";
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", selloRecibido: "EVENT-SEAL", observaciones: [] }))
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", codigoLote: "LOTE-TEST-1", observaciones: [] }))
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ procesados: [{ codigoGeneracion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4", selloRecibido: "DTE-SEAL" }], rechazados: [] }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const response = await worker.fetch(
-      new Request("https://example.org/api/contingency/sweep", {
-        method: "POST",
-        headers: { Authorization: "Bearer test-token" }
-      }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
-        MH_CERT_XML: await generatedCertificateXml(certPassword),
-        MH_CERT_PASSWORD: certPassword,
-        MH_USER_TEST: "10000003520015",
-        MH_PASSWORD_TEST: "test-password",
-        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-        MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
-        MH_CONTINGENCIA_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
-      })
-    );
-
-    expect(response.status).toBe(200);
-    const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
-    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcionlote");
-    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcion/consultadtelote/LOTE-TEST-1");
-    expect(requestedUrls).not.toContain("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
-    const loteRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/recepcionlote"))?.[1];
-    expect(JSON.parse(String(loteRequest?.body))).toMatchObject({
-      ambiente: "00",
-      version: 2,
-      nitEmisor: "10000003520015",
-      documentos: ["signed-cde-jws"]
     });
   });
 
@@ -3445,44 +3280,357 @@ describe("donation intent correlation", () => {
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
-  it("threads the gift type into the CDE apéndice when the payment is queued into contingency", async () => {
-    const db = new InMemoryD1();
-    seedIntentRow(db, { gift_type: "DIEZMO" });
-    const eventId = seedWompiEvent(db, correlationWebhook());
+});
 
-    // Non-mock env with a stubbed MH: auth succeeds, then recepcion returns 503 so the
-    // pipeline throws MhUnavailableError and routes the CDE into contingency
-    // (moveToContingency), which rebuilds via the same donorOverrideFromIntent path.
-    const certPassword = "cert-password";
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(new Response("MH no disponible", { status: 503 }));
+// Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
+// admite los tipos de DTE 01, 03, 04, 05, 06, 07, 11, 14 y 18 — el CDE (tipo 15)
+// está EXCLUIDO, así que un CDE nunca se emite en contingencia. Cuando MH no está
+// disponible, la emisión queda TRANSMISSION_PENDING: el donante recibe de inmediato
+// el comprobante TRANSITORIO y el cron de 15 minutos reintenta la transmisión.
+describe("deferred transmission when MH is unavailable", () => {
+  const INTENT_ADDRESS = {
+    departamento: "05",
+    municipio: "24",
+    distrito: "01",
+    complemento: "Calle Donante 123, Antiguo Cuscatlán"
+  };
+
+  function seedIntentRow(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const intent = {
+      id: "di_defer_1",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_name: null,
+      donor_document_type: "13",
+      donor_document: "10000002-7",
+      donor_email: null,
+      donor_phone: "70001111",
+      direccion_departamento: INTENT_ADDRESS.departamento,
+      direccion_municipio: INTENT_ADDRESS.municipio,
+      direccion_distrito: INTENT_ADDRESS.distrito,
+      direccion_complemento: INTENT_ADDRESS.complemento,
+      donor_pais: null,
+      wompi_id_enlace: 987654,
+      wompi_url_enlace: "https://s.wompi.sv/987654",
+      wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
+      document_id: null,
+      client_ip: "203.0.113.9",
+      created_at: "2026-06-26T01:00:00.000Z",
+      updated_at: "2026-06-26T01:00:00.000Z",
+      expires_at: "2026-06-26T02:00:00.000Z",
+      ...overrides
+    };
+    db.donationIntents.push(intent);
+    return intent;
+  }
+
+  function seedWompiEvent(db: InMemoryD1, webhook: Record<string, unknown>, id = "wompi_defer_evt"): string {
+    db.wompiEvents.push({
+      id,
+      transaction_id: String(webhook.IdTransaccion),
+      environment: "00",
+      result: String(webhook.ResultadoTransaccion),
+      amount_cents: 2500,
+      donor_email: null,
+      donor_name: null,
+      raw_body: JSON.stringify(webhook),
+      headers_json: "{}",
+      received_at: "2026-06-26T01:46:47.015Z",
+      processed_at: null,
+      created_document_id: null
+    });
+    return id;
+  }
+
+  function deferWebhook(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-26T01:40:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_defer_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_defer_1",
+      cliente: {
+        DocumentoIdentidad: "P-A123456",
+        Nombre: "Fallback",
+        Apellidos: "Cliente",
+        EMail: "fallback@example.org",
+        Celular: "70000003",
+        CodigoPais: "SV"
+      },
+      ...overrides
+    };
+  }
+
+  // URL-routing fetch stub: MH auth always succeeds; recepciondte behaves per test.
+  function stubMhFetch(recepcion: () => Response): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/seguridad/auth")) {
+        return jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" });
+      }
+      if (url.includes("recepciondte")) {
+        return recepcion();
+      }
+      throw new Error(`Fetch inesperado en prueba de transmisión diferida: ${url}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
 
-    const contingencyEnv = env(db, {
+  async function deferredEnv(db: InMemoryD1, sent: Array<{ subject: string; to: string; text: string }>): Promise<Env> {
+    return env(db, {
       MOCK_EXTERNAL_SERVICES: "false",
       EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
-      MH_CERT_XML: await generatedCertificateXml(certPassword),
-      MH_CERT_PASSWORD: certPassword,
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password",
       MH_USER_TEST: "10000003520015",
       MH_PASSWORD_TEST: "test-password",
       MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+      EMAIL_FROM: "comprobantes@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sent.push(message as { subject: string; to: string; text: string });
+          return { messageId: `email-${sent.length}` };
+        }
+      } as SendEmail
     });
+  }
 
-    const record = await new IssuancePipeline(contingencyEnv).processWompiEvent(eventId);
+  it("defers a Wompi CDE: TRANSMISSION_PENDING, normal shape, transitorio email, intent untouched", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { gift_type: "DIEZMO" });
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
 
-    expect(record?.status).toBe("CONTINGENCY_PENDING");
+    const record = await new IssuancePipeline(await deferredEnv(db, sent)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("TRANSMISSION_PENDING");
+    expect(record?.signed_jws).toBeTruthy();
+    // NO contingency: no period row, no attachment — the CDE keeps its NORMAL shape.
+    expect(db.contingencies).toHaveLength(0);
+    expect(record?.contingency_period_id).toBeNull();
     const cde = JSON.parse(String(record!.plain_json)) as {
+      identificacion: Record<string, unknown>;
+      receptor: Record<string, unknown>;
       apendice: Array<Record<string, unknown>>;
       cuerpoDocumento: Array<Record<string, unknown>>;
-      identificacion: Record<string, unknown>;
     };
-    // Contingency rebuild keeps the informational tipo line and the DONACIÓN descripcion.
+    expect(cde.identificacion.tipoModelo).toBe(1);
+    // The intent override and gift type survive the deferral unchanged.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
-    expect(cde.identificacion.tipoModelo).toBe(2); // contingency model
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_TRANSMISSION_DEFERRED", entity_type: "dte_document", entity_id: record!.id })
+    );
+    // Immediate transitorio email with distinguishing evidence type.
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+    expect(sent[0].text).toContain("Sello de Recepción");
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: record!.id,
+        status: "SENT",
+        email_type: "dteReceiptTransitorio",
+        document_status_at_send: "TRANSMISSION_PENDING"
+      })
+    );
+    // The intent completes only on REAL MH acceptance — never at deferral.
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("LINK_CREATED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+  });
+
+  it("defers a quick/advanced queue CDE instead of marking it FAILED", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(advancedFailingDocument("doc_quick_defer"));
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    const record = await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_defer");
+
+    expect(record.status).toBe("TRANSMISSION_PENDING");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_TRANSMISSION_DEFERRED", entity_id: "doc_quick_defer" })
+    );
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED" }));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+  });
+
+  it("does not resend the transitorio email when a queue redelivery re-defers the same document", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({ ...advancedFailingDocument("doc_quick_dedupe"), status: "TRANSMISSION_PENDING", signed_jws: "already-signed-jws" });
+    // The first delivery attempt already sent the transitorio before the crash/redelivery.
+    db.emailDeliveries.push({
+      id: "email_prev",
+      document_id: "doc_quick_dedupe",
+      to_email: "legacy-contact-2@example.com",
+      status: "SENT",
+      provider_response_json: "{}",
+      sent_at: "2026-06-26T01:50:00.000Z",
+      email_type: "dteReceiptTransitorio",
+      document_status_at_send: "TRANSMISSION_PENDING",
+      template_version: null,
+      pdf_renderer_version: null,
+      pdf_sha256: null,
+      dte_json_sha256: null,
+      provider_delivery_id: null
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_dedupe");
+
+    expect(sent).toHaveLength(0);
+    expect(db.emailDeliveries.filter((row) => row.document_id === "doc_quick_dedupe")).toHaveLength(1);
+    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.status).toBe("TRANSMISSION_PENDING");
+  });
+
+  it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_rejected_defer",
+      wompi_event_id: eventId,
+      status: "REJECTED",
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      accepted_at: null
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    const record = db.documents.find((row) => row.id === "doc_rejected_defer") as unknown as DteDocumentRecord;
+    const result = await new IssuancePipeline(await deferredEnv(db, sent)).rebuildRejectedWompiDocument(record);
+
+    expect(result.accepted).toBe(false);
+    const rebuilt = db.documents.find((row) => row.id === "doc_rejected_defer");
+    expect(rebuilt?.status).toBe("TRANSMISSION_PENDING");
+    const cde = JSON.parse(String(rebuilt!.plain_json)) as { identificacion: Record<string, unknown>; receptor: Record<string, unknown> };
+    expect(cde.identificacion.tipoModelo).toBe(1);
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).not.toBe("COMPLETED");
+  });
+
+  it("retries a deferred CDE on the sweep: acceptance completes the intent and sends the definitive email", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+    expect(deferred?.status).toBe("TRANSMISSION_PENDING");
+    expect(sent).toHaveLength(1);
+
+    stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-DEFINITIVO", observaciones: [] }));
+    const result = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    expect(result).toMatchObject({ transmitted: 1 });
+    const doc = db.documents.find((row) => row.id === deferred!.id);
+    expect(doc?.status).toBe("ACCEPTED");
+    expect(doc?.sello_recibido).toBe("SELLO-DEFINITIVO");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+    // Definitive email: normal receipt copy, PDF now carries the real sello.
+    expect(sent).toHaveLength(2);
+    expect(sent[1].subject).not.toContain("(en trámite)");
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: deferred!.id,
+        status: "SENT",
+        email_type: "dteReceipt",
+        document_status_at_send: "ACCEPTED"
+      })
+    );
+    // REAL acceptance completes the correlated intent.
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("COMPLETED");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.document_id).toBe(deferred!.id);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_defer_1" })
+    );
+  });
+
+  it("keeps the CDE pending without email or audit spam while MH stays down, alerting once after an hour", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+    expect(sent).toHaveLength(1); // transitorio
+    // Age the document beyond the one-hour alert threshold.
+    const doc = db.documents.find((row) => row.id === deferred!.id)!;
+    doc.created_at = "2026-06-26T00:00:00.000Z";
+
+    const first = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(first).toMatchObject({ transmitted: 0, pending: 1 });
+    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("TRANSMISSION_PENDING");
+    // One backlog alert (transitorio + alert = 2 sends), deduped on the next tick.
+    expect(sent).toHaveLength(2);
+    expect(db.audits.filter((row) => row.action === "ALERT_SENT:MH_UNAVAILABLE")).toHaveLength(1);
+
+    await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(sent).toHaveLength(2);
+    expect(db.audits.filter((row) => row.action === "ALERT_SENT:MH_UNAVAILABLE")).toHaveLength(1);
+    // No per-tick audit noise: the deferral audit stays singular, no accepted/rejected audits.
+    expect(db.audits.filter((row) => row.action === "DTE_TRANSMISSION_DEFERRED")).toHaveLength(1);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_ACCEPTED" }));
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_REJECTED" }));
+  });
+
+  it("marks a deferred CDE REJECTED through the normal rejected path when MH rejects it on retry", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+
+    stubMhFetch(() => jsonResponse({ estado: "RECHAZADO", observaciones: ["Firma inválida"] }));
+    await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    const doc = db.documents.find((row) => row.id === deferred!.id);
+    expect(doc?.status).toBe("REJECTED");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_REJECTED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+    // No definitive email on rejection; the intent stays open for the operator rebuild.
+    expect(sent).toHaveLength(1);
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).not.toBe("COMPLETED");
+  });
+
+  it("runs the deferred-transmission retry on the 15-minute cron tick", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_sched_defer",
+      wompi_event_id: null,
+      status: "TRANSMISSION_PENDING",
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null,
+      donor_email: null
+    });
+
+    // Mock mode: MH accepts without network. The cron must pick the pending doc up.
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+
+    expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
   });
 });
 
@@ -4987,6 +5135,13 @@ class Statement {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("FROM email_deliveries") && this.sql.includes("email_type = ?")) {
+      // hasSentEmail dedupe lookup: SENT delivery of a given evidence type for a document.
+      const [documentId, emailType] = this.args.map(String);
+      return (this.db.emailDeliveries.find(
+        (row) => row.document_id === documentId && row.email_type === emailType && row.status === "SENT"
+      ) ?? null) as T | null;
+    }
     if (this.sql.includes("FROM contingency_periods WHERE environment = ?")) {
       const environment = String(this.args[0]);
       return (
@@ -5493,6 +5648,16 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents SET signed_jws = ?")) {
+      // updateDocumentSigned: persists the JWS and flips the doc to SIGNED.
+      const [signedJws, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.signed_jws = String(signedJws);
+        document.status = "SIGNED";
+        document.updated_at = String(updatedAt);
       }
     }
     if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET codigo_generacion = ?")) {

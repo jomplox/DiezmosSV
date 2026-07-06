@@ -23,7 +23,10 @@ const STATUS_LABELS: Record<string, string> = {
   REJECTED: "Rechazado",
   SENT: "Enviado",
   SIGNED: "Firmado",
-  SUBMITTED: "Transmitido"
+  SUBMITTED: "Transmitido",
+  // Transmisión diferida: MH no estaba disponible al emitir; el donante ya tiene su
+  // comprobante transitorio y el cron reintenta cada 15 minutos.
+  TRANSMISSION_PENDING: "En trámite"
 };
 
 // Donor-checkout intent lifecycle (donation_intents.status). Kept separate from
@@ -66,6 +69,9 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   DTE_REJECTED: "DTE rechazado",
   DTE_RETRIED: "DTE reintentado",
   DTE_RETRY_ENQUEUED: "DTE en cola de reintento",
+  // Transmisión diferida (MH no disponible al emitir; reintento automático cada 15 min).
+  DTE_TRANSMISSION_DEFERRED: "Transmisión diferida",
+  MH_UNAVAILABLE: "Hacienda no disponible",
   EMAIL_FAILED: "Correo fallido",
   EMAIL_INVALIDATION_FAILED: "Aviso de invalidación fallido",
   EMAIL_INVALIDATION_SENT: "Aviso de invalidación enviado",

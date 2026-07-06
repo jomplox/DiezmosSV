@@ -101,9 +101,9 @@ export default {
     }
     const pipeline = new IssuancePipeline(env);
     try {
-      await pipeline.runContingencySweep();
+      await pipeline.retryDeferredTransmissions();
     } catch (error) {
-      console.error("Contingency sweep failed", error);
+      console.error("Deferred transmission retry failed", error);
     }
     try {
       await pipeline.sweepStalledWompiEvents();
@@ -560,52 +560,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ audit: await repo.listAudit(url.searchParams.get("entityType") ?? undefined, url.searchParams.get("entityId") ?? undefined) });
   }
 
+  // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
+  // Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
+  // así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
+  // emisión queda TRANSMISSION_PENDING y el cron de 15 minutos la reintenta.
   if (url.pathname === "/api/contingency" && request.method === "GET") {
     requireRole(user, "VIEWER");
     return jsonResponse({ contingency: await contingencyState(repo) });
-  }
-
-  if (url.pathname === "/api/contingency/open" && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    const body = (await request.json().catch(() => ({}))) as { environment?: unknown; tipoContingencia?: unknown; reason?: unknown };
-    const environment = body.environment === "01" ? "01" : body.environment === "00" ? "00" : null;
-    if (!environment) {
-      return jsonResponse({ error: "invalid_contingency_environment" }, { status: 400 });
-    }
-    const tipoContingencia = Number(body.tipoContingencia);
-    if (!Number.isInteger(tipoContingencia) || tipoContingencia < 1 || tipoContingencia > 5) {
-      return jsonResponse({ error: "invalid_contingency_type" }, { status: 400 });
-    }
-    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
-    if (!reason) {
-      return jsonResponse({ error: "missing_contingency_reason", message: "Configure el tipo y motivo de contingencia antes de emitir DTE en contingencia." }, { status: 400 });
-    }
-    const existing = await repo.getOpenContingency(environment);
-    const periodId = await repo.openContingency(environment, reason, tipoContingencia);
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: existing ? "CONTINGENCY_OPEN_REUSED" : "CONTINGENCY_OPENED",
-      entityType: "contingency_period",
-      entityId: periodId,
-      summary: reason,
-      metadata: { environment, tipoContingencia }
-    });
-    if (!existing) {
-      await sendOperationalAlert(env, repo, {
-        kind: "CONTINGENCY_OPENED",
-        title: "Contingencia abierta",
-        detail: `Se abrió un período de contingencia manualmente: ${reason}`,
-        entityType: "contingency_period",
-        entityId: periodId
-      });
-    }
-    return jsonResponse({ contingency: await contingencyState(repo) }, { status: existing ? 200 : 201 });
-  }
-
-  if (url.pathname === "/api/contingency/sweep" && request.method === "POST") {
-    requireRole(user, "OPERATOR");
-    return jsonResponse(await new IssuancePipeline(env).runContingencySweep());
   }
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {

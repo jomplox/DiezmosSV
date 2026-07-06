@@ -1,11 +1,11 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
-import { buildCdeDocument, buildContingenciaEvent, cdeDocumentSummary } from "../domain/dteBuilder";
+import { buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { Repository } from "../storage/repository";
-import type { ContingencyBatchRecord, ContingencyBatchLineRecord, DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
-import { addHours, nowIso } from "../utils/dates";
+import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
+import { nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
@@ -13,6 +13,9 @@ import { MhClient, MhUnavailableError } from "./mhClient";
 
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
+// Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
+// una alerta operativa MH_UNAVAILABLE (una sola vez por documento, vía dedupe).
+const DEFERRED_ALERT_AGE_MS = 60 * 60 * 1000;
 
 export class IssuancePipeline {
   private readonly repo: Repository;
@@ -138,7 +141,9 @@ export class IssuancePipeline {
       return record;
     } catch (error) {
       if (error instanceof MhUnavailableError) {
-        return this.moveToContingency(record, payload, sequence, String(error.message), intent);
+        // El documento ya quedó firmado con forma NORMAL antes del intento de
+        // transmisión: se difiere tal cual (nunca se reconstruye en contingencia).
+        return this.deferTransmission(record.id, String(error.message));
       }
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",
@@ -193,13 +198,25 @@ export class IssuancePipeline {
       signedJws,
       status: "SIGNED"
     });
-    const mhResult = await this.mh.transmitDte({
-      ambiente: record.environment,
-      version: 2,
-      tipoDte: "15",
-      codigoGeneracion: identifiers.codigoGeneracion,
-      signedJws
-    });
+    let mhResult: MhResponse;
+    try {
+      mhResult = await this.mh.transmitDte({
+        ambiente: record.environment,
+        version: 2,
+        tipoDte: "15",
+        codigoGeneracion: identifiers.codigoGeneracion,
+        signedJws
+      });
+    } catch (error) {
+      if (error instanceof MhUnavailableError) {
+        // MH cayó durante el reintento del operador: el CDE reconstruido (forma
+        // normal, ya firmado) se difiere y el cron lo transmitirá al volver MH.
+        const reason = String(error.message);
+        await this.deferTransmission(record.id, reason);
+        return { accepted: false, estado: "TRANSMISSION_PENDING", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
+      }
+      throw error;
+    }
     await this.repo.updateDocumentMhResult(record.id, {
       status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
       sello: mhResult.selloRecibido,
@@ -263,6 +280,10 @@ export class IssuancePipeline {
       }
       return record;
     } catch (error) {
+      if (error instanceof MhUnavailableError) {
+        // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
+        return this.deferTransmission(record.id, String(error.message));
+      }
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",
         sello: null,
@@ -287,219 +308,143 @@ export class IssuancePipeline {
     }
   }
 
-  async runContingencySweep(): Promise<{ transmitted: number; periodId: string | null }> {
-    const open = await this.repo.getOpenContingency();
-    if (!open) {
-      return { transmitted: 0, periodId: null };
-    }
-    const periodId = String(open.id);
-    const docs = await this.repo.listContingencyDocuments(periodId);
-    if (docs.length === 0) {
-      await this.repo.closeContingency(periodId);
-      return { transmitted: 0, periodId };
-    }
-    const config = getEmisorConfig(this.env);
-
-    if (!open.event_sello || !open.event_id) {
-      const startedAt = new Date(String(open.started_at));
-      const endedAt = new Date();
-      const eventDocument = buildContingenciaEvent(config, {
-        ambiente: docs[0].environment,
-        documents: docs.map((document) => ({ codigoGeneracion: document.codigo_generacion, tipoDoc: document.tipo_dte })),
-        startedAt,
-        endedAt,
-        tipoContingencia: Number(open.tipo_contingencia ?? 1),
-        motivoContingencia: String(open.reason)
-      });
-      const eventJws = await signMhDocument(eventDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      const eventId = await this.repo.createDteEvent({
-        documentId: null,
-        eventType: "CONTINGENCIA",
-        environment: docs[0].environment,
-        codigoGeneracion: extractEventGenerationCode(eventDocument),
-        plainJson: eventDocument,
-        signedJws: eventJws
-      });
-      const eventResult = await this.mh.transmitContingencia({ ambiente: docs[0].environment, signedJws: eventJws });
-      await this.repo.updateDteEventResult(eventId, {
-        status: eventResult.accepted ? "ACCEPTED" : "REJECTED",
-        sello: eventResult.selloRecibido,
-        mhEstado: eventResult.estado,
-        observaciones: eventResult.observaciones,
-        acceptedAt: eventResult.accepted ? nowIso() : null
-      });
-      if (!eventResult.accepted) {
-        return { transmitted: 0, periodId };
-      }
-      await this.repo.markContingencyEventAccepted(periodId, { eventId, sello: eventResult.selloRecibido, deadlineAt: addHours(nowIso(), 72) });
-    }
-
-    await this.ensureContingencyBatches(periodId, docs);
-    const batches = await this.repo.listContingencyBatches(periodId);
-    for (const batch of batches.filter((item) => ["DRAFT", "FAILED"].includes(item.status))) {
-      await this.submitContingencyBatch(batch, config.numDocumento);
-    }
-
+  // Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
+  // admite los tipos de DTE 01, 03, 04, 05, 06, 07, 11, 14 y 18 — el CDE (tipo 15)
+  // está EXCLUIDO en la propia capa de validación de MH, por lo que un CDE jamás se
+  // emite en contingencia. El manejo de una caída de MH es "transmisión diferida por
+  // reintento": el documento (forma NORMAL, ya firmado) queda TRANSMISSION_PENDING,
+  // el donante recibe de inmediato su comprobante TRANSITORIO, y este barrido del
+  // cron de 15 minutos reintenta la transmisión hasta obtener el sello definitivo
+  // (o un rechazo real de MH, que sigue el flujo normal de rechazados).
+  async retryDeferredTransmissions(): Promise<{ transmitted: number; rejected: number; pending: number }> {
+    const docs = await this.repo.listTransmissionPendingDocuments();
     let transmitted = 0;
-    for (const batch of await this.repo.listContingencyBatches(periodId)) {
-      if (batch.codigo_lote && !["DONE", "PARTIAL", "REJECTED"].includes(batch.status)) {
-        transmitted += await this.pollContingencyBatch(batch);
+    let rejected = 0;
+    let pending = 0;
+    for (const record of docs) {
+      // Cada documento se reintenta aislado: un fallo no debe abortar el barrido.
+      try {
+        let signedJws = record.signed_jws;
+        if (!signedJws) {
+          // Defensivo: todos los caminos que difieren firman antes. RS512/PKCS1 es
+          // determinista, así que re-firmar el mismo plain_json es idempotente.
+          signedJws = await signMhDocument(JSON.parse(record.plain_json), getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+        }
+        const mhResult = await this.mh.transmitDte({
+          ambiente: record.environment,
+          version: 2,
+          tipoDte: record.tipo_dte || "15",
+          codigoGeneracion: record.codigo_generacion,
+          signedJws
+        });
+        if (!record.signed_jws) {
+          await this.repo.updateDocumentSigned(record.id, signedJws);
+        }
+        await this.repo.updateDocumentMhResult(record.id, {
+          status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
+          sello: mhResult.selloRecibido,
+          mhEstado: mhResult.estado,
+          observaciones: mhResult.observaciones,
+          acceptedAt: mhResult.accepted ? nowIso() : null
+        });
+        const updated = (await this.repo.getDteDocument(record.id)) ?? record;
+        await this.repo.createAudit({
+          action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
+          entityType: "dte_document",
+          entityId: updated.id,
+          summary: `${updated.numero_control} ${mhResult.estado} (transmisión diferida)`,
+          metadata: mhResult.raw
+        });
+        if (mhResult.accepted) {
+          transmitted += 1;
+          // La aceptación REAL de MH completa la intención correlacionada y envía el
+          // comprobante DEFINITIVO (el PDF ahora lleva el Sello de Recepción).
+          const intent = await this.correlateIntentForDocument(updated);
+          if (intent) {
+            await this.completeIntent(intent, updated.id);
+          }
+          await this.emailReceipt(updated);
+        } else {
+          rejected += 1;
+        }
+      } catch (error) {
+        // MH sigue sin responder (u otro fallo transitorio): el documento permanece
+        // TRANSMISSION_PENDING sin auditoría por tick — auditar cada reintento de un
+        // cron de 15 minutos sería puro ruido. La visibilidad la da la alerta de
+        // backlog de alertOnDeferredBacklog.
+        if (!(error instanceof MhUnavailableError)) {
+          console.error("Reintento de transmisión diferida falló", record.id, error);
+        }
+        pending += 1;
       }
     }
-
-    const remaining = await this.repo.listContingencyDocuments(periodId);
-    if (remaining.length === 0) {
-      await this.repo.closeContingency(periodId);
-    }
-    return { transmitted, periodId };
+    await this.alertOnDeferredBacklog();
+    return { transmitted, rejected, pending };
   }
 
-  private async ensureContingencyBatches(periodId: string, docs: DteDocumentRecord[]): Promise<void> {
-    const existingLines = await this.repo.listContingencyBatchLines({ periodId });
-    const batchedDocumentIds = new Set(existingLines.map((line) => line.document_id));
-    const candidates = docs.filter((document) => document.signed_jws && !batchedDocumentIds.has(document.id));
-    for (const chunk of chunks(candidates, 100)) {
-      await this.repo.createContingencyBatch({
-        periodId,
-        environment: chunk[0].environment,
-        idEnvio: crypto.randomUUID().toUpperCase(),
-        documents: chunk
-      });
-    }
-  }
-
-  private async submitContingencyBatch(batch: ContingencyBatchRecord, nitEmisor: string): Promise<void> {
-    const lines = await this.repo.listContingencyBatchLines({ batchId: batch.id });
-    const documentos = lines.map((line) => line.signed_jws).filter((jws): jws is string => Boolean(jws));
-    if (!documentos.length) {
-      await this.repo.markContingencyBatchFailed(batch.id, "El lote no tiene CDE firmados.");
+  // Alerta operativa MH_UNAVAILABLE cuando algún CDE diferido lleva más de una hora
+  // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
+  // del documento más antiguo la dispara UNA sola vez por atasco.
+  private async alertOnDeferredBacklog(): Promise<void> {
+    const remaining = await this.repo.listTransmissionPendingDocuments();
+    const cutoff = new Date(Date.now() - DEFERRED_ALERT_AGE_MS).toISOString();
+    const overdue = remaining.filter((record) => String(record.created_at) < cutoff);
+    if (overdue.length === 0) {
       return;
     }
-    const request = {
-      ambiente: batch.environment,
-      idEnvio: batch.id_envio,
-      version: 2,
-      nitEmisor: normalizeNit(nitEmisor),
-      documentos
-    };
-    const result = await this.mh.transmitLote(request);
-    if (!result.accepted || !result.codigoLote) {
-      await this.repo.markContingencyBatchFailed(batch.id, result.observaciones.join("; ") || result.estado, result.raw);
-      return;
-    }
-    await this.repo.markContingencyBatchSubmitted(batch.id, {
-      codigoLote: result.codigoLote,
-      request,
-      response: result.raw
-    });
-    await this.repo.createAudit({
-      action: "CONTINGENCY_BATCH_SUBMITTED",
-      entityType: "contingency_period",
-      entityId: batch.contingency_period_id,
-      summary: `${result.codigoLote} ${documentos.length} CDE`,
-      metadata: result.raw
+    await sendOperationalAlert(this.env, this.repo, {
+      kind: "MH_UNAVAILABLE",
+      title: "Ministerio de Hacienda no disponible",
+      detail: `Hay ${overdue.length} CDE con transmisión diferida por más de una hora (el más antiguo: ${overdue[0].numero_control}). El sistema reintenta automáticamente cada 15 minutos; los donantes ya recibieron su comprobante transitorio.`,
+      entityType: "dte_document",
+      entityId: overdue[0].id
     });
   }
 
-  private async pollContingencyBatch(batch: ContingencyBatchRecord): Promise<number> {
-    if (!batch.codigo_lote) {
-      return 0;
-    }
-    const result = await this.mh.consultarLote({ ambiente: batch.environment, codigoLote: batch.codigo_lote });
-    const lines = await this.repo.listContingencyBatchLines({ batchId: batch.id });
-    const linesByGeneration = new Map(lines.map((line) => [line.codigo_generacion, line]));
-    let accepted = 0;
-    for (const item of result.procesados) {
-      const line = linesByGeneration.get(String(item.codigoGeneracion ?? ""));
-      if (!line || line.status === "ACCEPTED") {
-        continue;
-      }
-      await this.repo.markContingencyBatchLineAccepted({
-        lineId: line.id,
-        documentId: line.document_id,
-        sello: stringValue(item.selloRecibido),
-        mhEstado: stringValue(item.estado) ?? result.estado,
-        observaciones: arrayStrings(item.observaciones),
-        response: item
-      });
-      accepted += 1;
-      await this.repo.createAudit({
-        action: "CONTINGENCY_DTE_ACCEPTED",
-        entityType: "dte_document",
-        entityId: line.document_id,
-        summary: stringValue(item.estado) ?? result.estado,
-        metadata: item
-      });
-    }
-    for (const item of result.rechazados) {
-      const line = linesByGeneration.get(String(item.codigoGeneracion ?? ""));
-      if (!line || line.status === "REJECTED") {
-        continue;
-      }
-      const observaciones = arrayStrings(item.observaciones);
-      const message = observaciones.join("; ") || stringValue(item.descripcionMsg) || "El Ministerio de Hacienda rechazó el CDE en lote.";
-      await this.repo.markContingencyBatchLineRejected({
-        lineId: line.id,
-        documentId: line.document_id,
-        mhEstado: stringValue(item.estado) ?? "RECHAZADO",
-        observaciones,
-        message
-      });
-      await this.repo.createAudit({
-        action: "CONTINGENCY_DTE_REJECTED",
-        entityType: "dte_document",
-        entityId: line.document_id,
-        summary: message,
-        metadata: item
-      });
-    }
-    if (!result.procesados.length && !result.rechazados.length) {
-      await this.repo.markContingencyBatchProcessing(batch.id, result.raw);
-    } else {
-      await this.repo.syncContingencyBatchCounts(batch.id);
-    }
-    return accepted;
-  }
-
-  private async moveToContingency(record: DteDocumentRecord, payload: WompiWebhook, sequence: number, reason: string, intent?: DonationIntentRecord | null): Promise<DteDocumentRecord> {
-    const config = getEmisorConfig(this.env);
-    // Preserve the donor override so a contingency rebuild never downgrades an
-    // intent-backed CDE to fallback donor data. The intent stays LINK_CREATED/EXPIRED
-    // — it is only marked COMPLETED once MH actually accepts (contingency sweep).
-    const contingencyDocument = buildCdeDocument(payload, config, {
-      sequence,
-      environment: record.environment,
-      contingency: true,
-      donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined
+  // Difiere la transmisión de un CDE ya firmado (forma normal). El donante recibe de
+  // inmediato el comprobante TRANSITORIO — pdf.ts imprime "TRANSITORIO" como sello
+  // cuando sello_recibido es null — y el cron reintenta la transmisión.
+  private async deferTransmission(documentId: string, reason: string): Promise<DteDocumentRecord> {
+    await this.repo.updateDocumentMhResult(documentId, {
+      status: "TRANSMISSION_PENDING",
+      sello: null,
+      mhEstado: "MH_NO_DISPONIBLE",
+      observaciones: [reason]
     });
-    const identifiers = extractCdeIdentifiers(contingencyDocument);
-    const signedJws = await signMhDocument(contingencyDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-    await this.repo.replaceDocumentPayload(record.id, {
-      codigoGeneracion: identifiers.codigoGeneracion,
-      numeroControl: identifiers.numeroControl,
-      plainJson: contingencyDocument,
-      signedJws,
-      status: "SIGNED"
-    });
-    const periodId = await this.repo.openContingency(record.environment, reason);
-    await this.repo.attachDocumentToContingency(record.id, periodId);
-    const updated = (await this.repo.getDteDocument(record.id)) ?? record;
+    const updated = await this.repo.getDteDocument(documentId);
+    if (!updated) {
+      throw new Error(`Documento DTE ${documentId} no encontrado al diferir su transmisión`);
+    }
     await this.repo.createAudit({
-      action: "DTE_CONTINGENCY_PENDING",
+      action: "DTE_TRANSMISSION_DEFERRED",
       entityType: "dte_document",
       entityId: updated.id,
-      summary: reason,
-      metadata: { contingencyPeriodId: periodId }
+      summary: `${updated.numero_control}: ${reason}`
     });
-    await sendOperationalAlert(this.env, this.repo, {
-      kind: "CONTINGENCY_OPENED",
-      title: "Contingencia abierta",
-      detail: `Se abrió un período de contingencia automáticamente: ${reason}`,
-      entityType: "contingency_period",
-      entityId: periodId
-    });
-    await this.emailReceipt(updated);
+    // Dedupe por evidencia en email_deliveries: una reentrega del mensaje de cola
+    // (crash entre correo y ack) no debe duplicar el transitorio al donante.
+    if (!(await this.repo.hasSentEmail(updated.id, "dteReceiptTransitorio"))) {
+      await this.emailReceipt(updated);
+    }
     return updated;
+  }
+
+  // Resuelve la intención de donación de un documento respaldado por Wompi para
+  // completarla cuando MH acepta el reintento. Documentos rápidos/avanzados no
+  // tienen intención; cualquier problema de parseo degrada a null (sin intención).
+  private async correlateIntentForDocument(record: DteDocumentRecord): Promise<DonationIntentRecord | null> {
+    if (!record.wompi_event_id) {
+      return null;
+    }
+    const event = await this.repo.getWompiEventById(record.wompi_event_id);
+    if (!event) {
+      return null;
+    }
+    try {
+      return await this.correlateIntent(normalizeWompiWebhook(JSON.parse(event.raw_body)));
+    } catch {
+      return null;
+    }
   }
 
   // Resolve the donation intent this payment fulfills, or null for legacy/static-link
@@ -640,26 +585,3 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
   };
 }
 
-function extractEventGenerationCode(document: Record<string, unknown>): string {
-  return (document.identificacion as { codigoGeneracion: string }).codigoGeneracion;
-}
-
-function chunks<T>(items: T[], size: number): T[][] {
-  const result: T[][] = [];
-  for (let index = 0; index < items.length; index += size) {
-    result.push(items.slice(index, index + size));
-  }
-  return result;
-}
-
-function normalizeNit(value: string): string {
-  return value.replace(/\D/g, "");
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function arrayStrings(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String) : [];
-}

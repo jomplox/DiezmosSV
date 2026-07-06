@@ -6,6 +6,8 @@ describe("client display text", () => {
     expect(statusLabel("ACCEPTED")).toBe("Aceptado");
     expect(statusLabel("INVALIDATED")).toBe("Invalidado");
     expect(statusLabel("CONTINGENCY_PENDING")).toBe("Contingencia");
+    // Transmisión diferida: MH no disponible al emitir, reintento automático.
+    expect(statusLabel("TRANSMISSION_PENDING")).toBe("En trámite");
     expect(statusLabel("EVENT_ACCEPTED")).toBe("Evento aceptado");
     expect(statusLabel("BATCH_SENT")).toBe("Lote enviado");
   });
@@ -33,6 +35,8 @@ describe("client display text", () => {
     expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
     expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
     expect(auditActionLabel("ALERT_EMAIL_UPDATED")).toBe("Correo de alertas actualizado");
+    expect(auditActionLabel("DTE_TRANSMISSION_DEFERRED")).toBe("Transmisión diferida");
+    expect(auditActionLabel("ALERT_SENT:MH_UNAVAILABLE")).toBe("Alerta enviada: Hacienda no disponible");
     expect(auditActionLabel("ALERT_SENT:DTE_FAILED")).toBe("Alerta enviada: DTE fallido");
     expect(auditActionLabel("ALERT_SENT:ADVANCED_CDE_FAILED")).toBe("Alerta enviada: CDE avanzado fallido");
     expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Contingencia abierta");

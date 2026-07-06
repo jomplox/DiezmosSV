@@ -15,7 +15,7 @@ import {
   isCat032DomicileCode
 } from "../../shared/catalogs";
 import { assertValidDui, cleanDui, formatDui, isDuiDocumentType } from "../../shared/dui";
-import { validateCde, validateContingencia, validateInvalidacion } from "./schema";
+import { validateCde, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
 
 // Receptor fields lifted from a correlated donation intent (donor-checkout). When
@@ -62,7 +62,6 @@ interface CdeBuildOptions {
   sequence: number;
   environment?: Ambiente;
   issuedAt?: Date;
-  contingency?: boolean;
   donorOverride?: IntentDonorOverride;
 }
 
@@ -101,15 +100,6 @@ export interface InvalidationInput {
   codigoGeneracionR?: string | null;
 }
 
-export interface ContingencyInput {
-  ambiente: Ambiente;
-  documents: Array<{ codigoGeneracion: string; tipoDoc: string }>;
-  startedAt: Date;
-  endedAt: Date;
-  tipoContingencia: number;
-  motivoContingencia: string | null;
-}
-
 export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, options: CdeBuildOptions): Record<string, unknown> {
   const issuedAt = options.issuedAt ?? new Date(payload.FechaTransaccion);
   const { date, time } = mhDateTime(issuedAt);
@@ -134,7 +124,9 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       tipoDte: "15",
       numeroControl: numeroControl(config.controlPrefix, options.sequence),
       codigoGeneracion: generationCode(),
-      tipoModelo: options.contingency ? 2 : 1,
+      // Siempre modelo 1 (previo): el CDE no participa del evento de contingencia
+      // (Anexo, campo 35), así que el modelo diferido (2) nunca aplica al tipo 15.
+      tipoModelo: 1,
       tipoOperacion: 1,
       fecEmi: date,
       horEmi: time,
@@ -335,7 +327,9 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     tipoDte: "15",
     numeroControl: numeroControl(config.controlPrefix, options.sequence),
     codigoGeneracion: generationCode(),
-    tipoModelo: currentIdentification.tipoModelo === 2 ? 2 : 1,
+    // Forzado a modelo 1: un borrador avanzado con tipoModelo 2 emitiría un CDE en
+    // forma de contingencia, que la normativa excluye para el tipo 15.
+    tipoModelo: 1,
     tipoOperacion: 1,
     fecEmi: date,
     horEmi: time,
@@ -421,49 +415,6 @@ export function buildInvalidacionEvent(
     }
   };
   validateInvalidacion(document);
-  return document;
-}
-
-export function buildContingenciaEvent(config: EmisorConfig, input: ContingencyInput, emittedAt: Date = new Date()): Record<string, unknown> {
-  const emitted = mhDateTime(emittedAt);
-  const start = mhDateTime(input.startedAt);
-  const end = mhDateTime(input.endedAt);
-  const eventCodes = mhEventCodes(null, config);
-  const document = {
-    identificacion: {
-      version: 4,
-      ambiente: input.ambiente,
-      codigoGeneracion: generationCode(),
-      fTransmision: emitted.date,
-      hTransmision: emitted.time
-    },
-    emisor: {
-      nit: config.numDocumento,
-      nombre: config.nombre,
-      nombreResponsable: config.responsable.nombre,
-      tipoDocResponsable: config.responsable.tipoDocumento,
-      numeroDocResponsable: config.responsable.numeroDocumento,
-      tipoEstablecimiento: config.responsable.tipoEstablecimiento,
-      codEstableMH: eventCodes.codEstableMH,
-      codPuntoVentaMH: eventCodes.codPuntoVentaMH,
-      telefono: config.telefono,
-      correo: config.correo
-    },
-    detalleDTE: input.documents.map((document, index) => ({
-      noItem: index + 1,
-      tipoDoc: document.tipoDoc,
-      codigoGeneracion: document.codigoGeneracion
-    })),
-    motivo: {
-      fInicio: start.date,
-      fFin: end.date,
-      hInicio: start.time,
-      hFin: end.time,
-      tipoContingencia: input.tipoContingencia,
-      motivoContingencia: input.motivoContingencia
-    }
-  };
-  validateContingencia(document);
   return document;
 }
 

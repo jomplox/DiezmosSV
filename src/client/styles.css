@@ -268,26 +268,6 @@ h2 {
   margin-bottom: 14px;
 }
 
-.contingency-banner {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 36px;
-  padding: 0 12px;
-  border: 1px solid #d8e0e3;
-  border-radius: 6px;
-  color: #52656c;
-  background: #ffffff;
-  font-size: 13px;
-  font-weight: 650;
-}
-
-.contingency-banner.open {
-  color: #7c4d00;
-  border-color: #efcf91;
-  background: #fff8e8;
-}
-
 .document-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 360px;
@@ -1132,87 +1112,6 @@ select,
   background: #ffffff;
   border: 1px solid #dfe6e8;
   border-radius: 8px;
-}
-
-.contingency-facts {
-  margin-bottom: 14px;
-}
-
-.contingency-deadline {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid #d8e0e3;
-  border-radius: 6px;
-  color: #52656c;
-  background: #f7f9fa;
-  font-size: 13px;
-}
-
-.contingency-deadline div {
-  display: grid;
-  gap: 3px;
-}
-
-.contingency-deadline.warn {
-  color: #855900;
-  background: #fff7df;
-  border-color: #f0d089;
-}
-
-.contingency-deadline.ok {
-  color: #006d66;
-  background: #edf9f7;
-  border-color: #c8ebe7;
-}
-
-.contingency-deadline.bad {
-  color: #a93530;
-  background: #fae8e6;
-  border-color: #e9b7b2;
-}
-
-.contingency-form-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.contingency-form-grid label {
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-}
-
-.contingency-form-grid label span {
-  color: #52656c;
-  font-size: 12px;
-  font-weight: 650;
-}
-
-.contingency-form-grid .span-2 {
-  grid-column: 1 / -1;
-}
-
-.contingency-form textarea {
-  min-height: 76px;
-  width: 100%;
-  padding: 10px;
-  color: #1b2328;
-  background: #ffffff;
-  border: 1px solid #d8e0e3;
-  border-radius: 6px;
-  outline: 0;
-  resize: vertical;
-}
-
-.contingency-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 14px;
 }
 
 .contingency-stats {
@@ -3409,11 +3308,6 @@ pre {
     flex-direction: row;
   }
 
-  .topbar-actions .contingency-banner {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-
   .topbar-actions .icon-button {
     flex: 0 0 auto;
   }
@@ -3464,15 +3358,9 @@ pre {
     width: 100%;
   }
 
-  .contingency-form-grid,
   .contingency-audit-list div,
   .contingency-period-row {
     grid-template-columns: 1fr;
-  }
-
-  .contingency-actions {
-    align-items: stretch;
-    flex-direction: column;
   }
 
   .credential-actions {
