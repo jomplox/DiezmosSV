@@ -740,6 +740,253 @@ describe("donation intents", () => {
     expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
+
+  // ── Premint: draft create (amount + optional giftType only) ────────────────
+  //
+  // The donor wizard mints the Wompi link in the background when the SV donor
+  // ENTERS Paso 2, before the fiscal data exists. That draft body carries only the
+  // amount (and, on the SV path, the gift type) — no documento/dirección — yet the
+  // link is minted exactly as today (identificadorEnlaceComercio = intent id).
+  describe("draft create (no donor fields)", () => {
+    function draftRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+      return new Request("https://example.org/api/donations/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
+        body: JSON.stringify(body)
+      });
+    }
+
+    it("mints the Wompi link for a draft carrying only { amount, giftType } (donor data absent)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "25.50", giftType: "DIEZMO" }), env(db));
+
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string };
+      // Response shape is unchanged from the full create, and the link is minted with
+      // identificadorEnlaceComercio = intent id (mock echoes the id into the URL).
+      expect(payload.intentId).toMatch(/^di_/);
+      expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
+      expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
+
+      expect(db.donationIntents).toHaveLength(1);
+      const intent = db.donationIntents[0];
+      expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.amount_cents).toBe(2550);
+      expect(intent.gift_type).toBe("DIEZMO");
+      // The draft marker: donor document + address stay NULL until the datos call.
+      expect(intent.donor_document).toBeNull();
+      expect(intent.direccion_departamento).toBeNull();
+      expect(intent.direccion_complemento).toBeNull();
+      expect(intent.donor_name).toBeNull();
+      expect(intent.client_ip).toBe("203.0.113.7");
+    });
+
+    it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "10" }), env(db));
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
+      expect(db.donationIntents[0].gift_type).toBeNull();
+      expect(db.donationIntents[0].donor_document).toBeNull();
+    });
+
+    it("still validates the amount for a draft (same rule as the full create)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "0.50", giftType: "DIEZMO" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_amount",
+        message: "El monto debe estar entre $1.00 y $5,000.00."
+      });
+      expect(db.donationIntents).toHaveLength(0);
+    });
+
+    it("rejects a present-but-invalid gift type on a draft (no persistence)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "25.00", giftType: "GIFT" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_gift_type",
+        message: "Seleccione el tipo de aportación: diezmo u ofrenda."
+      });
+      expect(db.donationIntents).toHaveLength(0);
+    });
+
+    it("applies the same per-IP throttle to draft creates", async () => {
+      const db = new InMemoryD1();
+      for (let i = 0; i < 5; i += 1) {
+        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+      }
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
+      try {
+        const response = await worker.fetch(draftRequest({ amount: "25.00", giftType: "DIEZMO" }), env(db));
+        expect(response.status).toBe(429);
+        expect(db.donationIntents).toHaveLength(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ── Premint: datos completion (fast D1-only) ───────────────────────────────
+  //
+  // Attaches the donor's fiscal data to a minted draft with the same validation the
+  // full create runs; NO Wompi call, and it must never touch amount or gift type.
+  describe("datos completion", () => {
+    function seedDraft(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      const draft = {
+        id: "di_draft_1",
+        status: "LINK_CREATED",
+        amount_cents: 2550,
+        donor_name: null,
+        donor_document_type: "13",
+        donor_document: null,
+        donor_email: null,
+        donor_phone: null,
+        direccion_departamento: null,
+        direccion_municipio: null,
+        direccion_distrito: null,
+        direccion_complemento: null,
+        donor_pais: null,
+        gift_type: "DIEZMO",
+        wompi_id_enlace: 123456,
+        wompi_url_enlace: "https://mock.wompi.sv/enlace/di_draft_1",
+        wompi_url_enlace_largo: "https://mock.wompi.sv/enlace-largo/di_draft_1",
+        document_id: null,
+        client_ip: "203.0.113.7",
+        created_at: "2026-07-04T12:00:00.000Z",
+        updated_at: "2026-07-04T12:00:00.000Z",
+        expires_at: "2026-07-04T13:00:00.000Z",
+        ...overrides
+      };
+      db.donationIntents.push(draft);
+      return draft;
+    }
+
+    function datosRequest(id: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+      return new Request(`https://example.org/api/donations/intent/${id}/datos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
+        body: JSON.stringify(body)
+      });
+    }
+
+    const validDatos = {
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorPhone: "70001122",
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      complemento: "Colonia Escalón, San Salvador"
+    };
+
+    it("attaches donor data to a minted draft without a Wompi call or an amount/gift change", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+      // No outbound HTTP: datos is D1-only.
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
+      expect(intent.donor_document).toBe("10000001-9"); // stored canonically
+      expect(intent.donor_document_type).toBe("13");
+      expect(intent.donor_phone).toBe("70001122");
+      expect(intent.direccion_departamento).toBe("06");
+      expect(intent.direccion_complemento).toBe("Colonia Escalón, San Salvador");
+      // Untouched by datos: money + tipo were locked at draft-mint time.
+      expect(intent.amount_cents).toBe(2550);
+      expect(intent.gift_type).toBe("DIEZMO");
+      // Still LINK_CREATED and pointing at the same minted link.
+      expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.wompi_id_enlace).toBe(123456);
+    });
+
+    it("mirrors the full-create validation messages (invalid DUI)", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(datosRequest("di_draft_1", { ...validDatos, donorDocument: "01234567-0" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_dui",
+        message: "DUI inválido: revise el número y el dígito verificador."
+      });
+      // Nothing persisted on a rejected datos call.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+    });
+
+    it("requires the razón social for a NIT (36) datos completion", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(
+        datosRequest("di_draft_1", { ...validDatos, donorDocumentType: "36", donorDocument: "06142803901121" }),
+        env(db)
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_razon_social",
+        message: "Ingrese la razón social (máximo 200 caracteres)."
+      });
+    });
+
+    it("returns 404 for an unknown intent id", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(datosRequest("di_missing", validDatos), env(db));
+
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_not_found" });
+    });
+
+    it("returns 409 for a COMPLETED intent", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db, { status: "COMPLETED", document_id: "dte_prev" });
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_already_completed" });
+      // The completed intent is not mutated.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+    });
+
+    it("allows datos on an EXPIRED intent (donor finishing in the link's last minute)", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db, { status: "EXPIRED" });
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(200);
+      const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
+      expect(intent.donor_document).toBe("10000001-9");
+      // Status is left as-is (correlateIntent already accepts EXPIRED).
+      expect(intent.status).toBe("EXPIRED");
+    });
+
+    it("applies the per-IP throttle to the public datos endpoint", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      for (let i = 0; i < 5; i += 1) {
+        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+      }
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
+      try {
+        const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+        expect(response.status).toBe(429);
+        // The draft was not modified.
+        expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 describe("password reset", () => {
@@ -3199,6 +3446,27 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
+  it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
+    const db = new InMemoryD1();
+    // A premint draft: link minted, but the donor never attached fiscal data, so the
+    // document is still NULL. Correlating it would build a receptor with an empty
+    // numDocumento that fails CDE schema validation — so the guard must skip it and
+    // let the legacy/static-link webhook fallback build the CDE from webhook data.
+    seedIntentRow(db, { donor_document: null, direccion_departamento: null, direccion_municipio: null, direccion_distrito: null, direccion_complemento: null });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("ACCEPTED");
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // Receptor comes from the webhook, not the (incomplete) draft.
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    // The draft is NOT completed by this webhook.
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+  });
+
   it("keeps the intent receptor when an operator rebuilds a REJECTED intent-backed CDE", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -5555,13 +5823,14 @@ class Statement {
         amount_cents: Number(amountCents),
         donor_name: donorName == null ? null : String(donorName),
         donor_document_type: String(donorDocumentType),
-        donor_document: String(donorDocument),
+        // Document + address are nullable now (0015): a draft binds them null.
+        donor_document: donorDocument == null ? null : String(donorDocument),
         donor_email: donorEmail == null ? null : String(donorEmail),
         donor_phone: donorPhone == null ? null : String(donorPhone),
-        direccion_departamento: String(direccionDepartamento),
-        direccion_municipio: String(direccionMunicipio),
-        direccion_distrito: String(direccionDistrito),
-        direccion_complemento: String(direccionComplemento),
+        direccion_departamento: direccionDepartamento == null ? null : String(direccionDepartamento),
+        direccion_municipio: direccionMunicipio == null ? null : String(direccionMunicipio),
+        direccion_distrito: direccionDistrito == null ? null : String(direccionDistrito),
+        direccion_complemento: direccionComplemento == null ? null : String(direccionComplemento),
         donor_pais: donorPais == null ? null : String(donorPais),
         // gift_type is the last bound arg (appended by migration 0012).
         gift_type: giftType == null ? null : String(giftType),
@@ -5574,6 +5843,35 @@ class Statement {
         updated_at: "2026-06-26T01:46:47.015Z",
         expires_at: String(expiresAt)
       });
+    }
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("donor_document_type = ?") && this.sql.includes("direccion_departamento = ?")) {
+      // The /datos completion: attaches donor data, leaving amount/gift_type/status/link untouched.
+      const [
+        donorDocumentType,
+        donorDocument,
+        donorName,
+        donorPhone,
+        direccionDepartamento,
+        direccionMunicipio,
+        direccionDistrito,
+        direccionComplemento,
+        donorPais,
+        updatedAt,
+        id
+      ] = this.args;
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent) {
+        intent.donor_document_type = String(donorDocumentType);
+        intent.donor_document = donorDocument == null ? null : String(donorDocument);
+        intent.donor_name = donorName == null ? null : String(donorName);
+        intent.donor_phone = donorPhone == null ? null : String(donorPhone);
+        intent.direccion_departamento = direccionDepartamento == null ? null : String(direccionDepartamento);
+        intent.direccion_municipio = direccionMunicipio == null ? null : String(direccionMunicipio);
+        intent.direccion_distrito = direccionDistrito == null ? null : String(direccionDistrito);
+        intent.direccion_complemento = direccionComplemento == null ? null : String(direccionComplemento);
+        intent.donor_pais = donorPais == null ? null : String(donorPais);
+        intent.updated_at = String(updatedAt);
+      }
     }
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("status = 'LINK_CREATED'")) {
       const [idEnlace, urlEnlace, urlEnlaceLargo, updatedAt, id] = this.args;

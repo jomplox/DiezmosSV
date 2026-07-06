@@ -464,6 +464,14 @@ export class IssuancePipeline {
     if (!intent || (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED")) {
       return null;
     }
+    // Premint draft that the donor never completed: the link was minted but the fiscal
+    // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
+    // would build a receptor with an empty numDocumento that fails CDE schema validation.
+    // Treat it as non-correlating → the legacy/static-link webhook fallback builds the CDE
+    // from webhook data. Defensive only: the UI cannot show the link before datos are set.
+    if (!intent.donor_document || intent.donor_document.trim() === "") {
+      return null;
+    }
     // Money truth comes from Wompi: on a mismatch we audit and still correlate, but the
     // CDE amount is left as the webhook's (buildCdeDocument derives it from the payload).
     const eventAmountCents = amountCents(payload);
