@@ -502,12 +502,16 @@ export function DonarPage() {
   // Wompi's checkout posts JSON messages to its parent — the same channel its own
   // modal widget consumes: { message: "sizeUpdate", height } as the content grows
   // (their widget renders it as height + 35), and { message: "close" } when the donor
-  // taps the checkout's back arrow. Origin-checked strictly; anything unparseable is
-  // ignored. "close" walks back to Paso 2, same as our own Atrás from the embed.
+  // taps the checkout's back arrow OR its post-payment "Cerrar". Origin-checked strictly;
+  // anything unparseable is ignored. "close" does a one-shot status check: paid/COMPLETED
+  // → thanks, otherwise it walks back to Paso 2 (same as our own Atrás from the embed).
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
     }
+    // Capture the non-null intent so the close handler's deferred fetch keeps a stable,
+    // narrowed reference (the effect re-runs whenever intent changes).
+    const activeIntent = intent;
     function onWompiMessage(event: MessageEvent) {
       if (event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN) {
         return;
@@ -523,9 +527,27 @@ export function DonarPage() {
         return;
       }
       if (payload?.message === "close") {
-        setIntent(null);
-        setStage("form");
-        setStep(2);
+        // Wompi posts { message: "close" } from BOTH its back arrow AND its post-payment
+        // "Cerrar" button. Returning straight to Paso 2 is right for the back arrow but
+        // wrong after a successful payment. So do a one-shot status check first: if the
+        // intent is already paid (or COMPLETED), go to thanks; otherwise fall back to the
+        // existing back-to-Paso-2 behavior. A fetch failure is treated as not-paid.
+        const statusPath = `${DONAR_INTENT_PATH}/${activeIntent.intentId}/status`;
+        void donarApi<{ status: string; paid: boolean }>(statusPath)
+          .then((result) => {
+            if (result.paid || result.status === "COMPLETED") {
+              setStage("thanks");
+            } else {
+              setIntent(null);
+              setStage("form");
+              setStep(2);
+            }
+          })
+          .catch(() => {
+            setIntent(null);
+            setStage("form");
+            setStep(2);
+          });
       }
     }
     window.addEventListener("message", onWompiMessage);
@@ -552,8 +574,11 @@ export function DonarPage() {
         return;
       }
       try {
-        const result = await donarApi<{ status: string }>(`${DONAR_INTENT_PATH}/${intent.intentId}/status`);
-        if (!cancelled && result.status === "COMPLETED") {
+        const result = await donarApi<{ status: string; paid: boolean }>(`${DONAR_INTENT_PATH}/${intent.intentId}/status`);
+        // The donor's "thanks" keys on PAYMENT (result.paid, stamped by Wompi's webhook)
+        // — not on MH acceptance. COMPLETED is kept as the legacy signal so an intent that
+        // was accepted before the poll observed the payment still lands on thanks.
+        if (!cancelled && (result.paid || result.status === "COMPLETED")) {
           window.clearInterval(timer);
           setStage("thanks");
         }
