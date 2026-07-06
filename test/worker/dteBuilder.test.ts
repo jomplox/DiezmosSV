@@ -317,17 +317,12 @@ describe("DTE builders", () => {
 
     expect(document.receptor.codPais).toBe("US");
     expect(document.receptor.codDomiciliado).toBe(2);
-    // Normativa campos 47-49: 00 exists for departamento/municipio but CAT-008 has no
-    // distrito 00 — MH rejects the full 00/00/00 direccion (codigoMsg 096, verified live
-    // in ambiente 00). The foreign receptor is marked fiscally by codPais +
-    // codDomiciliado 2; the direccion carries the emisor's valid geography and the
-    // complemento keeps the donor's real country + foreign address.
-    expect(document.receptor.direccion).toEqual({
-      departamento: emisorConfig.direccion.departamento,
-      municipio: emisorConfig.direccion.municipio,
-      distrito: emisorConfig.direccion.distrito,
-      complemento: "Estados Unidos: 742 Evergreen Terrace, Springfield"
-    });
+    // MH rejects ANY direccion object for a non-domiciled receptor — the 00/00/00
+    // extranjero marker AND a valid SV geography both fail with codigoMsg 096 (verified
+    // live in ambiente 00). The schema allows null and the receptor-distrito validation
+    // is "cuando aplique": for codDomiciliado 2 the direccion travels null; the donor's
+    // country rides in codPais and the foreign address stays on the intent record.
+    expect(document.receptor.direccion).toBeNull();
   });
 
   it("keeps the payload-derived codPais/codDomiciliado when the override carries none", () => {
