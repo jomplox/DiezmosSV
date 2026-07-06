@@ -19,7 +19,10 @@ import {
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WOMPI_SCRIPT_URL,
+  DONAR_WIDGET_DELAYED_MESSAGE,
+  DONAR_WIDGET_FALLBACK_CTA,
+  DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
@@ -43,14 +46,18 @@ import {
   DONAR_LANDING_UNIFIER,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
+  donarDatosPath,
   donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
   donationAmountValidationMessage,
+  donationDatosBody,
+  donationDraftBody,
   donationFormValidationMessage,
   donationIntentBody,
   donationStep1ValidationMessage,
   donationStep2ValidationMessage,
+  draftMatchesForm,
   givebutterHostedUrl,
   givebutterPrefillParams,
   isUsDonation,
@@ -346,15 +353,115 @@ describe("donar intent body", () => {
   });
 });
 
+describe("donar premint (background draft + datos completion)", () => {
+  const base = {
+    amount: " 10.00 ",
+    giftType: "DIEZMO" as const,
+    donorDocumentType: "13" as const,
+    donorDocument: "10000001-9",
+    donorName: "",
+    donorPhone: "70001122",
+    foreignResident: false,
+    pais: "",
+    departamento: "06",
+    municipio: "23",
+    distrito: "14",
+    complemento: "San Salvador"
+  };
+
+  it("the draft body carries only the trimmed amount + gift type (no donor data)", () => {
+    expect(donationDraftBody(base)).toEqual({ amount: "10.00", giftType: "DIEZMO" });
+    // No document/address keys: the server treats this as a draft create.
+    expect(donationDraftBody(base)).not.toHaveProperty("donorDocument");
+    expect(donationDraftBody(base)).not.toHaveProperty("departamento");
+  });
+
+  it("the draft body omits giftType when none is chosen (never sends an empty string)", () => {
+    expect(donationDraftBody({ amount: "25", giftType: "" }).giftType).toBeUndefined();
+  });
+
+  it("the datos body carries the donor fiscal data ONLY (no amount, no giftType)", () => {
+    const body = donationDatosBody(base);
+    expect(body).not.toHaveProperty("amount");
+    expect(body).not.toHaveProperty("giftType");
+    // Same field mapping as the full intent body minus amount/giftType.
+    expect(body).toMatchObject({
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorPhone: "70001122",
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      complemento: "San Salvador"
+    });
+  });
+
+  it("the datos body mirrors the full body's NIT razón social and foreign-path rules", () => {
+    const nit = donationDatosBody({ ...base, donorDocumentType: "36", donorDocument: "0614-280390-112-1", donorName: " Empresa " });
+    expect(nit.donorName).toBe("Empresa");
+    const foreign = donationDatosBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" });
+    expect(foreign).toMatchObject({ departamento: DONAR_FOREIGN_GEOGRAPHY_CODE, pais: "US" });
+  });
+
+  it("builds the datos path from the intent id", () => {
+    expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
+  });
+
+  it("treats a draft as fresh only when both the amount and the gift type still match", () => {
+    const draft = { amount: "10.00", giftType: "DIEZMO" as const };
+    expect(draftMatchesForm(draft, base)).toBe(true);
+    // Edited amount → stale (abandon and full-POST).
+    expect(draftMatchesForm(draft, { ...base, amount: "20.00" })).toBe(false);
+    // Switched Diezmo → Ofrenda → stale.
+    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" })).toBe(false);
+  });
+});
+
+describe("donar premint source contract", () => {
+  it("mints the draft link in the background on the SV Paso 1→2 transition", () => {
+    // The background mint fires inside continueFromMonto (the else / SV branch), posting
+    // only the draft body, and must NOT block the step change.
+    expect(donarSource).toContain("mintDraftIntent(");
+    expect(donarSource).toContain("donationDraftBody(");
+    // Fire-and-forget: no await on the draft create, errors swallowed.
+    expect(donarSource).toContain("void donarApi");
+    expect(donarSource).toContain("setDraftIntent(");
+    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) must reuse
+    // the draft already held — never re-mint. Each mint costs a Wompi link and one of
+    // the donor's 5 throttle slots per 15 minutes.
+    expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
+  });
+
+  it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
+    // Fast path: a matching draft → datos call, reuse its link, advance immediately.
+    expect(donarSource).toContain("draftMatchesForm(draftIntent, form)");
+    expect(donarSource).toContain("donarDatosPath(draftIntent.intent.intentId)");
+    expect(donarSource).toContain("donationDatosBody(form)");
+    // Fallback: no usable draft → the existing full-body POST still works.
+    expect(donarSource).toContain("donationIntentBody(form)");
+  });
+
+  it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
+    // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
+    // Editar from Paso 3 and switching doors clear it. A stale link simply expires
+    // on the sweep — there is no new deactivation call in the client.
+    expect(donarSource).toContain("setDraftIntent(null)");
+    expect(donarSource).not.toContain("deactivate");
+  });
+
+  it("keeps the Paso 2 submit copy exactly as before", () => {
+    // The premint must not touch any donor-facing copy.
+    expect(donarSource).toContain("Preparando su entrega…");
+    expect(donarSource).toContain("Continuar con su diezmo");
+    expect(donarSource).toContain("Continuar con su ofrenda");
+  });
+});
+
 describe("donar widget handoff", () => {
   it("feeds the widget urlEnlaceLargo with the esWidget flag appended", () => {
     expect(widgetUrlFrom("https://mock.wompi.sv/enlace-largo/abc?x=1")).toBe(
       "https://mock.wompi.sv/enlace-largo/abc?x=1&esWidget=1"
     );
-  });
-
-  it("pins the official Wompi widget script URL", () => {
-    expect(DONAR_WOMPI_SCRIPT_URL).toBe("https://pagos.wompi.sv/js/wompi.pagos.js");
   });
 
   it("polls the public intent status endpoint every ~5s and stops after ~3 minutes", () => {
@@ -366,8 +473,9 @@ describe("donar widget handoff", () => {
   });
 
   it("closes the poll with a neutral message that never implies failure", () => {
+    // Entrega framing: these are diezmos y ofrendas, never "pagos".
     expect(DONAR_FALLBACK_MESSAGE).toBe(
-      "Si completó el pago, recibirá su comprobante (CDE) por correo electrónico. Puede cerrar esta página."
+      "Si completó su entrega, recibirá su comprobante de donación por correo electrónico. Puede cerrar esta página."
     );
   });
 });
@@ -389,9 +497,9 @@ describe("donar thank-you page", () => {
 
   it("uses the webhook-driven thank-you copy with a religious blessing", () => {
     expect(DONAR_THANK_YOU_TITLE).toBe("Dios le bendiga. Su aportación fue recibida.");
-    // The CDE-by-email line (with the fiscal "comprobante (CDE)" wording) is unchanged.
+    // User-centered wording: "comprobante de donación", no CDE initials, no "pago".
     expect(DONAR_THANK_YOU_BODY).toBe(
-      "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme."
+      "Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme."
     );
   });
 });
@@ -455,8 +563,11 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("donarAmountDisplay(");
   });
 
-  it("changes the submit label to the diezmo-framed 'Continuar al pago'", () => {
-    expect(donarSource).toContain("Continuar al pago");
+  it("frames the Paso 2 submit around the chosen gift, never a 'pago'", () => {
+    // The label names the donor's own diezmo or ofrenda (giftType is always set on
+    // the SV door — Diezmo is preselected).
+    expect(donarSource).toContain("Continuar con su ofrenda");
+    expect(donarSource).toContain("Continuar con su diezmo");
     expect(donarSource).not.toContain('"Donar"');
   });
 
@@ -476,8 +587,8 @@ describe("donar wizard source contract", () => {
   it("assures each door's donor of the legal document their path produces on Paso 1", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
-    expect(donarSource).toContain("Recibirá su comprobante de donación electrónico (CDE) por correo.");
-    expect(donarSource).toContain("Recibirá un recibo deducible de impuestos en EE. UU. por correo.");
+    expect(donarSource).toContain("Recibirá su comprobante de donación en su dirección de correo electrónico.");
+    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });
 
@@ -555,7 +666,7 @@ describe("donar wizard source contract", () => {
   });
 
   it("disables the submit button while preparing the payment", () => {
-    expect(donarSource).toContain("Preparando el pago…");
+    expect(donarSource).toContain("Preparando su entrega…");
   });
 
   it("validates per step: Paso 1 gates on the step-1 rules, Paso 2 on the rest", () => {
@@ -563,44 +674,69 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("donationStep2ValidationMessage(");
   });
 
-  it("loads the Wompi widget script only from the donar view and renders the widget button", () => {
-    expect(donarSource).toContain("DONAR_WOMPI_SCRIPT_URL");
-    expect(donarSource).toContain("wompi_button_widget");
-    expect(donarSource).toContain('"data-render", "widget"');
-    expect(donarSource).toContain('"data-url-pago"');
+  it("renders the Wompi checkout embedded in Paso 3 via a plain iframe", () => {
+    // The checkout page (urlEnlaceLargo + esWidget=1) allows cross-origin framing —
+    // verified live: no X-Frame-Options, no frame-ancestors — and Wompi's own modal
+    // widget iframes the exact same URL with a plain {src, onLoad} iframe. Embedding
+    // it directly keeps the donor inside the wizard: no popup, no overlay.
+    expect(donarSource).toContain("<iframe");
+    expect(donarSource).toContain('className="donar-embed"');
+    expect(donarSource).toContain("src={widgetUrlFrom(intent.urlEnlaceLargo)}");
+    expect(stylesSource).toContain(".donar-embed");
   });
 
-  it("falls back to a full-page redirect to urlEnlace when the widget cannot render", () => {
-    expect(donarSource).toContain("window.location.href");
-    expect(donarSource).toContain("urlEnlace");
+  it("ships no Wompi script machinery: the embed needs no script, scan, or auto-click", () => {
+    // wompi.pagos.js scans for .wompi_button_widget divs exactly once at script
+    // evaluation (fragile in an SPA whose div appears on Paso 3), and its
+    // button+modal flow needed an auto-click. The inline iframe replaces all of it.
+    expect(donarSource).not.toContain("wompi_button_widget");
+    expect(donarSource).not.toContain("DONAR_WOMPI_SCRIPT_URL");
+    expect(donarSource).not.toContain("autoClickedRef");
   });
 
-  it("auto-clicks the rendered Wompi button so the modal opens immediately after submit", () => {
-    // The effect that renders the widget div must poll/observe the host for the
-    // button Wompi injects and click it once, so form → modal needs no extra click.
-    const widgetEffect = donarSource.indexOf("wompi_button_widget");
-    expect(widgetEffect).toBeGreaterThan(-1);
-    // Auto-click looks for the button in the host and invokes .click() on it.
-    expect(donarSource).toContain('host.querySelector("button")');
-    const clickCall = donarSource.indexOf(".click()", widgetEffect);
-    expect(clickCall).toBeGreaterThan(-1);
-    // The auto-click poll reuses the existing short script/render timeout budget.
+  it("never auto-redirects away from Paso 3 — leaving is always donor-initiated", () => {
+    // Exactly one window.location.href assignment exists in the wizard: the manual
+    // "Continúe aquí" backup button under the embed.
+    const assignments = donarSource.match(/window\.location\.href\s*=/g) ?? [];
+    expect(assignments).toHaveLength(1);
+    const at = donarSource.indexOf("window.location.href =");
+    expect(donarSource.slice(at, at + 260)).toContain("¿No se muestra el formulario? Continúe aquí");
+    // The slow path renders a prominent hosted-checkout anchor, not a redirect.
+    expect(donarSource).toContain("DONAR_WIDGET_FALLBACK_CTA");
+    expect(donarSource).toContain("donar-widget-fallback");
+    expect(DONAR_WIDGET_FALLBACK_CTA).toBe("Continuar en Wompi");
+  });
+
+  it("shows a loading indicator until the embedded checkout loads", () => {
+    // handoff: "loading" (spinner) → "ready" via the iframe's onLoad; if the render
+    // budget (DONAR_SCRIPT_TIMEOUT_MS) elapses first, "delayed" adds the hosted CTA
+    // while the iframe keeps loading underneath.
+    expect(donarSource).toContain("DONAR_WIDGET_LOADING_MESSAGE");
+    expect(donarSource).toContain("DONAR_WIDGET_DELAYED_MESSAGE");
+    expect(donarSource).toContain("onLoad");
     expect(donarSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
+    expect(DONAR_WIDGET_LOADING_MESSAGE).toContain("Preparando su entrega");
+    expect(DONAR_WIDGET_DELAYED_MESSAGE).toContain("Wompi");
+    // Spinner is announced to assistive tech and styled monochrome in CSS.
+    expect(donarSource).toContain('role="status"');
+    expect(stylesSource).toContain(".donar-spinner");
+    // Reduced-motion users get a static indicator, not a spinning ring.
+    const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
+    expect(reducedMotion).toBeGreaterThan(-1);
+    expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
-  it("guards the auto-click with a ref so it never double-fires", () => {
-    // A dedicated ref (initialized false) latches once the button is clicked.
-    expect(donarSource).toContain("autoClickedRef");
-    expect(donarSource).toContain("useRef(false)");
-    // The guard is checked before clicking and set true after, so re-observing the
-    // (still-present) button does not re-open the modal.
-    const guardCheck = donarSource.indexOf("autoClickedRef.current");
-    expect(guardCheck).toBeGreaterThan(-1);
+  it("preconnects to the checkout host while the donor fills the form", () => {
+    // DNS + TLS to pagos.wompi.sv are warmed on wizard mount, so the Paso 3 embed
+    // skips connection setup on mobile networks.
+    expect(donarSource).toContain('"preconnect"');
+    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    expect(DONAR_WOMPI_CHECKOUT_ORIGIN).toBe("https://pagos.wompi.sv");
   });
 
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
-    expect(donarSource).toContain("¿No se abre el pago? Continúe aquí");
+    expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {
@@ -836,14 +972,14 @@ describe("two-door landing copy", () => {
 
   it("labels the two doors, their tax-receipt descriptors, and the change-option link", () => {
     expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
-    expect(DONAR_DOOR_SV_DESC).toBe("Comprobante fiscal salvadoreño (CDE)");
+    expect(DONAR_DOOR_SV_DESC).toBe("Comprobante de donación DTE salvadoreño");
     expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
-    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo deducible de impuestos en EE. UU.");
+    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501(c)(3))");
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 
   it("tells EE. UU. donors the payment form is in English", () => {
-    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario de pago se muestra en inglés.");
+    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario se muestra en inglés.");
   });
 });
 
@@ -862,18 +998,19 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
-  it("draws the SV door as the church's own flag asset over a globe, US as a circle-flag SVG", () => {
+  it("draws the SV door as the official flag asset over a globe, US as a circle-flag SVG", () => {
     // The US door keeps its inlined circle-flag SVG (MIT), verbatim.
     expect(landingSource).toContain("<svg");
     expect(landingSource).toContain("#d80027");
     expect(landingSource).toContain('mask id="us-flag-a"');
-    // The SV door now uses the church's own flag PNG (imported asset) inside the
-    // globe SVG via <image>, NOT the circle-flags sv.svg. The SV circle-flag
-    // mask is gone. (#0052b4 legitimately survives as the US flag's canton blue.)
-    expect(landingSource).toContain("svFlag");
+    // The SV door uses the OFFICIAL flag (flag-icons sv 1:1, full escudo) as a
+    // circle-cropped <image> asset — internal SVG ids stay encapsulated.
+    expect(donarSource).toContain('from "./assets/sv-flag.svg"');
+    expect(landingSource).toContain("href={svFlag}");
     expect(landingSource).toContain("<image");
+    expect(landingSource).toContain('clipPath id="sv-flag-circle"');
+    // The simplified circle-flags inline paths are gone.
     expect(landingSource).not.toContain('mask id="sv-flag-a"');
-    // The SV circle-flag's distinctive fills (yellow triangle / green band) are gone.
     expect(landingSource).not.toContain("#ffda44");
     expect(landingSource).not.toContain("#6da544");
     // The old hand-drawn palette must still be gone.

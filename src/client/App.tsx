@@ -42,7 +42,7 @@ import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
@@ -231,11 +231,6 @@ export function App() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
-  const [contingencyInput, setContingencyInput] = useState<ContingencyOpenInput>({
-    environment: "00",
-    tipoContingencia: "2",
-    reason: "Ministerio de Hacienda no disponible"
-  });
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
@@ -750,35 +745,6 @@ export function App() {
     }
   }
 
-  async function openContingency() {
-    const reason = contingencyInput.reason.trim();
-    if (!reason) {
-      setToast("Ingrese motivo de contingencia");
-      return;
-    }
-    await runAction("contingency-open", async () => {
-      const result = await api<{ contingency: ContingencyState }>("/api/contingency/open", token, {
-        method: "POST",
-        body: {
-          environment: contingencyInput.environment,
-          tipoContingencia: Number(contingencyInput.tipoContingencia),
-          reason
-        }
-      });
-      setContingency(result.contingency);
-      setToast(result.contingency.active ? "Contingencia abierta" : "Contingencia actualizada");
-      await refresh();
-    });
-  }
-
-  async function runContingencySweep() {
-    await runAction("contingency-sweep", async () => {
-      const result = await api<{ transmitted: number; periodId: string | null }>("/api/contingency/sweep", token, { method: "POST" });
-      setToast(result.periodId ? `Barrido ejecutado: ${result.transmitted} DTE aceptado(s)` : "Sin contingencia abierta");
-      await refresh();
-    });
-  }
-
   async function refreshContingency() {
     await runAction("contingency-refresh", refresh);
   }
@@ -881,10 +847,6 @@ export function App() {
             <p>{viewSubtitle(view)}</p>
           </div>
           <div className="topbar-actions">
-            <div className={contingency?.active ? "contingency-banner open" : "contingency-banner"}>
-              <Clock size={16} />
-              {contingency?.active ? `Contingencia ${statusLabel(contingency.active.status).toLowerCase()}` : "Sin contingencia abierta"}
-            </div>
             <button className="icon-button" onClick={logout} title="Cerrar sesión">
               <LogOut size={17} />
             </button>
@@ -919,6 +881,7 @@ export function App() {
                   <select value={status} onChange={(event) => setStatus(event.target.value)}>
                     <option value="">Todos</option>
                     <option value="ACCEPTED">Aceptados</option>
+                    <option value="TRANSMISSION_PENDING">En trámite</option>
                     <option value="CONTINGENCY_PENDING">Contingencia</option>
                     <option value="REJECTED">Rechazados</option>
                     <option value="FAILED">Fallidos</option>
@@ -970,12 +933,7 @@ export function App() {
         {view === "contingency" && (
           <ContingencyPanel
             state={contingency}
-            input={contingencyInput}
             busy={busy}
-            canManage={can(user, "ADMIN")}
-            onInputChange={setContingencyInput}
-            onOpen={openContingency}
-            onSweep={runContingencySweep}
             onRefresh={refreshContingency}
           />
         )}
@@ -1138,24 +1096,13 @@ export function App() {
 
 function ContingencyPanel({
   state,
-  input,
   busy,
-  canManage,
-  onInputChange,
-  onOpen,
-  onSweep,
   onRefresh
 }: {
   state: ContingencyState | null;
-  input: ContingencyOpenInput;
   busy: string;
-  canManage: boolean;
-  onInputChange: (input: ContingencyOpenInput) => void;
-  onOpen: () => Promise<void>;
-  onSweep: () => Promise<void>;
   onRefresh: () => Promise<void>;
 }) {
-  const active = state?.active ?? null;
   const pendingDocuments = state?.pendingDocuments ?? [];
   const batches = state?.batches ?? [];
   const batchLines = state?.batchLines ?? [];
@@ -1175,102 +1122,26 @@ function ContingencyPanel({
     batchPending: 0,
     batchRejected: 0
   };
-  const deadline = contingencyDeadline(active);
 
   return (
     <section className="contingency-dashboard">
-      <div className="contingency-grid">
-        <div className="contingency-panel">
-          <div className="panel-head">
-            <div>
-              <h2>Estado actual</h2>
-              <p>{active ? active.reason : "No hay periodo abierto."}</p>
-            </div>
-            <StatusPill status={active?.status ?? "CLOSED"} />
+      <div className="contingency-panel">
+        <div className="panel-head">
+          <div>
+            <h2>Historial de contingencias (solo lectura)</h2>
+            <p>
+              La normativa no contempla contingencia para el CDE: la tabla de validaciones del
+              evento de contingencia (campo 35) excluye el tipo 15. Cuando el Ministerio de
+              Hacienda no está disponible, el CDE se emite con forma normal, queda
+              «En trámite», el donante recibe de inmediato su comprobante transitorio y el
+              sistema reintenta la transmisión cada 15 minutos hasta obtener el Sello de
+              Recepción. Esta sección conserva los periodos históricos.
+            </p>
           </div>
-          <dl className="contingency-facts">
-            <dt>Ambiente</dt>
-            <dd>{active ? environmentLabel(active.environment) : "—"}</dd>
-            <dt>Tipo</dt>
-            <dd>{active ? contingencyTypeLabel(active.tipo_contingencia) : "—"}</dd>
-            <dt>Inicio</dt>
-            <dd>{formatDateTime(active?.started_at)}</dd>
-            <dt>Cierre</dt>
-            <dd>{formatDateTime(active?.ended_at)}</dd>
-            <dt>Sello evento</dt>
-            <dd className="mono">{active?.event_sello ? shortCode(active.event_sello) : "Pendiente"}</dd>
-          </dl>
-          <div className={`contingency-deadline ${deadline.tone}`}>
-            <Clock size={18} />
-            <div>
-              <strong>{deadline.title}</strong>
-              <span>{deadline.detail}</span>
-            </div>
-          </div>
+          <button className="icon-button" onClick={() => void onRefresh()} disabled={busy === "contingency-refresh"} title="Actualizar">
+            <RefreshCw size={17} />
+          </button>
         </div>
-
-        <form
-          className="contingency-panel contingency-form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void onOpen();
-          }}
-        >
-          <div className="panel-head">
-            <div>
-              <h2>Apertura manual</h2>
-              <p>{canManage ? "Abra un periodo cuando el Ministerio de Hacienda no esté disponible; indique el tipo y el motivo." : "Requiere rol Administrador o Propietario."}</p>
-            </div>
-            <Cloud size={20} />
-          </div>
-          <div className="contingency-form-grid">
-            <label>
-              <span>Ambiente</span>
-              <select
-                value={input.environment}
-                disabled={!canManage || Boolean(active)}
-                onChange={(event) => onInputChange({ ...input, environment: event.target.value as "00" | "01" })}
-              >
-                <option value="00">Pruebas</option>
-                <option value="01">Producción</option>
-              </select>
-            </label>
-            <label>
-              <span>Tipo</span>
-              <select
-                value={input.tipoContingencia}
-                disabled={!canManage || Boolean(active)}
-                onChange={(event) => onInputChange({ ...input, tipoContingencia: event.target.value })}
-              >
-                {contingencyTypeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <label className="span-2">
-              <span>Motivo</span>
-              <textarea
-                value={input.reason}
-                disabled={!canManage || Boolean(active)}
-                onChange={(event) => onInputChange({ ...input, reason: event.target.value })}
-              />
-            </label>
-          </div>
-          <div className="contingency-actions">
-            <button type="button" onClick={() => void onRefresh()} disabled={busy === "contingency-refresh"}>
-              <RefreshCw size={16} />
-              Actualizar
-            </button>
-            <button type="button" onClick={() => void onSweep()} disabled={!active || busy === "contingency-sweep"}>
-              <RefreshCw size={16} />
-              Procesar pendientes
-            </button>
-            <button className="primary" type="submit" disabled={!canManage || Boolean(active) || busy === "contingency-open"}>
-              <CheckCircle2 size={16} />
-              Abrir contingencia
-            </button>
-          </div>
-        </form>
       </div>
 
       <div className="stats contingency-stats">
@@ -1284,8 +1155,8 @@ function ContingencyPanel({
       <section className="contingency-panel">
         <div className="panel-head">
           <div>
-            <h2>CDE pendientes</h2>
-            <p>Comprobantes emitidos localmente que se transmitirán cuando el Ministerio de Hacienda acepte el evento.</p>
+            <h2>CDE pendientes (histórico)</h2>
+            <p>Comprobantes que quedaron en estado de contingencia bajo el modelo anterior; requieren reemisión manual si aún no tienen sello.</p>
           </div>
           <FileText size={20} />
         </div>
@@ -1322,8 +1193,8 @@ function ContingencyPanel({
       <section className="contingency-panel">
         <div className="panel-head">
           <div>
-              <h2>Lotes del Ministerio de Hacienda</h2>
-            <p>Lotes de CDE enviados durante la contingencia y el resultado de cada consulta.</p>
+              <h2>Lotes del Ministerio de Hacienda (histórico)</h2>
+            <p>Lotes de CDE enviados bajo el modelo anterior de contingencia y el resultado de cada consulta.</p>
           </div>
           <FileText size={20} />
         </div>
@@ -1442,7 +1313,7 @@ function ContingencyPanel({
         <div className="panel-head">
           <div>
             <h2>Auditoría del periodo</h2>
-            <p>Acciones registradas para la contingencia activa.</p>
+            <p>Acciones registradas para los periodos históricos de contingencia.</p>
           </div>
           <History size={20} />
         </div>
@@ -3410,7 +3281,7 @@ function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed
       <div className="stats">
         <Metric label="Aceptados" value={counts.ACCEPTED ?? 0} tone="ok" />
         {fallidos}
-        <Metric label="Contingencia" value={counts.CONTINGENCY_PENDING ?? 0} tone="warn" />
+        <Metric label="En trámite" value={counts.TRANSMISSION_PENDING ?? 0} tone="warn" />
         <Metric label="Invalidados" value={counts.INVALIDATED ?? 0} tone="neutral" />
       </div>
     </>
@@ -3443,7 +3314,7 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
         <tbody>
           {documents.map((document) => (
             <tr key={document.id} className={selectedId === document.id ? "selected" : ""} onClick={() => onSelect(document.id)}>
-              <td><StatusPill status={document.status} /></td>
+              <td><StatusPill status={documentDisplayStatus(document)} /></td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
               <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
               <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
@@ -3527,12 +3398,12 @@ function DetailPanel({
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const emailEditing = emailEditingId === selected.id;
-  const canRetry = isRetryableDocumentStatus(selected.status);
+  const canRetry = isRetryableDocument(selected);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
   return (
     <aside className="detail-panel">
       <div className="detail-head">
-        <StatusPill status={selected.status} />
+        <StatusPill status={documentDisplayStatus(selected)} />
         <strong>{selected.numero_control}</strong>
       </div>
       {donorDataVerified && (
@@ -3942,7 +3813,7 @@ function RoleHelpTooltip() {
         <strong>Permisos por rol</strong>
 	        <span><b>{roleLabel("VIEWER")}</b>: consulta documentos, auditoría y archivos PDF/JSON.</span>
 	        <span><b>{roleLabel("OPERATOR")}</b>: genera, reenvía, reintenta, invalida y ejecuta barridos.</span>
-	        <span><b>{roleLabel("ADMIN")}</b>: administra usuarios, exportaciones y apertura de contingencia.</span>
+	        <span><b>{roleLabel("ADMIN")}</b>: administra usuarios y exportaciones.</span>
 	        <span><b>{roleLabel("OWNER")}</b>: todo lo anterior y gestión de credenciales.</span>
       </span>
     </span>
@@ -4006,8 +3877,14 @@ function invalidationToast(result: { accepted?: boolean; result?: { estado?: str
   return "Invalidación enviada al Ministerio de Hacienda";
 }
 
-function isRetryableDocumentStatus(status: string): boolean {
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+function isRetryableDocument(document: Pick<DteDocument, "status" | "transmission_deferred_at">): boolean {
+  // Espejo del worker: un CDE diferido (SIGNED + transmission_deferred_at) no se
+  // reintenta manualmente — el cron de 15 minutos es el dueño del reintento. Un
+  // SIGNED plano (sin marcador) sigue siendo reintetable.
+  if (document.status === "SIGNED" && document.transmission_deferred_at) {
+    return false;
+  }
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
 }
 
 function isValidEmail(value: string): boolean {
@@ -4049,8 +3926,10 @@ function isApiError(error: unknown): error is ApiError {
 }
 
 function countByStatus(documents: DteDocument[]): Record<string, number> {
+  // Cuenta por estado VISUAL: los diferidos (SIGNED + marcador) suman a "En trámite".
   return documents.reduce<Record<string, number>>((acc, document) => {
-    acc[document.status] = (acc[document.status] ?? 0) + 1;
+    const status = documentDisplayStatus(document);
+    acc[status] = (acc[status] ?? 0) + 1;
     return acc;
   }, {});
 }
@@ -4071,7 +3950,7 @@ function delay(ms: number): Promise<void> {
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
   failures: "CDE con errores o rechazos que requieren su atención.",
-  contingency: "Contingencias ante el Ministerio de Hacienda: eventos, CDE pendientes y plazos.",
+  contingency: "Historial de contingencias (solo lectura): la normativa no contempla contingencia para el CDE.",
   audit: "Historial de todas las acciones realizadas en el panel.",
   users: "Cree cuentas y asigne roles de acceso al panel.",
   credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo.",
@@ -4090,42 +3969,6 @@ export function documentListEmptyMessage(view: "documents" | "failures", query: 
 function contingencyTypeLabel(value: number | string): string {
   const option = contingencyTypeOptions.find((item) => item.value === String(value));
   return option?.label ?? `${value}`;
-}
-
-function contingencyDeadline(active: ContingencyState["active"]): { title: string; detail: string; tone: "idle" | "warn" | "ok" | "bad" } {
-  if (!active) {
-    return {
-      title: "Sin ventana activa",
-      detail: "No hay CDE pendientes bajo contingencia.",
-      tone: "idle"
-    };
-  }
-  if (active.status === "FAILED") {
-    return {
-      title: "Requiere revisión",
-      detail: "El periodo está marcado como fallido.",
-      tone: "bad"
-    };
-  }
-  if (active.event_sello && active.transmit_deadline_at) {
-    return {
-      title: "Evento sellado por el Ministerio de Hacienda",
-      detail: `Plazo para transmitir los CDE pendientes: ${formatDateTime(active.transmit_deadline_at)} hora El Salvador.`,
-      tone: "ok"
-    };
-  }
-  if (active.event_deadline_at) {
-    return {
-      title: "Evento pendiente de sello",
-      detail: `El evento vence el ${formatDateTime(active.event_deadline_at)} hora El Salvador.`,
-      tone: "warn"
-    };
-  }
-  return {
-    title: "Contingencia abierta",
-    detail: "Sin vencimiento final hasta cierre operativo del periodo.",
-    tone: "warn"
-  };
 }
 
 function formatDateTime(value?: string | null): string {
@@ -4205,12 +4048,6 @@ const contingencyTypeOptions = [
   { value: "4", label: "4 - Firmador no disponible" },
   { value: "5", label: "5 - Otro" }
 ];
-
-interface ContingencyOpenInput {
-  environment: "00" | "01";
-  tipoContingencia: string;
-  reason: string;
-}
 
 interface AdvancedCdeFormInput {
   donorName: string;

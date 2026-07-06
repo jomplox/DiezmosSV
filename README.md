@@ -71,12 +71,12 @@ auditable, and cheap to run.
 | ✍️ **Native signing** | Signs DTE JSON in the Worker with WebCrypto as a compact **RS512 JWS** — no external JVM signer required. |
 | 🏛️ **MH transmission** | Authenticates with MH, caches the token in D1, transmits to *Recepción*, and records the **Sello de recepción**. |
 | 📄 **Donor receipt** | Generates a PDF *representación gráfica* with a QR code and emails it (plus the signed JSON) through a configurable provider. |
-| 🌩️ **Resilient by design** | Handles MH-outage **contingency** state and retries transmission on a 15-minute cron sweep. A dead-letter queue plus a stalled-event sweep self-heal issuance messages that exhaust their retries. |
+| 🌩️ **Resilient by design** | On an MH outage the CDE is signed normally, the donor gets an immediate **transitorio** receipt, and a 15-minute cron retries transmission until MH seals it (deferred transmission — the contingency evento excludes tipo 15 per the Anexo, field 35). A dead-letter queue plus a stalled-event sweep self-heal issuance messages that exhaust their retries. |
 | ⚖️ **Legal invalidation** | Supports signed invalidation events with the CDE legal-window check baked in, and emails the donor a branded notice when MH accepts the invalidation. |
-| 🖥️ **Admin panel** | React SPA for documents, failures, contingency, audit log, users, exports, resend, retry, and invalidation. |
+| 🖥️ **Admin panel** | React SPA for documents, failures, contingency history (read-only), audit log, users, exports, resend, retry, and invalidation. |
 | 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and rate-limited auth endpoints. |
 | 📬 **Branded email** | All donor email (receipt, invalidation notice, password reset) is sent as branded HTML with configurable templates. |
-| 🚨 **Operational alerting** | Emails a configurable address on emission failures, opened contingencies, stalled events, and MH signer-certificate expiry (30/14/3-day warnings). |
+| 🚨 **Operational alerting** | Emails a configurable address on emission failures, MH unavailability (deferred-transmission backlog), stalled events, and MH signer-certificate expiry (30/14/3-day warnings). |
 | 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. |
 
 > 💸 **Run it before you have credentials.** The default (local) `wrangler.toml` config sets
@@ -106,7 +106,7 @@ flowchart TB
         Q --> Pipe["Issuance pipeline"]
         Q -. exhausted retries .-> DLQ[["Dead-letter queue"]]
         Pipe --> Build["Build CDE JSON<br/>schema validate · RS512 sign"]
-        Cron{{"Cron every 15 min<br/>contingency sweep · stalled-event sweep<br/>cert-expiry check"}} --> Pipe
+        Cron{{"Cron every 15 min<br/>deferred-transmission retry · stalled-event sweep<br/>cert-expiry check"}} --> Pipe
         Retention{{"Cron monthly<br/>R2 retention export"}} --> DB
         DB[("D1 database")]
     end
@@ -138,7 +138,7 @@ licensed OTFs are never committed; only the generated woff2 subsets are.
 | **D1** | `DB` | Wompi events, DTE documents, signed events, tokens, users, sessions, audit log, contingency periods, app settings. |
 | **Queues** | `ISSUANCE_QUEUE` → `diezmossv-local-issuance-example` (+ `-dlq`) | Async issuance triggered by approved Wompi webhooks (batch ≤ 10, up to 3 retries). Messages that exhaust retries land in a dead-letter queue that audits and alerts on each one. |
 | **R2** | `ARCHIVE` → `example-worker-archive-*` | Monthly legal-retention export bucket (NDJSON snapshots + SHA-256 manifest). |
-| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min: contingency sweep, stalled-event sweep, and signer-certificate expiry check. Monthly (09:00 UTC on the 1st): R2 retention export. |
+| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min: deferred-transmission retry, stalled-event sweep, and signer-certificate expiry check. Monthly (09:00 UTC on the 1st): R2 retention export. |
 | **Static assets** | `ASSETS` → `./dist/client` | React admin panel served from the Worker with SPA fallback. |
 
 `compatibility_date = 2026-06-02` with `nodejs_compat` enabled for crypto operations. `APP_ORIGIN`
@@ -247,7 +247,6 @@ The unit tests cover, among other areas:
 
 - Wompi HMAC verification
 - CDE schema generation
-- Contingency event schema generation
 - Native RS512 signing and verification, plus certificate-expiry parsing
 - CDE invalidation legal-window calculation
 - Auth rate limiting, password reset, and branded email templates
@@ -539,7 +538,7 @@ its detail panel.
 
 ## 👥 Admin panel & roles
 
-The React admin panel handles documents, failures, contingency status, the audit log, user
+The React admin panel handles documents, failures, the read-only contingency history, the audit log, user
 management, F960 exports, per-document actions (resend, retry, invalidation), and — for owners — a
 **Configuración** workspace covering MH/Wompi/email credentials, the active emission environment,
 email templates, and the operational alert address. No CLI-only operations. The Spanish navigation
@@ -547,9 +546,9 @@ reads: Documentos, Fallos, Contingencia, Auditoría, Usuarios, Exportar, Configu
 
 | Role | Capabilities |
 |---|---|
-| `VIEWER` (Consulta) | Read documents, contingency, and the audit log. |
-| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures, run the contingency sweep, initiate invalidation. |
-| `ADMIN` (Administrador) | Also: manage users and roles, open contingency, and run F960 exports. |
+| `VIEWER` (Consulta) | Read documents, the contingency history, and the audit log. |
+| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures, initiate invalidation. |
+| `ADMIN` (Administrador) | Also: manage users and roles, and run F960 exports. |
 | `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, alert address, and retention export. |
 
 > 📖 For a task-oriented walkthrough in Spanish, see the [operator runbook](./docs/runbook-operador.md).
@@ -588,13 +587,13 @@ stateDiagram-v2
 |---|---|
 | `wompi_events` | Incoming Wompi webhooks; dedup by `transaction_id`. |
 | `dte_documents` | Issued CDEs: status, plain JSON, signed JWS, MH seal, donor info. |
-| `dte_events` | Invalidation and contingency events (one-to-many with documents). |
-| `contingency_periods` | Windows when MH was unavailable. |
+| `dte_events` | Invalidation events, plus historical contingency events (one-to-many with documents). |
+| `contingency_periods` | Historical MH-outage windows (read-only; new emissions defer instead). |
 | `audit_logs` | Immutable action log: actor, action, entity, metadata. |
 | `mh_tokens` | Cached MH auth tokens, per environment. |
 | `document_sequences` | Control-number counters per environment/prefix. |
 | `email_deliveries` | Email send records, provider responses, and PDF/JSON evidence hashes. |
-| `contingency_batches` · `contingency_batch_lines` | MH contingency batch submissions and per-CDE results. |
+| `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |
 
@@ -607,8 +606,12 @@ Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 
 ## ⚖️ Compliance notes
 
-- CDE is transmitted normally **before** delivery to the donor, except during contingency.
-- Contingency documents are sent as transitory and queued for later MH transmission.
+- CDE is transmitted normally **before** delivery to the donor, except while MH is unavailable.
+- The contingency evento's validation table (Anexo, field 35) excludes tipo 15, so a CDE is **never**
+  issued in contingency. During an MH outage the CDE is signed in its normal shape, marked
+  `TRANSMISSION_PENDING` ("En trámite"), the donor immediately receives a clearly-labeled
+  **transitorio** receipt, and the 15-minute cron retries transmission; on acceptance the donor
+  receives the definitive receipt with the Sello de Recepción.
 - Invalidation is a **signed event**, not a database flag, and the donor is emailed a branded notice
   once MH accepts it.
 - CDE invalidation is only allowed through the **tenth business day of the month following the
@@ -642,7 +645,7 @@ a production integration. Every church must still provide its own:
 - Wompi webhook secret
 - Cloudflare Email Service sender domain and `EMAIL_FROM`
 - Emisor configuration
-- Responsible-person data for invalidation and contingency events
+- Responsible-person data for invalidation events
 - A legal/finance decision for donors with incomplete identification
 
 ---

@@ -6,20 +6,24 @@ import { isValidNitFormat } from "../shared/nit";
 // import the pure helpers. The two routes render WITHOUT a session and never
 // touch the auth bootstrap flow (see App.tsx path branching).
 
-export const DONAR_WOMPI_SCRIPT_URL = "https://pagos.wompi.sv/js/wompi.pagos.js";
 export const DONAR_INTENT_PATH = "/api/donations/intent";
 
-// Poll the intent status every ~5s while the widget modal is open; stop after
-// ~3 minutes with a neutral closing message (covers slow MH, contingency mode,
-// and abandoned checkouts — never implies failure).
+// The datos-completion endpoint for a minted draft intent. The wizard mints the Wompi
+// link in the background when the SV donor enters Paso 2 (POST DONAR_INTENT_PATH with
+// only { amount, giftType }), then attaches the fiscal data here on Paso 2 submit with
+// a fast D1-only call, so Paso 3 renders without waiting on Wompi.
+export function donarDatosPath(intentId: string): string {
+  return `${DONAR_INTENT_PATH}/${intentId}/datos`;
+}
+
+// Poll the intent status every ~5s while the embedded checkout is open; stop after
+// ~3 minutes with a neutral closing message (covers slow MH, deferred
+// transmission while MH is down, and abandoned checkouts — never implies failure).
 export const DONAR_POLL_INTERVAL_MS = 5_000;
 export const DONAR_POLL_TIMEOUT_MS = 180_000;
-// If the Wompi script never loads or the widget button never renders within this
-// window, fall back to the full-page hosted flow (window.location.href).
+// If the embedded checkout iframe has not loaded within this window, surface the
+// hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
-// Poll the widget host this often (up to DONAR_SCRIPT_TIMEOUT_MS) for the button
-// Wompi injects, then auto-click it once so the payment modal opens immediately.
-export const DONAR_AUTOCLICK_INTERVAL_MS = 150;
 
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;
@@ -86,7 +90,7 @@ export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
 export const GIVEBUTTER_FREQ_ONCE_LABEL = "Única";
 export const GIVEBUTTER_FREQ_MONTHLY_LABEL = "Mensual";
 // Shown under the EE. UU. door's Givebutter block: the widget is English-only.
-export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en inglés.";
+export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario se muestra en inglés.";
 
 // ── Two-door donation landing ───────────────────────────────────────────────
 //
@@ -104,9 +108,9 @@ export const DONAR_LANDING_UNIFIER =
   "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador.";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
-export const DONAR_DOOR_SV_DESC = "Comprobante fiscal salvadoreño (CDE)";
+export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";
 export const DONAR_DOOR_EEUU_LABEL = "EE. UU.";
-export const DONAR_DOOR_EEUU_DESC = "Recibo deducible de impuestos en EE. UU.";
+export const DONAR_DOOR_EEUU_DESC = "Recibo oficial deducible de impuestos (IRS 501(c)(3))";
 export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
 
 // Optional deep-link: /donar?ruta=sv or ?ruta=eeuu preselects a door. Read once
@@ -183,9 +187,22 @@ export function givebutterHostedUrl(input: { amount: string; monthly: boolean })
 
 export const DONAR_THANK_YOU_TITLE = "Dios le bendiga. Su aportación fue recibida.";
 export const DONAR_THANK_YOU_BODY =
-  "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme.";
+  "Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme.";
 export const DONAR_FALLBACK_MESSAGE =
-  "Si completó el pago, recibirá su comprobante (CDE) por correo electrónico. Puede cerrar esta página.";
+  "Si completó su entrega, recibirá su comprobante de donación por correo electrónico. Puede cerrar esta página.";
+
+// Paso 3 handoff states: spinner copy while the embedded checkout prepares, and the
+// manual hosted-checkout CTA when it takes longer than the render budget. Leaving the
+// page is always donor-initiated — never an automatic redirect. Wording rule for every
+// donor-facing string: these are diezmos y ofrendas — an ENTREGA, never a "pago"
+// (Wompi is still named where it builds trust in the secure card step).
+export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando su entrega segura…";
+export const DONAR_WIDGET_DELAYED_MESSAGE =
+  "Esto está tardando más de lo esperado. Puede continuar su entrega en la página segura de Wompi:";
+export const DONAR_WIDGET_FALLBACK_CTA = "Continuar en Wompi";
+
+// Preconnect target for the Paso 3 embed: DNS + TLS are warmed on wizard mount.
+export const DONAR_WOMPI_CHECKOUT_ORIGIN = "https://pagos.wompi.sv";
 
 // postMessage payload the thank-you page sends to its opener (the /donar view)
 // when it detects it is running inside the widget iframe modal.
@@ -359,6 +376,43 @@ export function donationIntentBody(form: DonationFormInput): Record<string, unkn
     pais: form.foreignResident ? form.pais : undefined,
     complemento: form.complemento.trim()
   };
+}
+
+// The DRAFT create body fired in the background on the SV Paso 1→2 transition: only
+// the two values known then (amount + gift type). The donor data is attached later via
+// the datos endpoint. giftType is always present on the SV path (Diezmo preselected).
+export function donationDraftBody(form: Pick<DonationFormInput, "amount" | "giftType">): Record<string, unknown> {
+  return {
+    amount: form.amount.trim(),
+    giftType: form.giftType || undefined
+  };
+}
+
+// The datos-completion body: the donor's fiscal data ONLY (no amount, no giftType — the
+// draft was minted with those and the server must not move them). Same field mapping as
+// donationIntentBody minus amount/giftType, so server validation is identical.
+export function donationDatosBody(form: DonationFormInput): Record<string, unknown> {
+  return {
+    donorDocumentType: form.donorDocumentType,
+    donorDocument: form.donorDocument.trim(),
+    donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,
+    donorPhone: form.donorPhone.trim() || undefined,
+    departamento: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.departamento,
+    municipio: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.municipio,
+    distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
+    pais: form.foreignResident ? form.pais : undefined,
+    complemento: form.complemento.trim()
+  };
+}
+
+// Whether a background-minted draft still matches the amount + gift type the donor now
+// has in the form. If the donor edited either via Atrás/Editar, the draft is stale and
+// must be abandoned (its link expires on the sweep) in favor of a fresh full POST.
+export function draftMatchesForm(
+  draft: { amount: string; giftType: DonarGiftType | "" },
+  form: Pick<DonationFormInput, "amount" | "giftType">
+): boolean {
+  return draft.amount === form.amount.trim() && draft.giftType === form.giftType;
 }
 
 // The widget consumes urlEnlaceLargo (which already carries a query string), so

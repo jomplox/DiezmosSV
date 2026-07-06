@@ -6,12 +6,18 @@ import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
+  applyIntentDatos,
   clientIpFrom,
   createDonationIntent,
+  createDraftDonationIntent,
+  IntentDatosError,
   IntentLinkError,
   intentThrottleSinceIso,
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
+  isDraftIntentBody,
+  validateDatosInput,
+  validateDraftIntentInput,
   validateIntentInput
 } from "./services/donations";
 import { EmailService } from "./services/email";
@@ -27,7 +33,7 @@ import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRe
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
-import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
+import type { DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { timingSafeEqual } from "./utils/encoding";
 import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
@@ -101,9 +107,9 @@ export default {
     }
     const pipeline = new IssuancePipeline(env);
     try {
-      await pipeline.runContingencySweep();
+      await pipeline.retryDeferredTransmissions();
     } catch (error) {
-      console.error("Contingency sweep failed", error);
+      console.error("Deferred transmission retry failed", error);
     }
     try {
       await pipeline.sweepStalledWompiEvents();
@@ -257,7 +263,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
   }
 
-  // Public donor checkout: unauthenticated, runs before any role check.
+  // Public donor checkout: unauthenticated, runs before any role check. A body with
+  // only { amount, giftType } is a DRAFT create (the wizard mints the Wompi link in the
+  // background on Paso 1→2); a body carrying donor data is a full create (the fallback
+  // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
     const clientIp = clientIpFrom(request);
     const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
@@ -265,10 +274,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Short-circuit before any validation/persistence so a throttled attempt is cheap.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
+    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const draft = isDraftIntentBody(body);
     let input;
     try {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-      input = validateIntentInput(body);
+      input = draft ? validateDraftIntentInput(body) : validateIntentInput(body);
     } catch (error) {
       if (error instanceof IntentValidationError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
@@ -276,12 +286,44 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     try {
-      const created = await createDonationIntent(env, repo, input, clientIp);
+      const created = draft
+        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp)
+        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp);
       return jsonResponse(created, { status: 201 });
     } catch (error) {
       if (error instanceof IntentLinkError) {
         // Intent stays PENDING and expires harmlessly on the cron sweep.
         return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
+      }
+      throw error;
+    }
+  }
+
+  // Public datos completion: attaches the donor's fiscal data to a minted draft with a
+  // fast D1-only call (no Wompi). Same per-IP throttle as create (cheap but public).
+  const intentDatosMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/datos$/);
+  if (intentDatosMatch && request.method === "POST") {
+    const clientIp = clientIpFrom(request);
+    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
+    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    let data;
+    try {
+      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      data = validateDatosInput(body);
+    } catch (error) {
+      if (error instanceof IntentValidationError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+      }
+      throw error;
+    }
+    try {
+      await applyIntentDatos(repo, intentDatosMatch[1], data);
+      return jsonResponse({ ok: true });
+    } catch (error) {
+      if (error instanceof IntentDatosError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
       }
       throw error;
     }
@@ -560,52 +602,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ audit: await repo.listAudit(url.searchParams.get("entityType") ?? undefined, url.searchParams.get("entityId") ?? undefined) });
   }
 
+  // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
+  // Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
+  // así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
+  // emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
+  // minutos la reintenta.
   if (url.pathname === "/api/contingency" && request.method === "GET") {
     requireRole(user, "VIEWER");
     return jsonResponse({ contingency: await contingencyState(repo) });
-  }
-
-  if (url.pathname === "/api/contingency/open" && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    const body = (await request.json().catch(() => ({}))) as { environment?: unknown; tipoContingencia?: unknown; reason?: unknown };
-    const environment = body.environment === "01" ? "01" : body.environment === "00" ? "00" : null;
-    if (!environment) {
-      return jsonResponse({ error: "invalid_contingency_environment" }, { status: 400 });
-    }
-    const tipoContingencia = Number(body.tipoContingencia);
-    if (!Number.isInteger(tipoContingencia) || tipoContingencia < 1 || tipoContingencia > 5) {
-      return jsonResponse({ error: "invalid_contingency_type" }, { status: 400 });
-    }
-    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
-    if (!reason) {
-      return jsonResponse({ error: "missing_contingency_reason", message: "Configure el tipo y motivo de contingencia antes de emitir DTE en contingencia." }, { status: 400 });
-    }
-    const existing = await repo.getOpenContingency(environment);
-    const periodId = await repo.openContingency(environment, reason, tipoContingencia);
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: existing ? "CONTINGENCY_OPEN_REUSED" : "CONTINGENCY_OPENED",
-      entityType: "contingency_period",
-      entityId: periodId,
-      summary: reason,
-      metadata: { environment, tipoContingencia }
-    });
-    if (!existing) {
-      await sendOperationalAlert(env, repo, {
-        kind: "CONTINGENCY_OPENED",
-        title: "Contingencia abierta",
-        detail: `Se abrió un período de contingencia manualmente: ${reason}`,
-        entityType: "contingency_period",
-        entityId: periodId
-      });
-    }
-    return jsonResponse({ contingency: await contingencyState(repo) }, { status: existing ? 200 : 201 });
-  }
-
-  if (url.pathname === "/api/contingency/sweep" && request.method === "POST") {
-    requireRole(user, "OPERATOR");
-    return jsonResponse(await new IssuancePipeline(env).runContingencySweep());
   }
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {
@@ -965,8 +969,16 @@ function mhRejectionMessage(result: MhResponse): string {
   return result.estado || "Invalidación rechazada por el Ministerio de Hacienda";
 }
 
-function isRetryableDocumentStatus(status: string): boolean {
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at">): boolean {
+  // Un CDE diferido (SIGNED + transmission_deferred_at) NO es reintetable manualmente:
+  // el cron de 15 minutos es el único dueño del reintento, porque el camino manual
+  // genérico no completa la intención ni envía el comprobante definitivo. Un SIGNED
+  // "plano" (transitorio de pipeline atascado, sin marcador) sigue siendo reintetable
+  // como siempre.
+  if (document.status === "SIGNED" && document.transmission_deferred_at) {
+    return false;
+  }
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
 }
 
 function normalizeEmail(value: unknown): string | null {
@@ -1195,7 +1207,7 @@ async function handleDocumentRoute(
 
   if (action === "retry" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
-    if (!isRetryableDocumentStatus(document.status)) {
+    if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
           error: "document_not_retryable",
