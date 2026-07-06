@@ -75,16 +75,17 @@ describe("donar form validation", () => {
     expect(donationFormValidationMessage(base)).toBe("");
   });
 
-  it("validates the NIT format (14 digits) and requires the razón social for NIT donors", () => {
+  it("validates the empresa NIT format (14 digits) and requires the razón social", () => {
     const nitBase = { ...base, donorDocumentType: "36" as const, donorDocument: "0614-280390-112-1", donorName: "Empresa Ejemplo, S.A. de C.V." };
     expect(donationFormValidationMessage(nitBase)).toBe("");
     // Unhyphenated 14-digit input is also valid (format-only, no check digit).
     expect(donationFormValidationMessage({ ...nitBase, donorDocument: "06142803901121" })).toBe("");
-    expect(donationFormValidationMessage({ ...nitBase, donorDocument: "0614280390112" })).toBe("Revise el número de NIT (14 dígitos).");
-    // Razón social is required for NIT (36) only, capped at 200 characters.
+    // Donor-facing copy frames the 36 type as the empresa's NIT.
+    expect(donationFormValidationMessage({ ...nitBase, donorDocument: "0614280390112" })).toBe("Ingrese el NIT de la empresa (14 dígitos).");
+    // Razón social is required for Empresa (36) only, capped at 200 characters.
     expect(donationFormValidationMessage({ ...nitBase, donorName: "  " })).toBe("Ingrese la razón social.");
     expect(donationFormValidationMessage({ ...nitBase, donorName: "x".repeat(201) })).toBe("La razón social no debe exceder 200 caracteres.");
-    // Non-NIT types never require a razón social.
+    // Non-empresa types never require a razón social.
     expect(donationFormValidationMessage({ ...base, donorName: "" })).toBe("");
   });
 
@@ -98,6 +99,15 @@ describe("donar form validation", () => {
         "Ingrese su documento (entre 5 y 30 caracteres)."
       );
     }
+  });
+
+  it("caps the dirección at the MH schema's 200-character complemento limit", () => {
+    // fe-cd-v2 caps receptor direccion.complemento at 200; a longer address would
+    // take the donor's payment and then fail schema validation at CDE build time.
+    expect(donationFormValidationMessage({ ...base, complemento: "x".repeat(200) })).toBe("");
+    expect(donationFormValidationMessage({ ...base, complemento: "x".repeat(201) })).toBe(
+      "La dirección no debe exceder 200 caracteres."
+    );
   });
 
   it("requires a país instead of the departamento/municipio/distrito on the foreign path", () => {
@@ -278,15 +288,23 @@ describe("donar page source contract", () => {
     expect(donationFormValidationMessage).toBeTypeOf("function");
   });
 
-  it("offers the five CAT-022 document types with the admin quick-CDE labels", () => {
-    // The /donar select carries the same human labels the admin quick-CDE uses
-    // (CAT022_DOCUMENT_TYPES): NIT, DUI, Otro, Pasaporte, Carnet de Residente.
+  it("offers the five CAT-022 document types with donor-facing labels in the agreed order", () => {
+    // Donor-facing labeling: CAT-022 "36" shows as "Empresa" on /donar, NOT "NIT" —
+    // many natural persons still hold legacy personal NITs and a literal "NIT"
+    // option would bait them into the razón-social requirement. The stored code
+    // stays "36"; the admin quick-CDE keeps the raw CAT022_DOCUMENT_TYPES labels.
+    // Order: DUI, Empresa, Otro, Pasaporte, Carnet de Residente.
     const donarStart = appSource.indexOf("function DonarPage");
     expect(donarStart).toBeGreaterThan(-1);
     const donarSource = appSource.slice(donarStart);
-    for (const option of ['value="13">DUI<', 'value="36">NIT<', 'value="03">Pasaporte<', 'value="02">Carnet de Residente<', 'value="37">Otro<']) {
-      expect(donarSource).toContain(option);
+    let previous = -1;
+    for (const option of ['value="13">DUI<', 'value="36">Empresa<', 'value="37">Otro<', 'value="03">Pasaporte<', 'value="02">Carnet de Residente<']) {
+      const at = donarSource.indexOf(option);
+      expect(at, `missing or out of order: ${option}`).toBeGreaterThan(previous);
+      previous = at;
     }
+    // The bait label never appears on the donor-facing select.
+    expect(donarSource).not.toContain('value="36">NIT<');
   });
 
   it("auto-formats a valid 14-digit NIT on blur, mirroring the DUI blur behavior", () => {
@@ -294,10 +312,12 @@ describe("donar page source contract", () => {
     expect(appSource).toContain("isValidNitFormat(");
   });
 
-  it("shows a required razón social field only for NIT donors", () => {
+  it("presents the empresa field pair: NIT de la empresa + required razón social", () => {
     const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+    // The document input is labeled "NIT de la empresa" while Empresa is selected...
+    expect(donarSource).toContain("NIT de la empresa");
+    // ...alongside the required razón social, both keyed on the 36 document type.
     expect(donarSource).toContain("Razón social");
-    // Conditional render keyed on the NIT document type.
     expect(donarSource).toContain('donorDocumentType === "36"');
   });
 

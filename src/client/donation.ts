@@ -96,8 +96,10 @@ export function donationFormValidationMessage(input: DonationFormInput): string 
       return "Revise el número de DUI.";
     }
   } else if (input.donorDocumentType === "36") {
+    // Donor-facing framing: the select labels 36 as "Empresa", so the copy asks for
+    // the empresa's NIT (a natural person's document is the DUI post-reform).
     if (!isValidNitFormat(input.donorDocument)) {
-      return "Revise el número de NIT (14 dígitos).";
+      return "Ingrese el NIT de la empresa (14 dígitos).";
     }
     if (!input.donorName.trim()) {
       return "Ingrese la razón social.";
@@ -133,6 +135,11 @@ export function donationFormValidationMessage(input: DonationFormInput): string 
   }
   if (!input.complemento.trim()) {
     return "Ingrese su dirección.";
+  }
+  // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters; mirror the
+  // server cap so the donor hears it before paying, not at CDE build time.
+  if (input.complemento.trim().length > 200) {
+    return "La dirección no debe exceder 200 caracteres.";
   }
 
   return "";
