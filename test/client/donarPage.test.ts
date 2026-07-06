@@ -17,7 +17,6 @@ import {
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
-  GIVEBUTTER_ESCAPE_HATCH,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
   GIVEBUTTER_INTRO,
@@ -26,10 +25,14 @@ import {
   GIVEBUTTER_SCRIPT_URL,
   GIVEBUTTER_US_COUNTRY_CODE,
   DONAR_CHANGE_DOOR_LABEL,
+  DONAR_DOOR_EEUU_DESC,
   DONAR_DOOR_EEUU_LABEL,
+  DONAR_DOOR_SV_DESC,
   DONAR_DOOR_SV_LABEL,
+  DONAR_GIFT_TYPE_LABEL,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
+  DONAR_LANDING_UNIFIER,
   DONAR_ROUTE_PARAM,
   doorFromSearch,
   routeParamForDoor,
@@ -81,6 +84,7 @@ describe("donar form validation", () => {
   // dirección, and monto.
   const base = {
     amount: "10.00",
+    giftType: "DIEZMO" as const,
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
@@ -95,6 +99,11 @@ describe("donar form validation", () => {
 
   it("accepts a fully valid DUI donation", () => {
     expect(donationFormValidationMessage(base)).toBe("");
+  });
+
+  it("requires the donor to choose diezmo or ofrenda first", () => {
+    expect(donationFormValidationMessage({ ...base, giftType: "" })).toBe("Seleccione si es diezmo u ofrenda.");
+    expect(donationFormValidationMessage({ ...base, giftType: "OFRENDA" })).toBe("");
   });
 
   it("validates the empresa NIT format (14 digits) and requires the razón social", () => {
@@ -170,6 +179,7 @@ describe("donar amount chips", () => {
 describe("donar intent body", () => {
   const base = {
     amount: " 10.00 ",
+    giftType: "DIEZMO" as const,
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
@@ -185,6 +195,7 @@ describe("donar intent body", () => {
   it("sends the donor-chosen geography and omits pais/donorName on the domestic path", () => {
     expect(donationIntentBody(base)).toEqual({
       amount: "10.00",
+      giftType: "DIEZMO",
       donorDocumentType: "13",
       donorDocument: "10000001-9",
       donorName: undefined,
@@ -195,6 +206,10 @@ describe("donar intent body", () => {
       pais: undefined,
       complemento: "San Salvador"
     });
+  });
+
+  it("omits giftType when none is chosen (legacy / US callers)", () => {
+    expect(donationIntentBody({ ...base, giftType: "" }).giftType).toBeUndefined();
   });
 
   it("includes the razón social only for NIT (36) donors", () => {
@@ -269,8 +284,9 @@ describe("donar thank-you page", () => {
     expect(display.monto).toBe("");
   });
 
-  it("uses the webhook-driven thank-you copy", () => {
-    expect(DONAR_THANK_YOU_TITLE).toBe("Su donación fue recibida.");
+  it("uses the webhook-driven thank-you copy with a religious blessing", () => {
+    expect(DONAR_THANK_YOU_TITLE).toBe("Dios le bendiga. Su aportación fue recibida.");
+    // The CDE-by-email line (with the fiscal "comprobante (CDE)" wording) is unchanged.
     expect(DONAR_THANK_YOU_BODY).toBe(
       "Recibirá su comprobante (CDE) por correo cuando el Ministerio de Hacienda lo confirme."
     );
@@ -278,8 +294,9 @@ describe("donar thank-you page", () => {
 });
 
 describe("donar page source contract", () => {
-  it("labels the form fields in usted-form Spanish", () => {
-    expect(appSource).toContain("Haga su donación");
+  it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
+    // Religious framing: the SV fiscal form heading now names the aportación.
+    expect(appSource).toContain("Entregue su diezmo u ofrenda");
     expect(appSource).toContain("Tipo de documento");
     expect(appSource).toContain("Teléfono (opcional)");
     expect(appSource).toContain("Departamento");
@@ -287,6 +304,24 @@ describe("donar page source contract", () => {
     expect(appSource).toContain("Distrito");
     expect(appSource).toContain("Dirección");
     expect(appSource).toContain("Monto");
+  });
+
+  it("renders the required Diezmo/Ofrenda chip selector on the SV form", () => {
+    expect(appSource).toContain("DONAR_GIFT_TYPE_LABEL");
+    expect(appSource).toContain("DONAR_GIFT_TYPE_FIELD_LABEL");
+    // Rendered as monochrome chips (same class as the monto chips; active inverts).
+    expect(appSource).toContain('form.giftType === option ? "donar-chip active" : "donar-chip"');
+    expect(DONAR_GIFT_TYPE_LABEL.DIEZMO).toBe("Diezmo");
+    expect(DONAR_GIFT_TYPE_LABEL.OFRENDA).toBe("Ofrenda");
+  });
+
+  it("changes the submit label to the diezmo-framed 'Continuar al pago'", () => {
+    expect(appSource).toContain("Continuar al pago");
+    expect(appSource).not.toContain('"Donar"');
+  });
+
+  it("shows the EE. UU. flow its own heading", () => {
+    expect(appSource).toContain("Diezmos y Ofrendas — EE. UU.");
   });
 
   it("no longer collects name or email on the form (both are entered on Wompi's sheet)", () => {
@@ -504,9 +539,21 @@ describe("givebutter donar page source contract", () => {
     expect(appSource).toContain("GIVEBUTTER_INTRO");
     expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
     expect(GIVEBUTTER_INTRO).toContain("501(c)(3)");
+    // The US door funds the SAME church — the intro says so, never implying a
+    // different beneficiary.
+    expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
     // The embedded custom element targets the campaign.
     expect(donarSource).toContain("givebutter-giving-form");
     expect(donarSource).toContain("GIVEBUTTER_CAMPAIGN");
+  });
+
+  it("uses human GiveButter anchor text, never a raw URL, in the fallback CTA and hint", () => {
+    // Brand style: capital G, capital B. "GiveButter" is the anchor text.
+    expect(GIVEBUTTER_FALLBACK_CTA).toBe("Donar en GiveButter");
+    expect(GIVEBUTTER_FALLBACK_HINT).toBe("¿Problemas con el formulario? Done en GiveButter");
+    // No raw givebutter.com URL is shown to the donor in either string.
+    expect(GIVEBUTTER_FALLBACK_CTA).not.toContain("givebutter.com");
+    expect(GIVEBUTTER_FALLBACK_HINT).not.toContain("givebutter.com");
   });
 
   it("injects the Givebutter script only for the US path, once per page load", () => {
@@ -538,9 +585,12 @@ describe("givebutter donar page source contract", () => {
     expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
   });
 
-  it("offers the escape hatch back to the SV fiscal (CDE) form", () => {
-    expect(appSource).toContain("GIVEBUTTER_ESCAPE_HATCH");
-    expect(GIVEBUTTER_ESCAPE_HATCH).toContain("CDE");
+  it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {
+    // The donor deliberately chose the EE. UU. door; "← Cambiar opción" is the way
+    // back. The forceFiscal escape hatch (and its state) is gone.
+    expect(appSource).not.toContain("GIVEBUTTER_ESCAPE_HATCH");
+    expect(appSource).not.toContain("forceFiscal");
+    expect(appSource).not.toContain("donar-givebutter-escape");
   });
 
   it("leaves the Wompi intent path untouched (non-US donors still submit an intent)", () => {
@@ -572,14 +622,23 @@ describe("two-door landing deep-link helpers", () => {
 });
 
 describe("two-door landing copy", () => {
-  it("uses the Gotham-Black heading and a one-line subtitle", () => {
-    expect(DONAR_LANDING_HEADING).toBe("Haga su donación");
-    expect(DONAR_LANDING_SUBTITLE.length).toBeGreaterThan(0);
+  it("uses the Diezmos y Ofrendas heading and a residence-based subtitle", () => {
+    expect(DONAR_LANDING_HEADING).toBe("Diezmos y Ofrendas");
+    // Residence-based, not destination-based.
+    expect(DONAR_LANDING_SUBTITLE).toBe("Elija según su lugar de residencia.");
   });
 
-  it("labels the two doors and the change-option link", () => {
+  it("pins the unifying line that both doors fund the same church in El Salvador", () => {
+    expect(DONAR_LANDING_UNIFIER).toBe(
+      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador."
+    );
+  });
+
+  it("labels the two doors, their tax-receipt descriptors, and the change-option link", () => {
     expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
+    expect(DONAR_DOOR_SV_DESC).toBe("Comprobante fiscal salvadoreño (CDE)");
     expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
+    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo deducible de impuestos en EE. UU.");
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 
@@ -593,23 +652,31 @@ describe("two-door landing source contract", () => {
   // SvWorldIcon, UsFlagIcon) which sit right above DonarPage and are only used there.
   const donarSource = appSource.slice(appSource.indexOf("function OrganizationLogo"));
 
-  it("renders the landing heading, subtitle, and both door labels", () => {
+  it("renders the landing heading, subtitle, unifier, and both door labels + descriptors", () => {
     expect(appSource).toContain("DONAR_LANDING_HEADING");
     expect(appSource).toContain("DONAR_LANDING_SUBTITLE");
+    expect(appSource).toContain("DONAR_LANDING_UNIFIER");
     expect(appSource).toContain("DONAR_DOOR_SV_LABEL");
+    expect(appSource).toContain("DONAR_DOOR_SV_DESC");
     expect(appSource).toContain("DONAR_DOOR_EEUU_LABEL");
+    expect(appSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
-  it("draws the two door icons as inline SVGs: SV flag + globe, and the US flag", () => {
-    // Both door icons are hand-drawn inline <svg>. The SV flag uses the official
-    // azul (#0F47AF); the globe is monochrome line-art in the secondary gray.
+  it("draws both door icons as inline circle-flag SVGs (HatScripts/circle-flags), SV over a globe", () => {
+    // The hand-drawn flags are replaced with circle-flags (MIT), inlined verbatim.
     expect(donarSource).toContain("<svg");
-    // The SV flag blue and a globe (circle) marker.
-    expect(donarSource).toContain("#0F47AF");
-    // The US flag canton blue.
-    expect(donarSource).toContain("#3C3B6E");
-    // The US flag stripe red.
-    expect(donarSource).toContain("#B22234");
+    // circle-flags palette: SV blue #0052b4, US red #d80027, shared canton blue #0052b4.
+    expect(donarSource).toContain("#0052b4");
+    expect(donarSource).toContain("#d80027");
+    // The circular-flag mask marker (a masked circle) rather than the old rect flags.
+    expect(donarSource).toContain('mask id="sv-flag-a"');
+    expect(donarSource).toContain('mask id="us-flag-a"');
+    // The old hand-drawn palette must be gone.
+    expect(donarSource).not.toContain("#0F47AF");
+    expect(donarSource).not.toContain("#3C3B6E");
+    expect(donarSource).not.toContain("#B22234");
+    // The SV door keeps the line-art globe behind the circle flag.
+    expect(donarSource).toContain('stroke="#595959"');
   });
 
   it("reuses the default logo vector paths on the landing", () => {

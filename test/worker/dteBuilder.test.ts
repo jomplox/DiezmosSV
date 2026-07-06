@@ -19,6 +19,31 @@ describe("DTE builders", () => {
     expect(document.otrosDocumentos[0].codDocAsociado).toBe(1);
     expect(document.receptor.nombre).toBe("Donante Demo");
     expect(document.resumen.valorTotal).toBe(10);
+    // Legal description is pinned to the church's production convention, NOT the
+    // Wompi link's free-form NombreProducto (uppercase, accented; see the real CDE
+    // in examples/DTE-15-M001P004-000000000006702.json).
+    expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("pins the CDE descripcion to DONACIÓN even when the Wompi link carries a product name", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, EnlacePago: { ...wompiSample.EnlacePago, NombreProducto: "Testing" } } as WompiWebhook,
+      emisorConfig,
+      { sequence: 1, issuedAt: new Date("2026-06-02T14:05:20.742-06:00") }
+    ) as Record<string, any>;
+
+    // "Testing" (a Wompi link name) must never reach the fiscal document.
+    expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("pins the quick (direct) CDE descripcion to DONACIÓN", () => {
+    const document = buildDirectCdeDocument(
+      { donorName: "Donante Directo", donorDocument: "SIN-DOCUMENTO", donorDocumentType: "37", amount: "5.00" },
+      emisorConfig,
+      { sequence: 3, environment: "00", issuedAt: new Date("2026-06-02T14:05:20.742-06:00") }
+    ) as Record<string, any>;
+
+    expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
   it("builds a CDE for real payment-link payloads without document or address", () => {
@@ -210,6 +235,63 @@ describe("DTE builders", () => {
       distrito: "01",
       complemento: "Calle Donante 123, Antiguo Cuscatlán"
     });
+  });
+
+  it("appends a TipoAportacion apéndice line for a Diezmo intent (descripcion stays DONACIÓN)", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Ana Donante",
+        correo: "ana@example.org",
+        telefono: null,
+        direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" },
+        giftType: "DIEZMO"
+      }
+    }) as Record<string, any>;
+
+    const tipo = document.apendice.find((entry: any) => entry.campo === "TipoAportacion");
+    expect(tipo).toEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
+    // The legal descripcion is unaffected by the informational tipo.
+    expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("appends a TipoAportacion apéndice line for an Ofrenda intent", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Ana Donante",
+        correo: "ana@example.org",
+        telefono: null,
+        direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" },
+        giftType: "OFRENDA"
+      }
+    }) as Record<string, any>;
+
+    const tipo = document.apendice.find((entry: any) => entry.campo === "TipoAportacion");
+    expect(tipo).toEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Ofrenda" });
+  });
+
+  it("omits the TipoAportacion apéndice line when the intent carries no gift type", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Ana Donante",
+        correo: "ana@example.org",
+        telefono: null,
+        direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" }
+      }
+    }) as Record<string, any>;
+
+    expect(document.apendice.find((entry: any) => entry.campo === "TipoAportacion")).toBeUndefined();
   });
 
   it("marks the receptor non-domiciled with the override país for foreign-donor intents", () => {

@@ -323,6 +323,41 @@ describe("donation intents", () => {
     expect(db.donationIntents[0].donor_document).toBe("PASAPORTE-XZ-9");
     // Domestic intents never carry a país.
     expect(db.donationIntents[0].donor_pais).toBeNull();
+    // Absent giftType stays null (legacy/US paths never send it).
+    expect(db.donationIntents[0].gift_type).toBeNull();
+  });
+
+  it("persists a chosen gift type (DIEZMO / OFRENDA) on the intent", async () => {
+    const diezmoDb = new InMemoryD1();
+    const diezmo = await worker.fetch(intentRequest(validIntentBody({ giftType: "DIEZMO" })), env(diezmoDb));
+    expect(diezmo.status).toBe(201);
+    expect(diezmoDb.donationIntents[0].gift_type).toBe("DIEZMO");
+
+    const ofrendaDb = new InMemoryD1();
+    const ofrenda = await worker.fetch(intentRequest(validIntentBody({ giftType: "OFRENDA" })), env(ofrendaDb));
+    expect(ofrenda.status).toBe(201);
+    expect(ofrendaDb.donationIntents[0].gift_type).toBe("OFRENDA");
+  });
+
+  it("rejects an invalid gift type without persisting the intent", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ giftType: "GIFT" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_gift_type",
+      message: "Seleccione el tipo de aportación: diezmo u ofrenda."
+    });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("still accepts an intent with no gift type at all (legacy / US paths)", async () => {
+    const db = new InMemoryD1();
+    // validIntentBody carries no giftType key.
+    const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
+
+    expect(response.status).toBe(201);
+    expect(db.donationIntents[0].gift_type).toBeNull();
   });
 
   it("creates a NIT (36) intent with canonical document storage and the razón social", async () => {
@@ -1003,6 +1038,8 @@ describe("online donation intents listing", () => {
         direccion_municipio: "22",
         direccion_distrito: "01",
         direccion_complemento: "San Salvador",
+        donor_pais: null,
+        gift_type: null,
         wompi_id_enlace: null,
         wompi_url_enlace: null,
         wompi_url_enlace_largo: null,
@@ -1025,6 +1062,8 @@ describe("online donation intents listing", () => {
         direccion_municipio: "22",
         direccion_distrito: "01",
         direccion_complemento: "San Salvador",
+        donor_pais: null,
+        gift_type: "DIEZMO",
         wompi_id_enlace: 987654,
         wompi_url_enlace: "https://s.wompi.sv/987654",
         wompi_url_enlace_largo: null,
@@ -1045,7 +1084,7 @@ describe("online donation intents listing", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
-      intents: Array<{ id: string; status: string; numero_control: string | null; document_donor_name: string | null }>;
+      intents: Array<{ id: string; status: string; numero_control: string | null; document_donor_name: string | null; gift_type: string | null }>;
     };
     // Newest first: the COMPLETED intent (12:00) precedes the PENDING one (10:00).
     expect(body.intents.map((intent) => intent.id)).toEqual(["di_done", "di_pending"]);
@@ -1054,6 +1093,9 @@ describe("online donation intents listing", () => {
     expect(body.intents[0].document_donor_name).toBe("Beto del Webhook");
     expect(body.intents[1].numero_control).toBeNull();
     expect(body.intents[1].document_donor_name).toBeNull();
+    // The admin listing carries gift_type so the panel can render the Tipo column.
+    expect(body.intents[0].gift_type).toBe("DIEZMO");
+    expect(body.intents[1].gift_type).toBeNull();
   });
 });
 
@@ -3171,6 +3213,32 @@ describe("donation intent correlation", () => {
     expect(cde.receptor).toMatchObject({ codPais: "SV", codDomiciliado: 1 });
   });
 
+  it("threads the intent gift type into the CDE apéndice on normal issuance (descripcion stays DONACIÓN)", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { gift_type: "DIEZMO" });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as {
+      apendice: Array<Record<string, unknown>>;
+      cuerpoDocumento: Array<Record<string, unknown>>;
+    };
+    expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
+    expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("omits the TipoAportacion apéndice for an intent with no gift type", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db); // gift_type undefined → treated as null
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { apendice: Array<Record<string, unknown>> };
+    expect(cde.apendice.find((entry) => entry.campo === "TipoAportacion")).toBeUndefined();
+  });
+
   it("uses the intent razón social as the receptor nombre for a NIT intent", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, {
@@ -3336,6 +3404,85 @@ describe("donation intent correlation", () => {
     expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_rejected");
+  });
+
+  it("threads the gift type into the CDE apéndice when a gift-type intent is rebuilt on the rejected path", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { gift_type: "OFRENDA" });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    db.documents.push({
+      id: "dte_rejected_gift",
+      wompi_event_id: eventId,
+      tipo_dte: "15",
+      environment: "00",
+      codigo_generacion: "70000003-2222-4222-8222-700000032222",
+      numero_control: "DTE-15-M001P004-000000000000019",
+      status: "REJECTED",
+      plain_json: JSON.stringify({ receptor: { nombre: "Fallback Cliente" } }),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: "[]",
+      donor_email: "fallback@example.org",
+      donor_name: "Fallback Cliente",
+      amount_cents: 2500,
+      issued_at: "2026-06-26T01:46:47.015Z",
+      accepted_at: null,
+      contingency_period_id: null,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const record = db.documents.find((row) => row.id === "dte_rejected_gift") as unknown as DteDocumentRecord;
+    await new IssuancePipeline(await pipelineEnv(db)).rebuildRejectedWompiDocument(record);
+
+    const rebuilt = db.documents.find((row) => row.id === "dte_rejected_gift");
+    const cde = JSON.parse(String(rebuilt!.plain_json)) as {
+      apendice: Array<Record<string, unknown>>;
+      cuerpoDocumento: Array<Record<string, unknown>>;
+    };
+    expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Ofrenda" });
+    expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("threads the gift type into the CDE apéndice when the payment is queued into contingency", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { gift_type: "DIEZMO" });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    // Non-mock env with a stubbed MH: auth succeeds, then recepcion returns 503 so the
+    // pipeline throws MhUnavailableError and routes the CDE into contingency
+    // (moveToContingency), which rebuilds via the same donorOverrideFromIntent path.
+    const certPassword = "cert-password";
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(new Response("MH no disponible", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const contingencyEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml(certPassword),
+      MH_CERT_PASSWORD: certPassword,
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    const record = await new IssuancePipeline(contingencyEnv).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("CONTINGENCY_PENDING");
+    const cde = JSON.parse(String(record!.plain_json)) as {
+      apendice: Array<Record<string, unknown>>;
+      cuerpoDocumento: Array<Record<string, unknown>>;
+      identificacion: Record<string, unknown>;
+    };
+    // Contingency rebuild keeps the informational tipo line and the DONACIÓN descripcion.
+    expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
+    expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+    expect(cde.identificacion.tipoModelo).toBe(2); // contingency model
   });
 });
 
@@ -4696,7 +4843,9 @@ class Statement {
           id: intent.id,
           wompi_id_enlace: intent.wompi_id_enlace ?? null,
           amount_cents: intent.amount_cents,
-          status: intent.status
+          status: intent.status,
+          // Projected so the sweep's deactivate PUT resends the create nombreProducto.
+          gift_type: intent.gift_type ?? null
         }));
       return { results: rows as T[] };
     }
@@ -4989,7 +5138,8 @@ class Statement {
         direccionComplemento,
         donorPais,
         clientIp,
-        expiresAt
+        expiresAt,
+        giftType
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -5005,6 +5155,8 @@ class Statement {
         direccion_distrito: String(direccionDistrito),
         direccion_complemento: String(direccionComplemento),
         donor_pais: donorPais == null ? null : String(donorPais),
+        // gift_type is the last bound arg (appended by migration 0012).
+        gift_type: giftType == null ? null : String(giftType),
         wompi_id_enlace: null,
         wompi_url_enlace: null,
         wompi_url_enlace_largo: null,

@@ -2701,7 +2701,8 @@ pre {
   accent-color: #000000;
 }
 
-.donar-amount {
+.donar-amount,
+.donar-gift-type {
   display: grid;
   gap: 8px;
 }
@@ -2775,6 +2776,14 @@ pre {
   color: #595959;
   font-size: 14px;
   line-height: 1.45;
+  margin: 0 0 4px;
+}
+
+/* Unifying line: both doors fund the same church — slightly smaller, secondary gray. */
+.donar-landing-unifier {
+  color: #595959;
+  font-size: 12.5px;
+  line-height: 1.4;
   margin: 0 0 8px;
 }
 
@@ -2831,6 +2840,15 @@ pre {
   letter-spacing: -0.01em;
 }
 
+/* Per-door descriptor: the real differentiator (tax receipt), in secondary gray. */
+.donar-door-desc {
+  margin-top: -6px;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.35;
+  color: #595959;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .donar-door {
     transition: border-color 160ms ease;
@@ -2882,8 +2900,7 @@ pre {
   text-decoration: none;
 }
 
-.donar-givebutter-hint,
-.donar-givebutter-escape {
+.donar-givebutter-hint {
   font-size: 12px;
   color: #595959;
   text-align: center;
