@@ -1,3 +1,4 @@
+import svFlag from "./assets/sv-flag.svg";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -164,10 +165,11 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the El Salvador circle flag (HatScripts/circle-flags, MIT) overlapping
-// the lower-right of a thin monochrome line-art globe — matching the US door's circle
-// style so the flag reads prominently at card size. Inlined verbatim (self-hosted).
-// aria-hidden: the door button's text label is the single accessible name.
+// Door 1 icon: the official El Salvador flag (flag-icons sv 1:1, MIT — full escudo
+// with the "REPUBLICA DE EL SALVADOR" ring) cropped to a circle, overlapping the
+// lower-right of a thin monochrome line-art globe. Referenced as an <image> asset so
+// its internal SVG ids stay encapsulated. aria-hidden: the door button's text label
+// is the single accessible name.
 function SvWorldIcon() {
   return (
     <svg
@@ -186,23 +188,21 @@ function SvWorldIcon() {
         <path d="M 17 23 Q 42 31 67 23" />
         <path d="M 17 53 Q 42 45 67 53" />
       </g>
-      {/* El Salvador circle flag (circle-flags sv.svg, MIT), lower-right, sized up for
-          prominence with a white ring separating it from the globe lines. */}
-      <g transform="translate(44 44)">
-        <circle cx="25" cy="25" r="28" fill="#ffffff" />
-        <g transform="scale(0.09766)">
-          <mask id="sv-flag-a">
-            <circle cx="256" cy="256" r="256" fill="#fff" />
-          </mask>
-          <g mask="url(#sv-flag-a)">
-            <path fill="#0052b4" d="M0 0h512v144.7l-40.5 112.6 40.5 110V512H0V367.3l42.2-114L0 144.7z" />
-            <path fill="#eee" d="M0 144.7h512v222.6H0z" />
-            <path fill="#ffda44" d="m204.6 267.1 51.4-89 51.4 89z" />
-            <path fill="#6da544" d="M322.8 296.5 256 330l-66.8-33.4V252h133.6z" />
-            <path fill="#ffda44" d="m319 182-23.6 23.5a55.5 55.5 0 0 1-39.4 95 55.7 55.7 0 0 1-39.3-95L193 182a89 89 0 1 0 126 0z" />
-          </g>
-        </g>
-      </g>
+      {/* Official flag, circle-cropped, lower-right, with a white ring separating it
+          from the globe lines. */}
+      <clipPath id="sv-flag-circle">
+        <circle cx="69" cy="69" r="25" />
+      </clipPath>
+      <circle cx="69" cy="69" r="28" fill="#ffffff" />
+      <image
+        href={svFlag}
+        x="44"
+        y="44"
+        width="50"
+        height="50"
+        preserveAspectRatio="xMidYMid slice"
+        clipPath="url(#sv-flag-circle)"
+      />
     </svg>
   );
 }
