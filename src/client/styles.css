@@ -41,6 +41,10 @@
   font-family: "Gotham", -apple-system, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  /* White-label accent: App.tsx sets --accent from /api/branding on boot; every teal
+     in the admin UI below derives from it (darker/lighter shades via color-mix so ONE
+     setting drives all of them). The fallback is the historical ExamplePerson1 teal. */
+  --accent: #0f766e;
 }
 
 * {
@@ -139,6 +143,15 @@ button:disabled {
   flex: 0 0 auto;
 }
 
+/* Uploaded white-label logo in the sidebar brand slot: constrained to the icon's
+   footprint so the layout never shifts, regardless of the source aspect ratio. */
+.brand-logo {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
 .brand-text {
   min-width: 0;
 }
@@ -230,7 +243,7 @@ td span {
   display: block;
   margin-top: 4px;
   font-size: 12px;
-  color: #69c5bd;
+  color: color-mix(in srgb, var(--accent, #0f766e) 55%, white);
 }
 
 .workspace {
@@ -590,13 +603,13 @@ select,
   justify-content: center;
   border-radius: 50%;
   background: #eef8f7;
-  color: #00756f;
+  color: var(--accent, #0f766e);
   font-size: 12px;
   font-weight: 800;
 }
 
 .advanced-steps button.active span {
-  background: #69c5bd;
+  background: color-mix(in srgb, var(--accent, #0f766e) 55%, white);
   color: #112327;
 }
 
@@ -677,7 +690,7 @@ select,
 }
 
 .advanced-form-grid .currency-input:focus-within {
-  border-color: #0b8f8f;
+  border-color: var(--accent, #0f766e);
   box-shadow: 0 0 0 2px rgba(11, 143, 143, 0.12);
 }
 
@@ -753,7 +766,7 @@ select,
 }
 
 .user-row:focus-visible {
-  outline: 2px solid #007c75;
+  outline: 2px solid var(--accent, #0f766e);
   outline-offset: -2px;
 }
 
@@ -821,7 +834,7 @@ select,
 
 .help-tooltip button:hover,
 .help-tooltip button:focus-visible {
-  color: #007c75;
+  color: var(--accent, #0f766e);
   border-color: #9ad7d1;
   background: #ecfaf7;
 }
@@ -873,7 +886,7 @@ select,
 .checkbox-line input {
   width: 16px;
   min-height: 16px;
-  accent-color: #007c75;
+  accent-color: var(--accent, #0f766e);
 }
 
 .user-password-box {
@@ -924,7 +937,7 @@ select,
 
 .password-policy-list li.met {
   border-color: #bfe5dc;
-  color: #007c75;
+  color: var(--accent, #0f766e);
   background: #ecfaf7;
 }
 
@@ -1009,8 +1022,8 @@ select,
 .date-grid button:hover,
 .date-grid button.selected {
   background: #e8f7f4;
-  border-color: #0d8b8f;
-  color: #006a6e;
+  border-color: var(--accent, #0f766e);
+  color: color-mix(in srgb, var(--accent, #0f766e) 80%, black);
 }
 
 .export-summary {
@@ -1272,7 +1285,7 @@ select,
 
 .credential-settings-nav-item.active {
   border-color: #b9e3df;
-  color: #0d4d4b;
+  color: color-mix(in srgb, var(--accent, #0f766e) 70%, black);
   background: #edf9f7;
 }
 
@@ -1314,7 +1327,7 @@ select,
 }
 
 .credential-settings-nav-item em.ready {
-  color: #00756f;
+  color: var(--accent, #0f766e);
   background: #dff5f2;
 }
 
@@ -1379,13 +1392,13 @@ select,
 }
 
 .writer-state.ready {
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   border-color: #c8ebe7;
 }
 
 .writer-state.ready small {
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
 }
 
 .writer-remedy {
@@ -1393,7 +1406,7 @@ select,
   gap: 10px;
   margin: -4px 0 16px;
   padding: 12px;
-  border-left: 3px solid #008f8a;
+  border-left: 3px solid var(--accent, #0f766e);
   background: #f4fbfa;
   color: #254148;
   font-size: 12px;
@@ -1552,7 +1565,7 @@ select,
 }
 
 .credential-group li strong.configured {
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .credential-env {
@@ -1587,7 +1600,7 @@ select,
 }
 
 .credential-runtime-env strong {
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .credential-runtime-env p {
@@ -1652,7 +1665,7 @@ select,
 }
 
 .issuer-config-status.ready {
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   border-color: #c8ebe7;
 }
@@ -1752,7 +1765,7 @@ select,
 }
 
 .credential-field-label strong.configured {
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .plain-field-label {
@@ -1866,7 +1879,7 @@ select,
 }
 
 .credential-form-state.ready {
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   border-color: #c8ebe7;
 }
@@ -1912,8 +1925,8 @@ select,
 }
 
 .credential-fields .file-upload-button:hover {
-  border-color: #008a84;
-  color: #00756f;
+  border-color: var(--accent, #0f766e);
+  color: var(--accent, #0f766e);
 }
 
 .credential-fields input.file-input-hidden {
@@ -1959,6 +1972,77 @@ select,
 .email-template-panel {
   display: grid;
   gap: 14px;
+}
+
+/* White-label "Marca" settings section. */
+.branding-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.branding-color-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.branding-color-swatch {
+  flex: 0 0 auto;
+  width: 44px;
+  min-height: 38px;
+  padding: 2px;
+  cursor: pointer;
+}
+
+.branding-color-hex {
+  flex: 1 1 auto;
+  font-variant-numeric: tabular-nums;
+  text-transform: lowercase;
+}
+
+.branding-logo-block {
+  padding-top: 12px;
+  border-top: 1px solid #e7eef0;
+}
+
+.branding-logo-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
+.branding-logo-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 96px;
+  height: 96px;
+  flex: 0 0 auto;
+  padding: 8px;
+  border: 1px solid #d8e0e3;
+  border-radius: 8px;
+  background: #f8fbfc;
+}
+
+.branding-logo-preview img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.branding-logo-empty {
+  color: #7a8b91;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.branding-logo-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .email-template-guidance {
@@ -2079,7 +2163,7 @@ select,
 }
 
 .metric.ok {
-  border-left-color: #008f84;
+  border-left-color: var(--accent, #0f766e);
 }
 
 .metric.bad {
@@ -2194,12 +2278,12 @@ td.numeric, th.numeric {
 
 .audit-expand-toggle:hover {
   background: #e7f3f1;
-  color: #1c7d70;
+  color: color-mix(in srgb, var(--accent, #0f766e) 92%, black);
 }
 
 .audit-expand-toggle.expanded {
   transform: rotate(180deg);
-  color: #1c7d70;
+  color: color-mix(in srgb, var(--accent, #0f766e) 92%, black);
 }
 
 .audit-detail-row td {
@@ -2265,12 +2349,12 @@ td.numeric, th.numeric {
 
 .status.accepted {
   background: #e6f6f3;
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .status.event_accepted {
   background: #e6f6f3;
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .status.open {
@@ -2303,7 +2387,7 @@ td.numeric, th.numeric {
 /* Donation-intent lifecycle badges (admin "Donaciones en línea" listing). */
 .status.completed {
   background: #e6f6f3;
-  color: #00756f;
+  color: var(--accent, #0f766e);
 }
 
 .status.link_created {
@@ -2384,7 +2468,7 @@ dd {
   align-items: flex-start;
   margin: 18px 0;
   padding: 12px;
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   border: 1px solid #c8ebe7;
   border-radius: 6px;
@@ -2415,7 +2499,7 @@ dd {
   align-items: center;
   margin: 12px 0 0;
   padding: 8px 10px;
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   border: 1px solid #c8ebe7;
   border-radius: 6px;
@@ -2494,9 +2578,9 @@ dd {
 }
 
 .primary {
-  background: #007c75;
+  background: var(--accent, #0f766e);
   color: #ffffff;
-  border-color: #007c75;
+  border-color: var(--accent, #0f766e);
 }
 
 pre {
@@ -2528,6 +2612,14 @@ pre {
   font-size: 26px;
 }
 
+/* Uploaded white-label logo on the login card, in place of the built-in glyph. */
+.auth-logo {
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+  justify-self: start;
+}
+
 .segmented {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -2556,7 +2648,7 @@ pre {
   padding: 10px 12px;
   border: 1px solid #c8ebe7;
   border-radius: 6px;
-  color: #006d66;
+  color: color-mix(in srgb, var(--accent, #0f766e) 90%, black);
   background: #edf9f7;
   font-size: 13px;
   line-height: 1.35;
@@ -2571,7 +2663,7 @@ pre {
 .link-button {
   border: 0;
   background: transparent;
-  color: #0f766e;
+  color: var(--accent, #0f766e);
   font-size: 13px;
   text-decoration: underline;
   text-underline-offset: 3px;
@@ -2581,7 +2673,7 @@ pre {
 }
 
 .link-button:hover {
-  color: #0b5e57;
+  color: color-mix(in srgb, var(--accent, #0f766e) 82%, black);
 }
 
 /* Public donor-checkout pages (/donar, /donar/gracias). Mobile-first, monochrome
@@ -3494,6 +3586,6 @@ pre {
 }
 
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
-  outline: 2px solid #007c75;
+  outline: 2px solid var(--accent, #0f766e);
   outline-offset: 2px;
 }

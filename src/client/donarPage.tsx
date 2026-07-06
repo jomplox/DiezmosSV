@@ -67,6 +67,7 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
+import { brandingLogoSrc, parseBrandingResponse } from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -266,6 +267,11 @@ export function DonarPage() {
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
   // the Givebutter wizard directly, skipping the extranjero mechanics.
   const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
+  // White-label logo for the landing chooser. When a church has uploaded a logo the
+  // donor page shows it in place of the built-in default vector; the vector stays as the
+  // fallback. The accent color is deliberately NOT applied here — the donor wizard's
+  // monochrome Gotham brand is a design decision, so only the logo is branded.
+  const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
   // US-donor (Givebutter) path state: gift frequency (Única | Mensual segmented
   // control) and the render-probe fallback for the embedded giving form.
   const [monthly, setMonthly] = useState(false);
@@ -350,6 +356,25 @@ export function DonarPage() {
     }
     summaryEditRef.current?.focus();
   }, [door, step]);
+
+  // Fetch the church's branding for the landing logo (name is used as alt text). Uses
+  // the same unauthenticated /api/branding as the admin; a failure keeps the default vector.
+  useEffect(() => {
+    let cancelled = false;
+    void donarApi<unknown>("/api/branding")
+      .then((data) => {
+        if (cancelled) return;
+        const branding = parseBrandingResponse(data);
+        const src = brandingLogoSrc(branding.logoVersion);
+        setBrandingLogo(src ? { src, name: branding.displayName } : null);
+      })
+      .catch(() => {
+        // Keep the built-in default vector.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
   // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
@@ -636,7 +661,11 @@ export function DonarPage() {
     return (
       <div className="donar-screen">
         <div className="donar-card card donar-landing">
-          <OrganizationLogo />
+          {brandingLogo ? (
+            <img className="donar-logo" src={brandingLogo.src} alt={brandingLogo.name} />
+          ) : (
+            <OrganizationLogo />
+          )}
           <h1>{DONAR_LANDING_HEADING}</h1>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           {/* Unifying line: both doors fund the same mother church in El Salvador —

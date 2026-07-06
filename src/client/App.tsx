@@ -19,6 +19,7 @@ import {
   Lock,
   LogOut,
   Mail,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -35,6 +36,7 @@ import {
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
+import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
@@ -101,7 +103,8 @@ const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof
   wompi: Cloud,
   emisor: FileText,
   correo: Mail,
-  plantillas: Braces
+  plantillas: Braces,
+  marca: Palette
 };
 
 const FOCUSABLE_SELECTOR =
@@ -231,6 +234,7 @@ export function App() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
+  const [branding, setBranding] = useState<Branding>({ ...CLIENT_BRANDING_DEFAULTS, logoVersion: null });
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
@@ -241,6 +245,26 @@ export function App() {
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  // White-label branding boots BEFORE (and independently of) the session check so the
+  // login screen is already branded. A failed fetch keeps the historical defaults.
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/branding")
+      .then((response) => (response.ok ? response.json() : {}))
+      .then((data) => {
+        if (cancelled) return;
+        const next = parseBrandingResponse(data);
+        applyBranding(next);
+        setBranding(next);
+      })
+      .catch(() => {
+        // Keep the defaults already applied via the initial state.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -764,6 +788,7 @@ export function App() {
     return (
       <AuthScreen
         notice={authNotice}
+        branding={branding}
         onLogin={login}
         onBootstrap={bootstrap}
         onRequestReset={requestPasswordReset}
@@ -807,9 +832,13 @@ export function App() {
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="sidebar-head">
           <div className="brand">
-            <ShieldCheck size={24} />
+            {brandingLogoSrc(branding.logoVersion) ? (
+              <img className="brand-logo" src={brandingLogoSrc(branding.logoVersion) ?? undefined} alt={branding.displayName} />
+            ) : (
+              <ShieldCheck size={24} />
+            )}
             <div className="brand-text">
-              <strong>ExamplePerson1</strong>
+              <strong>{branding.displayName}</strong>
               <span>Comprobantes de donación</span>
             </div>
           </div>
@@ -1020,6 +1049,8 @@ export function App() {
             emailTemplates={emailTemplates}
             emailTemplateDraft={emailTemplateDraft}
             alertEmailDraft={alertEmailDraft}
+            branding={branding}
+            token={token}
             input={credentialInput}
             busy={busy === "credentials"}
             emissionBusy={busy === "emission-environment"}
@@ -1042,6 +1073,10 @@ export function App() {
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onAlertEmailChange={setAlertEmailDraft}
             onAlertEmailSubmit={updateAlertEmail}
+            onBrandingSave={(next) => {
+              applyBranding(next);
+              setBranding(next);
+            }}
             onBootstrapWriter={bootstrapCredentialWriter}
             onRefresh={async () => {
               const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
@@ -1813,6 +1848,8 @@ function CredentialsPanel({
   emailTemplates,
   emailTemplateDraft,
   alertEmailDraft,
+  branding,
+  token,
   input,
   busy,
   emissionBusy,
@@ -1826,6 +1863,7 @@ function CredentialsPanel({
   onEmissionEnvironmentChange,
   onAlertEmailChange,
   onAlertEmailSubmit,
+  onBrandingSave,
   onBootstrapWriter,
   onRefresh
 }: {
@@ -1834,6 +1872,8 @@ function CredentialsPanel({
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
   alertEmailDraft: string;
+  branding: Branding;
+  token: string;
   input: CredentialFormInput;
   busy: boolean;
   emissionBusy: boolean;
@@ -1847,6 +1887,7 @@ function CredentialsPanel({
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onAlertEmailChange: (value: string) => void;
   onAlertEmailSubmit: () => Promise<void>;
+  onBrandingSave: (next: Branding) => void;
   onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
   onRefresh: () => Promise<void>;
 }) {
@@ -1976,6 +2017,8 @@ function CredentialsPanel({
                 onChange={onEmailTemplateChange}
                 onSubmit={onEmailTemplateSubmit}
               />
+            ) : activeSection === "marca" ? (
+              <BrandingEditor branding={branding} token={token} onSave={onBrandingSave} />
             ) : (
               <form
                 className="credential-form-panel credential-detail-panel"
@@ -2313,6 +2356,219 @@ function CredentialsPanel({
           onConfirm={() => void confirmEmissionEnvironmentChange()}
         />
       )}
+    </section>
+  );
+}
+
+// The "Marca" (white-label) settings section. OWNER-only, like the other sensitive
+// sections. Edits the church name + accent color (color picker synced to a hex field)
+// and manages the logo (upload with live preview, current-logo preview, remove). On a
+// successful name/color save the accent is live-applied through onSave; the logo save
+// bumps the version so every <img src="/api/branding/logo?v="> refreshes.
+function BrandingEditor({
+  branding,
+  token,
+  onSave
+}: {
+  branding: Branding;
+  token: string;
+  onSave: (next: Branding) => void;
+}) {
+  const [displayName, setDisplayName] = useState(branding.displayName);
+  const [accentColor, setAccentColor] = useState(branding.accentColor);
+  const [logoVersion, setLogoVersion] = useState(branding.logoVersion);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [savingText, setSavingText] = useState(false);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Keep the local color hex normalized for the native color input (which only accepts
+  // #rrggbb). A partial/invalid value keeps the picker on the last valid color.
+  const colorForPicker = /^#[0-9a-fA-F]{6}$/.test(accentColor.trim()) ? accentColor.trim().toLowerCase() : branding.accentColor;
+  const currentLogoSrc = brandingLogoSrc(logoVersion);
+
+  async function saveNameAndColor() {
+    const validation = brandingFieldError(displayName, accentColor);
+    if (validation) {
+      setError(validation);
+      setNotice("");
+      return;
+    }
+    setError("");
+    setSavingText(true);
+    try {
+      const result = await api<{ displayName: string; accentColor: string }>("/api/settings/branding", token, {
+        method: "PUT",
+        body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase() }
+      });
+      setDisplayName(result.displayName);
+      setAccentColor(result.accentColor);
+      const next: Branding = { displayName: result.displayName, accentColor: result.accentColor, logoVersion };
+      onSave(next);
+      setNotice("Marca actualizada.");
+    } catch (err) {
+      setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setSavingText(false);
+    }
+  }
+
+  async function uploadLogo(file: File) {
+    setLogoError("");
+    if (file.size > BRANDING_LOGO_MAX_BYTES) {
+      setLogoError("El logo no puede superar los 512 KB.");
+      return;
+    }
+    setLogoBusy(true);
+    try {
+      const response = await fetch("/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
+        body: file
+      });
+      const data = (await response.json().catch(() => ({}))) as { logoVersion?: string; message?: string; error?: string };
+      if (!response.ok) {
+        throw new Error(String(data.message ?? data.error ?? `HTTP ${response.status}`));
+      }
+      const nextVersion = data.logoVersion ?? null;
+      setLogoVersion(nextVersion);
+      setPreviewUrl(null);
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, logoVersion: nextVersion });
+      setNotice("Logo actualizado.");
+    } catch (err) {
+      setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLogoBusy(false);
+      if (logoInputRef.current) {
+        logoInputRef.current.value = "";
+      }
+    }
+  }
+
+  async function removeLogo() {
+    setLogoError("");
+    setLogoBusy(true);
+    try {
+      await api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" });
+      setLogoVersion(null);
+      setPreviewUrl(null);
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, logoVersion: null });
+      setNotice("Logo eliminado.");
+    } catch (err) {
+      setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
+  function onPickFile(file: File | undefined) {
+    if (!file) return;
+    // Local preview via an object URL, replaced/cleared once the upload resolves.
+    setPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return URL.createObjectURL(file);
+    });
+    void uploadLogo(file);
+  }
+
+  return (
+    <section className="credential-form-panel branding-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Marca</h2>
+          <p>Nombre, color y logo con los que se identifica su organización en el panel y los correos.</p>
+        </div>
+        <Palette size={20} />
+      </div>
+
+      <div className="credential-fields">
+        <label>
+          <span className="plain-field-label">Nombre de la organización</span>
+          <input
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            placeholder="ExamplePerson1"
+            maxLength={80}
+            aria-label="Nombre de la organización"
+          />
+        </label>
+
+        <div className="credential-field-block">
+          <span className="plain-field-label">Color de acento</span>
+          <div className="branding-color-row">
+            <input
+              type="color"
+              className="branding-color-swatch"
+              value={colorForPicker}
+              onChange={(event) => setAccentColor(event.target.value)}
+              aria-label="Selector de color de acento"
+            />
+            <input
+              className="branding-color-hex"
+              value={accentColor}
+              onChange={(event) => setAccentColor(event.target.value)}
+              placeholder="#0f766e"
+              aria-label="Color de acento en formato hexadecimal"
+            />
+          </div>
+          <small>Recolorea el panel de administración y el encabezado de los correos.</small>
+        </div>
+      </div>
+
+      {error && <p className="field-error">{error}</p>}
+
+      <div className="credential-actions">
+        <div>
+          <Palette size={16} />
+          <span>El color se aplica de inmediato en esta pantalla al guardar.</span>
+        </div>
+        <button className="primary" type="button" disabled={savingText} onClick={() => void saveNameAndColor()}>
+          {savingText ? "Guardando" : "Guardar nombre y color"}
+        </button>
+      </div>
+
+      <div className="credential-field-block branding-logo-block">
+        <div className="credential-section-title">
+          <h3>Logo</h3>
+          <p>Se muestra en el inicio de sesión, el encabezado del panel y la página de donación. SVG, PNG o JPG, hasta 512 KB.</p>
+        </div>
+        <div className="branding-logo-row">
+          <div className="branding-logo-preview" aria-hidden={!previewUrl && !currentLogoSrc}>
+            {previewUrl ? (
+              <img src={previewUrl} alt="Vista previa del logo" />
+            ) : currentLogoSrc ? (
+              <img src={currentLogoSrc} alt={displayName} />
+            ) : (
+              <span className="branding-logo-empty">Sin logo</span>
+            )}
+          </div>
+          <div className="branding-logo-controls">
+            <label className="file-upload-button">
+              <Upload size={16} />
+              {logoBusy ? "Subiendo" : currentLogoSrc ? "Reemplazar logo" : "Subir logo"}
+              <input
+                ref={logoInputRef}
+                className="file-input-hidden"
+                type="file"
+                accept={BRANDING_LOGO_ACCEPT}
+                disabled={logoBusy}
+                onChange={(event) => onPickFile(event.target.files?.[0])}
+              />
+            </label>
+            {currentLogoSrc && (
+              <button type="button" className="danger" disabled={logoBusy} onClick={() => void removeLogo()}>
+                Quitar logo
+              </button>
+            )}
+          </div>
+        </div>
+        {logoError && <p className="field-error">{logoError}</p>}
+      </div>
+
+      {notice && <p className="auth-notice">{notice}</p>}
     </section>
   );
 }
@@ -3136,6 +3392,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 
 function AuthScreen({
   notice,
+  branding,
   onLogin,
   onBootstrap,
   onRequestReset,
@@ -3143,6 +3400,7 @@ function AuthScreen({
   bootstrapAvailable
 }: {
   notice?: string;
+  branding: Branding;
   onLogin: (email: string, password: string) => Promise<void>;
   onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>;
   onRequestReset: (email: string) => Promise<void>;
@@ -3204,8 +3462,12 @@ function AuthScreen({
           }
         }}
       >
-        <ShieldCheck size={32} />
-        <h1>ExamplePerson1</h1>
+        {brandingLogoSrc(branding.logoVersion) ? (
+          <img className="auth-logo" src={brandingLogoSrc(branding.logoVersion) ?? undefined} alt={branding.displayName} />
+        ) : (
+          <ShieldCheck size={32} />
+        )}
+        <h1>{branding.displayName}</h1>
         {bootstrapAvailable && (mode === "login" || mode === "bootstrap") && (
           <div className="segmented">
             <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>

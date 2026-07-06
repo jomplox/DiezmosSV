@@ -18,7 +18,8 @@ export type CredentialSettingsSectionId =
   | "wompi"
   | "emisor"
   | "correo"
-  | "plantillas";
+  | "plantillas"
+  | "marca";
 
 export type CredentialSettingsSectionState = "ready" | "pending";
 
@@ -70,6 +71,12 @@ export const credentialSettingsSections: CredentialSettingsSection[] = [
     id: "plantillas",
     label: "Plantillas",
     description: "Asunto y cuerpo de correos.",
+    groupIds: []
+  },
+  {
+    id: "marca",
+    label: "Marca",
+    description: "Nombre, color y logo de la organización.",
     groupIds: []
   }
 ];

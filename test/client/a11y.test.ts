@@ -33,7 +33,9 @@ describe("keyboard accessibility contract", () => {
     );
     expect(resetIndex).toBeGreaterThan(-1);
     expect(focusRingIndex).toBeGreaterThan(resetIndex);
-    expect(stylesSource).toContain("outline: 2px solid #007c75;");
+    // The focus ring now tracks the white-label accent (var(--accent, …)) so it stays
+    // legible against any church's brand color; the historical teal is the fallback.
+    expect(stylesSource).toContain("outline: 2px solid var(--accent, #0f766e);");
     expect(stylesSource).toContain("outline-offset: 2px;");
   });
 });
