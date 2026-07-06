@@ -21,7 +21,10 @@ const MAX_FREE_DOCUMENT = 50;
 const MIN_IDENTITY_DOCUMENT = 5; // pasaporte (03) / carnet de residente (02)
 const MAX_IDENTITY_DOCUMENT = 30;
 const MAX_RAZON_SOCIAL = 200;
-const MAX_COMPLEMENTO = 300;
+// MH's fe-cd-v2 schema caps direccion.complemento at 200 characters. The intent
+// limit must never exceed it: a longer complemento would pass here, take the
+// donor's payment, and then fail schema validation at CDE build time.
+const MAX_COMPLEMENTO = 200;
 const INTENT_VALIDITY_HOURS = 1; // matches the Wompi link vigencia (Task 1).
 
 // The 00 codes across CAT-008/012/013 are "Otro (Para extranjeros)": the marker
@@ -99,7 +102,7 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
   if (!isIntentDocumentType(donorDocumentType)) {
     throw new IntentValidationError(
       "invalid_document_type",
-      "Seleccione un tipo de documento válido: NIT, DUI, Pasaporte, Carnet de Residente u Otro."
+      "Seleccione un tipo de documento válido: DUI, Empresa, Otro, Pasaporte o Carnet de Residente."
     );
   }
 
@@ -112,9 +115,10 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
     donorDocument = formatDui(rawDocument); // stored canonically as XXXXXXXX-X
   } else if (donorDocumentType === "36") {
     // Format-only (14 digits): MH validates the NIT server-side, and a homebrew
-    // check digit would reject valid NITs (see src/shared/nit.ts).
+    // check digit would reject valid NITs (see src/shared/nit.ts). The message is
+    // framed for empresas — the /donar select labels this type "Empresa".
     if (!isValidNitFormat(rawDocument)) {
-      throw new IntentValidationError("invalid_nit", "NIT inválido: debe tener 14 dígitos.");
+      throw new IntentValidationError("invalid_nit", "Ingrese el NIT de la empresa (14 dígitos).");
     }
     donorDocument = formatNit(rawDocument); // stored canonically as XXXX-XXXXXX-XXX-X
   } else if (donorDocumentType === "03" || donorDocumentType === "02") {
@@ -160,7 +164,7 @@ export function validateIntentInput(body: Record<string, unknown>): ValidatedInt
 
   const direccionComplemento = requireString(body.complemento);
   if (!direccionComplemento || direccionComplemento.length > MAX_COMPLEMENTO) {
-    throw new IntentValidationError("invalid_complemento", "Ingrese la dirección (máximo 300 caracteres).");
+    throw new IntentValidationError("invalid_complemento", "Ingrese la dirección (máximo 200 caracteres).");
   }
 
   // Foreign path: the 00 departamento ("Otro (Para extranjeros)") requires a real

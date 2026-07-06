@@ -341,7 +341,7 @@ describe("donation intents", () => {
     expect(intent.donor_name).toBe("Empresa Ejemplo, S.A. de C.V.");
   });
 
-  it("rejects a NIT without exactly 14 digits", async () => {
+  it("rejects an empresa NIT without exactly 14 digits", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       intentRequest(validIntentBody({ donorDocumentType: "36", donorDocument: "0614-280390-112", donorName: "Empresa Ejemplo" })),
@@ -349,9 +349,11 @@ describe("donation intents", () => {
     );
 
     expect(response.status).toBe(400);
+    // Donor-facing copy frames the 36 type as the empresa's NIT (the /donar select
+    // labels it "Empresa" so legacy personal-NIT holders are not baited into it).
     await expect(response.json()).resolves.toEqual({
       error: "invalid_nit",
-      message: "NIT inválido: debe tener 14 dígitos."
+      message: "Ingrese el NIT de la empresa (14 dígitos)."
     });
     expect(db.donationIntents).toHaveLength(0);
   });
@@ -531,6 +533,18 @@ describe("donation intents", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+  });
+
+  it("rejects a complemento longer than the MH schema's 200-char cap", async () => {
+    // fe-cd-v2 caps receptor direccion.complemento at 200. Anything longer would
+    // pass intent validation, take the donor's payment, and then FAIL the schema
+    // at CDE build time — a paid donation stranded without a comprobante.
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ complemento: "x".repeat(201) })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+    expect(db.donationIntents).toHaveLength(0);
   });
 
   it("blocks the sixth intent from one IP within 15 minutes with a 429", async () => {

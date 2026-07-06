@@ -3485,15 +3485,19 @@ function DonarPage() {
                   onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "", donorName: "" })}
                   aria-label="Tipo de documento"
                 >
+                  {/* CAT-022 "36" is labeled "Empresa" (donor-facing only; stored
+                      code stays 36): many natural persons hold legacy personal
+                      NITs and a literal "NIT" option would bait them into the
+                      razón-social requirement. Empresas donate under NIT. */}
                   <option value="13">DUI</option>
-                  <option value="36">NIT</option>
+                  <option value="36">Empresa</option>
+                  <option value="37">Otro</option>
                   <option value="03">Pasaporte</option>
                   <option value="02">Carnet de Residente</option>
-                  <option value="37">Otro</option>
                 </select>
               </label>
               <label>
-                <span>Número de documento</span>
+                <span>{form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}</span>
                 <input
                   value={form.donorDocument}
                   onChange={(event) => update({ donorDocument: event.target.value })}
@@ -3506,7 +3510,7 @@ function DonarPage() {
                     }
                   }}
                   placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
-                  aria-label="Número de documento"
+                  aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
                 />
               </label>
             </div>
@@ -3601,6 +3605,7 @@ function DonarPage() {
                 onChange={(event) => update({ complemento: event.target.value })}
                 placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
                 aria-label="Dirección"
+                maxLength={200}
               />
             </label>
 
