@@ -588,7 +588,7 @@ describe("donar wizard source contract", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
     expect(donarSource).toContain("Recibirá su comprobante de donación en su dirección de correo electrónico.");
-    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.");
+    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });
 
@@ -750,6 +750,34 @@ describe("donar wizard source contract", () => {
     expect(chooseDoor).toContain('foreignResident: false, pais: ""');
   });
 
+  it("keeps every donor screen at the landing width (no jump between steps)", () => {
+    // The two-door landing set the canvas at 560px; the wizard steps used a narrower
+    // 480px card, so the width visibly jumped after choosing a door. One width now.
+    expect(stylesSource).toContain("width: min(560px, 100%)");
+    expect(stylesSource).not.toContain("min(480px");
+  });
+
+  it("auto-sizes the embedded checkout from Wompi's sizeUpdate messages", () => {
+    // pagos.wompi.sv posts { message: "sizeUpdate", height } to its parent as content
+    // grows (their own modal consumes it as height + 35). Driving the iframe height
+    // from it removes the inner scrollbar — the page is the only scroller. The origin
+    // is validated strictly and the height clamped against bogus values.
+    expect(donarSource).toContain('"sizeUpdate"');
+    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    const listener = donarSource.indexOf('payload?.message === "sizeUpdate"');
+    expect(listener).toBeGreaterThan(-1);
+    const originCheck = donarSource.lastIndexOf("event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN", listener);
+    expect(originCheck).toBeGreaterThan(-1);
+    expect(donarSource).toContain("clampEmbedHeight(");
+    // Wompi's own "close" message (their back arrow) returns the donor to Paso 2.
+    expect(donarSource).toContain('"close"');
+    // The CSS fallback height remains until the first message arrives; height
+    // transitions are disabled under prefers-reduced-motion.
+    expect(stylesSource).toContain(".donar-embed");
+    const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
+    expect(stylesSource.slice(reducedMotion)).toContain(".donar-embed");
+  });
+
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
     expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
@@ -894,7 +922,7 @@ describe("givebutter donar page source contract", () => {
   it("shows the FMCE explanation and the example-campaign giving form", () => {
     expect(donarSource).toContain("GIVEBUTTER_INTRO");
     expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
-    expect(GIVEBUTTER_INTRO).toContain("501(c)(3)");
+    expect(GIVEBUTTER_INTRO).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
@@ -990,7 +1018,7 @@ describe("two-door landing copy", () => {
     expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
     expect(DONAR_DOOR_SV_DESC).toBe("Comprobante de donación DTE salvadoreño");
     expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
-    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501(c)(3))");
+    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501c3)");
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 

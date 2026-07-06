@@ -251,6 +251,12 @@ function UsFlagIcon() {
   );
 }
 
+// Clamp for the height Wompi's checkout reports via its sizeUpdate postMessage: a
+// buggy or hostile frame must not collapse the embed or blow the layout open.
+function clampEmbedHeight(height: number): number {
+  return Math.min(Math.max(Math.round(height), 320), 2400);
+}
+
 // Public donation wizard + Wompi/Givebutter handoff. Renders WITHOUT a session.
 export function DonarPage() {
   const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
@@ -281,6 +287,10 @@ export function DonarPage() {
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
   // still flips to "ready").
   const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed">("loading");
+  // Height reported by Wompi's checkout via sizeUpdate; null keeps the CSS fallback
+  // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
+  // the inner scrollbar disappears — the page is the only scroller.
+  const [embedHeight, setEmbedHeight] = useState<number | null>(null);
   const givebutterHostRef = useRef<HTMLDivElement | null>(null);
   // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
   // field, and the summary's Editar control (Paso 3 / the US embed step).
@@ -480,12 +490,46 @@ export function DonarPage() {
       return;
     }
     setHandoff("loading");
+    setEmbedHeight(null);
     const slow = window.setTimeout(() => {
       setHandoff((current) => (current === "loading" ? "delayed" : current));
     }, DONAR_SCRIPT_TIMEOUT_MS);
     return () => {
       window.clearTimeout(slow);
     };
+  }, [stage, intent]);
+
+  // Wompi's checkout posts JSON messages to its parent — the same channel its own
+  // modal widget consumes: { message: "sizeUpdate", height } as the content grows
+  // (their widget renders it as height + 35), and { message: "close" } when the donor
+  // taps the checkout's back arrow. Origin-checked strictly; anything unparseable is
+  // ignored. "close" walks back to Paso 2, same as our own Atrás from the embed.
+  useEffect(() => {
+    if (stage !== "widget" || !intent) {
+      return;
+    }
+    function onWompiMessage(event: MessageEvent) {
+      if (event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN) {
+        return;
+      }
+      let payload: { message?: unknown; height?: unknown };
+      try {
+        payload = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (payload?.message === "sizeUpdate" && typeof payload.height === "number") {
+        setEmbedHeight(clampEmbedHeight(payload.height + 35));
+        return;
+      }
+      if (payload?.message === "close") {
+        setIntent(null);
+        setStage("form");
+        setStep(2);
+      }
+    }
+    window.addEventListener("message", onWompiMessage);
+    return () => window.removeEventListener("message", onWompiMessage);
   }, [stage, intent]);
 
   // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
@@ -727,7 +771,7 @@ export function DonarPage() {
         {step === 1 && (
           <p className="donar-assurance">
             {usDonation
-              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico."
+              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico."
               : "Recibirá su comprobante de donación en su dirección de correo electrónico."}
           </p>
         )}
@@ -1010,6 +1054,8 @@ export function DonarPage() {
                   className="donar-embed"
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
                   title="Entrega segura con Wompi"
+                  style={embedHeight ? { height: embedHeight } : undefined}
+                  scrolling={embedHeight ? "no" : undefined}
                   onLoad={() => setHandoff("ready")}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
