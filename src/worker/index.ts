@@ -36,7 +36,7 @@ import {
   parseBrandingLogoMeta,
   parseBrandingSettings
 } from "./services/branding";
-import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates } from "./services/certificate";
+import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -612,15 +612,29 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
     }
     const year = Number(yearParam);
-    const result = await sendAnnualCertificates(env, repo, year, actor.id);
+    // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
+    // an absent/empty body runs the full bulk batch as before.
+    const body = (await request.json().catch(() => ({}))) as { donor?: unknown };
+    const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
+    let result;
+    try {
+      result = await sendAnnualCertificates(env, repo, year, actor.id, donorGroupKey);
+    } catch (error) {
+      if (error instanceof SingleDonorSendError) {
+        return jsonResponse({ error: "single_donor_send_error", message: error.message }, { status: error.status });
+      }
+      throw error;
+    }
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "DONOR_CERTIFICATES_RUN",
       entityType: "donor_certificate_run",
       entityId: String(year),
-      summary: `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
-      metadata: result
+      summary: donorGroupKey
+        ? `Constancia ${year} enviada individualmente: ${result.sent} enviada, ${result.failed} fallida`
+        : `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
+      metadata: { ...result, ...(donorGroupKey ? { mode: "single", donorGroupKey } : {}) }
     });
     return jsonResponse(result);
   }

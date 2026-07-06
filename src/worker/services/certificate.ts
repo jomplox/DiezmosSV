@@ -2,10 +2,11 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
 import { getEmisorConfig } from "../config";
-import type { Env } from "../types";
+import type { DteDocumentRecord, Env } from "../types";
 import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { certificateEmailHtml } from "./emailHtml";
+import { renderDtePdf } from "./pdf";
 
 export const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
 export const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
@@ -14,7 +15,10 @@ export const DONOR_CERTIFICATE_ENTITY_TYPE = "donor_certificate";
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
-export const CERTIFICATE_PDF_RENDERER_VERSION = "annual-certificate:v1";
+// v2 bundles the complete dossier: the summary page(s) followed by every related
+// CDE PDF appended one per page. Bumped from v1 (summary only) because the emitted
+// output changed — the version is evidence of which renderer produced a certificate.
+export const CERTIFICATE_PDF_RENDERER_VERSION = "annual-certificate:v2";
 
 export interface CertificateDonation {
   issuedAt: string;
@@ -37,6 +41,10 @@ export interface DonorCertificateSummary {
   // carry the "sin validez fiscal" marker so it is never mistaken for a real one.
   hasTestEnvironment: boolean;
   donations: CertificateDonation[];
+  // The source ACCEPTED records, in dossier order (ascending accepted_at, tie-break
+  // issued_at then id). Each is re-rendered with renderDtePdf and appended to the
+  // certificate so the donor receives every related CDE in one file.
+  documents: DteDocumentRecord[];
 }
 
 export interface CertificateEmisor {
@@ -117,6 +125,7 @@ export async function aggregateAnnualDonors(repo: Repository, year: number): Pro
         existing.totalCents += row.amount_cents;
         existing.hasTestEnvironment ||= row.environment === "00";
         existing.donations.push(donation);
+        existing.documents.push(row);
         if (!existing.donorEmail && email) {
           existing.donorEmail = email;
         }
@@ -128,7 +137,8 @@ export async function aggregateAnnualDonors(repo: Repository, year: number): Pro
           count: 1,
           totalCents: row.amount_cents,
           hasTestEnvironment: row.environment === "00",
-          donations: [donation]
+          donations: [donation],
+          documents: [row]
         });
       }
     }
@@ -141,9 +151,24 @@ export async function aggregateAnnualDonors(repo: Repository, year: number): Pro
   const donors = [...groups.values()];
   for (const donor of donors) {
     donor.donations.sort((left, right) => left.issuedAt.localeCompare(right.issuedAt));
+    // Dossier order: chronological by acceptance, tie-broken by issue instant then id
+    // so the appended CDE pages are deterministic even when two share an accepted_at.
+    donor.documents.sort(compareDossierDocuments);
   }
   donors.sort((left, right) => left.donorName.localeCompare(right.donorName, "es"));
   return donors;
+}
+
+// accepted_at may be null on legacy rows; treat null as an empty string so it sorts
+// before any real timestamp and never throws in the comparator.
+function compareDossierDocuments(left: DteDocumentRecord, right: DteDocumentRecord): number {
+  const leftAccepted = left.accepted_at ?? "";
+  const rightAccepted = right.accepted_at ?? "";
+  return (
+    leftAccepted.localeCompare(rightAccepted) ||
+    left.issued_at.localeCompare(right.issued_at) ||
+    left.id.localeCompare(right.id)
+  );
 }
 
 function normalizeText(value: string | null | undefined): string | null {
@@ -217,6 +242,36 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   return pdf.save();
 }
 
+// Builds the complete dossier: the summary page(s) followed by every related CDE,
+// one document per page, in the donor's dossier order. Renders each CDE sequentially
+// (never Promise.all — the worker CPU budget is tight) and appends via copyPages so a
+// single PDF carries the whole year. A CDE that fails to render throws a Spanish error
+// rather than shipping an incomplete dossier; callers isolate that failure per donor.
+export async function renderCertificateDossierPdf(input: RenderCertificateInput): Promise<Uint8Array> {
+  const summaryBytes = await renderCertificatePdf(input);
+  const dossier = await PDFDocument.load(summaryBytes);
+
+  // Sort here too (aggregateAnnualDonors already does) so the dossier invariant holds
+  // regardless of the order the caller supplies the records in.
+  const ordered = [...input.donor.documents].sort(compareDossierDocuments);
+  for (const record of ordered) {
+    let dteBytes: Uint8Array;
+    try {
+      dteBytes = await renderDtePdf(record);
+    } catch (error) {
+      const cause = error instanceof Error ? error.message : String(error);
+      throw new Error(`No se pudo generar el comprobante ${record.numero_control} para la constancia: ${cause}`);
+    }
+    const source = await PDFDocument.load(dteBytes);
+    const copied = await dossier.copyPages(source, source.getPageIndices());
+    for (const copiedPage of copied) {
+      dossier.addPage(copiedPage);
+    }
+  }
+
+  return dossier.save();
+}
+
 function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFont, bold: PDFFont, top: number): number {
   const black = rgb(0, 0, 0);
   const headerFill = rgb(0.06, 0.46, 0.43);
@@ -288,6 +343,9 @@ function formatDocument(value: string | null | undefined): string {
 }
 
 export interface AnnualCertificatePreviewDonor {
+  // The donor grouping key (email, else name) — the single-donor send addresses a
+  // donor by this exact value, so the preview row carries it for the per-row button.
+  groupKey: string;
   donorName: string;
   donorEmail: string | null;
   hasEmail: boolean;
@@ -316,6 +374,7 @@ export async function buildAnnualCertificatePreview(repo: Repository, year: numb
     withoutEmail: donors.length - withEmail,
     totalLabel: `$${formatCents(totalCents)}`,
     donors: donors.map((donor) => ({
+      groupKey: donor.groupKey,
       donorName: donor.donorName,
       donorEmail: donor.donorEmail,
       hasEmail: Boolean(donor.donorEmail),
@@ -333,13 +392,32 @@ export interface AnnualCertificateSendResult {
   failed: number;
 }
 
-// Emails one certificate per donor WITH an email address, for the given year.
-// Idempotent re-runs: a donor with an existing DONOR_CERTIFICATE_SENT audit for
-// this year (entityId `<year>:<email>`) is skipped, so re-running covers only new
-// or previously failed donors. Donors without email are counted as skipped and
-// never sent. Each donor is audited SENT or FAILED independently — one failure
-// never aborts the batch.
-export async function sendAnnualCertificates(env: Env, repo: Repository, year: number, actorId: string | null): Promise<AnnualCertificateSendResult> {
+// Raised when an explicit single-donor send names a donor who cannot be served.
+// `status` maps directly onto the HTTP response: 404 when the donor is absent from
+// the year's aggregation, 400 when the donor exists but has no email address.
+export class SingleDonorSendError extends Error {
+  constructor(readonly status: 400 | 404, message: string) {
+    super(message);
+    this.name = "SingleDonorSendError";
+  }
+}
+
+// Emails certificates for the given year. Two modes:
+//  - Bulk (no `donorGroupKey`): one certificate per donor WITH an email address.
+//    Idempotent re-runs — a donor with an existing DONOR_CERTIFICATE_SENT audit for
+//    this year (entityId `<year>:<email>`) is skipped, so re-running covers only new
+//    or previously failed donors. Donors without email are counted as skipped. Each
+//    donor is audited SENT or FAILED independently — one failure never aborts the batch.
+//  - Single (`donorGroupKey` set): sends ONLY that donor and is also the resend path,
+//    so the sent-dedupe is deliberately bypassed. An unknown donor throws a 404 and a
+//    donor without email a 400 (both Spanish); the audit metadata records mode "single".
+export async function sendAnnualCertificates(
+  env: Env,
+  repo: Repository,
+  year: number,
+  actorId: string | null,
+  donorGroupKey?: string | null
+): Promise<AnnualCertificateSendResult> {
   const emisorConfig = getEmisorConfig(env);
   const emisor: CertificateEmisor = { nombre: emisorConfig.nombreComercial || emisorConfig.nombre, numDocumento: emisorConfig.numDocumento };
   const donors = await aggregateAnnualDonors(repo, year);
@@ -349,20 +427,36 @@ export async function sendAnnualCertificates(env: Env, repo: Repository, year: n
   const email = new EmailService(env, undefined, { organizationName: emisor.nombre, brandColor: branding.brandColor });
   const issuedOnLabel = elSalvadorDateLabel(new Date().toISOString());
   const result: AnnualCertificateSendResult = { year, sent: 0, skipped: 0, failed: 0 };
+  const single = typeof donorGroupKey === "string";
 
-  for (const donor of donors) {
+  let targets = donors;
+  if (single) {
+    const donor = donors.find((candidate) => candidate.groupKey === donorGroupKey);
+    if (!donor) {
+      throw new SingleDonorSendError(404, "No se encontró al donante indicado en las donaciones aceptadas de este año.");
+    }
+    if (!donor.donorEmail) {
+      throw new SingleDonorSendError(400, "El donante indicado no tiene correo registrado, por lo que no se le puede enviar la constancia.");
+    }
+    targets = [donor];
+  }
+
+  for (const donor of targets) {
     if (!donor.donorEmail) {
       result.skipped += 1;
       continue;
     }
     const entityId = `${year}:${donor.donorEmail}`;
-    const alreadySent = await repo.countAuditEntries(DONOR_CERTIFICATE_SENT_ACTION, entityId);
-    if (alreadySent > 0) {
-      result.skipped += 1;
-      continue;
+    // A single-donor send is the explicit resend path, so it never dedupes.
+    if (!single) {
+      const alreadySent = await repo.countAuditEntries(DONOR_CERTIFICATE_SENT_ACTION, entityId);
+      if (alreadySent > 0) {
+        result.skipped += 1;
+        continue;
+      }
     }
     try {
-      const pdfBytes = await renderCertificatePdf({ year, donor, emisor, issuedOnLabel });
+      const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel });
       const totalLabel = `$${formatCents(donor.totalCents)}`;
       await email.sendDonorCertificate({
         toEmail: donor.donorEmail,
@@ -390,7 +484,7 @@ export async function sendAnnualCertificates(env: Env, repo: Repository, year: n
         entityType: DONOR_CERTIFICATE_ENTITY_TYPE,
         entityId,
         summary: `Constancia ${year} enviada a ${donor.donorEmail}`,
-        metadata: { year, donorName: donor.donorName, count: donor.count, totalCents: donor.totalCents }
+        metadata: { year, donorName: donor.donorName, count: donor.count, totalCents: donor.totalCents, ...(single ? { mode: "single" } : {}) }
       });
       result.sent += 1;
     } catch (error) {
@@ -400,7 +494,8 @@ export async function sendAnnualCertificates(env: Env, repo: Repository, year: n
         action: DONOR_CERTIFICATE_FAILED_ACTION,
         entityType: DONOR_CERTIFICATE_ENTITY_TYPE,
         entityId,
-        summary: error instanceof Error ? error.message : String(error)
+        summary: error instanceof Error ? error.message : String(error),
+        metadata: single ? { mode: "single" } : undefined
       });
       result.failed += 1;
     }

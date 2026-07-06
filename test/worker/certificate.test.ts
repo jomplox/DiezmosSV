@@ -7,6 +7,7 @@ import {
   aggregateAnnualDonors,
   certificateYearError,
   elSalvadorYearWindow,
+  renderCertificateDossierPdf,
   renderCertificatePdf,
   type DonorCertificateSummary
 } from "../../src/worker/services/certificate";
@@ -40,8 +41,8 @@ describe("certificateYearError", () => {
 describe("aggregateAnnualDonors", () => {
   it("groups ACCEPTED donations per donor by email, sums integer cents, excludes other statuses and years", async () => {
     const db = new FakeAggregationDb([
-      accepted({ id: "d1", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 2500, issued_at: "2025-02-01T10:00:00.000Z", numero_control: "DTE-15-0001" }),
-      accepted({ id: "d2", donor_email: "ana@example.org", donor_name: "Ana Lopez", amount_cents: 7501, issued_at: "2025-05-10T10:00:00.000Z", numero_control: "DTE-15-0002" }),
+      accepted({ id: "d1", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 2500, issued_at: "2025-02-01T10:00:00.000Z", accepted_at: "2025-02-01T10:05:00.000Z", numero_control: "DTE-15-0001" }),
+      accepted({ id: "d2", donor_email: "ana@example.org", donor_name: "Ana Lopez", amount_cents: 7501, issued_at: "2025-05-10T10:00:00.000Z", accepted_at: "2025-05-10T10:05:00.000Z", numero_control: "DTE-15-0002" }),
       accepted({ id: "d3", donor_email: "beto@example.org", donor_name: "Beto", amount_cents: 100, issued_at: "2025-11-30T10:00:00.000Z", numero_control: "DTE-15-0003" }),
       // Excluded: invalidated
       accepted({ id: "d4", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 9999, issued_at: "2025-06-01T10:00:00.000Z", numero_control: "DTE-15-0004", status: "INVALIDATED" }),
@@ -59,6 +60,10 @@ describe("aggregateAnnualDonors", () => {
     expect(ana!.totalCents).toBe(10001);
     expect(ana!.donations.map((donation) => donation.numeroControl)).toEqual(["DTE-15-0001", "DTE-15-0002"]);
     expect(ana!.hasTestEnvironment).toBe(false);
+    // The dossier source records ride along, ordered by accepted_at (tie-break issued_at, id),
+    // and the INVALIDATED document never appears among them.
+    expect(ana!.documents.map((document) => document.id)).toEqual(["d1", "d2"]);
+    expect(ana!.documents.every((document) => document.status === "ACCEPTED")).toBe(true);
 
     const beto = donors.find((donor) => donor.groupKey === "beto@example.org");
     expect(beto!.totalCents).toBe(100);
@@ -126,6 +131,59 @@ describe("renderCertificatePdf", () => {
   });
 });
 
+describe("renderCertificateDossierPdf", () => {
+  it("appends every ACCEPTED DTE after the summary page, one per page, in accepted_at order", async () => {
+    const donor: DonorCertificateSummary = {
+      ...summary(),
+      documents: [
+        dteRecord({ id: "d2", numero_control: "DTE-15-0002", accepted_at: "2025-05-10T16:10:00.000Z" }),
+        dteRecord({ id: "d1", numero_control: "DTE-15-0001", accepted_at: "2025-02-01T16:10:00.000Z" })
+      ]
+    };
+    const pdf = await renderCertificateDossierPdf({
+      year: 2025,
+      donor,
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026"
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-dossier-"));
+    const pdfPath = join(dir, "dossier.pdf");
+    const txtPath = join(dir, "dossier.txt");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+    const text = readFileSync(txtPath, "utf8");
+    const pageInfo = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    const pages = Number(pageInfo.match(/Pages:\s+(\d+)/)?.[1] ?? 0);
+
+    // 1 summary page + 2 DTE pages.
+    expect(pages).toBe(3);
+    // Every appended DTE renders its comprobante layout.
+    expect(text).toContain("COMPROBANTE DE DONACIÓN");
+
+    // Per-page extraction proves ascending accepted_at order: d1 (Feb) before d2 (May).
+    const perPage = execFileSync("pdftotext", ["-layout", "-f", "2", "-l", "2", pdfPath, "-"], { encoding: "utf8" });
+    const perPage3 = execFileSync("pdftotext", ["-layout", "-f", "3", "-l", "3", pdfPath, "-"], { encoding: "utf8" });
+    expect(perPage).toContain("DTE-15-0001");
+    expect(perPage3).toContain("DTE-15-0002");
+  });
+
+  it("fails with a Spanish message when a DTE cannot be rendered", async () => {
+    const donor: DonorCertificateSummary = {
+      ...summary(),
+      documents: [dteRecord({ id: "bad", plain_json: "not json at all" })]
+    };
+    await expect(
+      renderCertificateDossierPdf({
+        year: 2025,
+        donor,
+        emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+        issuedOnLabel: "05/07/2026"
+      })
+    ).rejects.toThrow(/comprobante/i);
+  });
+});
+
 function summary(): DonorCertificateSummary {
   return {
     groupKey: "ana@example.org",
@@ -137,7 +195,23 @@ function summary(): DonorCertificateSummary {
     donations: [
       { issuedAt: "2025-02-01T16:00:00.000Z", dateLabel: "01/02/2025", numeroControl: "DTE-15-0001", amountCents: 2500 },
       { issuedAt: "2025-05-10T16:00:00.000Z", dateLabel: "10/05/2025", numeroControl: "DTE-15-0002", amountCents: 10001 }
-    ]
+    ],
+    documents: []
+  };
+}
+
+// A fully-formed DTE record whose plain_json renderDtePdf can consume.
+function dteRecord(overrides: Partial<DteDocumentRecord>): DteDocumentRecord {
+  return {
+    ...accepted({}),
+    plain_json: JSON.stringify({
+      identificacion: { version: 2, fecEmi: "2025-02-01", horEmi: "10:00:00", tipoMoneda: "USD" },
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      receptor: { nombre: "Ana Prueba", correo: "ana@example.org", tipoDocumento: "13", numDocumento: "100000001" },
+      cuerpoDocumento: [{ cantidad: 1, descripcion: "DONACIÓN", valor: 100 }],
+      resumen: { valorTotal: 100, totalLetras: null }
+    }),
+    ...overrides
   };
 }
 
