@@ -3,14 +3,20 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DONAR_AMOUNT_CHIPS,
+  DONAR_BACK_LABEL,
+  DONAR_CONTINUE_LABEL,
   DONAR_DOMESTIC_DEPARTMENTS,
+  DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
   DONAR_FOREIGN_COUNTRIES,
   DONAR_FOREIGN_GEOGRAPHY_CODE,
+  DONAR_HERO_PLACEHOLDER,
   DONAR_INTENT_PATH,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
   DONAR_SCRIPT_TIMEOUT_MS,
+  DONAR_STEP_COUNT_SV,
+  DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
@@ -19,6 +25,8 @@ import {
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
+  GIVEBUTTER_FREQ_MONTHLY_LABEL,
+  GIVEBUTTER_FREQ_ONCE_LABEL,
   GIVEBUTTER_INTRO,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
@@ -34,10 +42,15 @@ import {
   DONAR_LANDING_SUBTITLE,
   DONAR_LANDING_UNIFIER,
   DONAR_ROUTE_PARAM,
+  donarAmountDisplay,
+  donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
+  donationAmountValidationMessage,
   donationFormValidationMessage,
   donationIntentBody,
+  donationStep1ValidationMessage,
+  donationStep2ValidationMessage,
   givebutterHostedUrl,
   givebutterPrefillParams,
   isUsDonation,
@@ -47,7 +60,11 @@ import {
   widgetUrlFrom
 } from "../../src/client/donation";
 
+// The donor-facing wizard lives in its own module (src/client/donarPage.tsx);
+// App.tsx keeps only the thin path branch that mounts it. Source-contract
+// assertions read whichever file now owns the markup.
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 
 describe("donar page routing", () => {
@@ -75,6 +92,18 @@ describe("donar page routing", () => {
     // Renders dedicated standalone components.
     expect(appSource).toContain("<DonarPage");
     expect(appSource).toContain("<DonarGraciasPage");
+  });
+
+  it("keeps App.tsx as the thin mount: the wizard lives in the extracted donarPage module", () => {
+    // The components are imported from the dedicated module...
+    expect(appSource).toContain('from "./donarPage"');
+    // ...and no longer defined inline in App.tsx.
+    expect(appSource).not.toContain("function DonarPage");
+    expect(appSource).not.toContain("function DonarThankYou");
+    expect(appSource).not.toContain("function DonarGraciasPage");
+    expect(donarSource).toContain("function DonarPage");
+    expect(donarSource).toContain("function DonarThankYou");
+    expect(donarSource).toContain("function DonarGraciasPage");
   });
 });
 
@@ -168,11 +197,85 @@ describe("donar form validation", () => {
     expect(donationFormValidationMessage({ ...base, distrito: "" })).toBe("Seleccione un distrito.");
     expect(donationFormValidationMessage({ ...base, complemento: "  " })).toBe("Ingrese su dirección.");
   });
+
+  describe("per-step split (wizard)", () => {
+    it("step 1 validates only the gift type and the amount", () => {
+      expect(donationStep1ValidationMessage({ giftType: "", amount: "10.00" })).toBe("Seleccione si es diezmo u ofrenda.");
+      expect(donationStep1ValidationMessage({ giftType: "DIEZMO", amount: "" })).toBe("Ingrese un monto válido en dólares.");
+      expect(donationStep1ValidationMessage({ giftType: "DIEZMO", amount: "0.50" })).toBe("El monto mínimo de donación es $1.00.");
+      expect(donationStep1ValidationMessage({ giftType: "OFRENDA", amount: "5.00" })).toBe("");
+    });
+
+    it("the amount rule is reusable alone (US Paso 1 has no gift type)", () => {
+      expect(donationAmountValidationMessage("")).toBe("Ingrese un monto válido en dólares.");
+      expect(donationAmountValidationMessage("abc")).toBe("Ingrese un monto válido en dólares.");
+      expect(donationAmountValidationMessage("0.99")).toBe("El monto mínimo de donación es $1.00.");
+      expect(donationAmountValidationMessage("1")).toBe("");
+      expect(donationAmountValidationMessage("125.00")).toBe("");
+    });
+
+    it("step 2 validates identity + address and ignores the step-1 fields", () => {
+      // Amount/giftType are already locked by Paso 1: garbage there must not block Paso 2.
+      const step2Valid = { ...base, amount: "", giftType: "" as const };
+      expect(donationStep2ValidationMessage(step2Valid)).toBe("");
+      expect(donationStep2ValidationMessage({ ...step2Valid, donorDocument: "04182769-0" })).toBe("Revise el número de DUI.");
+      expect(donationStep2ValidationMessage({ ...step2Valid, departamento: "" })).toBe("Seleccione un departamento.");
+      expect(donationStep2ValidationMessage({ ...step2Valid, complemento: " " })).toBe("Ingrese su dirección.");
+    });
+
+    it("the full validator is exactly step 1 then step 2 (messages and order unchanged)", () => {
+      const samples = [
+        base,
+        { ...base, giftType: "" as const },
+        { ...base, amount: "0" },
+        { ...base, donorDocument: "04182769-0" },
+        { ...base, departamento: "" },
+        { ...base, complemento: "  " },
+        { ...base, foreignResident: true, pais: "", departamento: "", municipio: "", distrito: "" }
+      ];
+      for (const sample of samples) {
+        expect(donationFormValidationMessage(sample)).toBe(
+          donationStep1ValidationMessage(sample) || donationStep2ValidationMessage(sample)
+        );
+      }
+    });
+  });
 });
 
 describe("donar amount chips", () => {
   it("offers the $5 / $10 / $25 / $50 quick amounts", () => {
     expect(DONAR_AMOUNT_CHIPS).toEqual([5, 10, 25, 50]);
+  });
+});
+
+describe("donar wizard helpers", () => {
+  it("labels the steps as 'Paso n de m'", () => {
+    expect(donarStepIndicator(1, 3)).toBe("Paso 1 de 3");
+    expect(donarStepIndicator(2, 3)).toBe("Paso 2 de 3");
+    expect(donarStepIndicator(2, 2)).toBe("Paso 2 de 2");
+  });
+
+  it("counts 3 SV steps (monto, datos, pago) and 2 US steps (monto, Givebutter)", () => {
+    expect(DONAR_STEP_COUNT_SV).toBe(3);
+    expect(DONAR_STEP_COUNT_US).toBe(2);
+  });
+
+  it("formats the summary amount as a two-decimal dollar figure", () => {
+    expect(donarAmountDisplay("125")).toBe("$125.00");
+    expect(donarAmountDisplay("12.5")).toBe("$12.50");
+    expect(donarAmountDisplay(" 25.00 ")).toBe("$25.00");
+    // Only rendered after Paso 1 validates, but degrade gracefully anyway.
+    expect(donarAmountDisplay("")).toBe("$0.00");
+  });
+
+  it("pins the wizard chrome labels", () => {
+    expect(DONAR_CONTINUE_LABEL).toBe("Continuar");
+    expect(DONAR_BACK_LABEL).toBe("← Atrás");
+    expect(DONAR_EDIT_LABEL).toBe("Editar");
+    expect(DONAR_HERO_PLACEHOLDER).toBe("0.00");
+    // US Paso 1 segmented control: Única | Mensual.
+    expect(GIVEBUTTER_FREQ_ONCE_LABEL).toBe("Única");
+    expect(GIVEBUTTER_FREQ_MONTHLY_LABEL).toBe("Mensual");
   });
 });
 
@@ -293,54 +396,90 @@ describe("donar thank-you page", () => {
   });
 });
 
-describe("donar page source contract", () => {
+describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
-    // Religious framing: the SV fiscal form heading now names the aportación.
-    expect(appSource).toContain("Entregue su diezmo u ofrenda");
-    expect(appSource).toContain("Tipo de documento");
-    expect(appSource).toContain("Teléfono (opcional)");
-    expect(appSource).toContain("Departamento");
-    expect(appSource).toContain("Municipio");
-    expect(appSource).toContain("Distrito");
-    expect(appSource).toContain("Dirección");
-    expect(appSource).toContain("Monto");
+    // Religious framing: the SV fiscal form heading names the aportación.
+    expect(donarSource).toContain("Entregue su diezmo u ofrenda");
+    expect(donarSource).toContain("Tipo de documento");
+    expect(donarSource).toContain("Teléfono (opcional)");
+    expect(donarSource).toContain("Departamento");
+    expect(donarSource).toContain("Municipio");
+    expect(donarSource).toContain("Distrito");
+    expect(donarSource).toContain("Dirección");
+    expect(donarSource).toContain("Monto");
   });
 
-  it("renders the required Diezmo/Ofrenda chip selector on the SV form", () => {
-    expect(appSource).toContain("DONAR_GIFT_TYPE_LABEL");
-    expect(appSource).toContain("DONAR_GIFT_TYPE_FIELD_LABEL");
-    // Rendered as monochrome chips (same class as the monto chips; active inverts).
-    expect(appSource).toContain('form.giftType === option ? "donar-chip active" : "donar-chip"');
+  it("renders Diezmo|Ofrenda as a segmented radiogroup of real radio inputs", () => {
+    expect(donarSource).toContain("DONAR_GIFT_TYPE_LABEL");
+    expect(donarSource).toContain("DONAR_GIFT_TYPE_FIELD_LABEL");
+    // Givebutter-style segmented control: real radios styled as two inverted halves.
+    expect(donarSource).toContain('role="radiogroup"');
+    expect(donarSource).toContain('type="radio"');
+    expect(donarSource).toContain('name="donar-gift-type"');
+    expect(donarSource).toContain('form.giftType === option ? "donar-segment-option active" : "donar-segment-option"');
     expect(DONAR_GIFT_TYPE_LABEL.DIEZMO).toBe("Diezmo");
     expect(DONAR_GIFT_TYPE_LABEL.OFRENDA).toBe("Ofrenda");
   });
 
+  it("presents the wizard in three SV steps with a step indicator and per-step back affordances", () => {
+    // "Paso n de m" chrome (Gotham Book gray) at the card top.
+    expect(donarSource).toContain("donarStepIndicator(");
+    expect(donarSource).toContain("donar-step-indicator");
+    // Back affordances: "← Atrás" on later steps; "← Cambiar opción" only on Paso 1.
+    expect(donarSource).toContain("DONAR_BACK_LABEL");
+    expect(donarSource).toContain("DONAR_CHANGE_DOOR_LABEL");
+  });
+
+  it("makes the amount the hero: giant $-prefixed decimal input, no 'Otro monto' field", () => {
+    expect(donarSource).toContain("donar-hero-amount");
+    expect(donarSource).toContain("DONAR_HERO_PLACEHOLDER");
+    expect(donarSource).toContain('inputMode="decimal"');
+    // The old afterthought text field is gone everywhere.
+    expect(donarSource).not.toContain("Otro monto");
+    expect(appSource).not.toContain("Otro monto");
+  });
+
+  it("keeps the preset quick-fills as pill chips that fill the hero input", () => {
+    expect(donarSource).toContain("DONAR_AMOUNT_CHIPS");
+    expect(donarSource).toContain('form.amount === chip.toFixed(2) ? "donar-chip active" : "donar-chip"');
+  });
+
+  it("moves focus to the step's first control on advance", () => {
+    expect(donarSource).toContain(".focus()");
+  });
+
+  it("shows a Paso 3 summary line with an Editar link back to Paso 1", () => {
+    expect(donarSource).toContain("donar-summary");
+    expect(donarSource).toContain("DONAR_EDIT_LABEL");
+    expect(donarSource).toContain("donarAmountDisplay(");
+  });
+
   it("changes the submit label to the diezmo-framed 'Continuar al pago'", () => {
-    expect(appSource).toContain("Continuar al pago");
-    expect(appSource).not.toContain('"Donar"');
+    expect(donarSource).toContain("Continuar al pago");
+    expect(donarSource).not.toContain('"Donar"');
   });
 
   it("shows the EE. UU. flow its own heading", () => {
-    expect(appSource).toContain("Diezmos y Ofrendas — EE. UU.");
+    expect(donarSource).toContain("Diezmos y Ofrendas — EE. UU.");
   });
 
   it("no longer collects name or email on the form (both are entered on Wompi's sheet)", () => {
     // Wompi's hosted sheet requires and asks only for name + email, so the form
     // must not render those fields — and must tell the donor what comes next.
-    expect(appSource).not.toContain("Nombre completo");
-    expect(appSource).not.toContain("Correo electrónico");
-    expect(appSource).toContain("Su nombre y correo se ingresan al pagar con Wompi.");
+    expect(donarSource).not.toContain("Nombre completo");
+    expect(donarSource).not.toContain("Correo electrónico");
+    expect(donarSource).toContain("Su nombre y correo se ingresan al pagar con Wompi.");
   });
 
   it("wires cascading municipio/distrito selects to the department-scoped catalog helpers", () => {
-    expect(appSource).toContain("getCat013Municipalities(");
-    expect(appSource).toContain("getCat008Districts(");
+    expect(donarSource).toContain("getCat013Municipalities(");
+    expect(donarSource).toContain("getCat008Districts(");
   });
 
   it("auto-formats and check-digit-validates the DUI on blur via the shared helpers", () => {
-    expect(appSource).toContain("formatDui(");
-    expect(appSource).toContain("isValidDui(");
-    expect(appSource).toContain("onBlur=");
+    expect(donarSource).toContain("formatDui(");
+    expect(donarSource).toContain("isValidDui(");
+    expect(donarSource).toContain("onBlur=");
     // The "Revise el número de DUI." copy lives in donationFormValidationMessage.
     expect(donationFormValidationMessage).toBeTypeOf("function");
   });
@@ -351,94 +490,99 @@ describe("donar page source contract", () => {
     // option would bait them into the razón-social requirement. The stored code
     // stays "36"; the admin quick-CDE keeps the raw CAT022_DOCUMENT_TYPES labels.
     // Order: DUI, Empresa, Otro, Pasaporte, Carnet de Residente.
-    const donarStart = appSource.indexOf("function DonarPage");
+    const donarStart = donarSource.indexOf("function DonarPage");
     expect(donarStart).toBeGreaterThan(-1);
-    const donarSource = appSource.slice(donarStart);
+    const pageSource = donarSource.slice(donarStart);
     let previous = -1;
     for (const option of ['value="13">DUI<', 'value="36">Empresa<', 'value="37">Otro<', 'value="03">Pasaporte<', 'value="02">Carnet de Residente<']) {
-      const at = donarSource.indexOf(option);
+      const at = pageSource.indexOf(option);
       expect(at, `missing or out of order: ${option}`).toBeGreaterThan(previous);
       previous = at;
     }
     // The bait label never appears on the donor-facing select.
-    expect(donarSource).not.toContain('value="36">NIT<');
+    expect(pageSource).not.toContain('value="36">NIT<');
   });
 
   it("auto-formats a valid 14-digit NIT on blur, mirroring the DUI blur behavior", () => {
-    expect(appSource).toContain("formatNit(");
-    expect(appSource).toContain("isValidNitFormat(");
+    expect(donarSource).toContain("formatNit(");
+    expect(donarSource).toContain("isValidNitFormat(");
   });
 
   it("presents the empresa field pair: NIT de la empresa + required razón social", () => {
-    const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+    const pageSource = donarSource.slice(donarSource.indexOf("function DonarPage"));
     // The document input is labeled "NIT de la empresa" while Empresa is selected...
-    expect(donarSource).toContain("NIT de la empresa");
+    expect(pageSource).toContain("NIT de la empresa");
     // ...alongside the required razón social, both keyed on the 36 document type.
-    expect(donarSource).toContain("Razón social");
-    expect(donarSource).toContain('donorDocumentType === "36"');
+    expect(pageSource).toContain("Razón social");
+    expect(pageSource).toContain('donorDocumentType === "36"');
   });
 
   it("wires the extranjero toggle above the address block, swapping geography for a país select", () => {
-    const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
-    expect(donarSource).toContain("Resido en el extranjero");
+    const pageSource = donarSource.slice(donarSource.indexOf("function DonarPage"));
+    expect(pageSource).toContain("Resido en el extranjero");
     // Checked → the país select (CAT-020 minus SV) replaces departamento/municipio/distrito.
-    expect(donarSource).toContain("DONAR_FOREIGN_COUNTRIES");
-    expect(donarSource).toContain("País");
-    expect(donarSource).toContain("foreignResident");
+    expect(pageSource).toContain("DONAR_FOREIGN_COUNTRIES");
+    expect(pageSource).toContain("País");
+    expect(pageSource).toContain("foreignResident");
     // The toggle renders BEFORE the address selects in the form markup.
-    const toggleAt = donarSource.indexOf("Resido en el extranjero");
-    const departamentoAt = donarSource.indexOf("<span>Departamento</span>");
+    const toggleAt = pageSource.indexOf("Resido en el extranjero");
+    const departamentoAt = pageSource.indexOf("<span>Departamento</span>");
     expect(toggleAt).toBeGreaterThan(-1);
     expect(departamentoAt).toBeGreaterThan(-1);
     expect(toggleAt).toBeLessThan(departamentoAt);
   });
 
   it("submits the intent body through the shared donationIntentBody helper", () => {
-    expect(appSource).toContain("donationIntentBody(");
+    expect(donarSource).toContain("donationIntentBody(");
   });
 
   it("disables the submit button while preparing the payment", () => {
-    expect(appSource).toContain("Preparando el pago…");
+    expect(donarSource).toContain("Preparando el pago…");
+  });
+
+  it("validates per step: Paso 1 gates on the step-1 rules, Paso 2 on the rest", () => {
+    expect(donarSource).toContain("donationStep1ValidationMessage(");
+    expect(donarSource).toContain("donationStep2ValidationMessage(");
   });
 
   it("loads the Wompi widget script only from the donar view and renders the widget button", () => {
-    expect(appSource).toContain("DONAR_WOMPI_SCRIPT_URL");
-    expect(appSource).toContain("wompi_button_widget");
-    expect(appSource).toContain('"data-render", "widget"');
-    expect(appSource).toContain('"data-url-pago"');
+    expect(donarSource).toContain("DONAR_WOMPI_SCRIPT_URL");
+    expect(donarSource).toContain("wompi_button_widget");
+    expect(donarSource).toContain('"data-render", "widget"');
+    expect(donarSource).toContain('"data-url-pago"');
   });
 
   it("falls back to a full-page redirect to urlEnlace when the widget cannot render", () => {
-    expect(appSource).toContain("window.location.href");
-    expect(appSource).toContain("urlEnlace");
+    expect(donarSource).toContain("window.location.href");
+    expect(donarSource).toContain("urlEnlace");
   });
 
   it("auto-clicks the rendered Wompi button so the modal opens immediately after submit", () => {
     // The effect that renders the widget div must poll/observe the host for the
     // button Wompi injects and click it once, so form → modal needs no extra click.
-    const widgetEffect = appSource.indexOf("wompi_button_widget");
+    const widgetEffect = donarSource.indexOf("wompi_button_widget");
     expect(widgetEffect).toBeGreaterThan(-1);
     // Auto-click looks for the button in the host and invokes .click() on it.
-    expect(appSource).toContain('host.querySelector("button")');
-    const clickCall = appSource.indexOf(".click()", widgetEffect);
+    expect(donarSource).toContain('host.querySelector("button")');
+    const clickCall = donarSource.indexOf(".click()", widgetEffect);
     expect(clickCall).toBeGreaterThan(-1);
     // The auto-click poll reuses the existing short script/render timeout budget.
-    expect(appSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
+    expect(donarSource).toContain("DONAR_SCRIPT_TIMEOUT_MS");
   });
 
   it("guards the auto-click with a ref so it never double-fires", () => {
     // A dedicated ref (initialized false) latches once the button is clicked.
-    expect(appSource).toContain("autoClickedRef");
-    expect(appSource).toContain("useRef(false)");
+    expect(donarSource).toContain("autoClickedRef");
+    expect(donarSource).toContain("useRef(false)");
     // The guard is checked before clicking and set true after, so re-observing the
     // (still-present) button does not re-open the modal.
-    const guardCheck = appSource.indexOf("autoClickedRef.current");
+    const guardCheck = donarSource.indexOf("autoClickedRef.current");
     expect(guardCheck).toBeGreaterThan(-1);
   });
 
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
-    expect(appSource).toContain("¿No se abre el pago? Continúe aquí");
+    expect(donarSource).toContain("¿No se abre el pago? Continúe aquí");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {
@@ -449,22 +593,53 @@ describe("donar page source contract", () => {
     // The gracias page inside the modal iframe is same-origin, so the listener must
     // reject messages whose origin differs from window.location.origin — otherwise the
     // Wompi widget iframe (which holds window.parent) could spoof the thank-you state.
-    const listenerStart = appSource.indexOf("function onMessage(event: MessageEvent)");
+    const listenerStart = donarSource.indexOf("function onMessage(event: MessageEvent)");
     expect(listenerStart).toBeGreaterThan(-1);
-    const completedCheck = appSource.indexOf("DONAR_COMPLETED_MESSAGE", listenerStart);
+    const completedCheck = donarSource.indexOf("DONAR_COMPLETED_MESSAGE", listenerStart);
     expect(completedCheck).toBeGreaterThan(-1);
-    const originCheck = appSource.indexOf("event.origin !== window.location.origin", listenerStart);
+    const originCheck = donarSource.indexOf("event.origin !== window.location.origin", listenerStart);
     expect(originCheck).toBeGreaterThan(-1);
     // The origin guard must appear before (or with) the message check, inside the listener.
     expect(originCheck).toBeLessThan(completedCheck);
   });
 
   it("posts the completed message to the same origin, never the wildcard target", () => {
-    const senderStart = appSource.indexOf("window.parent.postMessage(DONAR_COMPLETED_MESSAGE");
+    const senderStart = donarSource.indexOf("window.parent.postMessage(DONAR_COMPLETED_MESSAGE");
     expect(senderStart).toBeGreaterThan(-1);
-    const senderCall = appSource.slice(senderStart, senderStart + 120);
+    const senderCall = donarSource.slice(senderStart, senderStart + 120);
     expect(senderCall).toContain("window.location.origin");
     expect(senderCall).not.toContain('"*"');
+  });
+});
+
+describe("donar wizard styles contract", () => {
+  it("wraps the wizard in a soft-shadowed 16px-radius card", () => {
+    const cardRule = stylesSource.match(/\.donar-card\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(cardRule).toContain("border-radius: 16px");
+    expect(cardRule).toContain("box-shadow");
+  });
+
+  it("sizes the hero amount input in the 48-56px Gotham range", () => {
+    const heroRule = stylesSource.match(/\.donar-hero-amount input\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(heroRule).toMatch(/font-size:\s*(4[89]|5[0-6])px/);
+  });
+
+  it("gives the primary button and segmented control 48px+ touch targets", () => {
+    const primaryRule = stylesSource.match(/\.donar-card\s+\.primary\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(primaryRule).toMatch(/min-height:\s*(4[89]|5[0-6])px/);
+    const segmentOption = stylesSource.match(/\.donar-segment-option\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(segmentOption).toMatch(/min-height:\s*(4[89]|5[0-6])px/);
+  });
+
+  it("inverts the active segment half to black (monochrome, no teal)", () => {
+    const activeSegment = stylesSource.match(/\.donar-segment-option\.active\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(activeSegment).toMatch(/#000|#111/i);
+    expect(activeSegment).not.toContain("#007c75");
+  });
+
+  it("respects prefers-reduced-motion on the step transition", () => {
+    expect(stylesSource).toContain(".donar-step");
+    expect(stylesSource).toMatch(/prefers-reduced-motion[\s\S]{0,800}\.donar-step/);
   });
 });
 
@@ -527,24 +702,35 @@ describe("givebutter prefill and hosted-url helpers", () => {
 });
 
 describe("givebutter donar page source contract", () => {
-  const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+  const pageSource = donarSource.slice(donarSource.indexOf("function DonarPage"));
 
   it("collapses the SV fiscal fields when the US Givebutter path is active", () => {
     // The form branches on isUsDonation(form): documento/razón social/teléfono/
-    // dirección must NOT render for a US resident (only monto + monthly + widget).
-    expect(donarSource).toContain("isUsDonation(");
+    // dirección must NOT render for a US resident (only monto + frequency + widget).
+    expect(pageSource).toContain("isUsDonation(");
+  });
+
+  it("shares Paso 1 with the SV door: hero amount + Única|Mensual segmented control", () => {
+    // The US door renders the SAME hero amount input and pill chips, with the
+    // monthly toggle restyled as the segmented control (real radios).
+    expect(pageSource).toContain('name="donar-frequency"');
+    expect(pageSource).toContain("GIVEBUTTER_FREQ_ONCE_LABEL");
+    expect(pageSource).toContain("GIVEBUTTER_FREQ_MONTHLY_LABEL");
+    // The pinned Spanish label still names the control for screen readers.
+    expect(pageSource).toContain("GIVEBUTTER_MONTHLY_LABEL");
+    expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
   });
 
   it("shows the FMCE explanation and the example-campaign giving form", () => {
-    expect(appSource).toContain("GIVEBUTTER_INTRO");
+    expect(donarSource).toContain("GIVEBUTTER_INTRO");
     expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
     expect(GIVEBUTTER_INTRO).toContain("501(c)(3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
     // The embedded custom element targets the campaign.
-    expect(donarSource).toContain("givebutter-giving-form");
-    expect(donarSource).toContain("GIVEBUTTER_CAMPAIGN");
+    expect(pageSource).toContain("givebutter-giving-form");
+    expect(pageSource).toContain("GIVEBUTTER_CAMPAIGN");
   });
 
   it("uses human GiveButter anchor text, never a raw URL, in the fallback CTA and hint", () => {
@@ -557,47 +743,43 @@ describe("givebutter donar page source contract", () => {
   });
 
   it("injects the Givebutter script only for the US path, once per page load", () => {
-    expect(appSource).toContain("GIVEBUTTER_SCRIPT_URL");
+    expect(donarSource).toContain("GIVEBUTTER_SCRIPT_URL");
     // Guarded like the Wompi injection: a querySelector check prevents a second tag.
-    expect(appSource).toContain('script[src="${GIVEBUTTER_SCRIPT_URL}"]');
+    expect(donarSource).toContain('script[src="${GIVEBUTTER_SCRIPT_URL}"]');
   });
 
   it("prefills the amount/frequency into the page URL via history.replaceState", () => {
-    expect(appSource).toContain("givebutterPrefillParams(");
-    expect(appSource).toContain("history.replaceState");
+    expect(donarSource).toContain("givebutterPrefillParams(");
+    expect(donarSource).toContain("history.replaceState");
   });
 
   it("removes the prefill params when leaving the US path (clean unmount)", () => {
     // The effect cleanup restores the URL so the fiscal fields / Wompi path is clean.
-    expect(appSource).toContain("GIVEBUTTER_RENDER_TIMEOUT_MS");
+    expect(donarSource).toContain("GIVEBUTTER_RENDER_TIMEOUT_MS");
   });
 
   it("renders the mandatory hosted-page fallback link with the slug URL", () => {
-    expect(appSource).toContain("givebutterHostedUrl(");
-    expect(appSource).toContain("GIVEBUTTER_FALLBACK_CTA");
-    expect(appSource).toContain("GIVEBUTTER_FALLBACK_HINT");
+    expect(donarSource).toContain("givebutterHostedUrl(");
+    expect(donarSource).toContain("GIVEBUTTER_FALLBACK_CTA");
+    expect(donarSource).toContain("GIVEBUTTER_FALLBACK_HINT");
     // Opens in a new tab.
-    expect(donarSource).toContain('target="_blank"');
-  });
-
-  it("offers a Donación mensual toggle mapping to frequency=monthly", () => {
-    expect(appSource).toContain("GIVEBUTTER_MONTHLY_LABEL");
-    expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
+    expect(pageSource).toContain('target="_blank"');
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {
     // The donor deliberately chose the EE. UU. door; "← Cambiar opción" is the way
     // back. The forceFiscal escape hatch (and its state) is gone.
-    expect(appSource).not.toContain("GIVEBUTTER_ESCAPE_HATCH");
-    expect(appSource).not.toContain("forceFiscal");
-    expect(appSource).not.toContain("donar-givebutter-escape");
+    expect(donarSource).not.toContain("GIVEBUTTER_ESCAPE_HATCH");
+    expect(donarSource).not.toContain("forceFiscal");
+    expect(donarSource).not.toContain("donar-givebutter-escape");
   });
 
   it("leaves the Wompi intent path untouched (non-US donors still submit an intent)", () => {
     // The non-US path still posts a donation intent through the shared helpers.
-    expect(donarSource).toContain("donationIntentBody(");
-    expect(donarSource).toContain("DONAR_INTENT_PATH");
+    expect(pageSource).toContain("donationIntentBody(");
+    expect(pageSource).toContain("DONAR_INTENT_PATH");
     // No Givebutter-specific backend endpoint is introduced.
+    expect(donarSource).not.toContain("/api/givebutter");
     expect(appSource).not.toContain("/api/givebutter");
   });
 });
@@ -650,60 +832,60 @@ describe("two-door landing copy", () => {
 describe("two-door landing source contract", () => {
   // The donor-landing surface begins at the inline icon components (OrganizationLogo,
   // SvWorldIcon, UsFlagIcon) which sit right above DonarPage and are only used there.
-  const donarSource = appSource.slice(appSource.indexOf("function OrganizationLogo"));
+  const landingSource = donarSource.slice(donarSource.indexOf("function OrganizationLogo"));
 
   it("renders the landing heading, subtitle, unifier, and both door labels + descriptors", () => {
-    expect(appSource).toContain("DONAR_LANDING_HEADING");
-    expect(appSource).toContain("DONAR_LANDING_SUBTITLE");
-    expect(appSource).toContain("DONAR_LANDING_UNIFIER");
-    expect(appSource).toContain("DONAR_DOOR_SV_LABEL");
-    expect(appSource).toContain("DONAR_DOOR_SV_DESC");
-    expect(appSource).toContain("DONAR_DOOR_EEUU_LABEL");
-    expect(appSource).toContain("DONAR_DOOR_EEUU_DESC");
+    expect(donarSource).toContain("DONAR_LANDING_HEADING");
+    expect(donarSource).toContain("DONAR_LANDING_SUBTITLE");
+    expect(donarSource).toContain("DONAR_LANDING_UNIFIER");
+    expect(donarSource).toContain("DONAR_DOOR_SV_LABEL");
+    expect(donarSource).toContain("DONAR_DOOR_SV_DESC");
+    expect(donarSource).toContain("DONAR_DOOR_EEUU_LABEL");
+    expect(donarSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
   it("draws both door icons as inline circle-flag SVGs (HatScripts/circle-flags), SV over a globe", () => {
     // The hand-drawn flags are replaced with circle-flags (MIT), inlined verbatim.
-    expect(donarSource).toContain("<svg");
+    expect(landingSource).toContain("<svg");
     // circle-flags palette: SV blue #0052b4, US red #d80027, shared canton blue #0052b4.
-    expect(donarSource).toContain("#0052b4");
-    expect(donarSource).toContain("#d80027");
+    expect(landingSource).toContain("#0052b4");
+    expect(landingSource).toContain("#d80027");
     // The circular-flag mask marker (a masked circle) rather than the old rect flags.
-    expect(donarSource).toContain('mask id="sv-flag-a"');
-    expect(donarSource).toContain('mask id="us-flag-a"');
+    expect(landingSource).toContain('mask id="sv-flag-a"');
+    expect(landingSource).toContain('mask id="us-flag-a"');
     // The old hand-drawn palette must be gone.
-    expect(donarSource).not.toContain("#0F47AF");
-    expect(donarSource).not.toContain("#3C3B6E");
-    expect(donarSource).not.toContain("#B22234");
+    expect(landingSource).not.toContain("#0F47AF");
+    expect(landingSource).not.toContain("#3C3B6E");
+    expect(landingSource).not.toContain("#B22234");
     // The SV door keeps the line-art globe behind the circle flag.
-    expect(donarSource).toContain('stroke="#595959"');
+    expect(landingSource).toContain('stroke="#595959"');
   });
 
   it("reuses the default logo vector paths on the landing", () => {
     // The landing shows the default logo. Its vector paths come from orgLogo.ts.
-    expect(appSource).toContain("ORG_LOGO_PATHS");
+    expect(donarSource).toContain("ORG_LOGO_PATHS");
   });
 
   it("routes door 1 to the existing SV fiscal form and door 2 to the Givebutter block", () => {
     // A door state gates which view renders. Door 1 keeps the SV form (documento,
     // dirección, extranjero path); door 2 renders the Givebutter block directly.
-    expect(donarSource).toMatch(/door === "sv"|door === "eeuu"|setDoor\(/);
-    expect(donarSource).toContain("setDoor");
+    expect(landingSource).toMatch(/door === "sv"|door === "eeuu"|setDoor\(/);
+    expect(landingSource).toContain("setDoor");
   });
 
   it("shows the change-option link from either door path", () => {
-    expect(appSource).toContain("DONAR_CHANGE_DOOR_LABEL");
+    expect(donarSource).toContain("DONAR_CHANGE_DOOR_LABEL");
   });
 
   it("shows the English-form notice on the EE. UU. door", () => {
-    expect(appSource).toContain("GIVEBUTTER_ENGLISH_NOTICE");
+    expect(donarSource).toContain("GIVEBUTTER_ENGLISH_NOTICE");
   });
 
   it("reads the deep-link on mount and writes it back via history.replaceState", () => {
-    expect(appSource).toContain("doorFromSearch(");
-    expect(appSource).toContain("routeParamForDoor(");
+    expect(donarSource).toContain("doorFromSearch(");
+    expect(donarSource).toContain("routeParamForDoor(");
     // The door write composes with the URL, never clobbering existing params.
-    expect(appSource).toContain("history.replaceState");
+    expect(donarSource).toContain("history.replaceState");
   });
 });
 

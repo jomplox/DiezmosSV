@@ -24,6 +24,32 @@ export const DONAR_AUTOCLICK_INTERVAL_MS = 150;
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;
 
+// ── Step wizard (Givebutter-style structure, monochrome Gotham skin) ─────────
+//
+// The single long form became one concern per screen. SV door: Paso 1 monto,
+// Paso 2 datos, Paso 3 pago (Wompi handoff). US door: Paso 1 monto (Única |
+// Mensual), Paso 2 the embedded Givebutter giving form.
+export const DONAR_STEP_COUNT_SV = 3;
+export const DONAR_STEP_COUNT_US = 2;
+// Wizard chrome. The step indicator is plain "Paso n de m" (Gotham Book, gray).
+export const DONAR_CONTINUE_LABEL = "Continuar";
+export const DONAR_BACK_LABEL = "← Atrás";
+export const DONAR_EDIT_LABEL = "Editar";
+// The hero amount input: "$" prefix + giant centered numerals. This IS the
+// amount control — the old small "Otro monto" afterthought field is gone.
+export const DONAR_HERO_PLACEHOLDER = "0.00";
+
+export function donarStepIndicator(step: number, total: number): string {
+  return `Paso ${step} de ${total}`;
+}
+
+// The Paso 3 summary figure ("Diezmo · $125.00"). Only rendered after Paso 1
+// validated the amount, but degrades to $0.00 rather than NaN just in case.
+export function donarAmountDisplay(amount: string): string {
+  const parsed = Number.parseFloat(amount.trim());
+  return `$${(Number.isFinite(parsed) ? parsed : 0).toFixed(2)}`;
+}
+
 // ── US donors → Givebutter / Friends of Misión ExampleOrganization (FMCE) ────────────
 //
 // A US-resident donor gets NO Salvadoran CDE (useless to a US taxpayer); their
@@ -55,6 +81,10 @@ export const GIVEBUTTER_INTRO =
 export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done en GiveButter";
 export const GIVEBUTTER_FALLBACK_CTA = "Donar en GiveButter";
 export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
+// The monthly toggle restyled as the Paso 1 segmented control (Única | Mensual).
+// GIVEBUTTER_MONTHLY_LABEL stays as the radiogroup's accessible name.
+export const GIVEBUTTER_FREQ_ONCE_LABEL = "Única";
+export const GIVEBUTTER_FREQ_MONTHLY_LABEL = "Mensual";
 // Shown under the EE. UU. door's Givebutter block: the widget is English-only.
 export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario de pago se muestra en inglés.";
 
@@ -217,28 +247,39 @@ export function isDonarGraciasPath(pathname: string): boolean {
   return pathname === "/donar/gracias" || pathname === "/donar/gracias/";
 }
 
-// Mirrors the server-side validation codes (src/worker/services/donations.ts) but
-// with donor-facing usted-form messages shown inline. Each CAT-022 document type
-// carries its own rule: DUI check digit (13), NIT 14-digit format (36, plus a
-// required razón social), pasaporte/carnet 5-30 chars (03/02), and free text for
-// Otro (37). Name and email are NOT validated here — the donor enters them on
-// Wompi's hosted sheet (razón social is the one exception, for NIT donors).
-export function donationFormValidationMessage(input: DonationFormInput): string {
+// The amount rule alone: shared by both doors' Paso 1 (the US door has no gift
+// type, so its Paso 1 gates on this only).
+export function donationAmountValidationMessage(amount: string): string {
+  const parsed = Number.parseFloat(amount.trim());
+  if (!amount.trim() || !Number.isFinite(parsed)) {
+    return "Ingrese un monto válido en dólares.";
+  }
+  if (parsed < DONAR_MIN_AMOUNT) {
+    return "El monto mínimo de donación es $1.00.";
+  }
+  return "";
+}
+
+// Paso 1 (SV door): diezmo/ofrenda choice + amount. The wizard's "Continuar"
+// advances only when this returns "".
+export function donationStep1ValidationMessage(input: Pick<DonationFormInput, "giftType" | "amount">): string {
   // The SV form requires the donor to state whether the gift is a diezmo or an
   // ofrenda before anything else. (The US/Givebutter path renders no fiscal form and
   // never reaches this validator.)
   if (input.giftType !== "DIEZMO" && input.giftType !== "OFRENDA") {
     return "Seleccione si es diezmo u ofrenda.";
   }
+  return donationAmountValidationMessage(input.amount);
+}
 
-  const amount = Number.parseFloat(input.amount.trim());
-  if (!input.amount.trim() || !Number.isFinite(amount)) {
-    return "Ingrese un monto válido en dólares.";
-  }
-  if (amount < DONAR_MIN_AMOUNT) {
-    return "El monto mínimo de donación es $1.00.";
-  }
-
+// Mirrors the server-side validation codes (src/worker/services/donations.ts) but
+// with donor-facing usted-form messages shown inline. Each CAT-022 document type
+// carries its own rule: DUI check digit (13), NIT 14-digit format (36, plus a
+// required razón social), pasaporte/carnet 5-30 chars (03/02), and free text for
+// Otro (37). Name and email are NOT validated here — the donor enters them on
+// Wompi's hosted sheet (razón social is the one exception, for NIT donors).
+// Paso 2 (SV door): identity + address. Ignores the Paso-1 fields entirely.
+export function donationStep2ValidationMessage(input: DonationFormInput): string {
   if (input.donorDocumentType === "13") {
     if (!isValidDui(input.donorDocument)) {
       return "Revise el número de DUI.";
@@ -291,6 +332,12 @@ export function donationFormValidationMessage(input: DonationFormInput): string 
   }
 
   return "";
+}
+
+// The whole-form validator is exactly Paso 1 then Paso 2 — same messages, same
+// order as the pre-wizard single-form validator (and the server mirror).
+export function donationFormValidationMessage(input: DonationFormInput): string {
+  return donationStep1ValidationMessage(input) || donationStep2ValidationMessage(input);
 }
 
 // Maps the validated form to the POST /api/donations/intent body. The razón
