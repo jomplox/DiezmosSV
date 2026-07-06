@@ -21,6 +21,7 @@ import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Se
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
+import { auditContextFrom } from "./services/requestContext";
 import { listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
@@ -222,7 +223,9 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     }
     throw error;
   }
-  const repo = new Repository(env.DB);
+  // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
+  // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
+  const repo = new Repository(env.DB, auditContextFrom(request));
   const environment = await activeEmissionEnvironment(repo, env);
   const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
@@ -239,7 +242,10 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
 }
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
-  const repo = new Repository(env.DB);
+  // Build the actor context ONCE per request and inject it into the Repository, so
+  // every downstream repo.createAudit (route handlers reuse this same instance)
+  // records the caller's IP and Cloudflare request context without per-call-site wiring.
+  const repo = new Repository(env.DB, auditContextFrom(request));
   const auth = new AuthService(env);
   const user = await auth.authenticate(request);
 

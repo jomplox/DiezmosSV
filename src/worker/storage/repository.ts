@@ -2,6 +2,7 @@ import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, Dona
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
+import type { AuditRequestContext } from "../services/requestContext";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -35,7 +36,14 @@ function retentionTimestampColumn(table: RetentionTable): "created_at" | "receiv
 }
 
 export class Repository {
-  constructor(private readonly db: D1Database) {}
+  // Optional per-request actor context. When handleApi/webhook build the Repository
+  // with a request, every createAudit call inherits the caller's IP and cf context
+  // without touching a single call site. Cron/queue handlers omit it, so their
+  // SYSTEM audits stay NULL — which is exactly what we want (no request => no actor).
+  constructor(
+    private readonly db: D1Database,
+    private readonly auditContext?: AuditRequestContext
+  ) {}
 
   async getSetting(key: string): Promise<string | null> {
     const row = await this.db.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first<{ value: string }>();
@@ -456,11 +464,23 @@ export class Repository {
     entityId: string;
     summary: string;
     metadata?: unknown;
+    // Explicit overrides win over the request-scoped context injected at construction;
+    // callers rarely need them since handleApi/webhook inject the context once.
+    actorIp?: string | null;
+    actorContext?: unknown;
   }): Promise<void> {
+    const actorIp = input.actorIp ?? this.auditContext?.ip ?? null;
+    const contextValue = input.actorContext ?? this.auditContext?.context;
+    // Persist context only when there is something to persist; an absent request
+    // (cron/queue) or an all-undefined cf blob leaves actor_context NULL.
+    const actorContext =
+      contextValue && typeof contextValue === "object" && Object.keys(contextValue as object).length > 0
+        ? JSON.stringify(contextValue)
+        : null;
     await this.db
       .prepare(
-        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         newId("audit"),
@@ -470,21 +490,35 @@ export class Repository {
         input.entityType,
         input.entityId,
         input.summary,
-        JSON.stringify(input.metadata ?? {})
+        JSON.stringify(input.metadata ?? {}),
+        actorIp,
+        actorContext
       )
       .run();
   }
 
   async listAudit(entityType?: string, entityId?: string): Promise<Array<Record<string, unknown>>> {
+    // LEFT JOIN users on actor_id so USER rows resolve to a display name/email while
+    // SYSTEM rows (and USER rows whose account was later deleted) fall through to NULL.
+    // The join is on the users PK, so it is index-backed and does not touch the
+    // audit_logs hot path beyond the existing ordered scan.
     if (entityType && entityId) {
       return this.db
-        .prepare("SELECT * FROM audit_logs WHERE entity_type = ? AND entity_id = ? ORDER BY created_at DESC LIMIT 100")
+        .prepare(
+          `SELECT a.*, u.name AS actor_name, u.email AS actor_email
+           FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+           WHERE a.entity_type = ? AND a.entity_id = ? ORDER BY a.created_at DESC LIMIT 100`
+        )
         .bind(entityType, entityId)
         .all<Record<string, unknown>>()
         .then((result) => result.results ?? []);
     }
     return this.db
-      .prepare("SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100")
+      .prepare(
+        `SELECT a.*, u.name AS actor_name, u.email AS actor_email
+         FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+         ORDER BY a.created_at DESC LIMIT 100`
+      )
       .all<Record<string, unknown>>()
       .then((result) => result.results ?? []);
   }
