@@ -321,6 +321,143 @@ describe("donation intents", () => {
     expect(response.status).toBe(201);
     expect(db.donationIntents[0].amount_cents).toBe(10000);
     expect(db.donationIntents[0].donor_document).toBe("PASAPORTE-XZ-9");
+    // Domestic intents never carry a país.
+    expect(db.donationIntents[0].donor_pais).toBeNull();
+  });
+
+  it("creates a NIT (36) intent with canonical document storage and the razón social", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "36", donorDocument: "06142803901121", donorName: "Empresa Ejemplo, S.A. de C.V." })),
+      env(db)
+    );
+
+    expect(response.status).toBe(201);
+    const intent = db.donationIntents[0];
+    // Stored canonically as XXXX-XXXXXX-XXX-X regardless of input hyphenation.
+    expect(intent.donor_document).toBe("0614-280390-112-1");
+    // The razón social rides in donor_name so the correlated CDE names the empresa,
+    // not the Wompi cardholder.
+    expect(intent.donor_name).toBe("Empresa Ejemplo, S.A. de C.V.");
+  });
+
+  it("rejects an empresa NIT without exactly 14 digits", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "36", donorDocument: "0614-280390-112", donorName: "Empresa Ejemplo" })),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    // Donor-facing copy frames the 36 type as the empresa's NIT (the /donar select
+    // labels it "Empresa" so legacy personal-NIT holders are not baited into it).
+    await expect(response.json()).resolves.toEqual({
+      error: "invalid_nit",
+      message: "Ingrese el NIT de la empresa (14 dígitos)."
+    });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("requires the razón social for NIT intents and caps it at 200 characters", async () => {
+    const missing = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "36", donorDocument: "06142803901121" })),
+      env(new InMemoryD1())
+    );
+    expect(missing.status).toBe(400);
+    await expect(missing.json()).resolves.toMatchObject({ error: "invalid_razon_social" });
+
+    const tooLong = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "36", donorDocument: "06142803901121", donorName: "x".repeat(201) })),
+      env(new InMemoryD1())
+    );
+    expect(tooLong.status).toBe(400);
+    await expect(tooLong.json()).resolves.toMatchObject({ error: "invalid_razon_social" });
+  });
+
+  it("bounds pasaporte (03) and carnet (02) documents to 5-30 chars and stores them uppercase", async () => {
+    const pasaporteDb = new InMemoryD1();
+    const pasaporte = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "03", donorDocument: "ab-123456" })),
+      env(pasaporteDb)
+    );
+    expect(pasaporte.status).toBe(201);
+    expect(pasaporteDb.donationIntents[0].donor_document).toBe("AB-123456");
+
+    const carnetDb = new InMemoryD1();
+    const carnet = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "02", donorDocument: "cr 2026-001" })),
+      env(carnetDb)
+    );
+    expect(carnet.status).toBe(201);
+    expect(carnetDb.donationIntents[0].donor_document).toBe("CR 2026-001");
+
+    const tooShort = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "03", donorDocument: "A123" })),
+      env(new InMemoryD1())
+    );
+    expect(tooShort.status).toBe(400);
+    await expect(tooShort.json()).resolves.toMatchObject({ error: "invalid_identity_document" });
+
+    const tooLong = await worker.fetch(
+      intentRequest(validIntentBody({ donorDocumentType: "02", donorDocument: "X".repeat(31) })),
+      env(new InMemoryD1())
+    );
+    expect(tooLong.status).toBe(400);
+    await expect(tooLong.json()).resolves.toMatchObject({ error: "invalid_identity_document" });
+  });
+
+  it("rejects document types outside the five CAT-022 receptor codes", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ donorDocumentType: "99" })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_document_type" });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("stores the 00/00/00 geography plus the CAT-020 país for a foreign-resident intent", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(
+        validIntentBody({ departamento: "00", municipio: "00", distrito: "00", pais: "US", complemento: "742 Evergreen Terrace, Springfield" })
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(201);
+    const intent = db.donationIntents[0];
+    expect(intent.direccion_departamento).toBe("00");
+    expect(intent.direccion_municipio).toBe("00");
+    expect(intent.direccion_distrito).toBe("00");
+    expect(intent.donor_pais).toBe("US");
+  });
+
+  it("rejects SV as the país on the foreign path", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ departamento: "00", municipio: "00", distrito: "00", pais: "SV" })),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_pais_sv" });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects a foreign-path intent whose país is missing or outside CAT-020", async () => {
+    const missing = await worker.fetch(
+      intentRequest(validIntentBody({ departamento: "00", municipio: "00", distrito: "00" })),
+      env(new InMemoryD1())
+    );
+    expect(missing.status).toBe(400);
+    await expect(missing.json()).resolves.toMatchObject({ error: "invalid_pais" });
+
+    const bogus = await worker.fetch(
+      intentRequest(validIntentBody({ departamento: "00", municipio: "00", distrito: "00", pais: "XX" })),
+      env(new InMemoryD1())
+    );
+    expect(bogus.status).toBe(400);
+    await expect(bogus.json()).resolves.toMatchObject({ error: "invalid_pais" });
   });
 
   it("rejects an amount below the one-dollar minimum", async () => {
@@ -343,9 +480,11 @@ describe("donation intents", () => {
     expect(db.donationIntents).toHaveLength(0);
   });
 
-  it("ignores a donorName/donorEmail in the body: they are never validated or persisted", async () => {
+  it("ignores a donorName/donorEmail on non-NIT intents: they are neither validated nor persisted", async () => {
     const db = new InMemoryD1();
-    // Even if a client sends name/email, the endpoint neither requires nor stores them.
+    // Even if a client sends name/email on a non-NIT intent, the endpoint neither
+    // requires nor stores them (the razón social is bound only for NIT/36, so the
+    // webhook cardholder name still wins for personal donors).
     const response = await worker.fetch(
       intentRequest(validIntentBody({ donorName: "Ignorado", donorEmail: "ignorado@example.org" })),
       env(db)
@@ -394,6 +533,18 @@ describe("donation intents", () => {
 
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+  });
+
+  it("rejects a complemento longer than the MH schema's 200-char cap", async () => {
+    // fe-cd-v2 caps receptor direccion.complemento at 200. Anything longer would
+    // pass intent validation, take the donor's payment, and then FAIL the schema
+    // at CDE build time — a paid donation stranded without a comprobante.
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ complemento: "x".repeat(201) })), env(db));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+    expect(db.donationIntents).toHaveLength(0);
   });
 
   it("blocks the sixth intent from one IP within 15 minutes with a 429", async () => {
@@ -2914,6 +3065,7 @@ describe("donation intent correlation", () => {
       direccion_municipio: INTENT_ADDRESS.municipio,
       direccion_distrito: INTENT_ADDRESS.distrito,
       direccion_complemento: INTENT_ADDRESS.complemento,
+      donor_pais: null,
       wompi_id_enlace: 987654,
       wompi_url_enlace: "https://s.wompi.sv/987654",
       wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
@@ -3005,6 +3157,68 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_corr_1" })
     );
+  });
+
+  it("keeps the payload-derived codPais/codDomiciliado for a domestic intent", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // No donor_pais on the intent → the existing payload-based behavior is untouched.
+    expect(cde.receptor).toMatchObject({ codPais: "SV", codDomiciliado: 1 });
+  });
+
+  it("uses the intent razón social as the receptor nombre for a NIT intent", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, {
+      donor_document_type: "36",
+      donor_document: "0614-280390-112-1",
+      donor_name: "Empresa Ejemplo, S.A. de C.V."
+    });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("ACCEPTED");
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // The comprobante must carry the empresa's razón social, not the cardholder
+    // name from the Wompi webhook. Correo still comes from the webhook.
+    expect(cde.receptor).toMatchObject({
+      tipoDocumento: "36",
+      numDocumento: "0614-280390-112-1",
+      nombre: "Empresa Ejemplo, S.A. de C.V.",
+      correo: "fallback@example.org"
+    });
+  });
+
+  it("marks a foreign intent's receptor non-domiciled with the intent país and 00 geography", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, {
+      direccion_departamento: "00",
+      direccion_municipio: "00",
+      direccion_distrito: "00",
+      direccion_complemento: "742 Evergreen Terrace, Springfield",
+      donor_pais: "US"
+    });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("ACCEPTED");
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({
+      codPais: "US",
+      codDomiciliado: 2,
+      direccion: {
+        departamento: "00",
+        municipio: "00",
+        distrito: "00",
+        complemento: "742 Evergreen Terrace, Springfield"
+      }
+    });
   });
 
   it("falls back to the webhook Celular when the intent has no phone", async () => {
@@ -4773,6 +4987,7 @@ class Statement {
         direccionMunicipio,
         direccionDistrito,
         direccionComplemento,
+        donorPais,
         clientIp,
         expiresAt
       ] = this.args;
@@ -4789,6 +5004,7 @@ class Statement {
         direccion_municipio: String(direccionMunicipio),
         direccion_distrito: String(direccionDistrito),
         direccion_complemento: String(direccionComplemento),
+        donor_pais: donorPais == null ? null : String(donorPais),
         wompi_id_enlace: null,
         wompi_url_enlace: null,
         wompi_url_enlace_largo: null,

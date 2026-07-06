@@ -41,7 +41,9 @@ import {
   DONAR_AMOUNT_CHIPS,
   DONAR_AUTOCLICK_INTERVAL_MS,
   DONAR_COMPLETED_MESSAGE,
+  DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_FALLBACK_MESSAGE,
+  DONAR_FOREIGN_COUNTRIES,
   DONAR_INTENT_PATH,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
@@ -50,6 +52,7 @@ import {
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
   donationFormValidationMessage,
+  donationIntentBody,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
   isDonarPath,
@@ -92,6 +95,7 @@ import {
   normalizeCat020CountryCode
 } from "../shared/catalogs";
 import { cleanDui, formatDui, isDuiDocumentType, isValidDui } from "../shared/dui";
+import { formatNit, isValidNitFormat } from "../shared/nit";
 import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
@@ -3271,7 +3275,10 @@ const emptyDonationForm: DonationFormInput = {
   amount: "",
   donorDocumentType: "13",
   donorDocument: "",
+  donorName: "",
   donorPhone: "",
+  foreignResident: false,
+  pais: "",
   departamento: "",
   municipio: "",
   distrito: "",
@@ -3433,16 +3440,7 @@ function DonarPage() {
     try {
       const created = await api<DonarIntent>(DONAR_INTENT_PATH, "", {
         method: "POST",
-        body: {
-          amount: form.amount.trim(),
-          donorDocumentType: form.donorDocumentType,
-          donorDocument: form.donorDocument.trim(),
-          donorPhone: form.donorPhone.trim() || undefined,
-          departamento: form.departamento,
-          municipio: form.municipio,
-          distrito: form.distrito,
-          complemento: form.complemento.trim()
-        }
+        body: donationIntentBody(form)
       });
       setIntent(created);
       setStage("widget");
@@ -3484,15 +3482,22 @@ function DonarPage() {
                 <span>Tipo de documento</span>
                 <select
                   value={form.donorDocumentType}
-                  onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "" })}
+                  onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "", donorName: "" })}
                   aria-label="Tipo de documento"
                 >
+                  {/* CAT-022 "36" is labeled "Empresa" (donor-facing only; stored
+                      code stays 36): many natural persons hold legacy personal
+                      NITs and a literal "NIT" option would bait them into the
+                      razón-social requirement. Empresas donate under NIT. */}
                   <option value="13">DUI</option>
+                  <option value="36">Empresa</option>
                   <option value="37">Otro</option>
+                  <option value="03">Pasaporte</option>
+                  <option value="02">Carnet de Residente</option>
                 </select>
               </label>
               <label>
-                <span>Número de documento</span>
+                <span>{form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}</span>
                 <input
                   value={form.donorDocument}
                   onChange={(event) => update({ donorDocument: event.target.value })}
@@ -3500,12 +3505,27 @@ function DonarPage() {
                     if (form.donorDocumentType === "13" && isValidDui(form.donorDocument)) {
                       update({ donorDocument: formatDui(form.donorDocument) });
                     }
+                    if (form.donorDocumentType === "36" && isValidNitFormat(form.donorDocument)) {
+                      update({ donorDocument: formatNit(form.donorDocument) });
+                    }
                   }}
-                  placeholder={form.donorDocumentType === "13" ? "00000000-0" : "Documento"}
-                  aria-label="Número de documento"
+                  placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
+                  aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
                 />
               </label>
             </div>
+
+            {form.donorDocumentType === "36" && (
+              <label>
+                <span>Razón social</span>
+                <input
+                  value={form.donorName}
+                  onChange={(event) => update({ donorName: event.target.value })}
+                  placeholder="Nombre legal de la empresa"
+                  aria-label="Razón social"
+                />
+              </label>
+            )}
 
             <label>
               <span>Teléfono (opcional)</span>
@@ -3518,49 +3538,74 @@ function DonarPage() {
               />
             </label>
 
-            <div className="donar-address-row">
+            <label className="donar-foreign-toggle">
+              <input
+                type="checkbox"
+                checked={form.foreignResident}
+                onChange={(event) => update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" })}
+                aria-label="Resido en el extranjero"
+              />
+              <span>Resido en el extranjero</span>
+            </label>
+
+            {form.foreignResident ? (
               <label>
-                <span>Departamento</span>
+                <span>País</span>
                 <CatalogSelect
-                  value={form.departamento}
-                  options={CAT012_DEPARTMENTS}
-                  onChange={setDepartamento}
+                  value={form.pais}
+                  options={DONAR_FOREIGN_COUNTRIES}
+                  onChange={(pais) => update({ pais })}
                   showCodes={false}
                   placeholder="Seleccione"
-                  ariaLabel="Departamento"
+                  ariaLabel="País"
                 />
               </label>
-              <label>
-                <span>Municipio</span>
-                <CatalogSelect
-                  value={form.municipio}
-                  options={municipalityOptions}
-                  onChange={(municipio) => update({ municipio })}
-                  showCodes={false}
-                  placeholder="Seleccione"
-                  ariaLabel="Municipio"
-                />
-              </label>
-              <label>
-                <span>Distrito</span>
-                <CatalogSelect
-                  value={form.distrito}
-                  options={districtOptions}
-                  onChange={(distrito) => update({ distrito })}
-                  showCodes={false}
-                  placeholder="Seleccione"
-                  ariaLabel="Distrito"
-                />
-              </label>
-            </div>
+            ) : (
+              <div className="donar-address-row">
+                <label>
+                  <span>Departamento</span>
+                  <CatalogSelect
+                    value={form.departamento}
+                    options={DONAR_DOMESTIC_DEPARTMENTS}
+                    onChange={setDepartamento}
+                    showCodes={false}
+                    placeholder="Seleccione"
+                    ariaLabel="Departamento"
+                  />
+                </label>
+                <label>
+                  <span>Municipio</span>
+                  <CatalogSelect
+                    value={form.municipio}
+                    options={municipalityOptions}
+                    onChange={(municipio) => update({ municipio })}
+                    showCodes={false}
+                    placeholder="Seleccione"
+                    ariaLabel="Municipio"
+                  />
+                </label>
+                <label>
+                  <span>Distrito</span>
+                  <CatalogSelect
+                    value={form.distrito}
+                    options={districtOptions}
+                    onChange={(distrito) => update({ distrito })}
+                    showCodes={false}
+                    placeholder="Seleccione"
+                    ariaLabel="Distrito"
+                  />
+                </label>
+              </div>
+            )}
 
             <label>
               <span>Dirección</span>
               <textarea
                 value={form.complemento}
                 onChange={(event) => update({ complemento: event.target.value })}
-                placeholder="Dirección completa"
+                placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
                 aria-label="Dirección"
+                maxLength={200}
               />
             </label>
 

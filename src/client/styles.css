@@ -2610,6 +2610,22 @@ pre {
   gap: 12px;
 }
 
+/* The extranjero checkbox sits above the address block: a horizontal row (the
+   form labels default to stacked grids, wrong for checkbox + text). */
+.donar-form label.donar-foreign-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.donar-foreign-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #007c75;
+}
+
 .donar-amount {
   display: grid;
   gap: 8px;

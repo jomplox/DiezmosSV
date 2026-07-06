@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -96,9 +96,9 @@ export class Repository {
     id: string;
     amountCents: number;
     // Name and email are collected on Wompi's sheet (not the /donar form), so both
-    // are nullable and bound null at insert time.
+    // are nullable; donorName carries the razón social for NIT (36) intents only.
     donorName: string | null;
-    donorDocumentType: "13" | "37";
+    donorDocumentType: DonationIntentDocumentType;
     donorDocument: string;
     donorEmail: string | null;
     donorPhone: string | null;
@@ -106,6 +106,8 @@ export class Repository {
     direccionMunicipio: string;
     direccionDistrito: string;
     direccionComplemento: string;
+    // CAT-020 country for the foreign path (00/00/00 geography); null domestic.
+    donorPais: string | null;
     clientIp: string | null;
     expiresAt: string;
   }): Promise<DonationIntentRecord> {
@@ -113,8 +115,8 @@ export class Repository {
       .prepare(
         `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
-          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, client_ip, expires_at
-        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.id,
@@ -128,6 +130,7 @@ export class Repository {
         input.direccionMunicipio,
         input.direccionDistrito,
         input.direccionComplemento,
+        input.donorPais,
         input.clientIp,
         input.expiresAt
       )

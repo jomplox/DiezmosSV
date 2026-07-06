@@ -59,7 +59,7 @@ describe("donation intents repository", () => {
       id: "di_seed",
       amountCents: 2550,
       // Name and email are no longer collected on the form — they arrive on the
-      // webhook from Wompi — so the intent binds null for both.
+      // webhook from Wompi — so a non-NIT intent binds null for both.
       donorName: null,
       donorDocumentType: "13",
       donorDocument: "000000000",
@@ -69,6 +69,7 @@ describe("donation intents repository", () => {
       direccionMunicipio: "22",
       direccionDistrito: "01",
       direccionComplemento: "San Salvador",
+      donorPais: null,
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z"
     });
@@ -78,12 +79,44 @@ describe("donation intents repository", () => {
     expect(insert).toBeTruthy();
     // PENDING is the seeded status for a new intent (written as a SQL literal).
     expect(insert!.sql).toContain("'PENDING'");
+    // The 0011 column set: donor_pais rides between the address and the client ip.
+    expect(insert!.sql).toContain("donor_pais");
     expect(insert!.args).toContain("2026-07-05T13:00:00.000Z");
     expect(insert!.args).toContain(2550);
     expect(insert!.args).toContain("203.0.113.9");
     // donor_name and donor_email are bound null (positions 3 and 6 of the VALUES list).
     expect(insert!.args[2]).toBeNull();
     expect(insert!.args[5]).toBeNull();
+    // donor_pais is bound null for a domestic intent (position 12, after complemento).
+    expect(insert!.args[11]).toBeNull();
+  });
+
+  it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
+    const { repository, db } = repo();
+    db.intents.set("di_foreign", seedIntent({ id: "di_foreign" }));
+
+    await repository.createDonationIntent({
+      id: "di_foreign",
+      amountCents: 5000,
+      donorName: "Empresa Ejemplo, S.A. de C.V.",
+      donorDocumentType: "36",
+      donorDocument: "0614-280390-112-1",
+      donorEmail: null,
+      donorPhone: null,
+      direccionDepartamento: "00",
+      direccionMunicipio: "00",
+      direccionDistrito: "00",
+      direccionComplemento: "742 Evergreen Terrace, Springfield",
+      donorPais: "US",
+      clientIp: "203.0.113.9",
+      expiresAt: "2026-07-05T13:00:00.000Z"
+    });
+
+    const insert = db.calls.find((call) => call.sql.includes("INSERT INTO donation_intents"));
+    expect(insert).toBeTruthy();
+    expect(insert!.args).toContain("Empresa Ejemplo, S.A. de C.V.");
+    expect(insert!.args).toContain("US");
+    expect(insert!.args).toContain("0614-280390-112-1");
   });
 
   it("reads a single intent by id", async () => {
@@ -169,6 +202,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     direccion_municipio: "22",
     direccion_distrito: "01",
     direccion_complemento: "San Salvador",
+    donor_pais: null,
     wompi_id_enlace: null,
     wompi_url_enlace: null,
     wompi_url_enlace_largo: null,

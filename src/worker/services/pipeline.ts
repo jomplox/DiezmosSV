@@ -597,15 +597,18 @@ export class IssuancePipeline {
 
 // Merge the correlated intent with the payment webhook into the CDE receptor:
 // identity (tipoDocumento/numDocumento) and the catalog-coded direccion come from the
-// intent (validated on the /donar form); nombre and correo come from the WEBHOOK,
-// because the donor types those on Wompi's hosted sheet and the intent no longer
-// stores them. telefono prefers the intent's phone, else the webhook Celular. This
-// keeps the canonical DUI and clean address while carrying the real donor contact.
+// intent (validated on the /donar form); correo comes from the WEBHOOK, because the
+// donor types it on Wompi's hosted sheet. nombre prefers the intent's donor_name —
+// the razón social, set only for NIT/empresa donors — else the webhook cardholder
+// name. telefono prefers the intent's phone, else the webhook Celular. A foreign
+// intent (donor_pais set) additionally marks the receptor as non-domiciled in its
+// CAT-020 country; domestic intents leave codPais/codDomiciliado to the builder's
+// payload-derived defaults.
 function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWebhook): IntentDonorOverride {
   return {
     tipoDocumento: intent.donor_document_type,
     numDocumento: intent.donor_document,
-    nombre: donorName(payload),
+    nombre: intent.donor_name ?? donorName(payload),
     correo: cleanNullable(payload.Cliente?.EMail),
     telefono: intent.donor_phone ?? cleanNullable(payload.Cliente?.Celular),
     direccion: {
@@ -613,7 +616,8 @@ function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWeb
       municipio: intent.direccion_municipio,
       distrito: intent.direccion_distrito,
       complemento: intent.direccion_complemento
-    }
+    },
+    ...(intent.donor_pais ? { codPais: intent.donor_pais, codDomiciliado: 2 as const } : {})
   };
 }
 

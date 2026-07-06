@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   DONAR_AMOUNT_CHIPS,
+  DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_FALLBACK_MESSAGE,
+  DONAR_FOREIGN_COUNTRIES,
+  DONAR_FOREIGN_GEOGRAPHY_CODE,
   DONAR_INTENT_PATH,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
@@ -12,6 +15,7 @@ import {
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
   donationFormValidationMessage,
+  donationIntentBody,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
   isDonarPath,
@@ -57,7 +61,10 @@ describe("donar form validation", () => {
     amount: "10.00",
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
+    donorName: "",
     donorPhone: "",
+    foreignResident: false,
+    pais: "",
     departamento: "06",
     municipio: "23",
     distrito: "14",
@@ -66,6 +73,39 @@ describe("donar form validation", () => {
 
   it("accepts a fully valid DUI donation", () => {
     expect(donationFormValidationMessage(base)).toBe("");
+  });
+
+  it("validates the NIT format (14 digits) and requires the razón social for NIT donors", () => {
+    const nitBase = { ...base, donorDocumentType: "36" as const, donorDocument: "0614-280390-112-1", donorName: "Empresa Ejemplo, S.A. de C.V." };
+    expect(donationFormValidationMessage(nitBase)).toBe("");
+    // Unhyphenated 14-digit input is also valid (format-only, no check digit).
+    expect(donationFormValidationMessage({ ...nitBase, donorDocument: "06142803901121" })).toBe("");
+    expect(donationFormValidationMessage({ ...nitBase, donorDocument: "0614280390112" })).toBe("Revise el número de NIT (14 dígitos).");
+    // Razón social is required for NIT (36) only, capped at 200 characters.
+    expect(donationFormValidationMessage({ ...nitBase, donorName: "  " })).toBe("Ingrese la razón social.");
+    expect(donationFormValidationMessage({ ...nitBase, donorName: "x".repeat(201) })).toBe("La razón social no debe exceder 200 caracteres.");
+    // Non-NIT types never require a razón social.
+    expect(donationFormValidationMessage({ ...base, donorName: "" })).toBe("");
+  });
+
+  it("bounds pasaporte and carnet de residente documents to 5-30 characters", () => {
+    for (const donorDocumentType of ["03", "02"] as const) {
+      expect(donationFormValidationMessage({ ...base, donorDocumentType, donorDocument: "AB123456" })).toBe("");
+      expect(donationFormValidationMessage({ ...base, donorDocumentType, donorDocument: "A123" })).toBe(
+        "Ingrese su documento (entre 5 y 30 caracteres)."
+      );
+      expect(donationFormValidationMessage({ ...base, donorDocumentType, donorDocument: "X".repeat(31) })).toBe(
+        "Ingrese su documento (entre 5 y 30 caracteres)."
+      );
+    }
+  });
+
+  it("requires a país instead of the departamento/municipio/distrito on the foreign path", () => {
+    const foreign = { ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "", complemento: "742 Evergreen Terrace, Springfield" };
+    expect(donationFormValidationMessage(foreign)).toBe("");
+    expect(donationFormValidationMessage({ ...foreign, pais: "" })).toBe("Seleccione su país de residencia.");
+    // The dirección (complemento) is still required — it carries the foreign address.
+    expect(donationFormValidationMessage({ ...foreign, complemento: "  " })).toBe("Ingrese su dirección.");
   });
 
   it("requires an amount of at least $1", () => {
@@ -92,6 +132,67 @@ describe("donar form validation", () => {
 describe("donar amount chips", () => {
   it("offers the $5 / $10 / $25 / $50 quick amounts", () => {
     expect(DONAR_AMOUNT_CHIPS).toEqual([5, 10, 25, 50]);
+  });
+});
+
+describe("donar intent body", () => {
+  const base = {
+    amount: " 10.00 ",
+    donorDocumentType: "13" as const,
+    donorDocument: "10000001-9",
+    donorName: "",
+    donorPhone: "",
+    foreignResident: false,
+    pais: "",
+    departamento: "06",
+    municipio: "23",
+    distrito: "14",
+    complemento: "San Salvador"
+  };
+
+  it("sends the donor-chosen geography and omits pais/donorName on the domestic path", () => {
+    expect(donationIntentBody(base)).toEqual({
+      amount: "10.00",
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorName: undefined,
+      donorPhone: undefined,
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      pais: undefined,
+      complemento: "San Salvador"
+    });
+  });
+
+  it("includes the razón social only for NIT (36) donors", () => {
+    const body = donationIntentBody({ ...base, donorDocumentType: "36", donorDocument: "0614-280390-112-1", donorName: " Empresa Ejemplo, S.A. de C.V. " });
+    expect(body.donorName).toBe("Empresa Ejemplo, S.A. de C.V.");
+    // A stray razón social on a non-NIT type is never sent.
+    expect(donationIntentBody({ ...base, donorName: "Ignorada" }).donorName).toBeUndefined();
+  });
+
+  it("sends the 00/00/00 geography plus the CAT-020 país on the foreign path", () => {
+    const body = donationIntentBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "", complemento: "742 Evergreen Terrace" });
+    expect(body.departamento).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
+    expect(body.municipio).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
+    expect(body.distrito).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
+    expect(body.pais).toBe("US");
+    expect(body.complemento).toBe("742 Evergreen Terrace");
+  });
+
+  it("offers every CAT-020 country except El Salvador for the foreign residence select", () => {
+    expect(DONAR_FOREIGN_COUNTRIES.length).toBeGreaterThan(100);
+    expect(DONAR_FOREIGN_COUNTRIES.some((option) => option.code === "SV")).toBe(false);
+    expect(DONAR_FOREIGN_COUNTRIES.some((option) => option.code === "US")).toBe(true);
+  });
+
+  it("keeps the 00 pseudo-department out of the domestic departamento choices", () => {
+    // "Otro (Para extranjeros)" is reachable only through the extranjero toggle;
+    // offering it as a domestic departamento would trip the foreign-path server
+    // validation without a país.
+    expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
+    expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === "06")).toBe(true);
   });
 });
 
@@ -175,6 +276,48 @@ describe("donar page source contract", () => {
     expect(appSource).toContain("onBlur=");
     // The "Revise el número de DUI." copy lives in donationFormValidationMessage.
     expect(donationFormValidationMessage).toBeTypeOf("function");
+  });
+
+  it("offers the five CAT-022 document types with the admin quick-CDE labels", () => {
+    // The /donar select carries the same human labels the admin quick-CDE uses
+    // (CAT022_DOCUMENT_TYPES): NIT, DUI, Otro, Pasaporte, Carnet de Residente.
+    const donarStart = appSource.indexOf("function DonarPage");
+    expect(donarStart).toBeGreaterThan(-1);
+    const donarSource = appSource.slice(donarStart);
+    for (const option of ['value="13">DUI<', 'value="36">NIT<', 'value="03">Pasaporte<', 'value="02">Carnet de Residente<', 'value="37">Otro<']) {
+      expect(donarSource).toContain(option);
+    }
+  });
+
+  it("auto-formats a valid 14-digit NIT on blur, mirroring the DUI blur behavior", () => {
+    expect(appSource).toContain("formatNit(");
+    expect(appSource).toContain("isValidNitFormat(");
+  });
+
+  it("shows a required razón social field only for NIT donors", () => {
+    const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+    expect(donarSource).toContain("Razón social");
+    // Conditional render keyed on the NIT document type.
+    expect(donarSource).toContain('donorDocumentType === "36"');
+  });
+
+  it("wires the extranjero toggle above the address block, swapping geography for a país select", () => {
+    const donarSource = appSource.slice(appSource.indexOf("function DonarPage"));
+    expect(donarSource).toContain("Resido en el extranjero");
+    // Checked → the país select (CAT-020 minus SV) replaces departamento/municipio/distrito.
+    expect(donarSource).toContain("DONAR_FOREIGN_COUNTRIES");
+    expect(donarSource).toContain("País");
+    expect(donarSource).toContain("foreignResident");
+    // The toggle renders BEFORE the address selects in the form markup.
+    const toggleAt = donarSource.indexOf("Resido en el extranjero");
+    const departamentoAt = donarSource.indexOf("<span>Departamento</span>");
+    expect(toggleAt).toBeGreaterThan(-1);
+    expect(departamentoAt).toBeGreaterThan(-1);
+    expect(toggleAt).toBeLessThan(departamentoAt);
+  });
+
+  it("submits the intent body through the shared donationIntentBody helper", () => {
+    expect(appSource).toContain("donationIntentBody(");
   });
 
   it("disables the submit button while preparing the payment", () => {

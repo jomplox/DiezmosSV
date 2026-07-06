@@ -389,6 +389,7 @@ function intent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRe
     direccion_municipio: "22",
     direccion_distrito: "01",
     direccion_complemento: "San Salvador",
+    donor_pais: null,
     wompi_id_enlace: null,
     wompi_url_enlace: null,
     wompi_url_enlace_largo: null,
