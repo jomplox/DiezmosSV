@@ -310,8 +310,12 @@ export function DonarPage() {
     }
     const query = params.toString();
     window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
-    // Leaving a door resets the wizard chrome so each entry is clean (the typed
-    // form values survive on purpose — going back must never lose the donor's data).
+    // Leaving a door resets the wizard chrome so each entry is clean. The typed form
+    // values survive on purpose — going back must never lose the donor's data — with
+    // ONE exception: the extranjero+país pair is cleared, because leftover
+    // foreignResident+US state would re-forward an explicit SV-door choice to the
+    // Givebutter path forever.
+    setForm((current) => ({ ...current, foreignResident: false, pais: "" }));
     setMonthly(false);
     setStep(1);
     setError("");
@@ -597,6 +601,16 @@ export function DonarPage() {
       setIntent(null);
       setStage("form");
       setStep(2);
+      return;
+    }
+    // Form-driven Givebutter takeover (SV door + extranjero USA): Atrás returns to the
+    // SV datos screen where the choice was made — clearing the país drops usDonation,
+    // so this same step re-renders as the SV Paso 2 with every dato intact and the
+    // extranjero checkbox still set. Without this, Atrás only walked the US steps and
+    // the donor could never reach the SV form again.
+    if (door === "sv" && usDonation) {
+      setMonthly(false);
+      update({ pais: "" });
       return;
     }
     setStep(1);
