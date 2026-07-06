@@ -398,8 +398,9 @@ describe("donar thank-you page", () => {
 
 describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
-    // Religious framing: the SV fiscal form heading names the aportación.
-    expect(donarSource).toContain("Entregue su diezmo u ofrenda");
+    // Religious framing: the SV fiscal form heading names the aportación, now
+    // flagged with the El Salvador emoji instead of a textual path identifier.
+    expect(donarSource).toContain("Entregue su diezmo u ofrenda 🇸🇻");
     expect(donarSource).toContain("Tipo de documento");
     expect(donarSource).toContain("Teléfono (opcional)");
     expect(donarSource).toContain("Departamento");
@@ -459,8 +460,25 @@ describe("donar wizard source contract", () => {
     expect(donarSource).not.toContain('"Donar"');
   });
 
-  it("shows the EE. UU. flow its own heading", () => {
-    expect(donarSource).toContain("Diezmos y Ofrendas — EE. UU.");
+  it("shows the EE. UU. flow its own heading, flagged with the US emoji", () => {
+    expect(donarSource).toContain("Diezmos y Ofrendas 🇺🇸");
+    // The old textual "— EE. UU." path identifier is replaced by the flag emoji.
+    expect(donarSource).not.toContain("Diezmos y Ofrendas — EE. UU.");
+  });
+
+  it("preselects Diezmo so the SV Paso 1 segmented control starts checked", () => {
+    // The gift type defaults to DIEZMO on mount: the donor lands with Diezmo
+    // already selected, so the "elija un tipo" validation never fires in normal flow.
+    expect(donarSource).toContain('giftType: "DIEZMO"');
+    expect(donarSource).not.toContain('giftType: ""');
+  });
+
+  it("assures each door's donor of the legal document their path produces on Paso 1", () => {
+    // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
+    // comprobante that path yields — reassurance of the door they just chose.
+    expect(donarSource).toContain("Recibirá su comprobante de donación electrónico (CDE) por correo.");
+    expect(donarSource).toContain("Recibirá un recibo deducible de impuestos en EE. UU. por correo.");
+    expect(donarSource).toContain("donar-assurance");
   });
 
   it("no longer collects name or email on the form (both are entered on Wompi's sheet)", () => {
@@ -844,20 +862,25 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
-  it("draws both door icons as inline circle-flag SVGs (HatScripts/circle-flags), SV over a globe", () => {
-    // The hand-drawn flags are replaced with circle-flags (MIT), inlined verbatim.
+  it("draws the SV door as the church's own flag asset over a globe, US as a circle-flag SVG", () => {
+    // The US door keeps its inlined circle-flag SVG (MIT), verbatim.
     expect(landingSource).toContain("<svg");
-    // circle-flags palette: SV blue #0052b4, US red #d80027, shared canton blue #0052b4.
-    expect(landingSource).toContain("#0052b4");
     expect(landingSource).toContain("#d80027");
-    // The circular-flag mask marker (a masked circle) rather than the old rect flags.
-    expect(landingSource).toContain('mask id="sv-flag-a"');
     expect(landingSource).toContain('mask id="us-flag-a"');
-    // The old hand-drawn palette must be gone.
+    // The SV door now uses the church's own flag PNG (imported asset) inside the
+    // globe SVG via <image>, NOT the circle-flags sv.svg. The SV circle-flag
+    // mask is gone. (#0052b4 legitimately survives as the US flag's canton blue.)
+    expect(landingSource).toContain("svFlag");
+    expect(landingSource).toContain("<image");
+    expect(landingSource).not.toContain('mask id="sv-flag-a"');
+    // The SV circle-flag's distinctive fills (yellow triangle / green band) are gone.
+    expect(landingSource).not.toContain("#ffda44");
+    expect(landingSource).not.toContain("#6da544");
+    // The old hand-drawn palette must still be gone.
     expect(landingSource).not.toContain("#0F47AF");
     expect(landingSource).not.toContain("#3C3B6E");
     expect(landingSource).not.toContain("#B22234");
-    // The SV door keeps the line-art globe behind the circle flag.
+    // The SV door keeps the line-art globe behind the flag.
     expect(landingSource).toContain('stroke="#595959"');
   });
 
