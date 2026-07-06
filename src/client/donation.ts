@@ -8,6 +8,14 @@ import { isValidNitFormat } from "../shared/nit";
 
 export const DONAR_INTENT_PATH = "/api/donations/intent";
 
+// The datos-completion endpoint for a minted draft intent. The wizard mints the Wompi
+// link in the background when the SV donor enters Paso 2 (POST DONAR_INTENT_PATH with
+// only { amount, giftType }), then attaches the fiscal data here on Paso 2 submit with
+// a fast D1-only call, so Paso 3 renders without waiting on Wompi.
+export function donarDatosPath(intentId: string): string {
+  return `${DONAR_INTENT_PATH}/${intentId}/datos`;
+}
+
 // Poll the intent status every ~5s while the embedded checkout is open; stop after
 // ~3 minutes with a neutral closing message (covers slow MH, deferred
 // transmission while MH is down, and abandoned checkouts — never implies failure).
@@ -368,6 +376,43 @@ export function donationIntentBody(form: DonationFormInput): Record<string, unkn
     pais: form.foreignResident ? form.pais : undefined,
     complemento: form.complemento.trim()
   };
+}
+
+// The DRAFT create body fired in the background on the SV Paso 1→2 transition: only
+// the two values known then (amount + gift type). The donor data is attached later via
+// the datos endpoint. giftType is always present on the SV path (Diezmo preselected).
+export function donationDraftBody(form: Pick<DonationFormInput, "amount" | "giftType">): Record<string, unknown> {
+  return {
+    amount: form.amount.trim(),
+    giftType: form.giftType || undefined
+  };
+}
+
+// The datos-completion body: the donor's fiscal data ONLY (no amount, no giftType — the
+// draft was minted with those and the server must not move them). Same field mapping as
+// donationIntentBody minus amount/giftType, so server validation is identical.
+export function donationDatosBody(form: DonationFormInput): Record<string, unknown> {
+  return {
+    donorDocumentType: form.donorDocumentType,
+    donorDocument: form.donorDocument.trim(),
+    donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,
+    donorPhone: form.donorPhone.trim() || undefined,
+    departamento: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.departamento,
+    municipio: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.municipio,
+    distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
+    pais: form.foreignResident ? form.pais : undefined,
+    complemento: form.complemento.trim()
+  };
+}
+
+// Whether a background-minted draft still matches the amount + gift type the donor now
+// has in the form. If the donor edited either via Atrás/Editar, the draft is stale and
+// must be abandoned (its link expires on the sweep) in favor of a fresh full POST.
+export function draftMatchesForm(
+  draft: { amount: string; giftType: DonarGiftType | "" },
+  form: Pick<DonationFormInput, "amount" | "giftType">
+): boolean {
+  return draft.amount === form.amount.trim() && draft.giftType === form.giftType;
 }
 
 // The widget consumes urlEnlaceLargo (which already carries a query string), so

@@ -45,12 +45,16 @@ import {
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   GIVEBUTTER_SCRIPT_URL,
   donarAmountDisplay,
+  donarDatosPath,
   donarStepIndicator,
   donationAmountValidationMessage,
+  donationDatosBody,
+  donationDraftBody,
   donationIntentBody,
   donationStep1ValidationMessage,
   donationStep2ValidationMessage,
   doorFromSearch,
+  draftMatchesForm,
   givebutterHostedUrl,
   givebutterPrefillParams,
   graciasDisplayFromSearch,
@@ -149,6 +153,15 @@ interface DonarIntent {
   urlEnlaceLargo: string;
 }
 
+// A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
+// transition, tagged with the amount + gift type it was minted with so Paso 2 submit
+// can tell whether the donor edited either (stale → abandon the draft, full POST).
+interface DonarDraftIntent {
+  intent: DonarIntent;
+  amount: string;
+  giftType: DonarGiftType | "";
+}
+
 // The default logo, reusing the vector paths shared with the worker's PDF renderer
 // (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
 function OrganizationLogo() {
@@ -245,6 +258,9 @@ export function DonarPage() {
   const [stage, setStage] = useState<DonarStage>("form");
   const [step, setStep] = useState<DonarStep>(1);
   const [intent, setIntent] = useState<DonarIntent | null>(null);
+  // The link minted in the background when the donor entered Paso 2. Held here until
+  // Paso 2 submit, which attaches the fiscal data (datos) and reuses this intent.
+  const [draftIntent, setDraftIntent] = useState<DonarDraftIntent | null>(null);
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
@@ -300,6 +316,7 @@ export function DonarPage() {
     setStep(1);
     setError("");
     setIntent(null);
+    setDraftIntent(null);
     setStage("form");
     setDoor(next);
   };
@@ -498,13 +515,37 @@ export function DonarPage() {
       }
       const query = params.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    } else {
+      // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
+      // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
+      // submit. Never blocks the step change; a failure just leaves draftIntent null and
+      // Paso 2 submit falls back to the full POST. A fresh entry supersedes any prior draft.
+      mintDraftIntent(form.amount.trim(), form.giftType);
     }
     setStep(2);
   }
 
-  // Paso 2 → Paso 3. Entering the pago step creates the payment intent: validate
-  // the datos, POST the intent, then advance into the handoff (embedded checkout,
-  // polling, and fallbacks unchanged). On error the donor stays on Paso 2.
+  // Fire-and-forget draft create (SV door only). Stores the minted link + the values it
+  // was minted with; errors are swallowed so the wizard degrades to the full POST.
+  function mintDraftIntent(amount: string, giftType: DonarGiftType | "") {
+    setDraftIntent(null);
+    void donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+      method: "POST",
+      body: donationDraftBody({ amount, giftType })
+    })
+      .then((created) => {
+        setDraftIntent({ intent: created, amount, giftType });
+      })
+      .catch(() => {
+        // Ignored: Paso 2 submit falls back to the full-body POST.
+      });
+  }
+
+  // Paso 2 → Paso 3. If a background-minted draft still matches the amount + gift type,
+  // attach the fiscal data with the fast D1-only datos call and reuse that link — Paso 3
+  // renders instantly (the ~6 s Wompi mint already happened during Paso 2). If the draft
+  // is missing/failed or stale (amount/tipo edited via Atrás/Editar), fall back to the
+  // full-body POST, which still mints the link inline. On error the donor stays on Paso 2.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
     const message = donationStep2ValidationMessage(form);
@@ -515,10 +556,22 @@ export function DonarPage() {
     setError("");
     setSubmitting(true);
     try {
-      const created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
-        method: "POST",
-        body: donationIntentBody(form)
-      });
+      let created: DonarIntent;
+      if (draftIntent && draftMatchesForm(draftIntent, form)) {
+        // Fast path: the draft link is valid; only attach the donor data (no Wompi call).
+        await donarApi<{ ok: true }>(donarDatosPath(draftIntent.intent.intentId), {
+          method: "POST",
+          body: donationDatosBody(form)
+        });
+        created = draftIntent.intent;
+      } else {
+        // No usable draft (missing/failed/stale): the full POST mints the link inline.
+        created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+          method: "POST",
+          body: donationIntentBody(form)
+        });
+      }
+      setDraftIntent(null);
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -530,7 +583,9 @@ export function DonarPage() {
   }
 
   // "← Atrás": one step back. Leaving Paso 3 abandons the created intent (a new
-  // one is created on the next entry) and unmounts the widget cleanly.
+  // one is created on the next entry) and unmounts the widget cleanly. Leaving Paso 2
+  // for Paso 1 abandons any background-minted draft — the donor may edit the amount or
+  // tipo, which would make it stale; its link expires on the sweep (no extra call).
   function goBack() {
     setError("");
     if (step === 3) {
@@ -539,13 +594,16 @@ export function DonarPage() {
       setStep(2);
       return;
     }
+    setDraftIntent(null);
     setStep(1);
   }
 
-  // The summary's "Editar": straight back to Paso 1 (amount), abandoning any intent.
+  // The summary's "Editar": straight back to Paso 1 (amount), abandoning any intent and
+  // any background-minted draft (the amount is about to change).
   function editAmount() {
     setError("");
     setIntent(null);
+    setDraftIntent(null);
     setStage("form");
     setStep(1);
   }
