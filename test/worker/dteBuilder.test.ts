@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { buildAdvancedCdeDocument, buildCdeDocument, buildContingenciaEvent, buildDirectCdeDocument, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
 import type { DteDocumentRecord, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -362,20 +362,6 @@ describe("DTE builders", () => {
     ).toThrow(/DUI.*digito verificador/i);
   });
 
-  it("builds a schema-valid contingency event for queued CDEs", () => {
-    const event = buildContingenciaEvent(emisorConfig, {
-      ambiente: "00",
-      documents: [{ tipoDoc: "15", codigoGeneracion: "11111111-1111-4111-8111-111111111111" }],
-      startedAt: new Date("2026-06-02T10:00:00-06:00"),
-      endedAt: new Date("2026-06-02T11:00:00-06:00"),
-      tipoContingencia: 1,
-      motivoContingencia: "MH no disponible"
-    }) as Record<string, any>;
-
-    expect(event.identificacion.version).toBe(4);
-    expect(event.detalleDTE).toHaveLength(1);
-  });
-
   it("uses MH control-number codes for invalidation event establishment fields", () => {
     const original = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 1,
@@ -400,6 +386,7 @@ describe("DTE builders", () => {
       issued_at: "2026-06-02T20:05:20.742Z",
       accepted_at: "2026-06-02T20:06:20.742Z",
       contingency_period_id: null,
+    transmission_deferred_at: null,
       created_at: "2026-06-02T20:05:20.742Z",
       updated_at: "2026-06-02T20:06:20.742Z"
     } satisfies DteDocumentRecord;

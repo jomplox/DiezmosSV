@@ -1,8 +1,8 @@
+import svFlag from "./assets/sv-flag.svg";
 import { CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
   DONAR_AMOUNT_CHIPS,
-  DONAR_AUTOCLICK_INTERVAL_MS,
   DONAR_BACK_LABEL,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_COMPLETED_MESSAGE,
@@ -30,7 +30,10 @@ import {
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
-  DONAR_WOMPI_SCRIPT_URL,
+  DONAR_WIDGET_DELAYED_MESSAGE,
+  DONAR_WIDGET_FALLBACK_CTA,
+  DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
@@ -42,12 +45,16 @@ import {
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   GIVEBUTTER_SCRIPT_URL,
   donarAmountDisplay,
+  donarDatosPath,
   donarStepIndicator,
   donationAmountValidationMessage,
+  donationDatosBody,
+  donationDraftBody,
   donationIntentBody,
   donationStep1ValidationMessage,
   donationStep2ValidationMessage,
   doorFromSearch,
+  draftMatchesForm,
   givebutterHostedUrl,
   givebutterPrefillParams,
   graciasDisplayFromSearch,
@@ -60,7 +67,6 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
-import svFlag from "./assets/sv-flag.png";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -147,6 +153,15 @@ interface DonarIntent {
   urlEnlaceLargo: string;
 }
 
+// A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
+// transition, tagged with the amount + gift type it was minted with so Paso 2 submit
+// can tell whether the donor edited either (stale → abandon the draft, full POST).
+interface DonarDraftIntent {
+  intent: DonarIntent;
+  amount: string;
+  giftType: DonarGiftType | "";
+}
+
 // The default logo, reusing the vector paths shared with the worker's PDF renderer
 // (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
 function OrganizationLogo() {
@@ -165,12 +180,11 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the church's own El Salvador flag asset (src/client/assets/sv-flag.png,
-// the civil blue-white-blue tricolor) overlapping the lower-right of a thin monochrome
-// line-art globe. The flag is a rounded-corner rectangle (~16:9) sitting on a white
-// backing card so it separates cleanly from the globe lines behind it — the same
-// "drops onto the globe's lower right" relationship as the previous circle flag.
-// aria-hidden: the door button's text label is the single accessible name.
+// Door 1 icon: the official El Salvador flag (flag-icons sv 1:1, MIT — full escudo
+// with the "REPUBLICA DE EL SALVADOR" ring) cropped to a circle, overlapping the
+// lower-right of a thin monochrome line-art globe. Referenced as an <image> asset so
+// its internal SVG ids stay encapsulated. aria-hidden: the door button's text label
+// is the single accessible name.
 function SvWorldIcon() {
   return (
     <svg
@@ -180,31 +194,29 @@ function SvWorldIcon() {
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Rounded-corner clip for the flag image (subtle ~4px radius). */}
-      <clipPath id="sv-flag-clip">
-        <rect x="47" y="58" width="44" height="24.75" rx="4" ry="4" />
-      </clipPath>
       {/* Line-art globe behind the flag. */}
       <g fill="none" stroke="#595959" strokeWidth="1.5">
-        <circle cx="44" cy="40" r="30" />
-        <ellipse cx="44" cy="40" rx="12" ry="30" />
-        <ellipse cx="44" cy="40" rx="24" ry="30" />
-        <line x1="14" y1="40" x2="74" y2="40" />
-        <path d="M 19 25 Q 44 33 69 25" />
-        <path d="M 19 55 Q 44 47 69 55" />
+        <circle cx="42" cy="38" r="30" />
+        <ellipse cx="42" cy="38" rx="12" ry="30" />
+        <ellipse cx="42" cy="38" rx="24" ry="30" />
+        <line x1="12" y1="38" x2="72" y2="38" />
+        <path d="M 17 23 Q 42 31 67 23" />
+        <path d="M 17 53 Q 42 45 67 53" />
       </g>
-      {/* White backing card (the "drop"): a slightly larger rounded rect behind the
-          flag so it reads clearly against the globe strokes. */}
-      <rect x="44.5" y="55.5" width="49" height="29.75" rx="5.5" ry="5.5" fill="#ffffff" />
-      {/* The church's own flag PNG, clipped to a rounded rectangle in the lower-right. */}
+      {/* Official flag, circle-cropped, lower-right, with a white ring separating it
+          from the globe lines. */}
+      <clipPath id="sv-flag-circle">
+        <circle cx="69" cy="69" r="25" />
+      </clipPath>
+      <circle cx="69" cy="69" r="28" fill="#ffffff" />
       <image
         href={svFlag}
-        x="47"
-        y="58"
-        width="44"
-        height="24.75"
+        x="44"
+        y="44"
+        width="50"
+        height="50"
         preserveAspectRatio="xMidYMid slice"
-        clipPath="url(#sv-flag-clip)"
+        clipPath="url(#sv-flag-circle)"
       />
     </svg>
   );
@@ -246,6 +258,9 @@ export function DonarPage() {
   const [stage, setStage] = useState<DonarStage>("form");
   const [step, setStep] = useState<DonarStep>(1);
   const [intent, setIntent] = useState<DonarIntent | null>(null);
+  // The link minted in the background when the donor entered Paso 2. Held here until
+  // Paso 2 submit, which attaches the fiscal data (datos) and reuses this intent.
+  const [draftIntent, setDraftIntent] = useState<DonarDraftIntent | null>(null);
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
@@ -255,11 +270,12 @@ export function DonarPage() {
   // control) and the render-probe fallback for the embedded giving form.
   const [monthly, setMonthly] = useState(false);
   const [givebutterFallback, setGivebutterFallback] = useState(false);
-  const widgetHostRef = useRef<HTMLDivElement | null>(null);
+  // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
+  // (spinner), "ready" once it has, "delayed" when the render budget elapses first
+  // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
+  // still flips to "ready").
+  const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed">("loading");
   const givebutterHostRef = useRef<HTMLDivElement | null>(null);
-  // Latches once the rendered Wompi button is auto-clicked so re-observing the
-  // (still-present) button never re-opens the modal. Reset per intent below.
-  const autoClickedRef = useRef(false);
   // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
   // field, and the summary's Editar control (Paso 3 / the US embed step).
   const heroInputRef = useRef<HTMLInputElement | null>(null);
@@ -300,6 +316,7 @@ export function DonarPage() {
     setStep(1);
     setError("");
     setIntent(null);
+    setDraftIntent(null);
     setStage("form");
     setDoor(next);
   };
@@ -330,16 +347,16 @@ export function DonarPage() {
     summaryEditRef.current?.focus();
   }, [door, step]);
 
-  // Load the Wompi widget script only while this view is mounted (never on admin
-  // views). Injected once; the widget div is rendered after intent success.
+  // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
+  // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
   useEffect(() => {
-    if (document.querySelector(`script[src="${DONAR_WOMPI_SCRIPT_URL}"]`)) {
+    if (document.querySelector(`link[rel="preconnect"][href="${DONAR_WOMPI_CHECKOUT_ORIGIN}"]`)) {
       return;
     }
-    const script = document.createElement("script");
-    script.src = DONAR_WOMPI_SCRIPT_URL;
-    script.async = true;
-    document.head.appendChild(script);
+    const link = document.createElement("link");
+    link.rel = "preconnect";
+    link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
+    document.head.appendChild(link);
   }, []);
 
   // Inject the Givebutter widget script ONLY when the US donation path first becomes
@@ -424,57 +441,25 @@ export function DonarPage() {
     return () => window.removeEventListener("message", onMessage);
   }, []);
 
-  // Once an intent exists, render the widget button. If the script/widget does not
-  // render within a short timeout, fall back to the full-page hosted flow.
+  // Once an intent exists, Paso 3 embeds the checkout directly (iframe below). This
+  // effect only drives the waiting UI: spinner from entry, and if the iframe has not
+  // fired onLoad within the render budget, the manual hosted-checkout CTA appears —
+  // never a redirect. The iframe keeps loading underneath; its onLoad flips to
+  // "ready" whenever it lands.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
     }
-    // Fresh intent: allow the button to be auto-clicked exactly once again.
-    autoClickedRef.current = false;
-    const host = widgetHostRef.current;
-    if (host) {
-      host.innerHTML = "";
-      const widget = document.createElement("div");
-      widget.className = "wompi_button_widget";
-      widget.setAttribute("data-url-pago", widgetUrlFrom(intent.urlEnlaceLargo));
-      widget.setAttribute("data-render", "widget");
-      widget.setAttribute("data-color-fondo", "#007c75");
-      widget.setAttribute("data-color-texto", "#ffffff");
-      widget.setAttribute("data-cubrir-ancho", "true");
-      host.appendChild(widget);
-    }
-    // Instant handoff: poll the host for the button Wompi injects and click it once
-    // so the donor goes form → payment modal with no extra click. The manual button
-    // and "Continúe aquí" link stay visible as the backup (the modal can be closed
-    // and reopened). Guarded by autoClickedRef so it never double-fires.
-    const autoClick = window.setInterval(() => {
-      if (autoClickedRef.current || !host) {
-        window.clearInterval(autoClick);
-        return;
-      }
-      const button = host.querySelector("button");
-      if (button) {
-        autoClickedRef.current = true;
-        window.clearInterval(autoClick);
-        button.click();
-      }
-    }, DONAR_AUTOCLICK_INTERVAL_MS);
-    const fallback = window.setTimeout(() => {
-      window.clearInterval(autoClick);
-      const rendered = host?.querySelector("iframe, a, button");
-      if (!rendered) {
-        // Script failed to load or never enhanced the div: hosted redirect.
-        window.location.href = intent.urlEnlace;
-      }
+    setHandoff("loading");
+    const slow = window.setTimeout(() => {
+      setHandoff((current) => (current === "loading" ? "delayed" : current));
     }, DONAR_SCRIPT_TIMEOUT_MS);
     return () => {
-      window.clearInterval(autoClick);
-      window.clearTimeout(fallback);
+      window.clearTimeout(slow);
     };
   }, [stage, intent]);
 
-  // Poll the intent status while the widget modal is open; COMPLETED -> thank-you.
+  // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
   // Stop after ~3 minutes with a neutral closing message.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
@@ -530,13 +515,41 @@ export function DonarPage() {
       }
       const query = params.toString();
       window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    } else {
+      // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
+      // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
+      // submit. Never blocks the step change; a failure just leaves draftIntent null and
+      // Paso 2 submit falls back to the full POST. A draft that still matches (Atrás →
+      // Continuar without edits) is reused — each mint costs a Wompi link and one of the
+      // donor's throttle slots, so only a missing or stale draft triggers a fresh one.
+      if (!draftIntent || !draftMatchesForm(draftIntent, form)) {
+        mintDraftIntent(form.amount.trim(), form.giftType);
+      }
     }
     setStep(2);
   }
 
-  // Paso 2 → Paso 3. Entering the pago step creates the payment intent: validate
-  // the datos, POST the intent, then advance into the handoff (widget auto-open,
-  // polling, and fallbacks unchanged). On error the donor stays on Paso 2.
+  // Fire-and-forget draft create (SV door only). Stores the minted link + the values it
+  // was minted with; errors are swallowed so the wizard degrades to the full POST.
+  function mintDraftIntent(amount: string, giftType: DonarGiftType | "") {
+    setDraftIntent(null);
+    void donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+      method: "POST",
+      body: donationDraftBody({ amount, giftType })
+    })
+      .then((created) => {
+        setDraftIntent({ intent: created, amount, giftType });
+      })
+      .catch(() => {
+        // Ignored: Paso 2 submit falls back to the full-body POST.
+      });
+  }
+
+  // Paso 2 → Paso 3. If a background-minted draft still matches the amount + gift type,
+  // attach the fiscal data with the fast D1-only datos call and reuse that link — Paso 3
+  // renders instantly (the ~6 s Wompi mint already happened during Paso 2). If the draft
+  // is missing/failed or stale (amount/tipo edited via Atrás/Editar), fall back to the
+  // full-body POST, which still mints the link inline. On error the donor stays on Paso 2.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
     const message = donationStep2ValidationMessage(form);
@@ -547,10 +560,22 @@ export function DonarPage() {
     setError("");
     setSubmitting(true);
     try {
-      const created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
-        method: "POST",
-        body: donationIntentBody(form)
-      });
+      let created: DonarIntent;
+      if (draftIntent && draftMatchesForm(draftIntent, form)) {
+        // Fast path: the draft link is valid; only attach the donor data (no Wompi call).
+        await donarApi<{ ok: true }>(donarDatosPath(draftIntent.intent.intentId), {
+          method: "POST",
+          body: donationDatosBody(form)
+        });
+        created = draftIntent.intent;
+      } else {
+        // No usable draft (missing/failed/stale): the full POST mints the link inline.
+        created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+          method: "POST",
+          body: donationIntentBody(form)
+        });
+      }
+      setDraftIntent(null);
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -562,7 +587,10 @@ export function DonarPage() {
   }
 
   // "← Atrás": one step back. Leaving Paso 3 abandons the created intent (a new
-  // one is created on the next entry) and unmounts the widget cleanly.
+  // one is created on the next entry) and unmounts the widget cleanly. Leaving Paso 2
+  // for Paso 1 KEEPS the held draft: if the donor returns without editing amount/tipo,
+  // draftMatchesForm reuses it (no second mint, no throttle slot); if they edit, the
+  // next Paso 1→2 crossing mints fresh and the stale link expires on the sweep.
   function goBack() {
     setError("");
     if (step === 3) {
@@ -574,10 +602,12 @@ export function DonarPage() {
     setStep(1);
   }
 
-  // The summary's "Editar": straight back to Paso 1 (amount), abandoning any intent.
+  // The summary's "Editar": straight back to Paso 1 (amount), abandoning any intent and
+  // any background-minted draft (the amount is about to change).
   function editAmount() {
     setError("");
     setIntent(null);
+    setDraftIntent(null);
     setStage("form");
     setStep(1);
   }
@@ -654,8 +684,8 @@ export function DonarPage() {
         {step === 1 && (
           <p className="donar-assurance">
             {usDonation
-              ? "Recibirá un recibo deducible de impuestos en EE. UU. por correo."
-              : "Recibirá su comprobante de donación electrónico (CDE) por correo."}
+              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico."
+              : "Recibirá su comprobante de donación en su dirección de correo electrónico."}
           </p>
         )}
 
@@ -738,7 +768,7 @@ export function DonarPage() {
 
         {/* Paso 2 — Sus datos (SV door only). Documento + dirección, roomy single
             column. Entering Paso 3 creates the payment intent, so the submit
-            label is the diezmo-framed "Continuar al pago". */}
+            label names the chosen gift ("Continuar con su diezmo/ofrenda"). */}
         {step === 2 && !usDonation && (
           <form className="donar-form donar-step" onSubmit={continueToPago}>
             <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
@@ -866,7 +896,7 @@ export function DonarPage() {
 
             {error && <p className="error donar-error">{error}</p>}
             <button className="primary" type="submit" disabled={submitting}>
-              {submitting ? "Preparando el pago…" : "Continuar al pago"}
+              {submitting ? "Preparando su entrega…" : form.giftType === "OFRENDA" ? "Continuar con su ofrenda" : "Continuar con su diezmo"}
             </button>
           </form>
         )}
@@ -911,17 +941,36 @@ export function DonarPage() {
         )}
 
         {/* Paso 3 — Pago (SV door). Summary line above the existing Wompi
-            handoff: widget auto-open, manual backup, polling, neutral close. */}
+            handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
           <div className="donar-step">
             {summary}
 
             {stage === "widget" && intent && (
               <div className="donar-handoff">
-                <p className="donar-intro">Pague de forma segura con Wompi. Al completar el pago, verá la confirmación aquí.</p>
-                <div className="donar-widget" ref={widgetHostRef} />
+                <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
+                {handoff === "loading" && (
+                  <div className="donar-widget-loading" role="status">
+                    <span className="donar-spinner" aria-hidden="true" />
+                    {DONAR_WIDGET_LOADING_MESSAGE}
+                  </div>
+                )}
+                {handoff === "delayed" && (
+                  <div className="donar-widget-delayed">
+                    <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
+                    <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
+                      {DONAR_WIDGET_FALLBACK_CTA}
+                    </a>
+                  </div>
+                )}
+                <iframe
+                  className="donar-embed"
+                  src={widgetUrlFrom(intent.urlEnlaceLargo)}
+                  title="Entrega segura con Wompi"
+                  onLoad={() => setHandoff("ready")}
+                />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
-                  ¿No se abre el pago? Continúe aquí
+                  ¿No se muestra el formulario? Continúe aquí
                 </button>
               </div>
             )}

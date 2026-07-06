@@ -1,13 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
   it("localizes internal status values for user-facing badges", () => {
     expect(statusLabel("ACCEPTED")).toBe("Aceptado");
     expect(statusLabel("INVALIDATED")).toBe("Invalidado");
     expect(statusLabel("CONTINGENCY_PENDING")).toBe("Contingencia");
+    // Transmisión diferida: MH no disponible al emitir, reintento automático.
+    expect(statusLabel("TRANSMISSION_PENDING")).toBe("En trámite");
     expect(statusLabel("EVENT_ACCEPTED")).toBe("Evento aceptado");
     expect(statusLabel("BATCH_SENT")).toBe("Lote enviado");
+  });
+
+  it("derives En trámite from the deferred marker while plain SIGNED stays Firmado", () => {
+    // Deferred state is stored as SIGNED + transmission_deferred_at (no dedicated
+    // status value: D1 cannot rebuild the FK-parent table to widen its CHECK).
+    const deferred = { status: "SIGNED", transmission_deferred_at: "2026-07-06T10:00:00.000Z" };
+    expect(documentDisplayStatus(deferred)).toBe("TRANSMISSION_PENDING");
+    expect(statusLabel(documentDisplayStatus(deferred))).toBe("En trámite");
+    // Plain SIGNED (mid-pipeline transient, no marker) keeps its normal label.
+    const plainSigned = { status: "SIGNED", transmission_deferred_at: null };
+    expect(documentDisplayStatus(plainSigned)).toBe("SIGNED");
+    expect(statusLabel(documentDisplayStatus(plainSigned))).toBe("Firmado");
+    // A resolved doc keeps the marker as history but its status wins.
+    expect(documentDisplayStatus({ status: "ACCEPTED", transmission_deferred_at: "2026-07-06T10:00:00.000Z" })).toBe("ACCEPTED");
   });
 
   it("localizes roles and environments without changing stored values", () => {
@@ -33,6 +49,8 @@ describe("client display text", () => {
     expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
     expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
     expect(auditActionLabel("ALERT_EMAIL_UPDATED")).toBe("Correo de alertas actualizado");
+    expect(auditActionLabel("DTE_TRANSMISSION_DEFERRED")).toBe("Transmisión diferida");
+    expect(auditActionLabel("ALERT_SENT:MH_UNAVAILABLE")).toBe("Alerta enviada: Hacienda no disponible");
     expect(auditActionLabel("ALERT_SENT:DTE_FAILED")).toBe("Alerta enviada: DTE fallido");
     expect(auditActionLabel("ALERT_SENT:ADVANCED_CDE_FAILED")).toBe("Alerta enviada: CDE avanzado fallido");
     expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Contingencia abierta");

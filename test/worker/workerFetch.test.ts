@@ -740,6 +740,253 @@ describe("donation intents", () => {
     expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
+
+  // ── Premint: draft create (amount + optional giftType only) ────────────────
+  //
+  // The donor wizard mints the Wompi link in the background when the SV donor
+  // ENTERS Paso 2, before the fiscal data exists. That draft body carries only the
+  // amount (and, on the SV path, the gift type) — no documento/dirección — yet the
+  // link is minted exactly as today (identificadorEnlaceComercio = intent id).
+  describe("draft create (no donor fields)", () => {
+    function draftRequest(body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+      return new Request("https://example.org/api/donations/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
+        body: JSON.stringify(body)
+      });
+    }
+
+    it("mints the Wompi link for a draft carrying only { amount, giftType } (donor data absent)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "25.50", giftType: "DIEZMO" }), env(db));
+
+      expect(response.status).toBe(201);
+      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string };
+      // Response shape is unchanged from the full create, and the link is minted with
+      // identificadorEnlaceComercio = intent id (mock echoes the id into the URL).
+      expect(payload.intentId).toMatch(/^di_/);
+      expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
+      expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
+
+      expect(db.donationIntents).toHaveLength(1);
+      const intent = db.donationIntents[0];
+      expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.amount_cents).toBe(2550);
+      expect(intent.gift_type).toBe("DIEZMO");
+      // The draft marker: donor document + address stay NULL until the datos call.
+      expect(intent.donor_document).toBeNull();
+      expect(intent.direccion_departamento).toBeNull();
+      expect(intent.direccion_complemento).toBeNull();
+      expect(intent.donor_name).toBeNull();
+      expect(intent.client_ip).toBe("203.0.113.7");
+    });
+
+    it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "10" }), env(db));
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
+      expect(db.donationIntents[0].gift_type).toBeNull();
+      expect(db.donationIntents[0].donor_document).toBeNull();
+    });
+
+    it("still validates the amount for a draft (same rule as the full create)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "0.50", giftType: "DIEZMO" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_amount",
+        message: "El monto debe estar entre $1.00 y $5,000.00."
+      });
+      expect(db.donationIntents).toHaveLength(0);
+    });
+
+    it("rejects a present-but-invalid gift type on a draft (no persistence)", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(draftRequest({ amount: "25.00", giftType: "GIFT" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_gift_type",
+        message: "Seleccione el tipo de aportación: diezmo u ofrenda."
+      });
+      expect(db.donationIntents).toHaveLength(0);
+    });
+
+    it("applies the same per-IP throttle to draft creates", async () => {
+      const db = new InMemoryD1();
+      for (let i = 0; i < 5; i += 1) {
+        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+      }
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
+      try {
+        const response = await worker.fetch(draftRequest({ amount: "25.00", giftType: "DIEZMO" }), env(db));
+        expect(response.status).toBe(429);
+        expect(db.donationIntents).toHaveLength(5);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ── Premint: datos completion (fast D1-only) ───────────────────────────────
+  //
+  // Attaches the donor's fiscal data to a minted draft with the same validation the
+  // full create runs; NO Wompi call, and it must never touch amount or gift type.
+  describe("datos completion", () => {
+    function seedDraft(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+      const draft = {
+        id: "di_draft_1",
+        status: "LINK_CREATED",
+        amount_cents: 2550,
+        donor_name: null,
+        donor_document_type: "13",
+        donor_document: null,
+        donor_email: null,
+        donor_phone: null,
+        direccion_departamento: null,
+        direccion_municipio: null,
+        direccion_distrito: null,
+        direccion_complemento: null,
+        donor_pais: null,
+        gift_type: "DIEZMO",
+        wompi_id_enlace: 123456,
+        wompi_url_enlace: "https://mock.wompi.sv/enlace/di_draft_1",
+        wompi_url_enlace_largo: "https://mock.wompi.sv/enlace-largo/di_draft_1",
+        document_id: null,
+        client_ip: "203.0.113.7",
+        created_at: "2026-07-04T12:00:00.000Z",
+        updated_at: "2026-07-04T12:00:00.000Z",
+        expires_at: "2026-07-04T13:00:00.000Z",
+        ...overrides
+      };
+      db.donationIntents.push(draft);
+      return draft;
+    }
+
+    function datosRequest(id: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+      return new Request(`https://example.org/api/donations/intent/${id}/datos`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
+        body: JSON.stringify(body)
+      });
+    }
+
+    const validDatos = {
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorPhone: "70001122",
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      complemento: "Colonia Escalón, San Salvador"
+    };
+
+    it("attaches donor data to a minted draft without a Wompi call or an amount/gift change", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({ ok: true });
+      // No outbound HTTP: datos is D1-only.
+      expect(fetchSpy).not.toHaveBeenCalled();
+
+      const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
+      expect(intent.donor_document).toBe("10000001-9"); // stored canonically
+      expect(intent.donor_document_type).toBe("13");
+      expect(intent.donor_phone).toBe("70001122");
+      expect(intent.direccion_departamento).toBe("06");
+      expect(intent.direccion_complemento).toBe("Colonia Escalón, San Salvador");
+      // Untouched by datos: money + tipo were locked at draft-mint time.
+      expect(intent.amount_cents).toBe(2550);
+      expect(intent.gift_type).toBe("DIEZMO");
+      // Still LINK_CREATED and pointing at the same minted link.
+      expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.wompi_id_enlace).toBe(123456);
+    });
+
+    it("mirrors the full-create validation messages (invalid DUI)", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(datosRequest("di_draft_1", { ...validDatos, donorDocument: "01234567-0" }), env(db));
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_dui",
+        message: "DUI inválido: revise el número y el dígito verificador."
+      });
+      // Nothing persisted on a rejected datos call.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+    });
+
+    it("requires the razón social for a NIT (36) datos completion", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(
+        datosRequest("di_draft_1", { ...validDatos, donorDocumentType: "36", donorDocument: "06142803901121" }),
+        env(db)
+      );
+
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toEqual({
+        error: "invalid_razon_social",
+        message: "Ingrese la razón social (máximo 200 caracteres)."
+      });
+    });
+
+    it("returns 404 for an unknown intent id", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(datosRequest("di_missing", validDatos), env(db));
+
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_not_found" });
+    });
+
+    it("returns 409 for a COMPLETED intent", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db, { status: "COMPLETED", document_id: "dte_prev" });
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_already_completed" });
+      // The completed intent is not mutated.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+    });
+
+    it("allows datos on an EXPIRED intent (donor finishing in the link's last minute)", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db, { status: "EXPIRED" });
+      const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+      expect(response.status).toBe(200);
+      const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
+      expect(intent.donor_document).toBe("10000001-9");
+      // Status is left as-is (correlateIntent already accepts EXPIRED).
+      expect(intent.status).toBe("EXPIRED");
+    });
+
+    it("applies the per-IP throttle to the public datos endpoint", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      for (let i = 0; i < 5; i += 1) {
+        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+      }
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
+      try {
+        const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+        expect(response.status).toBe(429);
+        // The draft was not modified.
+        expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
 
 describe("password reset", () => {
@@ -1710,117 +1957,51 @@ describe("document retry", () => {
   });
 });
 
-describe("contingency administration", () => {
-  it("sends an operational alert when a contingency period is opened manually", async () => {
+describe("contingency history (read-only)", () => {
+  // La emisión en contingencia del CDE se eliminó: el Anexo de validaciones del
+  // evento de contingencia (campo 35) no admite el tipo 15. Los periodos históricos
+  // siguen visibles en solo lectura; las rutas de apertura/barrido ya no existen.
+  it("no longer exposes the contingency open/sweep routes", async () => {
     const db = new InMemoryD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-    const sentAlerts: Array<{ to: string; subject: string }> = [];
 
-    const openResponse = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 2,
-          reason: "MH TEST no disponible"
-        })
-      }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMAIL_FROM: "alerts@example.org",
-        EMAIL: {
-          send: async (message: unknown) => {
-            sentAlerts.push(message as { to: string; subject: string });
-            return { messageId: "alert-contingency" };
-          }
-        } as SendEmail
-      })
-    );
-
-    expect(openResponse.status).toBe(201);
-    const opened = (await openResponse.json()) as { contingency: { active: { id: string } } };
-    expect(sentAlerts).toHaveLength(1);
-    expect(sentAlerts[0].to).toBe("owner@example.org");
-    expect(db.audits).toContainEqual(
-      expect.objectContaining({ action: "ALERT_SENT:CONTINGENCY_OPENED", entity_type: "contingency_period", entity_id: opened.contingency.active.id })
-    );
-  });
-
-  it("does not send a duplicate alert when reusing an already-open contingency period", async () => {
-    const db = new InMemoryD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-    const sentAlerts: unknown[] = [];
-    const testEnv = env(db, {
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
-    });
-
-    await worker.fetch(
+    const open = await worker.fetch(
       new Request("https://example.org/api/contingency/open", {
         method: "POST",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
         body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible" })
       }),
-      testEnv
+      env(db)
     );
-    await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
+    expect(open.status).toBe(404);
+    expect(db.contingencies).toHaveLength(0);
+
+    const sweep = await worker.fetch(
+      new Request("https://example.org/api/contingency/sweep", {
         method: "POST",
-        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ environment: "00", tipoContingencia: 2, reason: "MH TEST no disponible otra vez" })
-      }),
-      testEnv
-    );
-
-    expect(sentAlerts).toHaveLength(1);
-  });
-
-  it("opens a manual contingency period and returns dashboard-ready state", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
-
-    const openResponse = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 2,
-          reason: "MH TEST no disponible"
-        })
+        headers: { Authorization: "Bearer test-token" }
       }),
       env(db)
     );
+    expect(sweep.status).toBe(404);
+  });
 
-    expect(openResponse.status).toBe(201);
-    const opened = (await openResponse.json()) as {
-      contingency: {
-        active: { id: string; status: string; reason: string; tipo_contingencia: number };
-        summary: { open: number; pending: number };
-      };
-    };
-    expect(opened.contingency.active).toMatchObject({
-      status: "OPEN",
-      reason: "MH TEST no disponible",
-      tipo_contingencia: 2
+  it("still serves historical contingency state for the read-only view", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.contingencies.push({
+      id: "cont_hist_1",
+      environment: "00",
+      status: "CLOSED",
+      reason: "MH TEST no disponible (histórico)",
+      tipo_contingencia: 2,
+      started_at: "2026-06-20T01:00:00.000Z",
+      ended_at: "2026-06-20T04:00:00.000Z",
+      event_id: null,
+      event_sello: null,
+      transmit_deadline_at: null,
+      created_at: "2026-06-20T01:00:00.000Z"
     });
-    expect(opened.contingency.summary).toMatchObject({ open: 1, pending: 0 });
-    expect(db.audits).toContainEqual(expect.objectContaining({
-      action: "CONTINGENCY_OPENED",
-      entity_type: "contingency_period",
-      entity_id: opened.contingency.active.id
-    }));
-
     db.documents.push({
       ...testDocument(),
       id: "doc_contingency",
@@ -1828,7 +2009,7 @@ describe("contingency administration", () => {
       sello_recibido: null,
       mh_estado: "CONTINGENCY_PENDING",
       accepted_at: null,
-      contingency_period_id: opened.contingency.active.id
+      contingency_period_id: "cont_hist_1"
     });
 
     const stateResponse = await worker.fetch(
@@ -1841,11 +2022,7 @@ describe("contingency administration", () => {
     expect(stateResponse.status).toBe(200);
     await expect(stateResponse.json()).resolves.toMatchObject({
       contingency: {
-        active: {
-          id: opened.contingency.active.id,
-          status: "OPEN",
-          event_deadline_at: null
-        },
+        active: null,
         pendingDocuments: [
           {
             id: "doc_contingency",
@@ -1854,111 +2031,16 @@ describe("contingency administration", () => {
         ],
         periods: [
           {
-            id: opened.contingency.active.id,
-            status: "OPEN"
+            id: "cont_hist_1",
+            status: "CLOSED"
           }
         ],
         summary: {
           pending: 1,
-          open: 1,
-          eventAccepted: 0,
-          closed: 0,
-          failed: 0
+          open: 0,
+          closed: 1
         }
       }
-    });
-  });
-
-  it("requires a reason when opening contingency type 5", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
-
-    const response = await worker.fetch(
-      new Request("https://example.org/api/contingency/open", {
-        method: "POST",
-        headers: {
-          Authorization: "Bearer test-token",
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          environment: "00",
-          tipoContingencia: 5,
-          reason: ""
-        })
-      }),
-      env(db)
-    );
-
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "missing_contingency_reason" });
-  });
-
-  it("submits contingency CDEs through a lote after the event is accepted", async () => {
-    const db = new InMemoryD1();
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
-    db.contingencies.push({
-      id: "cont_1",
-      environment: "00",
-      status: "OPEN",
-      reason: "MH TEST no disponible",
-      tipo_contingencia: 2,
-      started_at: "2026-06-26T01:00:00.000Z",
-      ended_at: null,
-      event_id: null,
-      event_sello: null,
-      transmit_deadline_at: null,
-      created_at: "2026-06-26T01:00:00.000Z"
-    });
-    db.documents.push({
-      ...testDocument(),
-      id: "doc_contingency",
-      status: "CONTINGENCY_PENDING",
-      signed_jws: "signed-cde-jws",
-      sello_recibido: null,
-      mh_estado: "CONTINGENCY_PENDING",
-      accepted_at: null,
-      contingency_period_id: "cont_1"
-    });
-    const certPassword = "correct horse battery staple";
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", selloRecibido: "EVENT-SEAL", observaciones: [] }))
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ estado: "PROCESADO", codigoLote: "LOTE-TEST-1", observaciones: [] }))
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ procesados: [{ codigoGeneracion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4", selloRecibido: "DTE-SEAL" }], rechazados: [] }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    const response = await worker.fetch(
-      new Request("https://example.org/api/contingency/sweep", {
-        method: "POST",
-        headers: { Authorization: "Bearer test-token" }
-      }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
-        MH_CERT_XML: await generatedCertificateXml(certPassword),
-        MH_CERT_PASSWORD: certPassword,
-        MH_USER_TEST: "10000003520015",
-        MH_PASSWORD_TEST: "test-password",
-        MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-        MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
-        MH_CONTINGENCIA_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
-      })
-    );
-
-    expect(response.status).toBe(200);
-    const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
-    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcionlote");
-    expect(requestedUrls).toContain("https://apitest.dtes.mh.gob.sv/fesv/recepcion/consultadtelote/LOTE-TEST-1");
-    expect(requestedUrls).not.toContain("https://apitest.dtes.mh.gob.sv/fesv/recepciondte");
-    const loteRequest = fetchMock.mock.calls.find(([url]) => String(url).endsWith("/recepcionlote"))?.[1];
-    expect(JSON.parse(String(loteRequest?.body))).toMatchObject({
-      ambiente: "00",
-      version: 2,
-      nitEmisor: "10000003520015",
-      documentos: ["signed-cde-jws"]
     });
   });
 
@@ -3364,6 +3446,27 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
+  it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
+    const db = new InMemoryD1();
+    // A premint draft: link minted, but the donor never attached fiscal data, so the
+    // document is still NULL. Correlating it would build a receptor with an empty
+    // numDocumento that fails CDE schema validation — so the guard must skip it and
+    // let the legacy/static-link webhook fallback build the CDE from webhook data.
+    seedIntentRow(db, { donor_document: null, direccion_departamento: null, direccion_municipio: null, direccion_distrito: null, direccion_complemento: null });
+    const eventId = seedWompiEvent(db, correlationWebhook());
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(record?.status).toBe("ACCEPTED");
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    // Receptor comes from the webhook, not the (incomplete) draft.
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    // The draft is NOT completed by this webhook.
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+  });
+
   it("keeps the intent receptor when an operator rebuilds a REJECTED intent-backed CDE", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -3388,6 +3491,7 @@ describe("donation intent correlation", () => {
       issued_at: "2026-06-26T01:46:47.015Z",
       accepted_at: null,
       contingency_period_id: null,
+      transmission_deferred_at: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -3429,6 +3533,7 @@ describe("donation intent correlation", () => {
       issued_at: "2026-06-26T01:46:47.015Z",
       accepted_at: null,
       contingency_period_id: null,
+      transmission_deferred_at: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -3445,44 +3550,414 @@ describe("donation intent correlation", () => {
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
-  it("threads the gift type into the CDE apéndice when the payment is queued into contingency", async () => {
-    const db = new InMemoryD1();
-    seedIntentRow(db, { gift_type: "DIEZMO" });
-    const eventId = seedWompiEvent(db, correlationWebhook());
+});
 
-    // Non-mock env with a stubbed MH: auth succeeds, then recepcion returns 503 so the
-    // pipeline throws MhUnavailableError and routes the CDE into contingency
-    // (moveToContingency), which rebuilds via the same donorOverrideFromIntent path.
-    const certPassword = "cert-password";
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
-      .mockResolvedValueOnce(new Response("MH no disponible", { status: 503 }));
+// Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
+// admite los tipos de DTE 01, 03, 04, 05, 06, 07, 11, 14 y 18 — el CDE (tipo 15)
+// está EXCLUIDO, así que un CDE nunca se emite en contingencia. Cuando MH no está
+// disponible, la emisión queda diferida (status SIGNED + transmission_deferred_at —
+// D1 no permite reconstruir tablas padre de FK para ampliar el CHECK de status):
+// el donante recibe de inmediato
+// el comprobante TRANSITORIO y el cron de 15 minutos reintenta la transmisión.
+describe("deferred transmission when MH is unavailable", () => {
+  const INTENT_ADDRESS = {
+    departamento: "05",
+    municipio: "24",
+    distrito: "01",
+    complemento: "Calle Donante 123, Antiguo Cuscatlán"
+  };
+
+  function seedIntentRow(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const intent = {
+      id: "di_defer_1",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_name: null,
+      donor_document_type: "13",
+      donor_document: "10000002-7",
+      donor_email: null,
+      donor_phone: "70001111",
+      direccion_departamento: INTENT_ADDRESS.departamento,
+      direccion_municipio: INTENT_ADDRESS.municipio,
+      direccion_distrito: INTENT_ADDRESS.distrito,
+      direccion_complemento: INTENT_ADDRESS.complemento,
+      donor_pais: null,
+      wompi_id_enlace: 987654,
+      wompi_url_enlace: "https://s.wompi.sv/987654",
+      wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
+      document_id: null,
+      client_ip: "203.0.113.9",
+      created_at: "2026-06-26T01:00:00.000Z",
+      updated_at: "2026-06-26T01:00:00.000Z",
+      expires_at: "2026-06-26T02:00:00.000Z",
+      ...overrides
+    };
+    db.donationIntents.push(intent);
+    return intent;
+  }
+
+  function seedWompiEvent(db: InMemoryD1, webhook: Record<string, unknown>, id = "wompi_defer_evt"): string {
+    db.wompiEvents.push({
+      id,
+      transaction_id: String(webhook.IdTransaccion),
+      environment: "00",
+      result: String(webhook.ResultadoTransaccion),
+      amount_cents: 2500,
+      donor_email: null,
+      donor_name: null,
+      raw_body: JSON.stringify(webhook),
+      headers_json: "{}",
+      received_at: "2026-06-26T01:46:47.015Z",
+      processed_at: null,
+      created_document_id: null
+    });
+    return id;
+  }
+
+  function deferWebhook(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-26T01:40:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_defer_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_defer_1",
+      cliente: {
+        DocumentoIdentidad: "P-A123456",
+        Nombre: "Fallback",
+        Apellidos: "Cliente",
+        EMail: "fallback@example.org",
+        Celular: "70000003",
+        CodigoPais: "SV"
+      },
+      ...overrides
+    };
+  }
+
+  // URL-routing fetch stub: MH auth always succeeds; recepciondte behaves per test.
+  function stubMhFetch(recepcion: () => Response): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/seguridad/auth")) {
+        return jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" });
+      }
+      if (url.includes("recepciondte")) {
+        return recepcion();
+      }
+      throw new Error(`Fetch inesperado en prueba de transmisión diferida: ${url}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
 
-    const contingencyEnv = env(db, {
+  async function deferredEnv(db: InMemoryD1, sent: Array<{ subject: string; to: string; text: string }>): Promise<Env> {
+    return env(db, {
       MOCK_EXTERNAL_SERVICES: "false",
       EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
-      MH_CERT_XML: await generatedCertificateXml(certPassword),
-      MH_CERT_PASSWORD: certPassword,
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password",
       MH_USER_TEST: "10000003520015",
       MH_PASSWORD_TEST: "test-password",
       MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
+      EMAIL_FROM: "comprobantes@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sent.push(message as { subject: string; to: string; text: string });
+          return { messageId: `email-${sent.length}` };
+        }
+      } as SendEmail
     });
+  }
 
-    const record = await new IssuancePipeline(contingencyEnv).processWompiEvent(eventId);
+  it("defers a Wompi CDE: SIGNED + deferred marker, normal shape, transitorio email, intent untouched", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db, { gift_type: "DIEZMO" });
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
 
-    expect(record?.status).toBe("CONTINGENCY_PENDING");
+    const record = await new IssuancePipeline(await deferredEnv(db, sent)).processWompiEvent(eventId);
+
+    // Deferred state = SIGNED + transmission_deferred_at (no new status value: D1
+    // cannot rebuild dte_documents to widen its CHECK constraint).
+    expect(record?.status).toBe("SIGNED");
+    expect(record?.transmission_deferred_at).toBeTruthy();
+    expect(record?.signed_jws).toBeTruthy();
+    // NO contingency: no period row, no attachment — the CDE keeps its NORMAL shape.
+    expect(db.contingencies).toHaveLength(0);
+    expect(record?.contingency_period_id).toBeNull();
     const cde = JSON.parse(String(record!.plain_json)) as {
+      identificacion: Record<string, unknown>;
+      receptor: Record<string, unknown>;
       apendice: Array<Record<string, unknown>>;
       cuerpoDocumento: Array<Record<string, unknown>>;
-      identificacion: Record<string, unknown>;
     };
-    // Contingency rebuild keeps the informational tipo line and the DONACIÓN descripcion.
+    expect(cde.identificacion.tipoModelo).toBe(1);
+    // The intent override and gift type survive the deferral unchanged.
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Diezmo" });
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
-    expect(cde.identificacion.tipoModelo).toBe(2); // contingency model
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_TRANSMISSION_DEFERRED", entity_type: "dte_document", entity_id: record!.id })
+    );
+    // Immediate transitorio email with distinguishing evidence type.
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+    expect(sent[0].text).toContain("Sello de Recepción");
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: record!.id,
+        status: "SENT",
+        email_type: "dteReceiptTransitorio",
+        document_status_at_send: "SIGNED"
+      })
+    );
+    // The intent completes only on REAL MH acceptance — never at deferral.
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("LINK_CREATED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+  });
+
+  it("defers a quick/advanced queue CDE instead of marking it FAILED", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(advancedFailingDocument("doc_quick_defer"));
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    const record = await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_defer");
+
+    expect(record.status).toBe("SIGNED");
+    expect(record.transmission_deferred_at).toBeTruthy();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_TRANSMISSION_DEFERRED", entity_id: "doc_quick_defer" })
+    );
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED" }));
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+  });
+
+  it("does not resend the transitorio email when a queue redelivery re-defers the same document", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({ ...advancedFailingDocument("doc_quick_dedupe"), status: "SIGNED", transmission_deferred_at: "2026-06-26T01:49:00.000Z", signed_jws: "already-signed-jws" });
+    // The first delivery attempt already sent the transitorio before the crash/redelivery.
+    db.emailDeliveries.push({
+      id: "email_prev",
+      document_id: "doc_quick_dedupe",
+      to_email: "legacy-contact-2@example.com",
+      status: "SENT",
+      provider_response_json: "{}",
+      sent_at: "2026-06-26T01:50:00.000Z",
+      email_type: "dteReceiptTransitorio",
+      document_status_at_send: "SIGNED",
+      template_version: null,
+      pdf_renderer_version: null,
+      pdf_sha256: null,
+      dte_json_sha256: null,
+      provider_delivery_id: null
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_dedupe");
+
+    expect(sent).toHaveLength(0);
+    expect(db.emailDeliveries.filter((row) => row.document_id === "doc_quick_dedupe")).toHaveLength(1);
+    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.status).toBe("SIGNED");
+    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.transmission_deferred_at).toBeTruthy();
+  });
+
+  it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_rejected_defer",
+      wompi_event_id: eventId,
+      status: "REJECTED",
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      accepted_at: null
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+
+    const record = db.documents.find((row) => row.id === "doc_rejected_defer") as unknown as DteDocumentRecord;
+    const result = await new IssuancePipeline(await deferredEnv(db, sent)).rebuildRejectedWompiDocument(record);
+
+    expect(result.accepted).toBe(false);
+    const rebuilt = db.documents.find((row) => row.id === "doc_rejected_defer");
+    expect(rebuilt?.status).toBe("SIGNED");
+    expect(rebuilt?.transmission_deferred_at).toBeTruthy();
+    const cde = JSON.parse(String(rebuilt!.plain_json)) as { identificacion: Record<string, unknown>; receptor: Record<string, unknown> };
+    expect(cde.identificacion.tipoModelo).toBe(1);
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].subject).toContain("(en trámite)");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).not.toBe("COMPLETED");
+  });
+
+  it("retries a deferred CDE on the sweep: acceptance completes the intent and sends the definitive email", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+    expect(deferred?.status).toBe("SIGNED");
+    expect(deferred?.transmission_deferred_at).toBeTruthy();
+    expect(sent).toHaveLength(1);
+
+    stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-DEFINITIVO", observaciones: [] }));
+    const result = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    expect(result).toMatchObject({ transmitted: 1 });
+    const doc = db.documents.find((row) => row.id === deferred!.id);
+    expect(doc?.status).toBe("ACCEPTED");
+    expect(doc?.sello_recibido).toBe("SELLO-DEFINITIVO");
+    // The marker stays as historical "was deferred at" evidence; leaving SIGNED is
+    // what removes the doc from the retry sweep.
+    expect(doc?.transmission_deferred_at).toBeTruthy();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+    // Definitive email: normal receipt copy, PDF now carries the real sello.
+    expect(sent).toHaveLength(2);
+    expect(sent[1].subject).not.toContain("(en trámite)");
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: deferred!.id,
+        status: "SENT",
+        email_type: "dteReceipt",
+        document_status_at_send: "ACCEPTED"
+      })
+    );
+    // REAL acceptance completes the correlated intent.
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("COMPLETED");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.document_id).toBe(deferred!.id);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_defer_1" })
+    );
+  });
+
+  it("keeps the CDE pending without email or audit spam while MH stays down, alerting once after an hour", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+    expect(sent).toHaveLength(1); // transitorio
+    // Age the DEFERRAL beyond the one-hour alert threshold (the alert is measured
+    // from transmission_deferred_at, not from document creation).
+    const doc = db.documents.find((row) => row.id === deferred!.id)!;
+    doc.transmission_deferred_at = "2026-06-26T00:00:00.000Z";
+
+    const first = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(first).toMatchObject({ transmitted: 0, pending: 1 });
+    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("SIGNED");
+    expect(db.documents.find((row) => row.id === deferred!.id)?.transmission_deferred_at).toBeTruthy();
+    // One backlog alert (transitorio + alert = 2 sends), deduped on the next tick.
+    expect(sent).toHaveLength(2);
+    expect(db.audits.filter((row) => row.action === "ALERT_SENT:MH_UNAVAILABLE")).toHaveLength(1);
+
+    await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(sent).toHaveLength(2);
+    expect(db.audits.filter((row) => row.action === "ALERT_SENT:MH_UNAVAILABLE")).toHaveLength(1);
+    // No per-tick audit noise: the deferral audit stays singular, no accepted/rejected audits.
+    expect(db.audits.filter((row) => row.action === "DTE_TRANSMISSION_DEFERRED")).toHaveLength(1);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_ACCEPTED" }));
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DTE_REJECTED" }));
+  });
+
+  it("marks a deferred CDE REJECTED through the normal rejected path when MH rejects it on retry", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook());
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
+
+    stubMhFetch(() => jsonResponse({ estado: "RECHAZADO", observaciones: ["Firma inválida"] }));
+    await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    const doc = db.documents.find((row) => row.id === deferred!.id);
+    expect(doc?.status).toBe("REJECTED");
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_REJECTED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+    // No definitive email on rejection; the intent stays open for the operator rebuild.
+    expect(sent).toHaveLength(1);
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).not.toBe("COMPLETED");
+  });
+
+  it("runs the deferred-transmission retry on the 15-minute cron tick", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_sched_defer",
+      wompi_event_id: null,
+      status: "SIGNED",
+      transmission_deferred_at: "2026-06-26T01:49:00.000Z",
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null,
+      donor_email: null
+    });
+
+    // Mock mode: MH accepts without network. The cron must pick the pending doc up.
+    await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+
+    expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
+  });
+
+  it("surfaces deferred docs as En trámite (virtual filter) while a plain SIGNED doc stays out", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // Deferred: SIGNED + marker → listed under the virtual TRANSMISSION_PENDING filter.
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_deferred_list",
+      codigo_generacion: "AAAAAAA1-AAAA-4AAA-8AAA-AAAAAAAAAAA1",
+      numero_control: "DTE-15-M001P004-000000000000801",
+      status: "SIGNED",
+      transmission_deferred_at: "2026-06-26T01:49:00.000Z",
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null
+    });
+    // Plain SIGNED (mid-pipeline transient, NOT deferred) → excluded from the filter.
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_plain_signed",
+      codigo_generacion: "BBBBBBB2-BBBB-4BBB-8BBB-BBBBBBBBBBB2",
+      numero_control: "DTE-15-M001P004-000000000000802",
+      status: "SIGNED",
+      transmission_deferred_at: null,
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?status=TRANSMISSION_PENDING", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { documents: Array<{ id: string }> };
+    expect(body.documents.map((document) => document.id)).toEqual(["doc_deferred_list"]);
   });
 });
 
@@ -4987,6 +5462,13 @@ class Statement {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("FROM email_deliveries") && this.sql.includes("email_type = ?")) {
+      // hasSentEmail dedupe lookup: SENT delivery of a given evidence type for a document.
+      const [documentId, emailType] = this.args.map(String);
+      return (this.db.emailDeliveries.find(
+        (row) => row.document_id === documentId && row.email_type === emailType && row.status === "SENT"
+      ) ?? null) as T | null;
+    }
     if (this.sql.includes("FROM contingency_periods WHERE environment = ?")) {
       const environment = String(this.args[0]);
       return (
@@ -5132,7 +5614,10 @@ class Statement {
       let documents = [...this.db.documents];
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
         let argIndex = 0;
-        if (this.sql.includes("status = ?")) {
+        if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
+          // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
+          documents = documents.filter((document) => document.status === "SIGNED" && document.transmission_deferred_at != null);
+        } else if (this.sql.includes("status = ?")) {
           const status = String(this.args[argIndex]);
           argIndex += 1;
           documents = documents.filter((document) => document.status === status);
@@ -5154,6 +5639,9 @@ class Statement {
       if (this.sql.includes("status = ?")) {
         const status = String(this.args[0]);
         documents = documents.filter((document) => document.status === status);
+      }
+      if (this.sql.includes("transmission_deferred_at IS NOT NULL")) {
+        documents = documents.filter((document) => document.transmission_deferred_at != null);
       }
       if (this.sql.includes("contingency_period_id = ?")) {
         const periodId = String(this.args[0]);
@@ -5335,13 +5823,14 @@ class Statement {
         amount_cents: Number(amountCents),
         donor_name: donorName == null ? null : String(donorName),
         donor_document_type: String(donorDocumentType),
-        donor_document: String(donorDocument),
+        // Document + address are nullable now (0015): a draft binds them null.
+        donor_document: donorDocument == null ? null : String(donorDocument),
         donor_email: donorEmail == null ? null : String(donorEmail),
         donor_phone: donorPhone == null ? null : String(donorPhone),
-        direccion_departamento: String(direccionDepartamento),
-        direccion_municipio: String(direccionMunicipio),
-        direccion_distrito: String(direccionDistrito),
-        direccion_complemento: String(direccionComplemento),
+        direccion_departamento: direccionDepartamento == null ? null : String(direccionDepartamento),
+        direccion_municipio: direccionMunicipio == null ? null : String(direccionMunicipio),
+        direccion_distrito: direccionDistrito == null ? null : String(direccionDistrito),
+        direccion_complemento: direccionComplemento == null ? null : String(direccionComplemento),
         donor_pais: donorPais == null ? null : String(donorPais),
         // gift_type is the last bound arg (appended by migration 0012).
         gift_type: giftType == null ? null : String(giftType),
@@ -5354,6 +5843,35 @@ class Statement {
         updated_at: "2026-06-26T01:46:47.015Z",
         expires_at: String(expiresAt)
       });
+    }
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("donor_document_type = ?") && this.sql.includes("direccion_departamento = ?")) {
+      // The /datos completion: attaches donor data, leaving amount/gift_type/status/link untouched.
+      const [
+        donorDocumentType,
+        donorDocument,
+        donorName,
+        donorPhone,
+        direccionDepartamento,
+        direccionMunicipio,
+        direccionDistrito,
+        direccionComplemento,
+        donorPais,
+        updatedAt,
+        id
+      ] = this.args;
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent) {
+        intent.donor_document_type = String(donorDocumentType);
+        intent.donor_document = donorDocument == null ? null : String(donorDocument);
+        intent.donor_name = donorName == null ? null : String(donorName);
+        intent.donor_phone = donorPhone == null ? null : String(donorPhone);
+        intent.direccion_departamento = direccionDepartamento == null ? null : String(direccionDepartamento);
+        intent.direccion_municipio = direccionMunicipio == null ? null : String(direccionMunicipio);
+        intent.direccion_distrito = direccionDistrito == null ? null : String(direccionDistrito);
+        intent.direccion_complemento = direccionComplemento == null ? null : String(direccionComplemento);
+        intent.donor_pais = donorPais == null ? null : String(donorPais);
+        intent.updated_at = String(updatedAt);
+      }
     }
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("status = 'LINK_CREATED'")) {
       const [idEnlace, urlEnlace, urlEnlaceLargo, updatedAt, id] = this.args;
@@ -5405,6 +5923,7 @@ class Statement {
         issued_at: String(issuedAt),
         accepted_at: null,
         contingency_period_id: contingencyPeriodId === null ? null : String(contingencyPeriodId),
+        transmission_deferred_at: null,
         created_at: String(issuedAt),
         updated_at: String(issuedAt)
       });
@@ -5493,6 +6012,29 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+      }
+    }
+    if (this.sql.includes("transmission_deferred_at = ?")) {
+      // markDocumentTransmissionDeferred: SIGNED + deferral marker + MH_NO_DISPONIBLE.
+      const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.status = "SIGNED";
+        document.transmission_deferred_at = String(deferredAt);
+        document.sello_recibido = null;
+        document.mh_estado = String(mhEstado);
+        document.mh_observaciones_json = String(observacionesJson);
+        document.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE dte_documents SET signed_jws = ?")) {
+      // updateDocumentSigned: persists the JWS and flips the doc to SIGNED.
+      const [signedJws, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.signed_jws = String(signedJws);
+        document.status = "SIGNED";
+        document.updated_at = String(updatedAt);
       }
     }
     if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET codigo_generacion = ?")) {
@@ -5773,6 +6315,7 @@ function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRe
     issued_at: "2026-06-26T01:46:47.015Z",
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
+    transmission_deferred_at: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z",
     ...overrides

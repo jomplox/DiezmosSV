@@ -167,7 +167,7 @@ export function getMhCertificateXml(env: Env): string {
   throw new Error("MH_CERT_XML es requerido");
 }
 
-export function mhEndpoint(env: Env, name: "auth" | "recepcion" | "contingencia" | "anulacion", ambiente: "00" | "01"): string {
+export function mhEndpoint(env: Env, name: "auth" | "recepcion" | "anulacion", ambiente: "00" | "01"): string {
   const suffix = ambiente === "01" ? "PROD" : "TEST";
   const key = `MH_${name.toUpperCase()}_URL_${suffix}` as keyof Env;
   return requireSecret(env, key);

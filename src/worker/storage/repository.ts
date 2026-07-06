@@ -107,13 +107,16 @@ export class Repository {
     // are nullable; donorName carries the razón social for NIT (36) intents only.
     donorName: string | null;
     donorDocumentType: DonationIntentDocumentType;
-    donorDocument: string;
+    // Document + address are nullable so a DRAFT intent (background link mint on
+    // Paso 1→2, before the fiscal data exists) can be persisted; the /datos endpoint
+    // fills them in later. A full create passes them all non-null.
+    donorDocument: string | null;
     donorEmail: string | null;
     donorPhone: string | null;
-    direccionDepartamento: string;
-    direccionMunicipio: string;
-    direccionDistrito: string;
-    direccionComplemento: string;
+    direccionDepartamento: string | null;
+    direccionMunicipio: string | null;
+    direccionDistrito: string | null;
+    direccionComplemento: string | null;
     // CAT-020 country for the foreign path (00/00/00 geography); null domestic.
     donorPais: string | null;
     // Diezmo/Ofrenda (SV flow only); null for legacy and US paths.
@@ -167,6 +170,47 @@ export class Repository {
          WHERE id = ?`
       )
       .bind(link.idEnlace, link.urlEnlace, link.urlEnlaceLargo, nowIso(), id)
+      .run();
+  }
+
+  // Attaches the donor's fiscal data to a minted draft (the /datos completion). Amount,
+  // gift type, status, and the Wompi link are deliberately NOT in the SET clause: those
+  // were locked when the link was minted, and datos must never move them.
+  async updateIntentDatos(
+    id: string,
+    data: {
+      donorDocumentType: DonationIntentDocumentType;
+      donorDocument: string;
+      donorName: string | null;
+      donorPhone: string | null;
+      direccionDepartamento: string;
+      direccionMunicipio: string;
+      direccionDistrito: string;
+      direccionComplemento: string;
+      donorPais: string | null;
+    }
+  ): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE donation_intents
+         SET donor_document_type = ?, donor_document = ?, donor_name = ?, donor_phone = ?,
+             direccion_departamento = ?, direccion_municipio = ?, direccion_distrito = ?,
+             direccion_complemento = ?, donor_pais = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(
+        data.donorDocumentType,
+        data.donorDocument,
+        data.donorName,
+        data.donorPhone,
+        data.direccionDepartamento,
+        data.direccionMunicipio,
+        data.direccionDistrito,
+        data.direccionComplemento,
+        data.donorPais,
+        nowIso(),
+        id
+      )
       .run();
   }
 
@@ -317,7 +361,12 @@ export class Repository {
     const limit = normalizeDocumentListLimit(params.limit);
     const filters: string[] = [];
     const bindings: Array<string | number> = [];
-    if (params.status) {
+    if (params.status === "TRANSMISSION_PENDING") {
+      // Estado VIRTUAL "En trámite": transmisión diferida = SIGNED + marcador. No es
+      // un valor real de dte_documents.status (el CHECK no se pudo ampliar en D1);
+      // un SIGNED transitorio de pipeline (sin marcador) queda fuera a propósito.
+      filters.push("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL");
+    } else if (params.status) {
       filters.push("dte_documents.status = ?");
       bindings.push(params.status);
     }
@@ -420,6 +469,43 @@ export class Repository {
 
   async markDocumentInvalidated(id: string): Promise<void> {
     await this.db.prepare("UPDATE dte_documents SET status = 'INVALIDATED', updated_at = ? WHERE id = ?").bind(nowIso(), id).run();
+  }
+
+  // Marca un CDE como diferido: estado SIGNED + transmission_deferred_at (no hay un
+  // valor de status nuevo — dte_documents es padre de cuatro FKs y D1 no puede
+  // reconstruir la tabla para ampliar su CHECK). El marcador NO se limpia al resolver:
+  // queda como evidencia histórica ("estuvo diferido desde"), y es el status al salir
+  // de SIGNED (ACCEPTED/REJECTED) lo que retira al documento del barrido de reintento.
+  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET status = 'SIGNED', transmission_deferred_at = ?, sello_recibido = NULL,
+             mh_estado = ?, mh_observaciones_json = ?, updated_at = ?
+         WHERE id = ?`
+      )
+      .bind(nowIso(), "MH_NO_DISPONIBLE", JSON.stringify([reason]), nowIso(), id)
+      .run();
+  }
+
+  // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
+  // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
+  async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
+    return this.db
+      .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL ORDER BY created_at ASC LIMIT ?")
+      .bind("SIGNED", Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .all<DteDocumentRecord>()
+      .then((result) => result.results ?? []);
+  }
+
+  // Dedupe de evidencia de correo: ¿ya existe un envío SENT de este tipo para el
+  // documento? Evita que una reentrega de cola duplique el comprobante transitorio.
+  async hasSentEmail(documentId: string, emailType: string): Promise<boolean> {
+    const row = await this.db
+      .prepare("SELECT id FROM email_deliveries WHERE document_id = ? AND email_type = ? AND status = 'SENT' LIMIT 1")
+      .bind(documentId, emailType)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   async updateDocumentDonorEmail(id: string, email: string): Promise<void> {
@@ -567,22 +653,9 @@ export class Repository {
       .run();
   }
 
-  async openContingency(environment: Ambiente, reason: string, tipoContingencia = 1): Promise<string> {
-    const existing = await this.getOpenContingency(environment);
-    if (existing) {
-      return String(existing.id);
-    }
-    const id = newId("cont");
-    await this.db
-      .prepare(
-        `INSERT INTO contingency_periods (id, environment, status, reason, tipo_contingencia, started_at)
-         VALUES (?, ?, 'OPEN', ?, ?, ?)`
-      )
-      .bind(id, environment, reason, tipoContingencia, nowIso())
-      .run();
-    return id;
-  }
-
+  // Lectura histórica: la emisión en contingencia se eliminó (el Anexo del evento
+  // de contingencia, campo 35, excluye el tipo 15/CDE), y la migración 0014 cierra
+  // los periodos que quedaron abiertos — esto existe para la vista de historial.
   async getOpenContingency(environment?: Ambiente): Promise<Record<string, unknown> | null> {
     if (environment) {
       return this.db
@@ -646,149 +719,6 @@ export class Repository {
       .then((result) => result.results ?? []);
   }
 
-  async createContingencyBatch(input: { periodId: string; environment: Ambiente; idEnvio: string; documents: DteDocumentRecord[] }): Promise<string> {
-    const id = newId("batch");
-    await this.db
-      .prepare(
-        `INSERT INTO contingency_batches (
-          id, contingency_period_id, environment, id_envio, status, line_count, pending_count
-        ) VALUES (?, ?, ?, ?, 'DRAFT', ?, ?)`
-      )
-      .bind(id, input.periodId, input.environment, input.idEnvio, input.documents.length, input.documents.length)
-      .run();
-    for (const [index, document] of input.documents.entries()) {
-      await this.db
-        .prepare(
-          `INSERT INTO contingency_batch_lines (
-            id, batch_id, contingency_period_id, document_id, line_no, status,
-            codigo_generacion, tipo_dte, signed_jws
-          ) VALUES (?, ?, ?, ?, ?, 'LOCAL_ISSUED', ?, ?, ?)`
-        )
-        .bind(
-          newId("batch_line"),
-          id,
-          input.periodId,
-          document.id,
-          index + 1,
-          document.codigo_generacion,
-          document.tipo_dte,
-          document.signed_jws
-        )
-        .run();
-    }
-    return id;
-  }
-
-  async markContingencyBatchSubmitted(batchId: string, input: { codigoLote: string; request: unknown; response: unknown }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_batches
-         SET status = 'SUBMITTED', codigo_lote = ?, request_json = ?, response_json = ?, last_error = NULL,
-             submitted_at = COALESCE(submitted_at, ?), updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(input.codigoLote, JSON.stringify(input.request), JSON.stringify(input.response), nowIso(), nowIso(), batchId)
-      .run();
-    await this.db
-      .prepare("UPDATE contingency_batch_lines SET status = 'BATCH_SENT', updated_at = ? WHERE batch_id = ? AND status = 'LOCAL_ISSUED'")
-      .bind(nowIso(), batchId)
-      .run();
-    await this.syncContingencyBatchCounts(batchId);
-  }
-
-  async markContingencyBatchProcessing(batchId: string, response: unknown): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_batches
-         SET status = 'PROCESSING', response_json = ?, last_polled_at = ?, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(JSON.stringify(response), nowIso(), nowIso(), batchId)
-      .run();
-    await this.syncContingencyBatchCounts(batchId, "PROCESSING");
-  }
-
-  async markContingencyBatchFailed(batchId: string, message: string, response?: unknown): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_batches
-         SET status = 'FAILED', response_json = ?, last_error = ?, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(JSON.stringify(response ?? { error: message }), message, nowIso(), batchId)
-      .run();
-  }
-
-  async markContingencyBatchLineAccepted(input: { lineId: string; documentId: string; sello: string | null; mhEstado: string; observaciones: string[]; response: unknown }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_batch_lines
-         SET status = 'ACCEPTED', sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?,
-             last_error = NULL, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(input.sello, input.mhEstado, JSON.stringify(input.observaciones), nowIso(), input.lineId)
-      .run();
-    await this.updateDocumentMhResult(input.documentId, {
-      status: "ACCEPTED",
-      sello: input.sello,
-      mhEstado: input.mhEstado,
-      observaciones: input.observaciones,
-      acceptedAt: nowIso()
-    });
-  }
-
-  async markContingencyBatchLineRejected(input: { lineId: string; documentId: string; mhEstado: string; observaciones: string[]; message: string }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_batch_lines
-         SET status = 'REJECTED', mh_estado = ?, mh_observaciones_json = ?, last_error = ?, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(input.mhEstado, JSON.stringify(input.observaciones), input.message, nowIso(), input.lineId)
-      .run();
-    await this.updateDocumentMhResult(input.documentId, {
-      status: "REJECTED",
-      sello: null,
-      mhEstado: input.mhEstado,
-      observaciones: input.observaciones.length ? input.observaciones : [input.message]
-    });
-  }
-
-  async syncContingencyBatchCounts(batchId: string, forcedStatus?: string): Promise<void> {
-    const lines = await this.listContingencyBatchLines({ batchId });
-    const accepted = lines.filter((line) => line.status === "ACCEPTED").length;
-    const rejected = lines.filter((line) => line.status === "REJECTED" || line.status === "MANUAL_REVIEW").length;
-    const pending = Math.max(lines.length - accepted - rejected, 0);
-    const status = forcedStatus ?? (pending > 0 ? "PROCESSING" : rejected > 0 ? (accepted > 0 ? "PARTIAL" : "REJECTED") : "DONE");
-    await this.db
-      .prepare(
-        `UPDATE contingency_batches
-         SET status = ?, line_count = ?, accepted_count = ?, rejected_count = ?, pending_count = ?, updated_at = ?
-         WHERE id = ?`
-      )
-      .bind(status, lines.length, accepted, rejected, pending, nowIso(), batchId)
-      .run();
-  }
-
-  async attachDocumentToContingency(documentId: string, periodId: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE dte_documents SET status = 'CONTINGENCY_PENDING', contingency_period_id = ?, updated_at = ? WHERE id = ?")
-      .bind(periodId, nowIso(), documentId)
-      .run();
-  }
-
-  async markContingencyEventAccepted(periodId: string, input: { eventId: string; sello: string | null; deadlineAt: string }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE contingency_periods
-         SET status = 'EVENT_ACCEPTED', event_id = ?, event_sello = ?, transmit_deadline_at = ?
-         WHERE id = ?`
-      )
-      .bind(input.eventId, input.sello, input.deadlineAt, periodId)
-      .run();
-  }
-
   async listDteEventsByType(eventType: "INVALIDACION" | "CONTINGENCIA", limit = 20): Promise<Array<Record<string, unknown>>> {
     return this.db
       .prepare(
@@ -802,13 +732,6 @@ export class Repository {
       .bind(eventType, Math.min(limit, 100))
       .all<Record<string, unknown>>()
       .then((result) => result.results ?? []);
-  }
-
-  async closeContingency(periodId: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE contingency_periods SET status = 'CLOSED', ended_at = COALESCE(ended_at, ?) WHERE id = ?")
-      .bind(nowIso(), periodId)
-      .run();
   }
 
   async recordEmailDelivery(input: {

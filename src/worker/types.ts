@@ -139,6 +139,10 @@ export interface DteDocumentRecord {
   issued_at: string;
   accepted_at: string | null;
   contingency_period_id: string | null;
+  // Marcador de transmisión diferida: estado diferido = SIGNED + este timestamp
+  // (no hay valor nuevo en el CHECK de status — D1 no puede reconstruir tablas
+  // padre de FK). Se conserva tras la resolución como evidencia histórica.
+  transmission_deferred_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -262,22 +266,6 @@ export interface MhResponse {
   accepted: boolean;
   estado: string;
   selloRecibido: string | null;
-  observaciones: string[];
-  raw: unknown;
-}
-
-export interface MhLoteSubmitResponse {
-  accepted: boolean;
-  estado: string;
-  codigoLote: string | null;
-  observaciones: string[];
-  raw: unknown;
-}
-
-export interface MhLoteConsultaResponse {
-  estado: string;
-  procesados: Array<Record<string, unknown>>;
-  rechazados: Array<Record<string, unknown>>;
   observaciones: string[];
   raw: unknown;
 }

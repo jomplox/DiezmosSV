@@ -20,9 +20,9 @@ rol.
 
 | Rol | Qué puede hacer |
 |---|---|
-| **Consulta** | Ver documentos, contingencia y la auditoría. |
+| **Consulta** | Ver documentos, el historial de contingencias y la auditoría. |
 | **Operador** | Además: emitir un CDE rápido, reenviar correos, reintentar fallos e invalidar. |
-| **Administrador** | Además: crear usuarios, abrir contingencia y exportar el F960. |
+| **Administrador** | Además: crear usuarios y exportar el F960. |
 | **Propietario** | Además: la sección **Configuración** (credenciales, ambiente, correo, alertas). |
 
 Si olvidó su contraseña, en la pantalla de ingreso pulse **¿Olvidó su contraseña?** y siga
@@ -44,8 +44,8 @@ Cuando un donante paga por **Wompi**, todo ocurre solo:
 3. Al recibir el **sello** de Hacienda, envía al donante su comprobante en PDF por correo.
 
 Usted no tiene que hacer nada en el caso normal. En **Documentos** verá el CDE con el
-estado **Aceptado** y su **Sello**. Solo intervenga si algo aparece en **Fallos** o si se
-abre una **Contingencia** (secciones 6 y 7).
+estado **Aceptado** y su **Sello**. Solo intervenga si algo aparece en **Fallos**
+(sección 6); los CDE **En trámite** se resuelven solos (sección 7).
 
 ---
 
@@ -155,7 +155,8 @@ Cada CDE muestra una etiqueta de color con su estado:
 | **Transmitido** | Enviado a Hacienda; esperando respuesta. |
 | **Aceptado** | Hacienda lo selló. Es el estado correcto y final. |
 | **Rechazado** | Hacienda no lo aceptó. Aparecerá en **Fallos**. |
-| **Contingencia** | Emitido mientras Hacienda no estaba disponible; se transmitirá luego. |
+| **En trámite** | Hacienda no estaba disponible al emitir. El donante ya recibió su comprobante **transitorio** y el sistema reintenta la transmisión cada 15 minutos (sección 7). |
+| **Contingencia** | Estado histórico del modelo anterior; ya no se emite en contingencia (sección 7). |
 | **Fallido** | Ocurrió un error en el proceso. Aparecerá en **Fallos**. |
 | **Invalidado** | El CDE fue anulado ante Hacienda con un evento firmado. |
 
@@ -179,20 +180,26 @@ indíquele el **Código de generación** del documento.
 
 ---
 
-## 7. Qué significa una Contingencia abierta
+## 7. Qué significa un CDE «En trámite»
 
-Una **Contingencia** significa que Hacienda no estuvo disponible y el sistema emitió los CDE
-de forma local para no detener el servicio. **No cunda el pánico:** los comprobantes son
-válidos y el sistema reintenta transmitirlos automáticamente cada 15 minutos.
+Cuando Hacienda no está disponible, el sistema **no detiene el servicio**: firma el CDE de
+forma normal, lo deja **En trámite** y **envía de inmediato al donante su comprobante
+transitorio** por correo (el PDF indica sello «TRANSITORIO» y el mensaje aclara que es
+provisional). Después, el sistema **reintenta la transmisión automáticamente cada 15
+minutos**; cuando Hacienda responde y sella el CDE, el donante recibe un **segundo correo
+con el comprobante definitivo** (con Sello de Recepción). El donante recibe dos correos:
+es el comportamiento esperado, no un error.
 
-En la sección **Contingencia** verá el periodo activo, los **CDE pendientes** y los plazos.
-El evento de contingencia tiene un **plazo legal de 72 horas** para regularizarse ante
-Hacienda; el panel muestra ese plazo. Normalmente no debe hacer nada: el barrido automático
-transmite los pendientes en cuanto Hacienda responde.
+**No cunda el pánico ni haga nada:** los reintentos son automáticos. Si Hacienda tarda más
+de una hora, llegará una alerta operativa («Hacienda no disponible») a modo informativo.
+Si al reintentar Hacienda **rechaza** el CDE, este pasa a **Fallos** y se maneja como
+cualquier rechazo (sección 6).
 
-Si desea forzar el proceso sin esperar al barrido, pulse **Procesar pendientes**. Solo un
-Administrador o Propietario puede **Abrir contingencia** manualmente (indicando tipo y
-motivo); en el uso normal esto no es necesario.
+**¿Y la sección Contingencia?** Quedó como **historial de solo lectura**. La normativa no
+contempla contingencia para el CDE (la tabla de validaciones del evento de contingencia —
+campo 35 — no admite el tipo 15), así que el sistema ya no abre periodos ni transmite
+lotes de contingencia; los periodos antiguos siguen visibles para consulta. Si allí queda
+algún CDE del modelo anterior sin sello, contacte a soporte técnico para reemitirlo.
 
 ---
 
@@ -227,7 +234,7 @@ recibirá automáticamente avisos cuando algo necesite atención:
 
 | Alerta | Qué significa |
 |---|---|
-| **Contingencia abierta** | Hacienda no estuvo disponible y se abrió un periodo de contingencia. Revise la sección **Contingencia**. |
+| **Hacienda no disponible** | Hay CDE **En trámite** desde hace más de una hora porque Hacienda no responde. Los donantes ya tienen su comprobante transitorio; el sistema sigue reintentando cada 15 minutos. |
 | **Mensaje de emisión agotó reintentos** | Un CDE no se pudo procesar tras varios intentos automáticos. Revise **Fallos**. |
 | **Evento Wompi sin procesar** | Un pago de Wompi quedó estancado; el sistema intenta recuperarlo, pero conviene revisarlo. |
 | **Certificado del firmador por vencer** | El certificado de firma de Hacienda está por vencer (avisos a 30, 14 y 3 días). Coordine su renovación con soporte técnico. |
@@ -256,7 +263,8 @@ Solo se incluyen los CDE **Aceptados** del periodo elegido.
 Una vez al mes, dedique un par de minutos a confirmar que todo está en orden:
 
 - [ ] **Fallos** está vacío (o cada caso ya fue reintentado/escalado).
-- [ ] No hay ninguna **Contingencia** abierta sin resolver.
+- [ ] No hay CDE **En trámite** con más de un día (si los hay, Hacienda lleva mucho tiempo
+      sin responder: contacte a soporte técnico).
 - [ ] En **Configuración**, sección **Firmador del Ministerio de Hacienda**, el certificado
       aparece vigente (en verde), no por vencer.
 - [ ] La exportación mensual de retención se completó (si tiene dudas, confírmelo con

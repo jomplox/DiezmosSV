@@ -2,12 +2,12 @@ import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
-import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, type EmailTemplateSettings, type EmailTemplateType, type EmailTemplateValue } from "./emailTemplates";
+import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
 export interface EmailDeliveryResult {
   providerResponse: unknown;
-  emailType: EmailTemplateType;
+  emailType: EmailEvidenceType;
   documentStatusAtSend: string;
   templateVersion: string;
   pdfRendererVersion: string;
@@ -36,8 +36,18 @@ export class EmailService {
   }
 
   async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
+    // Documento diferido (MH no disponible): SIEMPRE la copy fija transitoria, sin
+    // importar la plantilla del operador — el PDF adjunto lleva sello TRANSITORIO y
+    // el correo debe enmarcarlo como provisional, no como comprobante definitivo.
+    // Diferido = SIGNED + transmission_deferred_at; un documento ya ACCEPTED conserva
+    // el marcador como historia y cae al comprobante definitivo de abajo.
+    if (record.status === "SIGNED" && record.transmission_deferred_at) {
+      return this.sendDteEmail(record, toEmail, "dteReceiptTransitorio", TRANSITORIO_RECEIPT_TEMPLATE, renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, record));
+    }
     const message = renderEmailTemplate(this.templates.dteReceipt, record);
     if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
+      // Solo documentos históricos: la emisión en contingencia se eliminó (Anexo,
+      // campo 35 — el CDE no participa del evento de contingencia).
       message.subject = "Comprobante transitorio de su donación";
     }
     return this.sendDteEmail(record, toEmail, "dteReceipt", this.templates.dteReceipt, message);
@@ -48,7 +58,7 @@ export class EmailService {
     return this.sendDteEmail(invalidatedRecord, toEmail, "dteInvalidation", this.templates.dteInvalidation, renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord));
   }
 
-  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, emailType: EmailTemplateType, template: EmailTemplateValue, message: EmailMessage): Promise<EmailDeliveryResult> {
+  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, emailType: EmailEvidenceType, template: EmailTemplateValue, message: EmailMessage): Promise<EmailDeliveryResult> {
     const pdfBytes = await renderDtePdf(record);
     const jsonBytes = new TextEncoder().encode(record.plain_json);
     const evidence = {
@@ -263,7 +273,7 @@ function parseProviderResponse(responseBody: string): unknown {
   }
 }
 
-async function templateVersion(emailType: EmailTemplateType, template: EmailTemplateValue): Promise<string> {
+async function templateVersion(emailType: EmailEvidenceType, template: EmailTemplateValue): Promise<string> {
   const payload = JSON.stringify({ emailType, subject: template.subject, body: template.body });
   return `${emailType}:sha256:${await sha256Hex(utf8Bytes(payload))}`;
 }
