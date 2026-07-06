@@ -1,6 +1,6 @@
 import { getEmisorConfig, isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
-import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
+import type { DonationGiftType, DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
 
 const TOKEN_URL = "https://id.wompi.sv/connect/token";
@@ -69,7 +69,7 @@ export class WompiApiService {
     const body = {
       identificadorEnlaceComercio: intent.id,
       monto: centsToAmount(intent.amount_cents),
-      nombreProducto: this.productName(),
+      nombreProducto: this.productName(intent.gift_type),
       limitesDeUso: {
         cantidadMaximaPagosExitosos: 1
       },
@@ -99,7 +99,7 @@ export class WompiApiService {
   // vigencia mínimo es de 5 minutos") — we use 6 to stay clear of the boundary. The
   // PUT replaces the entire object, so we resend the full create body (identifier,
   // monto, nombreProducto, configuracion) or those fields would be nulled.
-  async deactivatePaymentLink(intent: Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents">): Promise<void> {
+  async deactivatePaymentLink(intent: Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "gift_type">): Promise<void> {
     // Mock mode: no network, mirroring createPaymentLink's short-circuit.
     if (isMockMode(this.env)) {
       return;
@@ -116,7 +116,9 @@ export class WompiApiService {
       idEnlace: intent.wompi_id_enlace,
       identificadorEnlaceComercio: intent.id,
       monto: centsToAmount(intent.amount_cents),
-      nombreProducto: this.productName(),
+      // Mirror the create nombreProducto (derived from the same intent's gift_type):
+      // the PUT replaces the whole object, so a mismatch would rename the link.
+      nombreProducto: this.productName(intent.gift_type),
       vigencia: {
         // Fully in the past (both ends before now) so Wompi marks the link unusable,
         // yet the span is >=5 minutes so it passes the minimum-vigencia validation.
@@ -135,8 +137,18 @@ export class WompiApiService {
     }
   }
 
-  private productName(): string {
-    return `Donación ${displayName(this.env)}`;
+  // The donor sees this on Wompi's hosted payment sheet. A gift_type intent names the
+  // aportación ("Diezmo — <iglesia>" / "Ofrenda — <iglesia>"); legacy/US intents keep
+  // the neutral "Donación <iglesia>".
+  private productName(giftType: DonationGiftType | null): string {
+    const name = displayName(this.env);
+    if (giftType === "DIEZMO") {
+      return `Diezmo — ${name}`;
+    }
+    if (giftType === "OFRENDA") {
+      return `Ofrenda — ${name}`;
+    }
+    return `Donación ${name}`;
   }
 
   // Cards-only forma de pago. The permitir/permite prefixes are intentionally

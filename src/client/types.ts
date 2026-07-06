@@ -35,6 +35,9 @@ export interface DonationIntentListItem {
   document_donor_name: string | null;
   document_id: string | null;
   numero_control: string | null;
+  // Diezmo vs Ofrenda (SV flow); null for legacy and US-path intents. Drives the
+  // admin "Tipo" column. The server returns donation_intents.* so this rides in.
+  gift_type: "DIEZMO" | "OFRENDA" | null;
   created_at: string;
 }
 
