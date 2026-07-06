@@ -53,6 +53,50 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("SAN SALVADOR ESTE");
   });
 
+  it("wraps a long emisor address instead of overflowing into the receptor box", async () => {
+    const text = await renderToText(testDocument());
+    const lines = text.split("\n");
+
+    // The emisor address (complemento + AGUILARES, SAN SALVADOR ESTE, San Salvador + phone)
+    // is far too wide for the 294pt box, so it must wrap onto multiple rendered lines: the head
+    // ("SOYAPANGO.") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
+    const head = lines.findIndex((line) => line.includes("SOYAPANGO."));
+    const tail = lines.findIndex((line) => line.includes("SAN SALVADOR ESTE"));
+    expect(head).toBeGreaterThanOrEqual(0);
+    expect(tail).toBeGreaterThanOrEqual(0);
+    expect(tail).not.toBe(head);
+    // Wrapping must preserve the geographic segment intact (not split "SAN SALVADOR" mid-phrase).
+    expect(text).toContain("SAN SALVADOR ESTE");
+
+    // Overlap symptom (the live bug): the entire emisor address rendered as ONE over-wide line
+    // — complemento + every geographic segment + the emisor phone — that ran straight through the
+    // emisor box's right edge into the receptor column. Assert that single-line pattern (head
+    // "SOYAPANGO." AND tail "SAN SALVADOR ESTE" AND emisor phone "7000-0004" together) is gone.
+    // (pdftotext -layout legitimately places the emisor and receptor columns on the same y, so
+    // co-occurrence of the two columns on one extracted line is NOT the symptom — the symptom is
+    // the whole address collapsed onto a single over-wide emisor line.)
+    const overrun = lines.filter(
+      (line) => line.includes("SOYAPANGO.") && line.includes("SAN SALVADOR ESTE") && line.includes("7000-0004")
+    );
+    expect(overrun).toEqual([]);
+  });
+
+  it("keeps short addresses on a single unwrapped line", async () => {
+    const document = withReceptor(testDocument(), {
+      direccion: { departamento: "06", municipio: "23", distrito: "03", complemento: "Col 1" },
+      telefono: null,
+      correo: null
+    });
+    const text = await renderToText(document);
+    const lines = text.split("\n");
+
+    // A short receptor address fits in one line: complemento + geography all together.
+    const receptorLine = lines.filter(
+      (line) => line.includes("Col 1") && line.includes("AYUTUXTEPEQUE") && line.includes("San Salvador")
+    );
+    expect(receptorLine.length).toBeGreaterThan(0);
+  });
+
   it("labels a NIT receptor with the NIT: prefix", async () => {
     const document = withReceptor(testDocument(), {
       tipoDocumento: "36",
