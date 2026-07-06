@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
@@ -2682,6 +2686,128 @@ describe("annual donor certificates", () => {
     );
 
     expect(response.status).toBe(403);
+  });
+
+  it("attaches a complete dossier: summary page plus every accepted DTE", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    const sent: Array<{ attachments?: Array<{ content: Uint8Array }> }> = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message as { attachments?: Array<{ content: Uint8Array }> });
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const pdfBytes = sent[0]?.attachments?.[0]?.content;
+    expect(pdfBytes).toBeDefined();
+    // Ana has 2 accepted donations → 1 summary page + 2 DTE pages.
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-dossier-send-"));
+    const pdfPath = join(dir, "dossier.pdf");
+    writeFileSync(pdfPath, pdfBytes!);
+    const info = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    expect(Number(info.match(/Pages:\s+(\d+)/)?.[1] ?? 0)).toBe(3);
+  });
+
+  it("sends only the named donor when the request body identifies one, ignoring the sent-dedupe", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    // A prior send would normally dedupe Ana away — an explicit single send must resend.
+    db.audits.push({
+      id: "audit_prior",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "DONOR_CERTIFICATE_SENT",
+      entity_type: "donor_certificate",
+      entity_id: "2025:ana@example.org",
+      summary: "prior send",
+      created_at: "2026-07-01T00:00:00.000Z"
+    });
+    const sent: Array<{ to: string }> = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "ana@example.org" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message as { to: string });
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ year: 2025, sent: 1, skipped: 0, failed: 0 });
+    expect(sent.map((message) => message.to)).toEqual(["ana@example.org"]);
+    // Audited as a single send.
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({
+        action: "DONOR_CERTIFICATE_SENT",
+        entity_id: "2025:ana@example.org",
+        metadata_json: expect.stringContaining("\"mode\":\"single\"")
+      })
+    );
+  });
+
+  it("returns 404 with a Spanish message when the named donor is not in the year's aggregation", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "nadie@example.org" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toMatch(/no (se encontró|tiene)/i);
+  });
+
+  it("returns 400 with a Spanish message when the named donor has no email", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "Sin Correo" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toMatch(/correo/i);
   });
 });
 
