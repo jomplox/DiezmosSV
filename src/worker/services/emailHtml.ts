@@ -109,10 +109,12 @@ export function certificateEmailHtml(input: CertificateEmailInput): string {
 }
 
 function alertBanner(kind: string, title: string): string {
-  const isContingency = kind.startsWith("CONTINGENCY");
-  const background = isContingency ? "#fdf3e1" : "#fdecec";
-  const border = isContingency ? "#ecd196" : "#f2b8b5";
-  const color = isContingency ? "#7a5c00" : "#8c1d18";
+  // Ámbar para avisos operativos (histórico de contingencia y MH no disponible);
+  // rojo para fallos.
+  const isWarning = kind.startsWith("CONTINGENCY") || kind === "MH_UNAVAILABLE";
+  const background = isWarning ? "#fdf3e1" : "#fdecec";
+  const border = isWarning ? "#ecd196" : "#f2b8b5";
+  const color = isWarning ? "#7a5c00" : "#8c1d18";
   return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:${background};border:1px solid ${border};color:${color};font-weight:bold;text-align:center;">${escapeHtml(title)}</div>`;
 }
 
@@ -156,7 +158,9 @@ function statusBanner(record: DteDocumentRecord): string {
   if (record.status === "INVALIDATED") {
     return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:#fdecec;border:1px solid #f2b8b5;color:#8c1d18;font-weight:bold;text-align:center;">DOCUMENTO INVALIDADO</div>`;
   }
-  if (record.status === "CONTINGENCY_PENDING") {
+  if (record.status === "CONTINGENCY_PENDING" || record.status === "TRANSMISSION_PENDING") {
+    // Banner en negrita: el adjunto es PROVISIONAL (sello TRANSITORIO); la versión
+    // definitiva con Sello de Recepción llega automáticamente al aceptar MH.
     return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:#fdf3e1;border:1px solid #ecd196;color:#7a5c00;font-weight:bold;text-align:center;">COMPROBANTE TRANSITORIO</div>`;
   }
   return "";

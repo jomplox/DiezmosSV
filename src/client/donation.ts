@@ -10,8 +10,8 @@ export const DONAR_WOMPI_SCRIPT_URL = "https://pagos.wompi.sv/js/wompi.pagos.js"
 export const DONAR_INTENT_PATH = "/api/donations/intent";
 
 // Poll the intent status every ~5s while the widget modal is open; stop after
-// ~3 minutes with a neutral closing message (covers slow MH, contingency mode,
-// and abandoned checkouts — never implies failure).
+// ~3 minutes with a neutral closing message (covers slow MH, deferred
+// transmission while MH is down, and abandoned checkouts — never implies failure).
 export const DONAR_POLL_INTERVAL_MS = 5_000;
 export const DONAR_POLL_TIMEOUT_MS = 180_000;
 // If the Wompi script never loads or the widget button never renders within this
