@@ -426,12 +426,12 @@ describe("donar page source contract", () => {
 
 describe("givebutter constants", () => {
   it("pins the FMCE account id and example-campaign campaign", () => {
-    expect(GIVEBUTTER_ACCOUNT_ID).toBe("000000");
+    expect(GIVEBUTTER_ACCOUNT_ID).toBe("EXAMPLEACCT00001");
     expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
   });
 
   it("pins the official Givebutter widget script URL scoped to the account", () => {
-    expect(GIVEBUTTER_SCRIPT_URL).toBe("https://widgets.givebutter.com/latest.umd.cjs?acct=000000");
+    expect(GIVEBUTTER_SCRIPT_URL).toBe("https://widgets.givebutter.com/latest.umd.cjs?acct=EXAMPLEACCT00001");
     expect(GIVEBUTTER_SCRIPT_URL).toContain(`acct=${GIVEBUTTER_ACCOUNT_ID}`);
   });
 
