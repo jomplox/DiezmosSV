@@ -472,6 +472,19 @@ describe("donar widget handoff", () => {
     expect(DONAR_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
   });
 
+  it("flips to thanks on payment (result.paid) OR the legacy COMPLETED status", () => {
+    // The donor's "thanks" must key on PAYMENT, not MH acceptance: the status endpoint
+    // now returns { status, paid }, and the poll reacts to paid so the wizard reacts
+    // the moment Wompi's webhook stamps paid_at — long before the CDE is accepted.
+    // COMPLETED is kept as the legacy signal so an already-accepted intent still lands.
+    const pollType = donarSource.indexOf("donarApi<{ status: string; paid: boolean }>");
+    expect(pollType).toBeGreaterThan(-1);
+    const pollBlock = donarSource.slice(pollType, pollType + 400);
+    expect(pollBlock).toContain("result.paid");
+    expect(pollBlock).toContain('result.status === "COMPLETED"');
+    expect(pollBlock).toContain('setStage("thanks")');
+  });
+
   it("closes the poll with a neutral message that never implies failure", () => {
     // Entrega framing: these are diezmos y ofrendas, never "pagos".
     expect(DONAR_FALLBACK_MESSAGE).toBe(
@@ -769,8 +782,20 @@ describe("donar wizard source contract", () => {
     const originCheck = donarSource.lastIndexOf("event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN", listener);
     expect(originCheck).toBeGreaterThan(-1);
     expect(donarSource).toContain("clampEmbedHeight(");
-    // Wompi's own "close" message (their back arrow) returns the donor to Paso 2.
+    // Wompi's own "close" message (their post-payment "Cerrar" AND their back arrow
+    // share it) must NOT blindly return to Paso 2: after a successful payment that
+    // would be wrong. The handler does a one-shot status fetch first — paid/COMPLETED
+    // → thanks, otherwise the existing back-to-Paso-2 behavior.
     expect(donarSource).toContain('"close"');
+    const closeBranch = donarSource.indexOf('payload?.message === "close"');
+    expect(closeBranch).toBeGreaterThan(-1);
+    const closeBlock = donarSource.slice(closeBranch, closeBranch + 1100);
+    // One-shot status fetch for the current intent inside the close branch (the intent
+    // is captured as activeIntent so the deferred fetch keeps a narrowed reference).
+    expect(closeBlock).toContain(`${"$"}{DONAR_INTENT_PATH}/${"$"}{activeIntent.intentId}/status`);
+    // Both outcomes present: thanks on paid/COMPLETED, else back to Paso 2.
+    expect(closeBlock).toContain('setStage("thanks")');
+    expect(closeBlock).toContain("setStep(2)");
     // The CSS fallback height remains until the first message arrives; height
     // transitions are disabled under prefers-reduced-motion.
     expect(stylesSource).toContain(".donar-embed");
