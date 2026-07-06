@@ -46,14 +46,18 @@ import {
   DONAR_LANDING_UNIFIER,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
+  donarDatosPath,
   donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
   donationAmountValidationMessage,
+  donationDatosBody,
+  donationDraftBody,
   donationFormValidationMessage,
   donationIntentBody,
   donationStep1ValidationMessage,
   donationStep2ValidationMessage,
+  draftMatchesForm,
   givebutterHostedUrl,
   givebutterPrefillParams,
   isUsDonation,
@@ -346,6 +350,105 @@ describe("donar intent body", () => {
     // validation without a país.
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === "06")).toBe(true);
+  });
+});
+
+describe("donar premint (background draft + datos completion)", () => {
+  const base = {
+    amount: " 10.00 ",
+    giftType: "DIEZMO" as const,
+    donorDocumentType: "13" as const,
+    donorDocument: "10000001-9",
+    donorName: "",
+    donorPhone: "70001122",
+    foreignResident: false,
+    pais: "",
+    departamento: "06",
+    municipio: "23",
+    distrito: "14",
+    complemento: "San Salvador"
+  };
+
+  it("the draft body carries only the trimmed amount + gift type (no donor data)", () => {
+    expect(donationDraftBody(base)).toEqual({ amount: "10.00", giftType: "DIEZMO" });
+    // No document/address keys: the server treats this as a draft create.
+    expect(donationDraftBody(base)).not.toHaveProperty("donorDocument");
+    expect(donationDraftBody(base)).not.toHaveProperty("departamento");
+  });
+
+  it("the draft body omits giftType when none is chosen (never sends an empty string)", () => {
+    expect(donationDraftBody({ amount: "25", giftType: "" }).giftType).toBeUndefined();
+  });
+
+  it("the datos body carries the donor fiscal data ONLY (no amount, no giftType)", () => {
+    const body = donationDatosBody(base);
+    expect(body).not.toHaveProperty("amount");
+    expect(body).not.toHaveProperty("giftType");
+    // Same field mapping as the full intent body minus amount/giftType.
+    expect(body).toMatchObject({
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorPhone: "70001122",
+      departamento: "06",
+      municipio: "23",
+      distrito: "14",
+      complemento: "San Salvador"
+    });
+  });
+
+  it("the datos body mirrors the full body's NIT razón social and foreign-path rules", () => {
+    const nit = donationDatosBody({ ...base, donorDocumentType: "36", donorDocument: "0614-280390-112-1", donorName: " Empresa " });
+    expect(nit.donorName).toBe("Empresa");
+    const foreign = donationDatosBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" });
+    expect(foreign).toMatchObject({ departamento: DONAR_FOREIGN_GEOGRAPHY_CODE, pais: "US" });
+  });
+
+  it("builds the datos path from the intent id", () => {
+    expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
+  });
+
+  it("treats a draft as fresh only when both the amount and the gift type still match", () => {
+    const draft = { amount: "10.00", giftType: "DIEZMO" as const };
+    expect(draftMatchesForm(draft, base)).toBe(true);
+    // Edited amount → stale (abandon and full-POST).
+    expect(draftMatchesForm(draft, { ...base, amount: "20.00" })).toBe(false);
+    // Switched Diezmo → Ofrenda → stale.
+    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" })).toBe(false);
+  });
+});
+
+describe("donar premint source contract", () => {
+  it("mints the draft link in the background on the SV Paso 1→2 transition", () => {
+    // The background mint fires inside continueFromMonto (the else / SV branch), posting
+    // only the draft body, and must NOT block the step change.
+    expect(donarSource).toContain("mintDraftIntent(");
+    expect(donarSource).toContain("donationDraftBody(");
+    // Fire-and-forget: no await on the draft create, errors swallowed.
+    expect(donarSource).toContain("void donarApi");
+    expect(donarSource).toContain("setDraftIntent(");
+  });
+
+  it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
+    // Fast path: a matching draft → datos call, reuse its link, advance immediately.
+    expect(donarSource).toContain("draftMatchesForm(draftIntent, form)");
+    expect(donarSource).toContain("donarDatosPath(draftIntent.intent.intentId)");
+    expect(donarSource).toContain("donationDatosBody(form)");
+    // Fallback: no usable draft → the existing full-body POST still works.
+    expect(donarSource).toContain("donationIntentBody(form)");
+  });
+
+  it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
+    // Atrás from Paso 2 and Editar from Paso 3 both clear the held draft; the sweep
+    // expires its link. There is no new deactivation call in the client.
+    expect(donarSource).toContain("setDraftIntent(null)");
+    expect(donarSource).not.toContain("deactivate");
+  });
+
+  it("keeps the Paso 2 submit copy exactly as before", () => {
+    // The premint must not touch any donor-facing copy.
+    expect(donarSource).toContain("Preparando su entrega…");
+    expect(donarSource).toContain("Continuar con su diezmo");
+    expect(donarSource).toContain("Continuar con su ofrenda");
   });
 });
 
