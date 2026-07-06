@@ -105,6 +105,18 @@ propio donante en el formulario, no tomados del aviso de pago.
 pago de Wompi. Esas donaciones no aparecen en la lista de **Donaciones en línea** porque no pasaron
 por el formulario.
 
+**Donantes en Estados Unidos (NO reciben CDE — es intencional).** Si en /donar el donante marca
+«Resido en el extranjero» y elige **Estados Unidos**, desaparecen los campos fiscales salvadoreños y
+la página muestra el formulario de **Givebutter** de *Friends of Misión ExampleOrganization (FMCE)*, la
+entidad 501(c)(3) estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
+no un CDE salvadoreño, así que esas donaciones se procesan por completo en Givebutter: **no pasan por
+Wompi, no generan una donación en línea, no aparecen en la lista de Exportar y no se emite ningún CDE.**
+El propio Givebutter le envía al donante su recibo. Si el donante en realidad sí quiere un CDE
+salvadoreño, hay un enlace bajo el formulario de Givebutter — **«¿Necesita comprobante fiscal
+salvadoreño (CDE)?»** — que devuelve el formulario normal. Si algún donante de EE. UU. le escribe
+preguntando por su CDE, la respuesta correcta es que su donación se procesó en EE. UU. y su recibo
+proviene de Givebutter/FMCE, no del sistema salvadoreño.
+
 > **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
 > `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del
 > negocio** y se configuran con `npx wrangler secret put WOMPI_CLIENT_ID --env staging|production`

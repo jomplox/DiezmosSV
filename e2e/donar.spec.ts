@@ -34,6 +34,15 @@ test.beforeEach(async ({ context }) => {
   await context.route("https://mock.wompi.sv/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock wompi hosted flow</body></html>" })
   );
+  // Stub the Givebutter widget CDN and hosted page too. The stubbed script never
+  // upgrades <givebutter-giving-form>, so the render probe times out and the
+  // fallback link state is what renders — exactly the offline-safe path to assert.
+  await context.route("https://widgets.givebutter.com/**", (route) =>
+    route.fulfill({ status: 200, contentType: "application/javascript", body: "/* stubbed givebutter widget */" })
+  );
+  await context.route("https://givebutter.com/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock givebutter hosted flow</body></html>" })
+  );
 });
 
 test("public donation form submits and reaches the Wompi handoff state", async ({ page }) => {
@@ -72,6 +81,40 @@ test("public donation form submits and reaches the Wompi handoff state", async (
 
   const handedOff = (await fallbackLink.count()) > 0 || page.url().startsWith("https://mock.wompi.sv/");
   expect(handedOff).toBe(true);
+});
+
+test("US residents route to the Givebutter (FMCE) block instead of the SV fiscal form", async ({ page }) => {
+  await page.goto("/donar");
+  await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
+
+  // Pick a quick amount, then declare foreign residence and select Estados Unidos.
+  await page.getByLabel("Monto").fill("25.00");
+  await page.getByLabel("Resido en el extranjero").check();
+  await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
+
+  // The SV fiscal fields collapse: no documento, no dirección, no Donar submit.
+  await expect(page.getByLabel("Número de documento")).toHaveCount(0);
+  await expect(page.getByLabel("Dirección")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Donar" })).toHaveCount(0);
+
+  // The FMCE explanation and the embedded giving form appear in their place.
+  await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
+  await expect(page.locator("givebutter-giving-form")).toHaveAttribute("campaign", "example-campaign");
+
+  // The always-visible "done directly on givebutter.com" hint links to the slug URL.
+  const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done directamente en givebutter.com" });
+  await expect(hint).toHaveAttribute("href", /givebutter\.com\/example-campaign/);
+  await expect(hint).toHaveAttribute("href", /amount=25/);
+
+  // The stubbed widget never renders, so the prominent fallback CTA appears too.
+  const fallback = page.getByRole("link", { name: "Donar en givebutter.com" });
+  await expect(fallback).toBeVisible({ timeout: 10_000 });
+  await expect(fallback).toHaveAttribute("href", /givebutter\.com\/example-campaign\?amount=25/);
+
+  // The escape hatch brings the SV fiscal (CDE) form back.
+  await page.getByRole("button", { name: /comprobante fiscal salvadoreño/ }).click();
+  await expect(page.getByLabel("Dirección")).toBeVisible();
+  await expect(page.locator("givebutter-giving-form")).toHaveCount(0);
 });
 
 test("thank-you page shows the webhook-driven CDE copy", async ({ page }) => {
