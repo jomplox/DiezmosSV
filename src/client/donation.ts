@@ -104,9 +104,9 @@ export const DONAR_LANDING_UNIFIER =
   "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador.";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
-export const DONAR_DOOR_SV_DESC = "Comprobante fiscal salvadoreño (CDE)";
+export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";
 export const DONAR_DOOR_EEUU_LABEL = "EE. UU.";
-export const DONAR_DOOR_EEUU_DESC = "Recibo deducible de impuestos en EE. UU.";
+export const DONAR_DOOR_EEUU_DESC = "Recibo oficial deducible de impuestos (IRS 501(c)(3))";
 export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
 
 // Optional deep-link: /donar?ruta=sv or ?ruta=eeuu preselects a door. Read once

@@ -476,8 +476,8 @@ describe("donar wizard source contract", () => {
   it("assures each door's donor of the legal document their path produces on Paso 1", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
-    expect(donarSource).toContain("Recibirá su comprobante de donación electrónico (CDE) por correo.");
-    expect(donarSource).toContain("Recibirá un recibo deducible de impuestos en EE. UU. por correo.");
+    expect(donarSource).toContain("Recibirá su comprobante de donación en su dirección de correo electrónico.");
+    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });
 
@@ -836,9 +836,9 @@ describe("two-door landing copy", () => {
 
   it("labels the two doors, their tax-receipt descriptors, and the change-option link", () => {
     expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
-    expect(DONAR_DOOR_SV_DESC).toBe("Comprobante fiscal salvadoreño (CDE)");
+    expect(DONAR_DOOR_SV_DESC).toBe("Comprobante de donación DTE salvadoreño");
     expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
-    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo deducible de impuestos en EE. UU.");
+    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501(c)(3))");
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 
@@ -867,15 +867,14 @@ describe("two-door landing source contract", () => {
     expect(landingSource).toContain("<svg");
     expect(landingSource).toContain("#d80027");
     expect(landingSource).toContain('mask id="us-flag-a"');
-    // The SV door now uses the church's own flag PNG (imported asset) inside the
-    // globe SVG via <image>, NOT the circle-flags sv.svg. The SV circle-flag
-    // mask is gone. (#0052b4 legitimately survives as the US flag's canton blue.)
-    expect(landingSource).toContain("svFlag");
-    expect(landingSource).toContain("<image");
-    expect(landingSource).not.toContain('mask id="sv-flag-a"');
-    // The SV circle-flag's distinctive fills (yellow triangle / green band) are gone.
-    expect(landingSource).not.toContain("#ffda44");
-    expect(landingSource).not.toContain("#6da544");
+    // The SV door uses the circle-flags sv.svg (MIT), inlined, matching the US
+    // door's circle style so the flag reads prominently at card size.
+    expect(landingSource).toContain('mask id="sv-flag-a"');
+    expect(landingSource).toContain("#ffda44");
+    expect(landingSource).toContain("#6da544");
+    // The church PNG <image> approach is gone (asset import removed).
+    expect(landingSource).not.toContain("svFlag");
+    expect(landingSource).not.toContain("<image");
     // The old hand-drawn palette must still be gone.
     expect(landingSource).not.toContain("#0F47AF");
     expect(landingSource).not.toContain("#3C3B6E");
