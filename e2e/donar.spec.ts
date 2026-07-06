@@ -48,9 +48,12 @@ test.beforeEach(async ({ context }) => {
 test("public donation form submits and reaches the Wompi handoff state", async ({ page }) => {
   await page.goto("/donar");
 
-  // The public page renders without a session (no login form present).
+  // The public page opens on the two-door chooser (renders without a session).
   await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Continuar" })).toHaveCount(0);
+
+  // Door 1 (El Salvador y el mundo) opens the SV fiscal (Wompi + CDE) form.
+  await page.getByRole("button", { name: "El Salvador y el mundo" }).click();
 
   // Name and email are entered on Wompi's sheet, not here — the form no longer has them.
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
@@ -83,22 +86,25 @@ test("public donation form submits and reaches the Wompi handoff state", async (
   expect(handedOff).toBe(true);
 });
 
-test("US residents route to the Givebutter (FMCE) block instead of the SV fiscal form", async ({ page }) => {
+test("the EE. UU. door routes straight to the Givebutter (FMCE) block", async ({ page }) => {
   await page.goto("/donar");
   await expect(page.getByRole("heading", { name: "Haga su donación" })).toBeVisible();
 
-  // Pick a quick amount, then declare foreign residence and select Estados Unidos.
-  await page.getByLabel("Monto").fill("25.00");
-  await page.getByLabel("Resido en el extranjero").check();
-  await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
+  // Door 2 (EE. UU.) opens the Givebutter block directly — no extranjero toggle.
+  await page.getByRole("button", { name: "EE. UU." }).click();
 
-  // The SV fiscal fields collapse: no documento, no dirección, no Donar submit.
+  // The extranjero mechanics are skipped entirely: no toggle, no país, no SV form.
+  await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
   await expect(page.getByLabel("Dirección")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Donar" })).toHaveCount(0);
 
-  // The FMCE explanation and the embedded giving form appear in their place.
+  // Pick a quick amount for the widget prefill.
+  await page.getByLabel("Monto").fill("25.00");
+
+  // The FMCE explanation, the English-form notice, and the embedded giving form appear.
   await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
+  await expect(page.getByText("El formulario de pago se muestra en inglés.")).toBeVisible();
   await expect(page.locator("givebutter-giving-form")).toHaveAttribute("campaign", "example-campaign");
 
   // The always-visible "done directly on givebutter.com" hint links to the slug URL.
@@ -111,9 +117,9 @@ test("US residents route to the Givebutter (FMCE) block instead of the SV fiscal
   await expect(fallback).toBeVisible({ timeout: 10_000 });
   await expect(fallback).toHaveAttribute("href", /givebutter\.com\/example-campaign\?amount=25/);
 
-  // The escape hatch brings the SV fiscal (CDE) form back.
-  await page.getByRole("button", { name: /comprobante fiscal salvadoreño/ }).click();
-  await expect(page.getByLabel("Dirección")).toBeVisible();
+  // "Cambiar opción" returns to the two-door chooser.
+  await page.getByRole("button", { name: /Cambiar opción/ }).click();
+  await expect(page.getByRole("button", { name: "El Salvador y el mundo" })).toBeVisible();
   await expect(page.locator("givebutter-giving-form")).toHaveCount(0);
 });
 

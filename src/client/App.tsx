@@ -40,18 +40,25 @@ import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./p
 import {
   DONAR_AMOUNT_CHIPS,
   DONAR_AUTOCLICK_INTERVAL_MS,
+  DONAR_CHANGE_DOOR_LABEL,
   DONAR_COMPLETED_MESSAGE,
   DONAR_DOMESTIC_DEPARTMENTS,
+  DONAR_DOOR_EEUU_LABEL,
+  DONAR_DOOR_SV_LABEL,
   DONAR_FALLBACK_MESSAGE,
   DONAR_FOREIGN_COUNTRIES,
   DONAR_INTENT_PATH,
+  DONAR_LANDING_HEADING,
+  DONAR_LANDING_SUBTITLE,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
+  DONAR_ROUTE_PARAM,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
   DONAR_WOMPI_SCRIPT_URL,
   GIVEBUTTER_CAMPAIGN,
+  GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_ESCAPE_HATCH,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
@@ -59,6 +66,8 @@ import {
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   GIVEBUTTER_SCRIPT_URL,
+  doorFromSearch,
+  routeParamForDoor,
   donationFormValidationMessage,
   donationIntentBody,
   givebutterHostedUrl,
@@ -68,9 +77,11 @@ import {
   isDonarGraciasPath,
   isDonarPath,
   widgetUrlFrom,
+  type DonarDoor,
   type DonationFormInput,
   type DonorDocumentType
 } from "./donation";
+import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
 import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
@@ -3304,6 +3315,97 @@ interface DonarIntent {
   urlEnlaceLargo: string;
 }
 
+// The default logo, reusing the vector paths shared with the worker's PDF renderer
+// (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
+function OrganizationLogo() {
+  return (
+    <svg
+      className="donar-logo"
+      viewBox={`0 0 ${ORG_LOGO_VIEW_BOX.width} ${ORG_LOGO_VIEW_BOX.height}`}
+      role="img"
+      aria-label="Misión ExampleOrganization"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      {ORG_LOGO_PATHS.map((d, index) => (
+        <path key={index} d={d} />
+      ))}
+    </svg>
+  );
+}
+
+// Door 1 icon: the El Salvador flag (azul-blanco-azul bands, official #0F47AF, no
+// escudo at this size) overlapping in front of a thin monochrome line-art globe.
+// aria-hidden: the door button's text label is the single accessible name.
+function SvWorldIcon() {
+  return (
+    <svg
+      className="donar-door-icon"
+      viewBox="0 0 96 96"
+      aria-hidden="true"
+      focusable="false"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      {/* Line-art globe behind the flag. */}
+      <g fill="none" stroke="#595959" strokeWidth="1.5">
+        <circle cx="52" cy="40" r="30" />
+        <ellipse cx="52" cy="40" rx="12" ry="30" />
+        <ellipse cx="52" cy="40" rx="24" ry="30" />
+        <line x1="22" y1="40" x2="82" y2="40" />
+        <path d="M 27 25 Q 52 33 77 25" />
+        <path d="M 27 55 Q 52 47 77 55" />
+      </g>
+      {/* SV flag in front, lower-right, casting a subtle white gap around itself. */}
+      <g>
+        <rect x="30" y="52" width="52" height="34" rx="2" fill="#ffffff" stroke="#eeeeee" strokeWidth="2" />
+        <rect x="32" y="54" width="48" height="10" fill="#0F47AF" />
+        <rect x="32" y="64" width="48" height="10" fill="#ffffff" />
+        <rect x="32" y="74" width="48" height="10" fill="#0F47AF" />
+      </g>
+    </svg>
+  );
+}
+
+// Door 2 icon: a simplified US flag — 13 stripes (#B22234 / #fff), blue canton
+// (#3C3B6E) with a plain white dot grid standing in for the stars at this scale.
+function UsFlagIcon() {
+  const stripes = Array.from({ length: 13 }, (_, i) => i);
+  const stripeHeight = 68 / 13;
+  const stars: Array<{ cx: number; cy: number }> = [];
+  for (let row = 0; row < 5; row += 1) {
+    for (let col = 0; col < 5; col += 1) {
+      stars.push({ cx: 20 + col * 7, cy: 18 + row * 6 });
+    }
+  }
+  return (
+    <svg
+      className="donar-door-icon"
+      viewBox="0 0 96 96"
+      aria-hidden="true"
+      focusable="false"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <g>
+        {stripes.map((i) => (
+          <rect
+            key={i}
+            x="14"
+            y={14 + i * stripeHeight}
+            width="68"
+            height={stripeHeight}
+            fill={i % 2 === 0 ? "#B22234" : "#ffffff"}
+          />
+        ))}
+        {/* Blue canton over the top-left, ~7 stripes tall, ~40% wide. */}
+        <rect x="14" y="14" width="30" height={stripeHeight * 7} fill="#3C3B6E" />
+        {stars.map((star, index) => (
+          <circle key={index} cx={star.cx} cy={star.cy} r="1.4" fill="#ffffff" />
+        ))}
+        <rect x="14" y="14" width="68" height="68" fill="none" stroke="#eeeeee" strokeWidth="1" />
+      </g>
+    </svg>
+  );
+}
+
 // Public donation form + Wompi widget handoff. Renders WITHOUT a session.
 function DonarPage() {
   const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
@@ -3311,6 +3413,11 @@ function DonarPage() {
   const [submitting, setSubmitting] = useState(false);
   const [stage, setStage] = useState<DonarStage>("form");
   const [intent, setIntent] = useState<DonarIntent | null>(null);
+  // The two-door chooser: /donar opens on a landing where the donor picks where
+  // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
+  // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
+  // the Givebutter block directly, skipping the extranjero mechanics.
+  const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
   // US-donor (Givebutter) path state: monthly-gift toggle and the escape hatch that
   // reveals the SV fiscal (CDE) form even when país === US.
   const [monthly, setMonthly] = useState(false);
@@ -3322,9 +3429,29 @@ function DonarPage() {
   // (still-present) button never re-opens the modal. Reset per intent below.
   const autoClickedRef = useRef(false);
 
-  // When to render the Givebutter block instead of the SV fiscal fields: a US
-  // resident who has NOT taken the escape hatch to the CDE form.
-  const usDonation = isUsDonation(form) && !forceFiscal;
+  // When to render the Givebutter block instead of the SV fiscal fields: the EE.
+  // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
+  // The escape hatch (forceFiscal) always returns to the SV fiscal (CDE) form.
+  const usDonation = (door === "eeuu" || isUsDonation(form)) && !forceFiscal;
+
+  // Choose a door: record it in ?ruta (composing with — never clobbering — any
+  // existing query, e.g. the Givebutter amount/frequency prefill) so a refresh
+  // keeps the door, then swap the view. null returns to the chooser.
+  const chooseDoor = (next: DonarDoor | null) => {
+    const params = new URLSearchParams(window.location.search);
+    const route = routeParamForDoor(next);
+    if (route) {
+      params.set(DONAR_ROUTE_PARAM, route);
+    } else {
+      params.delete(DONAR_ROUTE_PARAM);
+    }
+    const query = params.toString();
+    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    // Leaving a door resets the escape hatch / monthly toggle so each entry is clean.
+    setForceFiscal(false);
+    setMonthly(false);
+    setDoor(next);
+  };
 
   const update = (patch: Partial<DonationFormInput>) => setForm((current) => ({ ...current, ...patch }));
 
@@ -3539,13 +3666,46 @@ function DonarPage() {
     return <DonarThankYou monto={form.amount.trim()} />;
   }
 
+  // The chooser is the first sight of /donar: no door picked yet and no payment
+  // handoff in progress. Once a door is chosen the matching form/block renders.
+  if (door === null && stage === "form") {
+    return (
+      <div className="donar-screen">
+        <div className="donar-card card donar-landing">
+          <OrganizationLogo />
+          <h1>{DONAR_LANDING_HEADING}</h1>
+          <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
+          <div className="donar-doors">
+            <button type="button" className="donar-door" onClick={() => chooseDoor("sv")}>
+              <SvWorldIcon />
+              <span className="donar-door-label">{DONAR_DOOR_SV_LABEL}</span>
+            </button>
+            <button type="button" className="donar-door" onClick={() => chooseDoor("eeuu")}>
+              <UsFlagIcon />
+              <span className="donar-door-label">{DONAR_DOOR_EEUU_LABEL}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="donar-screen">
       <div className="donar-card card">
+        {stage === "form" && (
+          <button type="button" className="donar-change-door" onClick={() => chooseDoor(null)}>
+            {DONAR_CHANGE_DOOR_LABEL}
+          </button>
+        )}
         <ShieldCheck size={30} />
         <h1>Haga su donación</h1>
-        <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
-        <p className="donar-note">Su nombre y correo se ingresan al pagar con Wompi.</p>
+        {!usDonation && (
+          <>
+            <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
+            <p className="donar-note">Su nombre y correo se ingresan al pagar con Wompi.</p>
+          </>
+        )}
 
         {stage === "widget" && intent && (
           <div className="donar-handoff">
@@ -3626,74 +3786,81 @@ function DonarPage() {
               </label>
             )}
 
-            <label className="donar-foreign-toggle">
-              <input
-                type="checkbox"
-                checked={form.foreignResident}
-                onChange={(event) => {
-                  setForceFiscal(false);
-                  setMonthly(false);
-                  update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" });
-                }}
-                aria-label="Resido en el extranjero"
-              />
-              <span>Resido en el extranjero</span>
-            </label>
+            {/* The extranjero toggle + geography only belong to the SV/mundo door.
+                The EE. UU. door (usDonation) skips the extranjero mechanics
+                entirely and shows the Givebutter block below instead. */}
+            {!usDonation && (
+              <>
+                <label className="donar-foreign-toggle">
+                  <input
+                    type="checkbox"
+                    checked={form.foreignResident}
+                    onChange={(event) => {
+                      setForceFiscal(false);
+                      setMonthly(false);
+                      update({ foreignResident: event.target.checked, departamento: "", municipio: "", distrito: "", pais: "" });
+                    }}
+                    aria-label="Resido en el extranjero"
+                  />
+                  <span>Resido en el extranjero</span>
+                </label>
 
-            {form.foreignResident ? (
-              <label>
-                <span>País</span>
-                <CatalogSelect
-                  value={form.pais}
-                  options={DONAR_FOREIGN_COUNTRIES}
-                  onChange={(pais) => {
-                    // Switching country away from US must leave the Givebutter path
-                    // cleanly (the prefill effect cleanup restores the URL).
-                    setForceFiscal(false);
-                    setMonthly(false);
-                    update({ pais });
-                  }}
-                  showCodes={false}
-                  placeholder="Seleccione"
-                  ariaLabel="País"
-                />
-              </label>
-            ) : (
-              <div className="donar-address-row">
-                <label>
-                  <span>Departamento</span>
-                  <CatalogSelect
-                    value={form.departamento}
-                    options={DONAR_DOMESTIC_DEPARTMENTS}
-                    onChange={setDepartamento}
-                    showCodes={false}
-                    placeholder="Seleccione"
-                    ariaLabel="Departamento"
-                  />
-                </label>
-                <label>
-                  <span>Municipio</span>
-                  <CatalogSelect
-                    value={form.municipio}
-                    options={municipalityOptions}
-                    onChange={(municipio) => update({ municipio })}
-                    showCodes={false}
-                    placeholder="Seleccione"
-                    ariaLabel="Municipio"
-                  />
-                </label>
-                <label>
-                  <span>Distrito</span>
-                  <CatalogSelect
-                    value={form.distrito}
-                    options={districtOptions}
-                    onChange={(distrito) => update({ distrito })}
-                    showCodes={false}
-                    placeholder="Seleccione"
-                    ariaLabel="Distrito"
-                  />
-                </label>
-              </div>
+                {form.foreignResident ? (
+                  <label>
+                    <span>País</span>
+                    <CatalogSelect
+                      value={form.pais}
+                      options={DONAR_FOREIGN_COUNTRIES}
+                      onChange={(pais) => {
+                        // Switching country away from US must leave the Givebutter path
+                        // cleanly (the prefill effect cleanup restores the URL).
+                        setForceFiscal(false);
+                        setMonthly(false);
+                        update({ pais });
+                      }}
+                      showCodes={false}
+                      placeholder="Seleccione"
+                      ariaLabel="País"
+                    />
+                  </label>
+                ) : (
+                  <div className="donar-address-row">
+                    <label>
+                      <span>Departamento</span>
+                      <CatalogSelect
+                        value={form.departamento}
+                        options={DONAR_DOMESTIC_DEPARTMENTS}
+                        onChange={setDepartamento}
+                        showCodes={false}
+                        placeholder="Seleccione"
+                        ariaLabel="Departamento"
+                      />
+                    </label>
+                    <label>
+                      <span>Municipio</span>
+                      <CatalogSelect
+                        value={form.municipio}
+                        options={municipalityOptions}
+                        onChange={(municipio) => update({ municipio })}
+                        showCodes={false}
+                        placeholder="Seleccione"
+                        ariaLabel="Municipio"
+                      />
+                    </label>
+                    <label>
+                      <span>Distrito</span>
+                      <CatalogSelect
+                        value={form.distrito}
+                        options={districtOptions}
+                        onChange={(distrito) => update({ distrito })}
+                        showCodes={false}
+                        placeholder="Seleccione"
+                        ariaLabel="Distrito"
+                      />
+                    </label>
+                  </div>
+                )}
+              </>
             )}
 
             {!usDonation && (
@@ -3745,6 +3912,7 @@ function DonarPage() {
                 </label>
 
                 <p className="donar-intro">{GIVEBUTTER_INTRO}</p>
+                <p className="donar-english-notice">{GIVEBUTTER_ENGLISH_NOTICE}</p>
 
                 {/* Givebutter reads amount/frequency from the host page URL (set via
                     history.replaceState in the prefill effect). The custom element is
