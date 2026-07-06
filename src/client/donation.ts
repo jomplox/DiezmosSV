@@ -32,13 +32,13 @@ export const DONAR_MIN_AMOUNT = 1;
 // fiscal fields collapse and the embedded Givebutter giving form takes over. No
 // backend involvement: no intent, no webhook, no migration.
 //
-// Account 000000, campaign "example-campaign" ("Mis Diezmos y Ofrendas",
+// Widget account code EXAMPLEACCT00001 (dashboard account 000000), campaign "example-campaign" ("Mis Diezmos y Ofrendas",
 // https://givebutter.com/example-campaign). The campaign attribute is UNVERIFIED for the
 // vanity slug (docs say six-character code); the controller can swap this constant
 // for the dashboard short code if the empirical probe shows the slug is rejected.
-export const GIVEBUTTER_ACCOUNT_ID = "000000";
+export const GIVEBUTTER_ACCOUNT_ID = "EXAMPLEACCT00001";
 export const GIVEBUTTER_CAMPAIGN = "example-campaign";
-export const GIVEBUTTER_SCRIPT_URL = "https://widgets.givebutter.com/latest.umd.cjs?acct=000000";
+export const GIVEBUTTER_SCRIPT_URL = "https://widgets.givebutter.com/latest.umd.cjs?acct=EXAMPLEACCT00001";
 // The CAT-020 código for Estados Unidos: the only foreign country that routes to
 // Givebutter (every other país stays on the Wompi + CDE path).
 export const GIVEBUTTER_US_COUNTRY_CODE = "US";
