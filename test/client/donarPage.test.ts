@@ -862,19 +862,21 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
-  it("draws the SV door as the church's own flag asset over a globe, US as a circle-flag SVG", () => {
+  it("draws the SV door as the official flag asset over a globe, US as a circle-flag SVG", () => {
     // The US door keeps its inlined circle-flag SVG (MIT), verbatim.
     expect(landingSource).toContain("<svg");
     expect(landingSource).toContain("#d80027");
     expect(landingSource).toContain('mask id="us-flag-a"');
-    // The SV door uses the circle-flags sv.svg (MIT), inlined, matching the US
-    // door's circle style so the flag reads prominently at card size.
-    expect(landingSource).toContain('mask id="sv-flag-a"');
-    expect(landingSource).toContain("#ffda44");
-    expect(landingSource).toContain("#6da544");
-    // The church PNG <image> approach is gone (asset import removed).
-    expect(landingSource).not.toContain("svFlag");
-    expect(landingSource).not.toContain("<image");
+    // The SV door uses the OFFICIAL flag (flag-icons sv 1:1, full escudo) as a
+    // circle-cropped <image> asset — internal SVG ids stay encapsulated.
+    expect(donarSource).toContain('from "./assets/sv-flag.svg"');
+    expect(landingSource).toContain("href={svFlag}");
+    expect(landingSource).toContain("<image");
+    expect(landingSource).toContain('clipPath id="sv-flag-circle"');
+    // The simplified circle-flags inline paths are gone.
+    expect(landingSource).not.toContain('mask id="sv-flag-a"');
+    expect(landingSource).not.toContain("#ffda44");
+    expect(landingSource).not.toContain("#6da544");
     // The old hand-drawn palette must still be gone.
     expect(landingSource).not.toContain("#0F47AF");
     expect(landingSource).not.toContain("#3C3B6E");
