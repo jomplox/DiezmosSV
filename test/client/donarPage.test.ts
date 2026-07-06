@@ -426,6 +426,10 @@ describe("donar premint source contract", () => {
     // Fire-and-forget: no await on the draft create, errors swallowed.
     expect(donarSource).toContain("void donarApi");
     expect(donarSource).toContain("setDraftIntent(");
+    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) must reuse
+    // the draft already held — never re-mint. Each mint costs a Wompi link and one of
+    // the donor's 5 throttle slots per 15 minutes.
+    expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
   });
 
   it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
@@ -438,8 +442,9 @@ describe("donar premint source contract", () => {
   });
 
   it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
-    // Atrás from Paso 2 and Editar from Paso 3 both clear the held draft; the sweep
-    // expires its link. There is no new deactivation call in the client.
+    // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
+    // Editar from Paso 3 and switching doors clear it. A stale link simply expires
+    // on the sweep — there is no new deactivation call in the client.
     expect(donarSource).toContain("setDraftIntent(null)");
     expect(donarSource).not.toContain("deactivate");
   });

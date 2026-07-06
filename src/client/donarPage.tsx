@@ -519,8 +519,12 @@ export function DonarPage() {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
       // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
       // submit. Never blocks the step change; a failure just leaves draftIntent null and
-      // Paso 2 submit falls back to the full POST. A fresh entry supersedes any prior draft.
-      mintDraftIntent(form.amount.trim(), form.giftType);
+      // Paso 2 submit falls back to the full POST. A draft that still matches (Atrás →
+      // Continuar without edits) is reused — each mint costs a Wompi link and one of the
+      // donor's throttle slots, so only a missing or stale draft triggers a fresh one.
+      if (!draftIntent || !draftMatchesForm(draftIntent, form)) {
+        mintDraftIntent(form.amount.trim(), form.giftType);
+      }
     }
     setStep(2);
   }
@@ -584,8 +588,9 @@ export function DonarPage() {
 
   // "← Atrás": one step back. Leaving Paso 3 abandons the created intent (a new
   // one is created on the next entry) and unmounts the widget cleanly. Leaving Paso 2
-  // for Paso 1 abandons any background-minted draft — the donor may edit the amount or
-  // tipo, which would make it stale; its link expires on the sweep (no extra call).
+  // for Paso 1 KEEPS the held draft: if the donor returns without editing amount/tipo,
+  // draftMatchesForm reuses it (no second mint, no throttle slot); if they edit, the
+  // next Paso 1→2 crossing mints fresh and the stale link expires on the sweep.
   function goBack() {
     setError("");
     if (step === 3) {
@@ -594,7 +599,6 @@ export function DonarPage() {
       setStep(2);
       return;
     }
-    setDraftIntent(null);
     setStep(1);
   }
 
