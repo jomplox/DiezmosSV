@@ -39,7 +39,9 @@ export class EmailService {
     // Documento diferido (MH no disponible): SIEMPRE la copy fija transitoria, sin
     // importar la plantilla del operador — el PDF adjunto lleva sello TRANSITORIO y
     // el correo debe enmarcarlo como provisional, no como comprobante definitivo.
-    if (record.status === "TRANSMISSION_PENDING") {
+    // Diferido = SIGNED + transmission_deferred_at; un documento ya ACCEPTED conserva
+    // el marcador como historia y cae al comprobante definitivo de abajo.
+    if (record.status === "SIGNED" && record.transmission_deferred_at) {
       return this.sendDteEmail(record, toEmail, "dteReceiptTransitorio", TRANSITORIO_RECEIPT_TEMPLATE, renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, record));
     }
     const message = renderEmailTemplate(this.templates.dteReceipt, record);

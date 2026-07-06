@@ -180,6 +180,15 @@ const CATALOG_UPPERCASE_TOKENS = new Set([
 
 const CATALOG_LOWERCASE_WORDS = new Set(["a", "al", "con", "de", "del", "e", "el", "en", "la", "las", "lo", "los", "o", "para", "por", "u", "y"]);
 
+// Estado VISUAL de un CDE: la transmisión diferida se persiste como SIGNED +
+// transmission_deferred_at (D1 no permite ampliar el CHECK de status en una tabla
+// padre de FK), y la UI la presenta como el estado virtual TRANSMISSION_PENDING
+// ("En trámite"). Un SIGNED plano — transitorio de pipeline, sin marcador — se
+// sigue mostrando como Firmado.
+export function documentDisplayStatus(document: { status: string; transmission_deferred_at?: string | null }): string {
+  return document.status === "SIGNED" && document.transmission_deferred_at ? "TRANSMISSION_PENDING" : document.status;
+}
+
 export function statusLabel(status: string | null | undefined): string {
   if (!status) return "Sin estado";
   return STATUS_LABELS[status] ?? readableCode(status);

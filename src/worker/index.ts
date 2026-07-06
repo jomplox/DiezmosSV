@@ -27,7 +27,7 @@ import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRe
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
-import type { Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
+import type { DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { timingSafeEqual } from "./utils/encoding";
 import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
@@ -563,7 +563,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
   // Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
   // así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
-  // emisión queda TRANSMISSION_PENDING y el cron de 15 minutos la reintenta.
+  // emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
+  // minutos la reintenta.
   if (url.pathname === "/api/contingency" && request.method === "GET") {
     requireRole(user, "VIEWER");
     return jsonResponse({ contingency: await contingencyState(repo) });
@@ -926,8 +927,16 @@ function mhRejectionMessage(result: MhResponse): string {
   return result.estado || "Invalidación rechazada por el Ministerio de Hacienda";
 }
 
-function isRetryableDocumentStatus(status: string): boolean {
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at">): boolean {
+  // Un CDE diferido (SIGNED + transmission_deferred_at) NO es reintetable manualmente:
+  // el cron de 15 minutos es el único dueño del reintento, porque el camino manual
+  // genérico no completa la intención ni envía el comprobante definitivo. Un SIGNED
+  // "plano" (transitorio de pipeline atascado, sin marcador) sigue siendo reintetable
+  // como siempre.
+  if (document.status === "SIGNED" && document.transmission_deferred_at) {
+    return false;
+  }
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
 }
 
 function normalizeEmail(value: unknown): string | null {
@@ -1156,7 +1165,7 @@ async function handleDocumentRoute(
 
   if (action === "retry" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
-    if (!isRetryableDocumentStatus(document.status)) {
+    if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
           error: "document_not_retryable",

@@ -42,7 +42,7 @@ import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
@@ -3314,7 +3314,7 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
         <tbody>
           {documents.map((document) => (
             <tr key={document.id} className={selectedId === document.id ? "selected" : ""} onClick={() => onSelect(document.id)}>
-              <td><StatusPill status={document.status} /></td>
+              <td><StatusPill status={documentDisplayStatus(document)} /></td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
               <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
               <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
@@ -3398,12 +3398,12 @@ function DetailPanel({
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const emailEditing = emailEditingId === selected.id;
-  const canRetry = isRetryableDocumentStatus(selected.status);
+  const canRetry = isRetryableDocument(selected);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
   return (
     <aside className="detail-panel">
       <div className="detail-head">
-        <StatusPill status={selected.status} />
+        <StatusPill status={documentDisplayStatus(selected)} />
         <strong>{selected.numero_control}</strong>
       </div>
       {donorDataVerified && (
@@ -3877,8 +3877,14 @@ function invalidationToast(result: { accepted?: boolean; result?: { estado?: str
   return "Invalidación enviada al Ministerio de Hacienda";
 }
 
-function isRetryableDocumentStatus(status: string): boolean {
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(status);
+function isRetryableDocument(document: Pick<DteDocument, "status" | "transmission_deferred_at">): boolean {
+  // Espejo del worker: un CDE diferido (SIGNED + transmission_deferred_at) no se
+  // reintenta manualmente — el cron de 15 minutos es el dueño del reintento. Un
+  // SIGNED plano (sin marcador) sigue siendo reintetable.
+  if (document.status === "SIGNED" && document.transmission_deferred_at) {
+    return false;
+  }
+  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
 }
 
 function isValidEmail(value: string): boolean {
@@ -3920,8 +3926,10 @@ function isApiError(error: unknown): error is ApiError {
 }
 
 function countByStatus(documents: DteDocument[]): Record<string, number> {
+  // Cuenta por estado VISUAL: los diferidos (SIGNED + marcador) suman a "En trámite".
   return documents.reduce<Record<string, number>>((acc, document) => {
-    acc[document.status] = (acc[document.status] ?? 0) + 1;
+    const status = documentDisplayStatus(document);
+    acc[status] = (acc[status] ?? 0) + 1;
     return acc;
   }, {});
 }

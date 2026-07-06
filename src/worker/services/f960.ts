@@ -240,7 +240,6 @@ function f960StatusLabel(status: string): string {
   const labels: Record<string, string> = {
     ACCEPTED: "Aceptado",
     CONTINGENCY_PENDING: "Contingencia",
-    TRANSMISSION_PENDING: "En trámite",
     FAILED: "Fallido",
     INVALIDATED: "Invalidado",
     PENDING: "Pendiente",

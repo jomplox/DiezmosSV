@@ -3223,6 +3223,7 @@ describe("donation intent correlation", () => {
       issued_at: "2026-06-26T01:46:47.015Z",
       accepted_at: null,
       contingency_period_id: null,
+      transmission_deferred_at: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -3264,6 +3265,7 @@ describe("donation intent correlation", () => {
       issued_at: "2026-06-26T01:46:47.015Z",
       accepted_at: null,
       contingency_period_id: null,
+      transmission_deferred_at: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -3285,7 +3287,9 @@ describe("donation intent correlation", () => {
 // Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
 // admite los tipos de DTE 01, 03, 04, 05, 06, 07, 11, 14 y 18 — el CDE (tipo 15)
 // está EXCLUIDO, así que un CDE nunca se emite en contingencia. Cuando MH no está
-// disponible, la emisión queda TRANSMISSION_PENDING: el donante recibe de inmediato
+// disponible, la emisión queda diferida (status SIGNED + transmission_deferred_at —
+// D1 no permite reconstruir tablas padre de FK para ampliar el CHECK de status):
+// el donante recibe de inmediato
 // el comprobante TRANSITORIO y el cron de 15 minutos reintenta la transmisión.
 describe("deferred transmission when MH is unavailable", () => {
   const INTENT_ADDRESS = {
@@ -3399,7 +3403,7 @@ describe("deferred transmission when MH is unavailable", () => {
     });
   }
 
-  it("defers a Wompi CDE: TRANSMISSION_PENDING, normal shape, transitorio email, intent untouched", async () => {
+  it("defers a Wompi CDE: SIGNED + deferred marker, normal shape, transitorio email, intent untouched", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, { gift_type: "DIEZMO" });
     const eventId = seedWompiEvent(db, deferWebhook());
@@ -3408,7 +3412,10 @@ describe("deferred transmission when MH is unavailable", () => {
 
     const record = await new IssuancePipeline(await deferredEnv(db, sent)).processWompiEvent(eventId);
 
-    expect(record?.status).toBe("TRANSMISSION_PENDING");
+    // Deferred state = SIGNED + transmission_deferred_at (no new status value: D1
+    // cannot rebuild dte_documents to widen its CHECK constraint).
+    expect(record?.status).toBe("SIGNED");
+    expect(record?.transmission_deferred_at).toBeTruthy();
     expect(record?.signed_jws).toBeTruthy();
     // NO contingency: no period row, no attachment — the CDE keeps its NORMAL shape.
     expect(db.contingencies).toHaveLength(0);
@@ -3436,7 +3443,7 @@ describe("deferred transmission when MH is unavailable", () => {
         document_id: record!.id,
         status: "SENT",
         email_type: "dteReceiptTransitorio",
-        document_status_at_send: "TRANSMISSION_PENDING"
+        document_status_at_send: "SIGNED"
       })
     );
     // The intent completes only on REAL MH acceptance — never at deferral.
@@ -3452,7 +3459,8 @@ describe("deferred transmission when MH is unavailable", () => {
 
     const record = await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_defer");
 
-    expect(record.status).toBe("TRANSMISSION_PENDING");
+    expect(record.status).toBe("SIGNED");
+    expect(record.transmission_deferred_at).toBeTruthy();
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DTE_TRANSMISSION_DEFERRED", entity_id: "doc_quick_defer" })
     );
@@ -3463,7 +3471,7 @@ describe("deferred transmission when MH is unavailable", () => {
 
   it("does not resend the transitorio email when a queue redelivery re-defers the same document", async () => {
     const db = new InMemoryD1();
-    db.documents.push({ ...advancedFailingDocument("doc_quick_dedupe"), status: "TRANSMISSION_PENDING", signed_jws: "already-signed-jws" });
+    db.documents.push({ ...advancedFailingDocument("doc_quick_dedupe"), status: "SIGNED", transmission_deferred_at: "2026-06-26T01:49:00.000Z", signed_jws: "already-signed-jws" });
     // The first delivery attempt already sent the transitorio before the crash/redelivery.
     db.emailDeliveries.push({
       id: "email_prev",
@@ -3473,7 +3481,7 @@ describe("deferred transmission when MH is unavailable", () => {
       provider_response_json: "{}",
       sent_at: "2026-06-26T01:50:00.000Z",
       email_type: "dteReceiptTransitorio",
-      document_status_at_send: "TRANSMISSION_PENDING",
+      document_status_at_send: "SIGNED",
       template_version: null,
       pdf_renderer_version: null,
       pdf_sha256: null,
@@ -3487,7 +3495,8 @@ describe("deferred transmission when MH is unavailable", () => {
 
     expect(sent).toHaveLength(0);
     expect(db.emailDeliveries.filter((row) => row.document_id === "doc_quick_dedupe")).toHaveLength(1);
-    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.status).toBe("TRANSMISSION_PENDING");
+    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.status).toBe("SIGNED");
+    expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.transmission_deferred_at).toBeTruthy();
   });
 
   it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {
@@ -3512,7 +3521,8 @@ describe("deferred transmission when MH is unavailable", () => {
 
     expect(result.accepted).toBe(false);
     const rebuilt = db.documents.find((row) => row.id === "doc_rejected_defer");
-    expect(rebuilt?.status).toBe("TRANSMISSION_PENDING");
+    expect(rebuilt?.status).toBe("SIGNED");
+    expect(rebuilt?.transmission_deferred_at).toBeTruthy();
     const cde = JSON.parse(String(rebuilt!.plain_json)) as { identificacion: Record<string, unknown>; receptor: Record<string, unknown> };
     expect(cde.identificacion.tipoModelo).toBe(1);
     expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
@@ -3529,7 +3539,8 @@ describe("deferred transmission when MH is unavailable", () => {
     const pipelineEnv = await deferredEnv(db, sent);
     stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
     const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
-    expect(deferred?.status).toBe("TRANSMISSION_PENDING");
+    expect(deferred?.status).toBe("SIGNED");
+    expect(deferred?.transmission_deferred_at).toBeTruthy();
     expect(sent).toHaveLength(1);
 
     stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-DEFINITIVO", observaciones: [] }));
@@ -3539,6 +3550,9 @@ describe("deferred transmission when MH is unavailable", () => {
     const doc = db.documents.find((row) => row.id === deferred!.id);
     expect(doc?.status).toBe("ACCEPTED");
     expect(doc?.sello_recibido).toBe("SELLO-DEFINITIVO");
+    // The marker stays as historical "was deferred at" evidence; leaving SIGNED is
+    // what removes the doc from the retry sweep.
+    expect(doc?.transmission_deferred_at).toBeTruthy();
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DTE_ACCEPTED", entity_type: "dte_document", entity_id: deferred!.id })
     );
@@ -3571,13 +3585,15 @@ describe("deferred transmission when MH is unavailable", () => {
     stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
     const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
     expect(sent).toHaveLength(1); // transitorio
-    // Age the document beyond the one-hour alert threshold.
+    // Age the DEFERRAL beyond the one-hour alert threshold (the alert is measured
+    // from transmission_deferred_at, not from document creation).
     const doc = db.documents.find((row) => row.id === deferred!.id)!;
-    doc.created_at = "2026-06-26T00:00:00.000Z";
+    doc.transmission_deferred_at = "2026-06-26T00:00:00.000Z";
 
     const first = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
     expect(first).toMatchObject({ transmitted: 0, pending: 1 });
-    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("TRANSMISSION_PENDING");
+    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("SIGNED");
+    expect(db.documents.find((row) => row.id === deferred!.id)?.transmission_deferred_at).toBeTruthy();
     // One backlog alert (transitorio + alert = 2 sends), deduped on the next tick.
     expect(sent).toHaveLength(2);
     expect(db.audits.filter((row) => row.action === "ALERT_SENT:MH_UNAVAILABLE")).toHaveLength(1);
@@ -3619,7 +3635,8 @@ describe("deferred transmission when MH is unavailable", () => {
       ...testDocument(),
       id: "doc_sched_defer",
       wompi_event_id: null,
-      status: "TRANSMISSION_PENDING",
+      status: "SIGNED",
+      transmission_deferred_at: "2026-06-26T01:49:00.000Z",
       signed_jws: "signed-jws",
       sello_recibido: null,
       mh_estado: "MH_NO_DISPONIBLE",
@@ -3631,6 +3648,48 @@ describe("deferred transmission when MH is unavailable", () => {
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
 
     expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
+  });
+
+  it("surfaces deferred docs as En trámite (virtual filter) while a plain SIGNED doc stays out", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // Deferred: SIGNED + marker → listed under the virtual TRANSMISSION_PENDING filter.
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_deferred_list",
+      codigo_generacion: "AAAAAAA1-AAAA-4AAA-8AAA-AAAAAAAAAAA1",
+      numero_control: "DTE-15-M001P004-000000000000801",
+      status: "SIGNED",
+      transmission_deferred_at: "2026-06-26T01:49:00.000Z",
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null
+    });
+    // Plain SIGNED (mid-pipeline transient, NOT deferred) → excluded from the filter.
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_plain_signed",
+      codigo_generacion: "BBBBBBB2-BBBB-4BBB-8BBB-BBBBBBBBBBB2",
+      numero_control: "DTE-15-M001P004-000000000000802",
+      status: "SIGNED",
+      transmission_deferred_at: null,
+      signed_jws: "signed-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?status=TRANSMISSION_PENDING", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { documents: Array<{ id: string }> };
+    expect(body.documents.map((document) => document.id)).toEqual(["doc_deferred_list"]);
   });
 });
 
@@ -5287,7 +5346,10 @@ class Statement {
       let documents = [...this.db.documents];
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
         let argIndex = 0;
-        if (this.sql.includes("status = ?")) {
+        if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
+          // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
+          documents = documents.filter((document) => document.status === "SIGNED" && document.transmission_deferred_at != null);
+        } else if (this.sql.includes("status = ?")) {
           const status = String(this.args[argIndex]);
           argIndex += 1;
           documents = documents.filter((document) => document.status === status);
@@ -5309,6 +5371,9 @@ class Statement {
       if (this.sql.includes("status = ?")) {
         const status = String(this.args[0]);
         documents = documents.filter((document) => document.status === status);
+      }
+      if (this.sql.includes("transmission_deferred_at IS NOT NULL")) {
+        documents = documents.filter((document) => document.transmission_deferred_at != null);
       }
       if (this.sql.includes("contingency_period_id = ?")) {
         const periodId = String(this.args[0]);
@@ -5560,6 +5625,7 @@ class Statement {
         issued_at: String(issuedAt),
         accepted_at: null,
         contingency_period_id: contingencyPeriodId === null ? null : String(contingencyPeriodId),
+        transmission_deferred_at: null,
         created_at: String(issuedAt),
         updated_at: String(issuedAt)
       });
@@ -5648,6 +5714,19 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+      }
+    }
+    if (this.sql.includes("transmission_deferred_at = ?")) {
+      // markDocumentTransmissionDeferred: SIGNED + deferral marker + MH_NO_DISPONIBLE.
+      const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      if (document) {
+        document.status = "SIGNED";
+        document.transmission_deferred_at = String(deferredAt);
+        document.sello_recibido = null;
+        document.mh_estado = String(mhEstado);
+        document.mh_observaciones_json = String(observacionesJson);
+        document.updated_at = String(updatedAt);
       }
     }
     if (this.sql.includes("UPDATE dte_documents SET signed_jws = ?")) {
@@ -5938,6 +6017,7 @@ function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRe
     issued_at: "2026-06-26T01:46:47.015Z",
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
+    transmission_deferred_at: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z",
     ...overrides

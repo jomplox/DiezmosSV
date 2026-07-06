@@ -5,7 +5,7 @@ export const EMAIL_TEMPLATES_SETTING_KEY = "email_templates_json";
 export type EmailTemplateType = "dteReceipt" | "dteInvalidation";
 
 // Evidence types recorded in email_deliveries.email_type: the transitorio receipt
-// (documento TRANSMISSION_PENDING, sin sello) se distingue del comprobante
+// (documento diferido: SIGNED + transmission_deferred_at, sin sello) se distingue del comprobante
 // definitivo para que el reenvío/dedupe y la auditoría puedan diferenciarlos.
 export type EmailEvidenceType = EmailTemplateType | "dteReceiptTransitorio";
 
@@ -74,7 +74,7 @@ export const DEFAULT_EMAIL_TEMPLATES: EmailTemplateSettings = {
 
 // Copy FIJA del comprobante transitorio (no editable por el operador): una plantilla
 // personalizada de dteReceipt podría afirmar que el CDE ya tiene sello de recepción,
-// lo cual sería falso mientras el documento está TRANSMISSION_PENDING. El asunto
+// lo cual sería falso mientras la transmisión está diferida. El asunto
 // lleva el sufijo "(en trámite)" y el cuerpo enmarca el adjunto como provisional,
 // prometiendo el envío automático del comprobante definitivo con Sello de Recepción.
 export const TRANSITORIO_RECEIPT_TEMPLATE: EmailTemplateValue = {
@@ -185,7 +185,6 @@ function statusLabel(status: string): string {
   const labels: Record<string, string> = {
     ACCEPTED: "Aceptado",
     CONTINGENCY_PENDING: "En contingencia",
-    TRANSMISSION_PENDING: "En trámite",
     FAILED: "Fallido",
     INVALIDATED: "Invalidado",
     REJECTED: "Rechazado",
