@@ -2959,7 +2959,8 @@ function credentialSettingsPanelDescription(section: CredentialSettingsSectionId
     wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
-    plantillas: "Edite los asuntos y cuerpos de los correos automáticos."
+    plantillas: "Edite los asuntos y cuerpos de los correos automáticos.",
+    marca: "Personalice el nombre, color y logo con los que se identifica su organización."
   };
   return descriptions[section];
 }
