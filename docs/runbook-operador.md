@@ -29,6 +29,10 @@ Si olvidó su contraseña, en la pantalla de ingreso pulse **¿Olvidó su contra
 el enlace que llegará a su correo. Por seguridad, tras varios intentos fallidos el sistema
 lo hará esperar unos minutos antes de reintentar.
 
+La **Auditoría** ahora registra el usuario que realizó cada acción, su IP y el contexto de
+la solicitud (ubicación, ISP, navegador, TLS/protocolo); pulse la flecha de una fila para
+ver el detalle. Las entradas anteriores a esta versión no tienen IP ni contexto.
+
 ---
 
 ## 2. El flujo normal de una donación

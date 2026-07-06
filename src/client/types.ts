@@ -68,6 +68,27 @@ export interface AuditRow {
   summary: string;
   metadata_json: string;
   created_at: string;
+  // Actor identity resolved server-side via LEFT JOIN users ON actor_id. NULL for
+  // SYSTEM rows and for USER rows whose account was later deleted.
+  actor_name?: string | null;
+  actor_email?: string | null;
+  // Request context captured at audit time (predates migration 0013 => NULL on old rows).
+  actor_ip?: string | null;
+  // JSON blob: { country, city, region, timezone, asn, asOrganization, colo, httpProtocol, tlsVersion, userAgent }.
+  actor_context?: string | null;
+}
+
+export interface AuditActorContext {
+  country?: string;
+  city?: string;
+  region?: string;
+  timezone?: string;
+  asn?: number;
+  asOrganization?: string;
+  colo?: string;
+  httpProtocol?: string;
+  tlsVersion?: string;
+  userAgent?: string;
 }
 
 export interface ContingencyPeriod {
