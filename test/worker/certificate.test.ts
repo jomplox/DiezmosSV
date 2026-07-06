@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { inflateSync } from "node:zlib";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +129,58 @@ describe("renderCertificatePdf", () => {
 
     expect(text).toContain("AMBIENTE DE PRUEBAS");
     expect(text).toContain("SIN VALIDEZ FISCAL");
+  });
+});
+
+
+// pdf-lib deflates content streams on save; inflate them so color operators
+// ("r g b rg") are assertable as text.
+function inflatedPdfStreams(pdf: Uint8Array): string {
+  const raw = Buffer.from(pdf);
+  const marker = Buffer.from("stream\n");
+  const endMarker = Buffer.from("endstream");
+  let out = "";
+  let cursor = 0;
+  while (true) {
+    const start = raw.indexOf(marker, cursor);
+    if (start === -1) break;
+    const dataStart = start + marker.length;
+    const end = raw.indexOf(endMarker, dataStart);
+    if (end === -1) break;
+    try {
+      out += inflateSync(raw.subarray(dataStart, end)).toString("latin1");
+    } catch {
+      out += raw.subarray(dataStart, end).toString("latin1");
+    }
+    cursor = end + endMarker.length;
+  }
+  return out;
+}
+
+describe("renderCertificatePdf branding", () => {
+  it("paints the constancia with the branding accent color instead of the fixed teal", async () => {
+    // #336699 -> pdf-lib color operands 0.2 0.4 0.6 (exact: 51/255, 102/255, 153/255).
+    const pdf = await renderCertificatePdf({
+      year: 2025,
+      donor: summary(),
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026",
+      accentColor: "#336699"
+    });
+    const streams = inflatedPdfStreams(pdf);
+    expect(streams).toContain("0.2 0.4 0.6");
+    // The historical teal must be gone when a custom accent is set.
+    expect(streams).not.toContain("0.06 0.46 0.43");
+  });
+
+  it("keeps the historical teal when no accent is configured", async () => {
+    const pdf = await renderCertificatePdf({
+      year: 2025,
+      donor: summary(),
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026"
+    });
+    expect(inflatedPdfStreams(pdf)).toContain("0.06 0.46 0.43");
   });
 });
 
