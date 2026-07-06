@@ -625,6 +625,37 @@ export function App() {
     });
   }
 
+  // Single-donor send (also the resend path): posts the donor's grouping key. Keyed by
+  // `certificates-send-<groupKey>` so only that row shows a busy state while it runs.
+  async function sendDonorCertificate(donor: AnnualCertificatePreviewDonor) {
+    const preview = certificatePreview;
+    if (!preview) {
+      return;
+    }
+    if (!donor.hasEmail) {
+      setToast("Este donante no tiene correo registrado, por lo que no se le puede enviar la constancia.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Se enviará la constancia del año ${preview.year} a ${donor.donorName}. ¿Desea continuar?`
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runAction(`certificates-send-${donor.groupKey}`, async () => {
+      const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, {
+        method: "POST",
+        body: { donor: donor.groupKey }
+      });
+      setToast(
+        result.sent > 0
+          ? `Constancia ${result.year} enviada a ${donor.donorName}.`
+          : `No se pudo enviar la constancia a ${donor.donorName}.`
+      );
+      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+    });
+  }
+
   async function createUser() {
     const passwordError = passwordPolicyMessage(newUser.password);
     if (passwordError) {
@@ -1027,8 +1058,10 @@ export function App() {
               yearOptions={certificateYearOptions()}
               preview={certificatePreview}
               busy={busy === "certificates-send"}
+              rowBusy={busy}
               onYearChange={setCertificateYear}
               onSend={sendAnnualCertificates}
+              onSendDonor={sendDonorCertificate}
             />
             <BackupsPanel
               months={backups}
@@ -1583,18 +1616,25 @@ function AnnualCertificatePanel({
   yearOptions,
   preview,
   busy,
+  rowBusy,
   onYearChange,
-  onSend
+  onSend,
+  onSendDonor
 }: {
   year: string;
   yearOptions: number[];
   preview: AnnualCertificatePreview | null;
   busy: boolean;
+  // The raw busy key so a single row can show its own spinner (certificates-send-<groupKey>).
+  rowBusy: string;
   onYearChange: (year: string) => void;
   onSend: () => Promise<void>;
+  onSendDonor: (donor: AnnualCertificatePreviewDonor) => Promise<void>;
 }) {
   const donors = preview?.donors ?? [];
   const withEmail = preview?.withEmail ?? 0;
+  // Any in-flight send (bulk or a per-row send) disables the other send buttons.
+  const anySending = busy || rowBusy.startsWith("certificates-send");
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -1639,22 +1679,36 @@ function AnnualCertificatePanel({
               <th className="numeric">Donaciones</th>
               <th className="numeric">Total</th>
               <th>Correo</th>
+              <th>Enviar</th>
             </tr>
           </thead>
           <tbody>
-            {donors.map((donor) => (
-              <tr key={donor.donorName + (donor.donorEmail ?? "")}>
-                <td>
-                  <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
-                </td>
-                <td className="numeric">{donor.count}</td>
-                <td className="numeric">{donor.totalLabel}</td>
-                <td>{donor.hasEmail ? "Sí" : "—"}</td>
-              </tr>
-            ))}
+            {donors.map((donor) => {
+              const rowSending = rowBusy === `certificates-send-${donor.groupKey}`;
+              return (
+                <tr key={donor.donorName + (donor.donorEmail ?? "")}>
+                  <td>
+                    <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
+                  </td>
+                  <td className="numeric">{donor.count}</td>
+                  <td className="numeric">{donor.totalLabel}</td>
+                  <td>{donor.hasEmail ? "Sí" : "—"}</td>
+                  <td>
+                    <button
+                      className="ghost"
+                      disabled={!donor.hasEmail || rowSending || anySending}
+                      onClick={() => void onSendDonor(donor)}
+                    >
+                      <Download size={14} />
+                      {rowSending ? "Enviando" : "Enviar"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {donors.length === 0 && (
               <tr>
-                <td colSpan={4}>Sin donaciones aceptadas para este año.</td>
+                <td colSpan={5}>Sin donaciones aceptadas para este año.</td>
               </tr>
             )}
           </tbody>
@@ -4844,6 +4898,7 @@ interface F960Preview {
 }
 
 interface AnnualCertificatePreviewDonor {
+  groupKey: string;
   donorName: string;
   donorEmail: string | null;
   hasEmail: boolean;

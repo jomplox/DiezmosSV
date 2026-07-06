@@ -29,4 +29,13 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain("certificateYearOptions()");
     expect(stylesSource).toContain(".certificate-table table");
   });
+
+  it("offers a per-row send button that posts the donor group key in the body", () => {
+    // Per-row action column and its usted-form label.
+    expect(appSource).toContain("<th>Enviar</th>");
+    // Single-donor send posts the donor's grouping key in the request body.
+    expect(appSource).toContain("body: { donor:");
+    // Per-row busy state keyed by donor so one row spins without disabling the rest.
+    expect(appSource).toContain("certificates-send-");
+  });
 });
