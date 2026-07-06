@@ -434,19 +434,37 @@ ResultadoTransaccion = ExitosaAprobada
 Besides the legacy static Wompi payment link, the app serves a public **`/donar`** page. The donor
 data is **split** between the form and Wompi's hosted sheet:
 
-- **Formulario `/donar`** → the donor's fiscal **documento** (with DUI validation) and **dirección**
-  (catalog-coded department/municipio/distrito + complemento), plus an optional phone and the amount.
+- **Formulario `/donar`** → the donor's fiscal **documento** and **dirección** (catalog-coded
+  department/municipio/distrito + complemento), plus an optional phone and the amount.
 - **Hoja de Wompi** → the donor's **nombre** and **correo**, which Wompi's hosted sheet requires and
   now asks for exclusively (they cannot be prefilled or disabled via the API).
 
+**Document types accepted** (CAT-022): each type has its own validation, enforced on the form and
+again on the server:
+
+| Tipo | Code | Rule | Stored as |
+|---|---|---|---|
+| DUI | `13` | Check-digit validated | `XXXXXXXX-X` |
+| NIT | `36` | 14 digits, **format-only** (no check digit: MH validates NITs server-side, and a homebrew checksum would reject valid NITs). Requires the **razón social**, stored on the intent's `donor_name` so the comprobante names the empresa instead of the Wompi cardholder. | `XXXX-XXXXXX-XXX-X` |
+| Pasaporte | `03` | Free text, 5–30 chars | Uppercased |
+| Carnet de Residente | `02` | Free text, 5–30 chars | Uppercased |
+| Otro | `37` | Free text, ≤50 chars | As entered |
+
+**Foreign donors** — a "Resido en el extranjero" checkbox replaces the three geography selects with a
+**País** select (CAT-020, `SV` excluded) plus the free-text dirección. The intent stores the
+`00/00/00` "Otro (Para extranjeros)" codes (CAT-008/012/013) and the country in `donor_pais`; the
+emitted CDE marks the receptor `codDomiciliado: 2` with `codPais` from the intent, and the PDF prints
+the complemento + country name instead of the placeholder catalog labels.
+
 The Worker validates the form data, persists a **donation intent** (identity + address only; name and
-email are stored null), and mints a **single-use, cards-only Wompi payment link** via the Wompi API
-(tarjeta de crédito/débito únicamente — puntoAgricola, cuotas, Bitcoin, QuickPay, and Nequi are
-disabled; Wompi is also told **not** to email the donor, since the app sends the CDE itself). When the
-payment webhook arrives, the CDE `receptor` **merges** the two sources: `tipoDocumento` /
-`numDocumento` / `direccion` come from the intent (canonical catalog codes and a clean DUI), while
-`nombre` / `correo` come from the webhook (what the donor typed on Wompi's sheet); the telephone
-prefers the intent's phone, falling back to the webhook's `Celular`.
+email are stored null, except the NIT razón social), and mints a **single-use, cards-only Wompi
+payment link** via the Wompi API (tarjeta de crédito/débito únicamente — puntoAgricola, cuotas,
+Bitcoin, QuickPay, and Nequi are disabled; Wompi is also told **not** to email the donor, since the
+app sends the CDE itself). When the payment webhook arrives, the CDE `receptor` **merges** the two
+sources: `tipoDocumento` / `numDocumento` / `direccion` come from the intent (canonical catalog codes
+and a clean document), while `correo` comes from the webhook (what the donor typed on Wompi's sheet);
+`nombre` prefers the intent's razón social (NIT donors), falling back to the webhook name; the
+telephone prefers the intent's phone, falling back to the webhook's `Celular`.
 
 **Two new secrets** are required to call the Wompi API for the single-use link (the legacy static-link
 flow does not need them). Obtain `client_id` / `client_secret` from the Wompi merchant panel under

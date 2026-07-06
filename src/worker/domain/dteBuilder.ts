@@ -34,6 +34,11 @@ export interface IntentDonorOverride {
     distrito: string;
     complemento: string;
   };
+  // Foreign-donor path: set together when the intent carries a donor_pais (the
+  // receptor is a non-domiciled resident of that CAT-020 country). When absent the
+  // builder keeps its payload-derived codPais/codDomiciliado behavior.
+  codPais?: string;
+  codDomiciliado?: 1 | 2;
 }
 
 interface CdeBuildOptions {
@@ -142,8 +147,8 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       direccion: override ? { ...override.direccion } : donorAddress(payload, config),
       telefono: override ? override.telefono : donorPhone,
       correo: override ? override.correo : donorEmail,
-      codDomiciliado: payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2,
-      codPais: payload.Cliente?.CodigoPais ?? config.defaultCodPais
+      codDomiciliado: override?.codDomiciliado ?? (payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2),
+      codPais: override?.codPais ?? payload.Cliente?.CodigoPais ?? config.defaultCodPais
     },
     otrosDocumentos: [
       {

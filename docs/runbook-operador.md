@@ -50,13 +50,25 @@ abre una **Contingencia** (secciones 6 y 7).
 Además del enlace de pago fijo de Wompi, la aplicación publica una página **/donar**. Los datos del
 donante se **dividen** entre el formulario y la pantalla de pago de Wompi:
 
-- **Formulario /donar:** el **documento** fiscal (con validación de DUI) y la **dirección**
-  (departamento, municipio, distrito y complemento), además del teléfono opcional y el monto.
+- **Formulario /donar:** el **documento** fiscal y la **dirección** (departamento, municipio,
+  distrito y complemento), además del teléfono opcional y el monto.
 - **Pantalla de Wompi:** el **nombre** y el **correo**, que Wompi pide obligatoriamente en su propia
   pantalla de pago (no se pueden desactivar ni rellenar por adelantado).
 
 Con esas dos fuentes el sistema arma el comprobante, así que el CDE sale con la información correcta
 del donante sin que usted tenga que capturarla.
+
+**Tipos de documento aceptados en /donar:** DUI (con validación del dígito verificador), NIT (14
+dígitos), Pasaporte y Carnet de Residente (de 5 a 30 caracteres) y Otro (texto libre). Cuando el
+donante elige **NIT** —por ejemplo, una empresa— el formulario le pide también la **razón social**, y
+es esa razón social (no el nombre de la tarjeta con la que se pagó) la que aparece como donante en el
+comprobante.
+
+**Donantes en el extranjero:** el formulario tiene la casilla **«Resido en el extranjero»**. Al
+marcarla, en lugar de departamento/municipio/distrito el donante elige su **país** y escribe su
+dirección completa. El comprobante sale con esa dirección y el nombre del país, y Hacienda lo recibe
+con los códigos oficiales para direcciones extranjeras. No requiere ninguna acción suya: es parte del
+mismo flujo automático.
 
 **Cómo funciona:**
 

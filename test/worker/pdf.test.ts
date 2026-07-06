@@ -105,6 +105,23 @@ describe("DTE PDF rendering", () => {
     expect(receptorLine.length).toBeGreaterThan(0);
   });
 
+  it("renders a foreign receptor address as complemento + CAT-020 country, without the 00-code labels", async () => {
+    const document = withReceptor(testDocument(), {
+      direccion: { departamento: "00", municipio: "00", distrito: "00", complemento: "742 Evergreen Tce" },
+      codPais: "US",
+      codDomiciliado: 2
+    });
+
+    const text = await renderToText(document);
+
+    // The donor's foreign address plus their CAT-020 country label...
+    expect(text).toContain("742 Evergreen Tce");
+    expect(text).toContain("Estados Unidos");
+    // ...and never the "Otro (Para extranjeros)" placeholder printed three times
+    // (the 00 code's label in CAT-008/012/013).
+    expect(text).not.toContain("Otro (Para extranjeros)");
+  });
+
   it("labels a NIT receptor with the NIT: prefix", async () => {
     const document = withReceptor(testDocument(), {
       tipoDocumento: "36",

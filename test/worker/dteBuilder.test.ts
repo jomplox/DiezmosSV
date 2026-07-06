@@ -212,6 +212,57 @@ describe("DTE builders", () => {
     });
   });
 
+  it("marks the receptor non-domiciled with the override país for foreign-donor intents", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "03",
+        numDocumento: "AB-123456",
+        nombre: "John Foreign",
+        correo: "john@example.org",
+        telefono: null,
+        direccion: {
+          departamento: "00",
+          municipio: "00",
+          distrito: "00",
+          complemento: "742 Evergreen Terrace, Springfield"
+        },
+        codPais: "US",
+        codDomiciliado: 2
+      }
+    }) as Record<string, any>;
+
+    expect(document.receptor.codPais).toBe("US");
+    expect(document.receptor.codDomiciliado).toBe(2);
+    expect(document.receptor.direccion).toEqual({
+      departamento: "00",
+      municipio: "00",
+      distrito: "00",
+      complemento: "742 Evergreen Terrace, Springfield"
+    });
+  });
+
+  it("keeps the payload-derived codPais/codDomiciliado when the override carries none", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Ana Donante",
+        correo: "ana@example.org",
+        telefono: null,
+        direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" }
+      }
+    }) as Record<string, any>;
+
+    // A domestic intent (no donor_pais) leaves the existing payload-based
+    // codPais/codDomiciliado behavior untouched.
+    expect(document.receptor.codPais).toBe("SV");
+    expect(document.receptor.codDomiciliado).toBe(1);
+  });
+
   it("still validates a DUI donorOverride before building a CDE for MH", () => {
     expect(() =>
       buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {

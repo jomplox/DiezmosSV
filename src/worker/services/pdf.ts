@@ -1,7 +1,7 @@
 import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
-import { CAT012_DEPARTMENTS, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
+import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import type { DteDocumentRecord } from "../types";
 
 export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v2";
@@ -372,9 +372,25 @@ function emisorLines(emisor: Party): string[] {
 }
 
 function receptorContactLine(receptor: Party): string {
-  return [addressText(receptor.direccion), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
+  return [receptorAddressText(receptor), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
     .filter(Boolean)
     .join(" / ");
+}
+
+// Foreign receptor (the 00 "Otro (Para extranjeros)" geography): the CAT-008/012/013
+// labels would print "Otro (Para extranjeros)" three times, so render the donor's
+// complemento followed by their CAT-020 country label instead. This special case
+// lives here (not in addressText) because codPais sits on the receptor, outside the
+// direccion object addressText receives.
+function receptorAddressText(receptor: Party): string {
+  if (clean(receptor.direccion?.departamento) === "00") {
+    const country = findCatalogOption(CAT020_COUNTRIES, receptor.codPais);
+    return [clean(receptor.direccion?.complemento), country?.label]
+      .map((part) => clean(part))
+      .filter(Boolean)
+      .join(", ");
+  }
+  return addressText(receptor.direccion);
 }
 
 function documentLabelFor(tipoDocumento: string | null | undefined): string {
@@ -561,6 +577,9 @@ interface Party {
   telefono?: string | null;
   correo?: string | null;
   codEstable?: string | null;
+  // CAT-020 nationality country; drives the foreign-address rendering when the
+  // direccion carries the 00 "Otro (Para extranjeros)" geography.
+  codPais?: string | null;
 }
 
 interface CdeItem {

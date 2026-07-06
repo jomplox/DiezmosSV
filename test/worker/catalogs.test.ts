@@ -12,7 +12,10 @@ import {
   CAT032_DOMICILE,
   CAT020_COUNTRIES,
   getCat013Municipalities,
-  getCat008Districts
+  getCat008Districts,
+  isCat008DistrictCode,
+  isCat012DepartmentCode,
+  isCat013MunicipalityCode
 } from "../../src/shared/catalogs";
 
 describe("MH catalog options", () => {
@@ -34,5 +37,16 @@ describe("MH catalog options", () => {
     expect(getCat013Municipalities("06")).toContainEqual({ code: "22", label: "SAN SALVADOR ESTE", departmentCode: "06" });
     expect(getCat013Municipalities("06")).not.toContainEqual({ code: "22", label: "SAN MIGUEL CENTRO", departmentCode: "12" });
     expect(getCat008Districts("06")).toContainEqual({ code: "13", label: "SAN MARTIN", departmentCode: "06" });
+  });
+
+  it("accepts the 00 'Otro (Para extranjeros)' geography codes scoped under department 00", () => {
+    // The foreign-donor path stores 00/00/00; the validators must accept the 00
+    // municipio/distrito UNDER department 00 and reject them under real departments.
+    expect(isCat012DepartmentCode("00")).toBe(true);
+    expect(isCat013MunicipalityCode("00", "00")).toBe(true);
+    expect(isCat008DistrictCode("00", "00")).toBe(true);
+    expect(isCat013MunicipalityCode("00", "06")).toBe(false);
+    expect(isCat008DistrictCode("00", "06")).toBe(false);
+    expect(getCat013Municipalities("00")).toEqual([{ code: "00", label: "Otro (Para extranjeros)", departmentCode: "00" }]);
   });
 });

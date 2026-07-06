@@ -183,15 +183,21 @@ export interface ContingencyBatchLineRecord {
 
 export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
 
+// The five CAT-022 receptor document types the public /donar form accepts
+// (mirrors the CHECK constraint from migration 0011).
+export type DonationIntentDocumentType = "36" | "13" | "37" | "03" | "02";
+
 export interface DonationIntentRecord {
   id: string;
   status: DonationIntentStatus;
   amount_cents: number;
   // Name and email are no longer collected on the /donar form — the donor types them
-  // on Wompi's hosted sheet — so the intent stores identity + address only and both
-  // are nullable. The correlated CDE lifts nombre/correo from the webhook.
+  // on Wompi's hosted sheet — so both are nullable. The one exception: NIT (36)
+  // intents store the REQUIRED razón social here, because the comprobante must name
+  // the empresa, not the Wompi cardholder. The correlated CDE lifts nombre from this
+  // field when present, else from the webhook; correo always from the webhook.
   donor_name: string | null;
-  donor_document_type: "13" | "37";
+  donor_document_type: DonationIntentDocumentType;
   donor_document: string;
   donor_email: string | null;
   donor_phone: string | null;
@@ -199,6 +205,9 @@ export interface DonationIntentRecord {
   direccion_municipio: string;
   direccion_distrito: string;
   direccion_complemento: string;
+  // Foreign-donor path: CAT-020 country (never "SV") when the direccion carries the
+  // 00/00/00 "Otro (Para extranjeros)" geography; null for domestic intents.
+  donor_pais: string | null;
   wompi_id_enlace: number | null;
   wompi_url_enlace: string | null;
   wompi_url_enlace_largo: string | null;
