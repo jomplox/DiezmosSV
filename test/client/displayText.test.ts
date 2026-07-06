@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, catalogOptionLabel, donationIntentStatusLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
   it("localizes internal status values for user-facing badges", () => {
@@ -65,5 +65,21 @@ describe("client display text", () => {
     expect(catalogOptionLabel("AGUILARES")).toBe("Aguilares");
     expect(catalogOptionLabel("NIT")).toBe("NIT");
     expect(catalogOptionLabel("Médico (solo aplica para contribuyentes obligados a la presentación de F-958)")).toBe("Médico (Solo Aplica para Contribuyentes Obligados a la Presentación de F-958)");
+  });
+
+  it("resolves the audit actor with a name/email/id fallback and Sistema for SYSTEM rows", () => {
+    expect(auditActorLabel({ actor_type: "USER", actor_id: "u1", actor_name: "Ada Admin", actor_email: "ada@example.org" })).toBe("Ada Admin");
+    expect(auditActorLabel({ actor_type: "USER", actor_id: "u1", actor_name: null, actor_email: "ada@example.org" })).toBe("ada@example.org");
+    expect(auditActorLabel({ actor_type: "USER", actor_id: "user_abcdefghijklmnop", actor_name: null, actor_email: null })).toBe("user_abcdefg…");
+    expect(auditActorLabel({ actor_type: "SYSTEM", actor_id: null, actor_name: null, actor_email: null })).toBe("Sistema");
+  });
+
+  it("parses the actor context blob defensively and formats location/protocol", () => {
+    const context = parseAuditContext(JSON.stringify({ city: "San Salvador", country: "SV", tlsVersion: "TLSv1.3", httpProtocol: "HTTP/2" }));
+    expect(auditLocationLabel(context)).toBe("San Salvador, SV");
+    expect(auditProtocolLabel(context)).toBe("TLSv1.3 · HTTP/2");
+    expect(parseAuditContext(null)).toBeNull();
+    expect(parseAuditContext("not-json")).toBeNull();
+    expect(auditLocationLabel(parseAuditContext(JSON.stringify({ country: "SV" })))).toBe("SV");
   });
 });

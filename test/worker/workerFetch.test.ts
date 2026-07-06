@@ -4632,6 +4632,182 @@ describe("admin backups panel", () => {
   });
 });
 
+describe("audit actor context", () => {
+  // Cloudflare only sets request.cf in the Workers runtime, so tests attach it
+  // manually; the worker reads it defensively via (request as any).cf.
+  function withCf(request: Request, cf: Record<string, unknown>): Request {
+    Object.defineProperty(request, "cf", { value: cf, configurable: true });
+    return request;
+  }
+
+  const SV_CF = {
+    country: "SV",
+    city: "San Salvador",
+    region: "San Salvador",
+    timezone: "America/El_Salvador",
+    asn: 27773,
+    asOrganization: "Claro El Salvador",
+    colo: "SJO",
+    httpProtocol: "HTTP/2",
+    tlsVersion: "TLSv1.3"
+  };
+
+  it("records the client IP and cf context on a failed login audit", async () => {
+    const db = new InMemoryD1();
+
+    const request = withCf(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "cf-connecting-ip": "190.86.1.2",
+          "user-agent": "Mozilla/5.0 Test"
+        },
+        body: JSON.stringify({ email: "nobody@example.org", password: "whatever" })
+      }),
+      SV_CF
+    );
+
+    const response = await worker.fetch(request, env(db));
+
+    expect(response.status).toBe(500);
+    const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
+    expect(failure).toBeTruthy();
+    expect(failure?.actor_ip).toBe("190.86.1.2");
+    expect(JSON.parse(String(failure?.actor_context))).toMatchObject({
+      country: "SV",
+      city: "San Salvador",
+      asOrganization: "Claro El Salvador",
+      userAgent: "Mozilla/5.0 Test"
+    });
+  });
+
+  it("records the client IP and cf context on an admin user update audit", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const request = withCf(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json",
+          "cf-connecting-ip": "201.203.9.9",
+          "user-agent": "AdminBrowser/1.0"
+        },
+        body: JSON.stringify({ role: "ADMIN" })
+      }),
+      SV_CF
+    );
+
+    const response = await worker.fetch(request, env(db));
+
+    expect(response.status).toBe(200);
+    const audit = db.audits.find((row) => row.action === "USER_UPDATED");
+    expect(audit?.actor_ip).toBe("201.203.9.9");
+    expect(JSON.parse(String(audit?.actor_context))).toMatchObject({
+      asOrganization: "Claro El Salvador",
+      userAgent: "AdminBrowser/1.0"
+    });
+  });
+
+  it("leaves cron/queue (SYSTEM) audits without actor IP or context", async () => {
+    const db = new InMemoryD1();
+    // A dead-letter batch runs in the queue handler with no incoming Request.
+    await worker.queue(
+      {
+        queue: "issuance-dlq",
+        messages: [
+          {
+            body: { wompiEventId: "wompi_1" } as IssuanceMessage,
+            ack: () => undefined,
+            retry: () => undefined
+          }
+        ]
+      } as unknown as MessageBatch<IssuanceMessage>,
+      env(db)
+    );
+
+    const audit = db.audits.find((row) => row.action === "ISSUANCE_DEAD_LETTERED");
+    expect(audit).toBeTruthy();
+    expect(audit?.actor_ip ?? null).toBeNull();
+    expect(audit?.actor_context ?? null).toBeNull();
+  });
+
+  it("resolves USER audit rows to an actor name and returns the new context fields", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Ada Admin",
+      role: "ADMIN",
+      password_hash: "h",
+      password_salt: "s",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.audits.push({
+      id: "audit_user_1",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "USER_UPDATED",
+      entity_type: "user",
+      entity_id: "user_operator",
+      summary: "Usuario actualizado",
+      metadata_json: "{}",
+      actor_ip: "190.86.1.2",
+      actor_context: JSON.stringify({ city: "San Salvador", country: "SV", asOrganization: "Claro El Salvador" }),
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.audits.push({
+      id: "audit_system_1",
+      actor_type: "SYSTEM",
+      actor_id: null,
+      action: "ISSUANCE_DEAD_LETTERED",
+      entity_type: "wompi_event",
+      entity_id: "wompi_1",
+      summary: "seeded",
+      metadata_json: "{}",
+      actor_ip: null,
+      actor_context: null,
+      created_at: "2026-06-26T01:46:46.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/audit", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { audit: Array<Record<string, unknown>> };
+    const userRow = body.audit.find((row) => row.id === "audit_user_1");
+    const systemRow = body.audit.find((row) => row.id === "audit_system_1");
+
+    expect(userRow).toMatchObject({
+      actor_name: "Ada Admin",
+      actor_email: "admin@example.org",
+      actor_ip: "190.86.1.2"
+    });
+    expect(JSON.parse(String(userRow?.actor_context))).toMatchObject({ city: "San Salvador" });
+    // SYSTEM rows have no resolvable user and no captured context.
+    expect(systemRow?.actor_name ?? null).toBeNull();
+    expect(systemRow?.actor_ip ?? null).toBeNull();
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -5018,11 +5194,21 @@ class Statement {
     }
     if (this.sql.includes("FROM audit_logs")) {
       let audits = [...this.db.audits];
-      if (this.sql.includes("WHERE entity_type = ? AND entity_id = ?")) {
+      if (this.sql.includes("a.entity_type = ? AND a.entity_id = ?")) {
         audits = audits.filter((audit) => audit.entity_type === this.args[0] && audit.entity_id === this.args[1]);
       }
       audits.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
-      return { results: audits as T[] };
+      // Mirror the LEFT JOIN users ON u.id = a.actor_id: USER rows resolve to a name/email,
+      // SYSTEM rows (and deleted-actor rows) keep NULLs.
+      const joined = audits.map((audit) => {
+        const actor = this.db.users.find((user) => user.id === audit.actor_id);
+        return {
+          ...audit,
+          actor_name: actor?.name ?? null,
+          actor_email: actor?.email ?? null
+        };
+      });
+      return { results: joined as T[] };
     }
     return { results: [] };
   }
@@ -5050,7 +5236,7 @@ class Statement {
       if (token) token.used_at = usedAt;
     }
     if (this.sql.includes("INSERT INTO audit_logs")) {
-      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson] = this.args;
+      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
       this.db.audits.push({
         id,
         actor_type: actorType,
@@ -5060,6 +5246,8 @@ class Statement {
         entity_id: entityId,
         summary,
         metadata_json: metadataJson,
+        actor_ip: actorIp ?? null,
+        actor_context: actorContext ?? null,
         created_at: "2026-06-26T01:46:47.015Z"
       });
     }

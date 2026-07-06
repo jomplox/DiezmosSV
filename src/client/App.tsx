@@ -1,6 +1,7 @@
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   Cloud,
@@ -31,7 +32,7 @@ import {
   X,
   Users
 } from "lucide-react";
-import { type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { filterAuditEntries } from "./auditFilter";
@@ -41,7 +42,7 @@ import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
-import { auditActionLabel, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
@@ -3708,17 +3709,77 @@ function InvalidationConfirmDialog({
 }
 
 function AuditTable({ rows }: { rows: AuditRow[] }) {
+  const [expandedId, setExpandedId] = useState<string | null>(null);
   return (
     <div className="table-scroll">
       <table>
-        <thead><tr><th>Acción</th><th>Entidad</th><th>Resumen</th><th>Fecha</th></tr></thead>
+        <thead><tr><th></th><th>Usuario</th><th>Acción</th><th>Entidad</th><th>Resumen</th><th>IP</th><th>Fecha</th></tr></thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={row.id}><td>{auditActionLabel(row.action)}</td><td>{entityLabel(row.entity_type)}</td><td>{auditSummaryLabel(row.summary)}</td><td className="numeric">{formatElSalvadorDateTime(row.created_at)}</td></tr>
-          ))}
+          {rows.map((row) => {
+            const context = parseAuditContext(row.actor_context);
+            const hasDetail = Boolean(context || row.actor_ip);
+            const expanded = expandedId === row.id;
+            return (
+              <Fragment key={row.id}>
+                <tr className={hasDetail ? "audit-row audit-row-expandable" : "audit-row"}>
+                  <td className="audit-expand-cell">
+                    {hasDetail && (
+                      <button
+                        type="button"
+                        className={expanded ? "audit-expand-toggle expanded" : "audit-expand-toggle"}
+                        aria-label={expanded ? "Ocultar contexto" : "Ver contexto"}
+                        aria-expanded={expanded}
+                        onClick={() => setExpandedId(expanded ? null : row.id)}
+                      >
+                        <ChevronDown size={16} />
+                      </button>
+                    )}
+                  </td>
+                  <td className="audit-actor" title={row.actor_email ?? undefined}>{auditActorLabel(row)}</td>
+                  <td>{auditActionLabel(row.action)}</td>
+                  <td>{entityLabel(row.entity_type)}</td>
+                  <td>{auditSummaryLabel(row.summary)}</td>
+                  <td className="audit-ip">{row.actor_ip ?? "—"}</td>
+                  <td className="numeric">{formatElSalvadorDateTime(row.created_at)}</td>
+                </tr>
+                {expanded && hasDetail && (
+                  <tr className="audit-detail-row">
+                    <td></td>
+                    <td colSpan={6}>
+                      <AuditContextDetail ip={row.actor_ip ?? null} context={context} />
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function AuditContextDetail({ ip, context }: { ip: string | null; context: ReturnType<typeof parseAuditContext> }) {
+  const location = auditLocationLabel(context);
+  const protocol = auditProtocolLabel(context);
+  const items: Array<{ label: string; value: string; title?: string }> = [];
+  if (ip) items.push({ label: AUDIT_CONTEXT_LABELS.ip, value: ip });
+  if (location) items.push({ label: AUDIT_CONTEXT_LABELS.location, value: location });
+  if (context?.asOrganization) items.push({ label: AUDIT_CONTEXT_LABELS.isp, value: context.asOrganization });
+  if (context?.userAgent) items.push({ label: AUDIT_CONTEXT_LABELS.browser, value: context.userAgent, title: context.userAgent });
+  if (protocol) items.push({ label: AUDIT_CONTEXT_LABELS.protocol, value: protocol });
+  if (items.length === 0) {
+    return <span className="audit-detail-empty">Sin contexto registrado.</span>;
+  }
+  return (
+    <dl className="audit-context-grid">
+      {items.map((item) => (
+        <div key={item.label} className="audit-context-item">
+          <dt>{item.label}</dt>
+          <dd className="audit-context-value" title={item.title}>{item.value}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
