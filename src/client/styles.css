@@ -2289,7 +2289,8 @@ td.numeric, th.numeric {
   color: #a93530;
 }
 
-.status.contingency_pending {
+.status.contingency_pending,
+.status.transmission_pending {
   background: #fff3d7;
   color: #855900;
 }
@@ -2983,7 +2984,7 @@ pre {
 /* ── Two-door landing: the chooser shown before any form. ─────────────────── */
 .donar-landing {
   display: grid;
-  gap: 8px;
+  gap: 16px;
   justify-items: center;
   text-align: center;
 }
@@ -2992,7 +2993,7 @@ pre {
   width: min(260px, 70%);
   height: auto;
   display: block;
-  margin: 4px auto 2px;
+  margin: 16px auto 10px;
 }
 
 .donar-logo path {
@@ -3003,7 +3004,7 @@ pre {
   color: #595959;
   font-size: 14px;
   line-height: 1.45;
-  margin: 0 0 4px;
+  margin: 0 0 6px;
 }
 
 /* Unifying line: both doors fund the same church — slightly smaller, secondary gray. */
@@ -3011,7 +3012,7 @@ pre {
   color: #595959;
   font-size: 12.5px;
   line-height: 1.4;
-  margin: 0 0 8px;
+  margin: 0 0 12px;
 }
 
 .donar-doors {
@@ -3019,7 +3020,7 @@ pre {
   grid-template-columns: 1fr;
   gap: 14px;
   width: 100%;
-  margin-top: 4px;
+  margin-top: 12px;
 }
 
 .donar-door {
