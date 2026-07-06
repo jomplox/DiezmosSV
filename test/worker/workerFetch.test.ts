@@ -3470,7 +3470,7 @@ describe("donation intent correlation", () => {
     });
   });
 
-  it("marks a foreign intent's receptor non-domiciled with the intent país and 00 geography", async () => {
+  it("marks a foreign intent's receptor non-domiciled with the intent país and the emisor geography", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, {
       direccion_departamento: "00",
@@ -3485,16 +3485,14 @@ describe("donation intent correlation", () => {
 
     expect(record?.status).toBe("ACCEPTED");
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({
-      codPais: "US",
-      codDomiciliado: 2,
-      direccion: {
-        departamento: "00",
-        municipio: "00",
-        distrito: "00",
-        complemento: "742 Evergreen Terrace, Springfield"
-      }
-    });
+    // MH rejects 00/00/00 (no CAT-008 distrito 00); the foreign marker lives in
+    // codPais + codDomiciliado while the direccion uses the emisor's geography and
+    // the complemento preserves the donor's country + foreign address.
+    const cdeReceptor = cde.receptor as { direccion: Record<string, string> };
+    expect(cde.receptor).toMatchObject({ codPais: "US", codDomiciliado: 2 });
+    expect(cdeReceptor.direccion.departamento).not.toBe("00");
+    expect(cdeReceptor.direccion.distrito).not.toBe("00");
+    expect(cdeReceptor.direccion.complemento).toBe("Estados Unidos: 742 Evergreen Terrace, Springfield");
   });
 
   it("falls back to the webhook Celular when the intent has no phone", async () => {
