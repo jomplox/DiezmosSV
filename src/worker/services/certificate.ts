@@ -190,11 +190,25 @@ export interface RenderCertificateInput {
   donor: DonorCertificateSummary;
   emisor: CertificateEmisor;
   issuedOnLabel: string;
+  // Branding accent (hex #rrggbb) painting the title + table header; the historical
+  // teal remains the default so an unbranded deployment renders unchanged.
+  accentColor?: string;
 }
 
 // Renders the annual donor certificate. Reuses the CDE branding (default vector logo,
 // Helvetica) but is deliberately NOT a DTE: it makes no Ministerio de Hacienda seal
 // claim. The individual CDE remain the fiscal vouchers; this is informational.
+// Converts the branding accent (#rrggbb) into pdf-lib color space; falls back to the
+// historical teal on absent/malformed values so rendering never fails over branding.
+function accentRgb(hex: string | undefined) {
+  const match = /^#([0-9a-f]{6})$/i.exec(hex?.trim() ?? "");
+  if (!match) {
+    return rgb(0.06, 0.46, 0.43);
+  }
+  const value = Number.parseInt(match[1], 16);
+  return rgb(((value >> 16) & 0xff) / 255, ((value >> 8) & 0xff) / 255, (value & 0xff) / 255);
+}
+
 export async function renderCertificatePdf(input: RenderCertificateInput): Promise<Uint8Array> {
   const pdf = await PDFDocument.create();
   const page = pdf.addPage([PAGE_WIDTH, 792]);
@@ -202,7 +216,7 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const black = rgb(0, 0, 0);
   const muted = rgb(0.32, 0.32, 0.32);
-  const brand = rgb(0.06, 0.46, 0.43);
+  const brand = accentRgb(input.accentColor);
 
   drawOrganizationLogo(page);
   drawCentered(page, input.emisor.nombre.toUpperCase(), 724, 11, bold, 0, PAGE_WIDTH, black);
@@ -230,7 +244,7 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   );
   y -= 34;
 
-  y = drawTable(page, input.donor, regular, bold, y);
+  y = drawTable(page, input.donor, regular, bold, y, brand);
 
   y -= 26;
   page.drawText(
@@ -272,9 +286,9 @@ export async function renderCertificateDossierPdf(input: RenderCertificateInput)
   return dossier.save();
 }
 
-function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFont, bold: PDFFont, top: number): number {
+function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFont, bold: PDFFont, top: number, accent = rgb(0.06, 0.46, 0.43)): number {
   const black = rgb(0, 0, 0);
-  const headerFill = rgb(0.06, 0.46, 0.43);
+  const headerFill = accent;
   const rowHeight = 18;
   const left = MARGIN;
   const right = PAGE_WIDTH - MARGIN;
@@ -456,7 +470,7 @@ export async function sendAnnualCertificates(
       }
     }
     try {
-      const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel });
+      const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
       const totalLabel = `$${formatCents(donor.totalCents)}`;
       await email.sendDonorCertificate({
         toEmail: donor.donorEmail,
