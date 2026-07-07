@@ -3,6 +3,7 @@ import { buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
+import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
@@ -102,8 +103,23 @@ export class IssuancePipeline {
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
     const intent = await this.correlateIntent(payload);
+    const donorOverride = intent ? donorOverrideFromIntent(intent, payload) : undefined;
+    // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
+    // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
+    // burns a control number on every queue retry, opening a permanent fiscal gap. Reject
+    // it as terminal here — no sequence consumed, no DTE created.
+    const duiReason = invalidWompiDonorDuiReason(payload, donorOverride);
+    if (duiReason) {
+      await this.repo.createAudit({
+        action: "WOMPI_INVALID_DONOR_DUI",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary: duiReason
+      });
+      return null;
+    }
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
+    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
     const identifiers = extractCdeIdentifiers(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
@@ -603,6 +619,30 @@ function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWeb
 function cleanNullable(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+// Pre-allocation guard: is the effective donor DUI invalid? Mirrors buildCdeDocument's
+// receptor derivation so the answer matches what buildCdeDocument would validate. An
+// intent override supplies tipoDocumento/numDocumento directly; a raw webhook declares
+// DUI ("13") only when DocumentoIdentidad carries the 9 digits a DUI needs, so a
+// document that is not a DUI simply passes. Returns a human-friendly reason on failure,
+// else null. Runs BEFORE nextControlSequence so a bad DUI never consumes a control number.
+function invalidWompiDonorDuiReason(payload: WompiWebhook, override: IntentDonorOverride | undefined): string | null {
+  if (override) {
+    return isDuiDocumentType(override.tipoDocumento) ? duiValidationReason(override.numDocumento) : null;
+  }
+  const donorDocumentRaw = cleanNullable(payload.Cliente?.DocumentoIdentidad);
+  const donorIsDui = donorDocumentRaw !== null && cleanDui(donorDocumentRaw).length === 9;
+  return donorIsDui ? duiValidationReason(donorDocumentRaw) : null;
+}
+
+function duiValidationReason(value: string | null): string | null {
+  try {
+    assertValidDui(value);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGeneracion: string; numeroControl: string } {
