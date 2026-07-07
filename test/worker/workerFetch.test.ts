@@ -4589,6 +4589,61 @@ describe("deferred transmission when MH is unavailable", () => {
   });
 });
 
+describe("audit pagination", () => {
+  it("pages the audit list by keyset cursor with a stable order", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    for (let i = 0; i < 7; i++) {
+      db.audits.push({
+        id: `audit_${String(i).padStart(3, "0")}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "DTE_ACCEPTED",
+        entity_type: "dte_document",
+        entity_id: `doc_${i}`,
+        summary: `fila ${i}`,
+        metadata_json: "{}",
+        actor_ip: null,
+        actor_context: null,
+        created_at: `2026-07-0${(i % 7) + 1}T10:00:00.000Z`
+      });
+    }
+
+    const first = await worker.fetch(
+      new Request("https://example.org/api/audit?limit=3", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(first.status).toBe(200);
+    const page1 = (await first.json()) as { audit: Array<{ id: string; created_at: string }>; nextCursor: string | null };
+    expect(page1.audit).toHaveLength(3);
+    expect(page1.nextCursor).not.toBeNull();
+    // Newest first.
+    expect(page1.audit[0].created_at >= page1.audit[1].created_at).toBe(true);
+
+    const second = await worker.fetch(
+      new Request(`https://example.org/api/audit?limit=3&cursor=${encodeURIComponent(page1.nextCursor!)}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const page2 = (await second.json()) as { audit: Array<{ id: string }>; nextCursor: string | null };
+    expect(page2.audit).toHaveLength(3);
+    // No overlap between pages.
+    const ids1 = new Set(page1.audit.map((row) => row.id));
+    expect(page2.audit.every((row) => !ids1.has(row.id))).toBe(true);
+
+    const third = await worker.fetch(
+      new Request(`https://example.org/api/audit?limit=3&cursor=${encodeURIComponent(page2.nextCursor!)}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const page3 = (await third.json()) as { audit: Array<{ id: string }>; nextCursor: string | null };
+    expect(page3.audit).toHaveLength(1);
+    expect(page3.nextCursor).toBeNull();
+  });
+});
+
 describe("pipeline failure alerts", () => {
   it("sends an operational alert when a Wompi-triggered DTE fails", async () => {
     const db = new InMemoryD1();
@@ -6949,10 +7004,27 @@ class Statement {
     }
     if (this.sql.includes("FROM audit_logs")) {
       let audits = [...this.db.audits];
+      let argIndex = 0;
       if (this.sql.includes("a.entity_type = ? AND a.entity_id = ?")) {
         audits = audits.filter((audit) => audit.entity_type === this.args[0] && audit.entity_id === this.args[1]);
+        argIndex = 2;
       }
-      audits.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+      if (this.sql.includes("(a.created_at, a.id) < (?, ?)")) {
+        const cursorCreated = String(this.args[argIndex]);
+        const cursorId = String(this.args[argIndex + 1]);
+        argIndex += 2;
+        audits = audits.filter((audit) => {
+          const created = String(audit.created_at);
+          return created < cursorCreated || (created === cursorCreated && String(audit.id) < cursorId);
+        });
+      }
+      audits.sort(
+        (left, right) =>
+          String(right.created_at).localeCompare(String(left.created_at)) || String(right.id).localeCompare(String(left.id))
+      );
+      if (this.sql.includes("ORDER BY a.created_at DESC, a.id DESC LIMIT ?")) {
+        audits = audits.slice(0, Number(this.args[argIndex] ?? 100));
+      }
       // Mirror the LEFT JOIN users ON u.id = a.actor_id: USER rows resolve to a name/email,
       // SYSTEM rows (and deleted-actor rows) keep NULLs.
       const joined = audits.map((audit) => {

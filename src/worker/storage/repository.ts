@@ -829,6 +829,25 @@ export class Repository {
       .then((result) => result.results ?? []);
   }
 
+  // Página del historial general de auditoría: keyset (created_at, id) DESC — el mismo
+  // patrón de cursor del listado de documentos, porque OFFSET degenera con miles de
+  // filas. Devuelve limit+1 filas para que la ruta derive nextCursor sin un COUNT.
+  async listAuditPage(cursor: { createdAt: string; id: string } | null, limit: number): Promise<Array<Record<string, unknown>>> {
+    const bounded = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const where = cursor ? "WHERE (a.created_at, a.id) < (?, ?)" : "";
+    const bindings: string[] = cursor ? [cursor.createdAt, cursor.id] : [];
+    return this.db
+      .prepare(
+        `SELECT a.*, u.name AS actor_name, u.email AS actor_email
+         FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+         ${where}
+         ORDER BY a.created_at DESC, a.id DESC LIMIT ?`
+      )
+      .bind(...bindings, bounded + 1)
+      .all<Record<string, unknown>>()
+      .then((result) => result.results ?? []);
+  }
+
   async createDteEvent(input: {
     documentId: string | null;
     eventType: "INVALIDACION" | "CONTINGENCIA";
