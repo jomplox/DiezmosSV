@@ -529,6 +529,23 @@ export class IssuancePipeline {
     if (!intent || (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED")) {
       return null;
     }
+    // Defense-in-depth behind the HMAC check: bind the approved payment to the specific
+    // Wompi link minted for this intent. IdExterno alone is donor-influenced, so when the
+    // webhook also carries EnlacePago.Id and the intent has a stored wompi_id_enlace, the
+    // two must match — otherwise a donor-controlled IdExterno could bind a payment to an
+    // unrelated intent and leak that intent's signed CDE + PII to a payer-controlled
+    // address. On mismatch we audit and skip correlation (the webhook then falls back to
+    // non-intent behavior); when either id is absent the check is a no-op.
+    if (payload.EnlacePago?.Id != null && intent.wompi_id_enlace != null && payload.EnlacePago.Id !== intent.wompi_id_enlace) {
+      await this.repo.createAudit({
+        action: "DONATION_INTENT_LINK_MISMATCH",
+        entityType: "donation_intent",
+        entityId: intent.id,
+        summary: `El enlace del webhook ${payload.EnlacePago.Id} no coincide con el enlace de la intención ${intent.wompi_id_enlace}; no se correlaciona`,
+        metadata: { payloadLinkId: payload.EnlacePago.Id, intentLinkId: intent.wompi_id_enlace }
+      });
+      return null;
+    }
     // Premint draft that the donor never completed: the link was minted but the fiscal
     // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
     // would build a receptor with an empty numDocumento that fails CDE schema validation.
