@@ -254,7 +254,11 @@ function clean(value: string | null | undefined): string | null {
 }
 
 function csvField(value: string): string {
-  return /[;"\r\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+  // Neutralize spreadsheet-formula injection: a donor-controlled cell that opens with
+  // =, +, -, @ (or a tab/CR that some parsers treat as a formula lead) is prefixed with
+  // an apostrophe so Excel/LibreOffice/Sheets treat it as literal text, then escaped.
+  const safeValue = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  return /[;"\r\n]/.test(safeValue) ? `"${safeValue.replace(/"/g, '""')}"` : safeValue;
 }
 
 function contentTypesXml(): string {

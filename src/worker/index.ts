@@ -1,7 +1,7 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
-import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
+import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
@@ -44,7 +44,7 @@ import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shar
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
-import { IssuancePipeline } from "./services/pipeline";
+import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
@@ -63,15 +63,135 @@ const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 // Audit-based auth throttling. Failed logins and password-reset requests are
-// counted over a rolling window keyed on (action, entity_id); crossing the
-// threshold short-circuits the endpoint before any credential work runs, so
-// there is no timing oracle to distinguish throttled from rejected.
+// counted over a rolling window; crossing the threshold short-circuits the endpoint
+// before any credential work runs, so there is no timing oracle to distinguish
+// throttled from rejected. Login failures are keyed on (email, caller IP) so a third
+// party cannot lock out a victim's email by spamming failures from another address,
+// while real brute-force from a single IP is still capped.
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const PASSWORD_RESET_LIMIT = 3;
 
+// The public donation endpoints parse untrusted JSON before any validation or
+// persistence, and the per-IP throttle counts only PERSISTED intents — so oversized
+// invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
+// payloads are a few hundred bytes) so an oversized request is rejected up front.
+const PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES = 16 * 1024;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super("Request body too large");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+// Reads a JSON body while enforcing a byte cap: a declared Content-Length over the
+// limit is rejected immediately, and a chunked/undeclared body is bounded as it
+// streams so a lying (or absent) length header cannot bypass the cap. Malformed JSON
+// resolves to {} to preserve the endpoints' prior tolerant parsing.
+async function readJsonBodyWithLimit(request: Request, limitBytes: number): Promise<Record<string, unknown>> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const parsedLength = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(parsedLength) && parsedLength > limitBytes) {
+      throw new RequestBodyTooLargeError();
+    }
+  }
+
+  const body = request.body;
+  if (!body) {
+    return {};
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        total += value.byteLength;
+        if (total > limitBytes) {
+          throw new RequestBodyTooLargeError();
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(concatBytes(chunks, total)));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function donationBodyTooLargeResponse(): Response {
+  return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+}
+
 function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+// Operator telemetry captured on audit rows: the client IP, the Cloudflare request
+// context (geo/ISP), and the acting user's email. The OWNER wants this visible in
+// Auditoría, but only to ADMIN+; VIEWERs receive these columns nulled server-side so
+// the values never leave the worker. The client renders the nulls as an em-dash and
+// hides the expandable context row.
+const SENSITIVE_AUDIT_FIELDS = ["actor_ip", "actor_context", "actor_email"] as const;
+
+function canViewSensitiveAudit(user: AuthUser): boolean {
+  return user.role === "ADMIN" || user.role === "OWNER";
+}
+
+function redactAuditForUser(rows: Array<Record<string, unknown>>, user: AuthUser): Array<Record<string, unknown>> {
+  if (canViewSensitiveAudit(user)) {
+    return rows;
+  }
+  return rows.map((row) => {
+    const redacted = { ...row };
+    for (const field of SENSITIVE_AUDIT_FIELDS) {
+      redacted[field] = null;
+    }
+    return redacted;
+  });
+}
+
+async function listAuditForUser(
+  repo: Repository,
+  user: AuthUser,
+  entityType?: string,
+  entityId?: string
+): Promise<Array<Record<string, unknown>>> {
+  return redactAuditForUser(await repo.listAudit(entityType, entityId), user);
+}
+
+// Canonical public origin for links emailed to users (password reset). Built from the
+// configured APP_ORIGIN so a poisoned Host header cannot redirect reset tokens to an
+// attacker; falls back to the request origin only when APP_ORIGIN is unset (local dev).
+function resolveAppOrigin(env: Env, url: URL): string {
+  const configured = env.APP_ORIGIN?.trim();
+  if (configured) {
+    return new URL(configured).origin;
+  }
+  return url.origin;
 }
 
 export default {
@@ -139,10 +259,12 @@ export default {
     try {
       const repo = new Repository(env.DB);
       const now = nowIso();
-      // Snapshot what the UPDATE will expire BEFORE running it (afterwards the rows
-      // no longer match the predicate), so we can deactivate their Wompi links.
+      // Process a bounded page per tick: snapshot the capped set of expiring intents,
+      // then expire exactly that page by id, so public intent creation cannot force one
+      // cron invocation to snapshot or deactivate an unbounded row set. The remainder
+      // is picked up by the next tick.
       const expiring = await repo.listIntentsExpiringBefore(now);
-      await repo.expireUnpaidIntentsBefore(now);
+      await repo.expireDonationIntentsByIds(expiring.map((intent) => intent.id), now);
       const wompi = new WompiApiService(env);
       for (const intent of expiring) {
         if (intent.wompi_id_enlace == null) {
@@ -160,7 +282,9 @@ export default {
       console.error("Donation intent expiry sweep failed", error);
     }
     try {
-      await checkCertificateExpiry(env, new Repository(env.DB));
+      // Drive the expiry math from the scheduled tick's time, the same reference the
+      // retention export above uses, so the countdown never depends on the wall clock.
+      await checkCertificateExpiry(env, new Repository(env.DB), event.scheduledTime ?? Date.now());
     } catch (error) {
       console.error("Certificate expiry check failed", error);
     }
@@ -197,8 +321,10 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
 // no-ops when there is nothing to check. Sends at most one alert per
 // threshold crossed (30/14/3 days), deduped by sendOperationalAlert's
 // audit-based mechanism keyed on `${expiresAt}:${threshold}` so a renewed
-// certificate (new expiresAt) re-arms every threshold.
-async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void> {
+// certificate (new expiresAt) re-arms every threshold. nowMs is the scheduled
+// tick's time, threaded from worker.scheduled so the countdown in both the
+// threshold check and the alert copy reads one clock instead of the wall clock.
+async function checkCertificateExpiry(env: Env, repo: Repository, nowMs: number): Promise<void> {
   let certXml: string;
   try {
     certXml = getMhCertificateXml(env);
@@ -209,7 +335,7 @@ async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void>
   if (!expiresAt) {
     return;
   }
-  const remainingDays = Math.floor((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  const remainingDays = Math.floor((new Date(expiresAt).getTime() - nowMs) / (24 * 60 * 60 * 1000));
   const remainingLabel = remainingDays < 0 ? `venció hace ${Math.abs(remainingDays)} días` : `Quedan ${remainingDays} día(s)`;
   for (const threshold of CERT_EXPIRY_ALERT_THRESHOLD_DAYS) {
     if (remainingDays > threshold) {
@@ -252,7 +378,13 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
   // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
   const repo = new Repository(env.DB, auditContextFrom(request));
-  const environment = await activeEmissionEnvironment(repo, env);
+  // The environment is the signed payload's own EsProductiva flag — never the
+  // owner-controlled active emission setting. A test-mode payment (EsProductiva=false)
+  // must never be emitted as a PRODUCTION DTE just because the deployment defaults to
+  // 01; the signed flag is the fiscal source of truth. When the two disagree we still
+  // honor the payload but audit the disagreement so operators can see it.
+  const environment = ambienteFromWompi(payload);
+  const activeEnvironment = await activeEmissionEnvironment(repo, env);
   const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   await repo.createAudit({
@@ -261,6 +393,15 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     entityId: record.id,
     summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
   });
+  if (inserted && environment !== activeEnvironment) {
+    await repo.createAudit({
+      action: "WOMPI_ENVIRONMENT_MISMATCH",
+      entityType: "wompi_event",
+      entityId: record.id,
+      summary: `El webhook declara ambiente ${environment} pero la emisión activa es ${activeEnvironment}; se honra el del webhook`,
+      metadata: { payloadEnvironment: environment, activeEnvironment }
+    });
+  }
   // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
   // regardless of it. The donor-facing "thanks" keys on paid_at (the PAYMENT), not on
   // COMPLETED (the CDE's MH acceptance, which the async pipeline sets and can lag).
@@ -331,7 +472,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Short-circuit before any validation/persistence so a throttled attempt is cheap.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return donationBodyTooLargeResponse();
+      }
+      throw error;
+    }
     const draft = isDraftIntentBody(body);
     let input;
     try {
@@ -367,9 +516,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     let data;
     try {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
       data = validateDatosInput(body);
     } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return donationBodyTooLargeResponse();
+      }
       if (error instanceof IntentValidationError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
       }
@@ -412,10 +564,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     const body = (await request.json()) as { email: string; password: string };
     const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
-    const recentFailures = await repo.countAuditEntriesSince("LOGIN_FAILED", normalizedEmail, authThrottleSinceIso());
+    const { ip: callerIp } = auditContextFrom(request);
+    const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
     if (recentFailures >= LOGIN_FAILED_LIMIT) {
       // Short-circuit before authenticating so a throttled attempt costs the same as
-      // any other rejection — no PBKDF2 work, no DB read, no timing signal.
+      // any other rejection — no PBKDF2 work, no DB read, no timing signal. Keyed on
+      // (email, caller IP) so only the abusing IP is throttled, not the victim.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     let result;
@@ -445,7 +599,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         } else {
           const created = await auth.createPasswordResetToken(email);
           if (created) {
-            const link = `${url.origin}/?reset=${created.token}`;
+            const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
             try {
               const resetBranding = await loadEmailBranding(repo, env);
               await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
@@ -780,12 +934,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/audit" && request.method === "GET") {
-    requireRole(user, "VIEWER");
+    const actor = requireRole(user, "VIEWER");
     const entityType = url.searchParams.get("entityType");
     const entityId = url.searchParams.get("entityId");
     if (entityType && entityId) {
       // Entity-scoped history keeps its original (uncapped-page) shape.
-      return jsonResponse({ audit: await repo.listAudit(entityType, entityId), nextCursor: null });
+      return jsonResponse({ audit: await listAuditForUser(repo, actor, entityType, entityId), nextCursor: null });
     }
     // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
     // grows forever, so the old flat LIMIT 100 silently hid everything older.
@@ -803,7 +957,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const page = rows.slice(0, limit);
     const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
     const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
-    return jsonResponse({ audit: page, nextCursor });
+    return jsonResponse({ audit: redactAuditForUser(page, actor), nextCursor });
   }
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
@@ -816,8 +970,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
   // minutos la reintenta.
   if (url.pathname === "/api/contingency" && request.method === "GET") {
-    requireRole(user, "VIEWER");
-    return jsonResponse({ contingency: await contingencyState(repo) });
+    const actor = requireRole(user, "VIEWER");
+    return jsonResponse({ contingency: await contingencyState(repo, actor) });
   }
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {
@@ -932,6 +1086,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (url.pathname === "/api/users" && request.method === "POST") {
     const actor = requireRole(user, "ADMIN");
     const body = (await request.json()) as { email: string; name: string; role: Role; password: string };
+    // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
+    // creating an OWNER account and then using the OWNER-only credential routes.
+    if (body.role === "OWNER" && actor.role !== "OWNER") {
+      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+    }
     const created = await auth.createUser(body);
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_CREATED", entityType: "user", entityId: created.id, summary: created.email });
     return jsonResponse({ user: created }, { status: 201 });
@@ -940,6 +1099,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   const passwordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
   if (passwordMatch && request.method === "POST") {
     const actor = requireRole(user, "ADMIN");
+    // Vector inverso de escalación: restablecer la contraseña de un OWNER le daría a
+    // un ADMIN esa sesión. Solo un propietario modifica a otro propietario.
+    if (actor.role !== "OWNER" && (await repo.getUserRole(passwordMatch[1])) === "OWNER") {
+      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
+    }
     const body = (await request.json().catch(() => ({}))) as { password?: unknown };
     if (typeof body.password !== "string" || !body.password) {
       return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
@@ -959,6 +1123,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await request.json().catch(() => ({}))) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
     const patch = userPatchInput(body);
     if (patch instanceof Response) return patch;
+    // Same escalation guard as user creation: promoting an account to OWNER is
+    // reserved for OWNERs.
+    if (patch.role === "OWNER" && actor.role !== "OWNER") {
+      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+    }
+    // Y el vector inverso: un ADMIN tampoco modifica (desactiva, renombra, degrada) a
+    // un OWNER existente.
+    if (actor.role !== "OWNER" && (await repo.getUserRole(userMatch[1])) === "OWNER") {
+      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
+    }
     const updated = await repo.updateUser(userMatch[1], patch);
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
     return jsonResponse({ user: updated });
@@ -1092,8 +1266,10 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
     action: "ALERT_EMAIL_UPDATED",
     entityType: "app_setting",
     entityId: ALERT_EMAIL_SETTING_KEY,
-    summary: raw ? `Correo de alertas configurado a ${raw}` : "Correo de alertas desactivado",
-    metadata: { alertEmail: raw }
+    // The audit trail is readable by lower roles, so record only THAT the recipient
+    // changed — never the OWNER-only address itself.
+    summary: raw ? "Correo de alertas configurado" : "Correo de alertas desactivado",
+    metadata: { enabled: Boolean(raw) }
   });
   return jsonResponse({ ok: true, alertEmail: raw });
 }
@@ -1293,7 +1469,7 @@ function isRole(value: unknown): value is Role {
   return value === "VIEWER" || value === "OPERATOR" || value === "ADMIN" || value === "OWNER";
 }
 
-async function contingencyState(repo: Repository): Promise<Record<string, unknown>> {
+async function contingencyState(repo: Repository, user: AuthUser): Promise<Record<string, unknown>> {
   const activeRaw = await repo.getOpenContingency();
   const periodsRaw = await repo.listContingencyPeriods();
   const pendingDocuments = activeRaw
@@ -1312,7 +1488,7 @@ async function contingencyState(repo: Repository): Promise<Record<string, unknow
     batchLines,
     periods,
     events,
-    audit: active ? await repo.listAudit("contingency_period", String(active.id)) : [],
+    audit: active ? await listAuditForUser(repo, user, "contingency_period", String(active.id)) : [],
     summary: {
       pending: pendingDocuments.length,
       open: countPeriodStatus("OPEN"),
@@ -1503,11 +1679,11 @@ async function handleDocumentRoute(
   }
 
   if (!action && request.method === "GET") {
-    requireRole(user, "VIEWER");
+    const actor = requireRole(user, "VIEWER");
     // donorDataVerified: this CDE was produced from a completed donation-intent, so
     // the donor's data came from the validated /donar form rather than the raw webhook.
     const donorDataVerified = (await repo.getCompletedIntentForDocument(document.id)) !== null;
-    return jsonResponse({ document, donorDataVerified, audit: await repo.listAudit("dte_document", document.id) });
+    return jsonResponse({ document, donorDataVerified, audit: await listAuditForUser(repo, actor, "dte_document", document.id) });
   }
 
   if (action === "pdf" && request.method === "GET") {
@@ -1607,7 +1783,17 @@ async function handleDocumentRoute(
     if (document.status === "REJECTED" && document.wompi_event_id) {
       // MH rejected the CONTENT of this CDE: retransmitting the same signed JWS
       // would be rejected identically, so rebuild it from the original webhook.
-      const result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
+      let result: MhResponse;
+      try {
+        result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
+      } catch (error) {
+        if (error instanceof RejectedWompiRetryConflictError) {
+          // A concurrent retry already claimed the rebuild: refuse cleanly so we never
+          // transmit a second distinct legal DTE for the same Wompi event.
+          return jsonResponse({ error: "document_retry_in_progress", message: error.message }, { status: 409 });
+        }
+        throw error;
+      }
       await repo.createAudit({
         actorType: "USER",
         actorId: actor.id,

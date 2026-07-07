@@ -83,14 +83,18 @@ export class EmailService {
 
   private async sendDteEmail(record: DteDocumentRecord, toEmail: string, emailType: EmailEvidenceType, template: EmailTemplateValue, message: EmailMessage): Promise<EmailDeliveryResult> {
     const pdfBytes = await renderDtePdf(record);
-    const jsonBytes = new TextEncoder().encode(record.plain_json);
+    // Prefer the signed JWS — the cryptographically signed, legally meaningful artifact —
+    // over the unsigned plain_json. The pipeline signs and persists a JWS before emailing
+    // accepted/transitorio receipts; only an edge document without a JWS falls back to
+    // plain_json. The recorded dteJsonSha256 evidence covers whatever was actually sent.
+    const dteAttachmentBytes = new TextEncoder().encode(record.signed_jws ?? record.plain_json);
     const evidence = {
       emailType,
       documentStatusAtSend: record.status,
       templateVersion: await templateVersion(emailType, template),
       pdfRendererVersion: DTE_PDF_RENDERER_VERSION,
       pdfSha256: await sha256Hex(pdfBytes),
-      dteJsonSha256: await sha256Hex(jsonBytes)
+      dteJsonSha256: await sha256Hex(dteAttachmentBytes)
     };
     const from = this.resolveFrom();
     const pdfAttachment = {
@@ -100,7 +104,7 @@ export class EmailService {
     };
     const jsonAttachment = {
       filename: `${record.codigo_generacion}.json`,
-      contentBase64: bytesToBase64(jsonBytes),
+      contentBase64: bytesToBase64(dteAttachmentBytes),
       contentType: "application/json"
     };
     const payload = {
@@ -139,7 +143,7 @@ export class EmailService {
         filename: jsonAttachment.filename,
         type: jsonAttachment.contentType,
         disposition: "attachment",
-        content: jsonBytes
+        content: dteAttachmentBytes
       }
     ]);
     return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };

@@ -19,6 +19,12 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
+// Rows one cron sweep may expire (and deactivate the Wompi links of) per tick. Caps
+// the outbound Wompi fanout so attacker-created expired intents cannot translate into
+// an unbounded burst of API calls in a single invocation; the remainder is picked up
+// by the next tick.
+export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+
 export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
@@ -34,6 +40,24 @@ export interface RetentionCursor {
 // (migrations/0001_init.sql). Every other windowed retention table uses created_at.
 function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
+}
+
+// The alert-email setting is OWNER-only, but its ALERT_EMAIL_UPDATED audit rows are
+// readable by lower roles through the audit trail. Newer writes never record the
+// address, but rows written before that fix still carry it in the summary/metadata, so
+// the read path scrubs those columns for the app_setting/alert_email entity regardless
+// of role. It keeps that an update happened; it only drops the address value.
+function redactSensitiveAuditRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return rows.map((row) => {
+    if (row.entity_type !== "app_setting" || row.entity_id !== "alert_email") {
+      return row;
+    }
+    return {
+      ...row,
+      summary: row.action === "ALERT_EMAIL_UPDATED" ? "Correo de alertas actualizado" : row.summary,
+      metadata_json: "{}"
+    };
+  });
 }
 
 // Raw D1 column shape for the contacts export join (snake_case, intent_* columns
@@ -256,24 +280,31 @@ export class Repository {
   // Wompi links of exactly the rows it is about to expire. Read this BEFORE the
   // UPDATE (afterwards the rows no longer match) — its results feed
   // WompiApiService.deactivatePaymentLink.
-  async listIntentsExpiringBefore(nowIso: string): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>> {
+  async listIntentsExpiringBefore(nowIso: string, limit = INTENT_EXPIRY_SWEEP_LIMIT): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>> {
     // gift_type is projected so the deactivation sweep can resend the SAME
-    // nombreProducto the create sent (a PUT replaces the whole link object).
+    // nombreProducto the create sent (a PUT replaces the whole link object). The page
+    // is capped and ordered oldest-first so attacker-created expired intents cannot
+    // force one cron invocation to snapshot (or deactivate) an unbounded row set; the
+    // next tick continues from the remaining PENDING/LINK_CREATED rows.
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit), INTENT_EXPIRY_SWEEP_LIMIT));
     const result = await this.db
-      .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
-      .bind(nowIso)
+      .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ? ORDER BY expires_at ASC, id ASC LIMIT ?")
+      .bind(nowIso, safeLimit)
       .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>();
     return result.results;
   }
 
-  // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
-  // rows past their expiry flip to EXPIRED. LINK_CREATED is included so an
-  // abandoned checkout (link minted, donor never paid) does not sit unexpired
-  // forever. Filters on (status, expires_at) — the index added in 0009.
-  async expireUnpaidIntentsBefore(nowIso: string): Promise<void> {
+  // Marks only the bounded page the cron sweep just snapshotted as EXPIRED, so link
+  // deactivation and status expiry stay in the same capped unit of work and a later
+  // tick can continue from rows this one did not process.
+  async expireDonationIntentsByIds(ids: string[], updatedAt: string): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const placeholders = ids.map(() => "?").join(", ");
     await this.db
-      .prepare("UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
-      .bind(nowIso, nowIso)
+      .prepare(`UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND id IN (${placeholders})`)
+      .bind(updatedAt, ...ids)
       .run();
   }
 
@@ -292,9 +323,19 @@ export class Repository {
   // status. The donante shown in the panel comes from the document (lifted from the
   // webhook), since the intent no longer stores name/email.
   async listRecentDonationIntents(limit = 50): Promise<DonationIntentListItem[]> {
+    // Least privilege: allowlist only the columns the admin "Donaciones en línea" panel
+    // renders (status, tipo, amount, donante-from-document, numero de control, fecha).
+    // A prior `SELECT donation_intents.*` shipped donor PII (donor_document, donor_email),
+    // the client IP, and the Wompi payment-link URLs to the browser even though nothing
+    // renders them.
     const rows = await this.db
       .prepare(
-        `SELECT donation_intents.*,
+        `SELECT donation_intents.id,
+                donation_intents.status,
+                donation_intents.amount_cents,
+                donation_intents.document_id,
+                donation_intents.gift_type,
+                donation_intents.created_at,
                 dte_documents.numero_control AS numero_control,
                 dte_documents.donor_name AS document_donor_name
          FROM donation_intents
@@ -397,8 +438,16 @@ export class Repository {
       // un SIGNED transitorio de pipeline (sin marcador) queda fuera a propósito.
       filters.push("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL");
     } else if (params.status) {
-      filters.push("dte_documents.status = ?");
-      bindings.push(params.status);
+      // Accept a comma-separated status list (e.g. the Fallos view's "FAILED,REJECTED")
+      // as a multi-status IN filter, while a single status keeps the equality clause.
+      const statuses = params.status.split(",").map((status) => status.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        filters.push("dte_documents.status = ?");
+        bindings.push(statuses[0]);
+      } else if (statuses.length > 1) {
+        filters.push(`dte_documents.status IN (${statuses.map(() => "?").join(", ")})`);
+        bindings.push(...statuses);
+      }
     }
     const ftsQuery = buildDteSearchQuery(params.q);
     if (ftsQuery) {
@@ -664,16 +713,33 @@ export class Repository {
       .run();
   }
 
-  async replaceDocumentPayload(id: string, input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null; status: string }): Promise<void> {
-    await this.db
+  // CAS claim for an operator rebuild of a REJECTED Wompi CDE. Atomically writes the
+  // freshly rebuilt payload + signature and moves the row REJECTED → SIGNED, clearing
+  // the stale MH verdict in the same statement. Guarded on status = 'REJECTED', so two
+  // concurrent retries can never both proceed: the loser matches 0 rows and gets false,
+  // so it never transmits a second legal DTE for the same Wompi event and can never
+  // leave the stored payload describing a different document than the recorded MH
+  // result. Returns true only for the retry that won the claim.
+  async claimRejectedWompiRebuild(
+    id: string,
+    wompiEventId: string,
+    input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null }
+  ): Promise<boolean> {
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?, status = ?, updated_at = ?
-         WHERE id = ?`
+         SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?,
+             status = 'SIGNED', sello_recibido = NULL, mh_estado = NULL, mh_observaciones_json = '[]', updated_at = ?
+         WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
+         RETURNING id`
       )
-      .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, input.status, nowIso(), id)
-      .run();
+      .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, nowIso(), id, wompiEventId)
+      .first<{ id: string }>();
+    if (!row) {
+      return false;
+    }
     await this.indexDteDocumentById(id);
+    return true;
   }
 
   async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
@@ -817,7 +883,7 @@ export class Repository {
         )
         .bind(entityType, entityId)
         .all<Record<string, unknown>>()
-        .then((result) => result.results ?? []);
+        .then((result) => redactSensitiveAuditRows(result.results ?? []));
     }
     return this.db
       .prepare(
@@ -826,7 +892,7 @@ export class Repository {
          ORDER BY a.created_at DESC LIMIT 100`
       )
       .all<Record<string, unknown>>()
-      .then((result) => result.results ?? []);
+      .then((result) => redactSensitiveAuditRows(result.results ?? []));
   }
 
   // Página del historial general de auditoría: keyset (created_at, id) DESC — el mismo
@@ -845,7 +911,7 @@ export class Repository {
       )
       .bind(...bindings, bounded + 1)
       .all<Record<string, unknown>>()
-      .then((result) => result.results ?? []);
+      .then((result) => redactSensitiveAuditRows(result.results ?? []));
   }
 
   async createDteEvent(input: {
@@ -1012,6 +1078,13 @@ export class Repository {
       .run();
   }
 
+  // Rol del usuario objetivo para los guards de gestión de usuarios (un ADMIN nunca
+  // toca a un OWNER). Null cuando el usuario no existe.
+  async getUserRole(id: string): Promise<string | null> {
+    const row = await this.db.prepare("SELECT role FROM users WHERE id = ?").bind(id).first<{ role: string }>();
+    return row?.role ?? null;
+  }
+
   async listUsers(): Promise<Array<Record<string, unknown>>> {
     return this.db
       .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT 100")
@@ -1131,6 +1204,17 @@ export class Repository {
     return Number(row?.count ?? 0);
   }
 
+  // Same rolling-window count as above, but additionally scoped to the caller's IP
+  // (null-safe via IS). Used by the login throttle so an attacker cannot lock out a
+  // victim's email by seeding failures from a different address.
+  async countAuditEntriesSinceForIp(action: string, entityId: string, actorIp: string | null, sinceIso: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ? AND created_at >= ? AND actor_ip IS ?")
+      .bind(action, entityId, sinceIso, actorIp)
+      .first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
   // Paged reads for the monthly legal-retention export (Task 1). Each call reads at
   // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged
@@ -1213,6 +1297,15 @@ export class Repository {
       .bind(passwordHash, passwordSalt, nowIso(), userId)
       .run();
     await this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(nowIso(), userId).run();
+  }
+
+  // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does
+  // NOT revoke sessions — the credential is unchanged, only its stored encoding.
+  async updateUserPasswordHash(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
+      .bind(passwordHash, passwordSalt, nowIso(), userId)
+      .run();
   }
 }
 
