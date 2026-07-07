@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
@@ -635,14 +639,32 @@ describe("donation intents", () => {
     }
   });
 
-  it("returns only the status for a known intent id", async () => {
+  it("returns the status and paid flag for a known intent id", async () => {
     const db = new InMemoryD1();
-    db.donationIntents.push({ id: "di_known", status: "LINK_CREATED", donor_name: "Secreto", donor_document: "10000001-9" });
+    db.donationIntents.push({ id: "di_known", status: "LINK_CREATED", donor_name: "Secreto", donor_document: "10000001-9", paid_at: null });
 
     const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_known/status"), env(db));
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED" });
+    // Backward-compatible: status unchanged, paid added. Unpaid intent → paid:false.
+    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED", paid: false });
+  });
+
+  it("reports paid:true once paid_at is stamped (donor thanks keys on payment, not MH acceptance)", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_paidflag",
+      status: "LINK_CREATED",
+      donor_name: "Secreto",
+      donor_document: "10000001-9",
+      paid_at: "2026-07-04T12:30:00.000Z"
+    });
+
+    const response = await worker.fetch(new Request("https://example.org/api/donations/intent/di_paidflag/status"), env(db));
+
+    expect(response.status).toBe(200);
+    // Status is still LINK_CREATED (CDE not yet accepted) but the donor already paid.
+    await expect(response.json()).resolves.toEqual({ status: "LINK_CREATED", paid: true });
   });
 
   it("returns 404 for an unknown intent id", async () => {
@@ -2480,6 +2502,260 @@ describe("F960 CSV export", () => {
   });
 });
 
+describe("CRM contacts export", () => {
+  function seedWompiDonor(
+    db: InMemoryD1,
+    document: Partial<DteDocumentRecord>,
+    intent?: Record<string, unknown>
+  ): void {
+    const doc = testDocument({ wompi_event_id: `wompi_${document.id}`, ...document });
+    db.documents.push(doc);
+    if (intent) {
+      db.donationIntents.push({
+        id: `intent_${doc.id}`,
+        status: "COMPLETED",
+        document_id: doc.id,
+        created_at: doc.issued_at,
+        donor_phone: null,
+        direccion_complemento: null,
+        direccion_departamento: null,
+        donor_pais: null,
+        gift_type: null,
+        ...intent
+      });
+    }
+  }
+
+  it("returns a BOM-prefixed CSV of unique Wompi-lane donors for the requested ambiente", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      {
+        id: "doc_ana",
+        environment: "01",
+        donor_email: "ana@example.org",
+        donor_name: "Ana",
+        amount_cents: 5000,
+        issued_at: "2026-02-01T18:00:00.000Z"
+      },
+      {
+        donor_phone: "70000001",
+        direccion_complemento: "Calle Nueva",
+        direccion_departamento: "06",
+        gift_type: "DIEZMO"
+      }
+    );
+    // Excluded: production filter (this doc is ambiente 00).
+    seedWompiDonor(db, {
+      id: "doc_other_env",
+      environment: "00",
+      donor_email: "test@example.org",
+      donor_name: "Test",
+      issued_at: "2026-02-02T18:00:00.000Z"
+    });
+    // Excluded: not a Wompi-lane document (no wompi_event_id).
+    seedWompiDonor(db, {
+      id: "doc_manual",
+      environment: "01",
+      wompi_event_id: null,
+      donor_email: "manual@example.org",
+      donor_name: "Manual",
+      issued_at: "2026-02-03T18:00:00.000Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="contactos-donantes-01-1.csv"');
+    // Response.text() strips a leading BOM per spec, so assert the BOM on raw bytes.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]);
+    const csv = new TextDecoder("utf-8").decode(bytes).replace(/^﻿/, "");
+    const rows = csv.split("\r\n");
+    expect(rows[0]).toBe("nombre,correo,telefono,direccion,departamento,pais,primera_donacion,ultima_donacion,total_donado_usd,numero_donaciones,tipo_preferido");
+    expect(rows[1]).toBe("Ana,ana@example.org,70000001,Calle Nueva,San Salvador,El Salvador,2026-02-01,2026-02-01,50.00,1,Diezmo");
+    // Only the single ambiente-01 Wompi-lane donor.
+    expect(rows.filter((row) => row.length > 0)).toHaveLength(2);
+  });
+
+  it("records a CONTACTS_EXPORTED audit with the count and environment but no PII", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_ana", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", issued_at: "2026-02-01T18:00:00.000Z" },
+      { donor_phone: "70000001", gift_type: "DIEZMO" }
+    );
+
+    await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    const audit = db.audits.find((row) => row.action === "CONTACTS_EXPORTED");
+    expect(audit).toBeDefined();
+    expect(audit!.entity_type).toBe("export");
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({ environment: "01", contacts: 1 });
+    const serialized = JSON.stringify(audit);
+    expect(serialized).not.toContain("ana@example.org");
+    expect(serialized).not.toContain("70000001");
+    expect(serialized).not.toContain("Ana");
+  });
+
+  it("rejects a missing or invalid environment", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_export_environment" });
+  });
+
+  it("requires an admin role (viewer and operator are rejected)", async () => {
+    for (const role of ["VIEWER", "OPERATOR"]) {
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_x", email: "x@example.org", name: "X", role };
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/exports/contacts?environment=01", {
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(403);
+    }
+  });
+
+  it("restricts the export to a from/to date window (El Salvador local, inclusive)", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    // Before the window (2024) and inside the window (2025-06).
+    seedWompiDonor(
+      db,
+      { id: "doc_old", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 1000, issued_at: "2024-06-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+    seedWompiDonor(
+      db,
+      { id: "doc_in", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 5000, issued_at: "2025-06-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-01-01&to=2025-12-31", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await response.arrayBuffer())).replace(/^﻿/, "");
+    const rows = csv.split("\r\n").filter((row) => row.length > 0);
+    // Header + one donor; the 2025 donation is the only one counted (total 50.00).
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain("50.00");
+    expect(rows[1]).not.toContain("60.00");
+  });
+
+  it("filters counted donations by giftType and drops donors with none", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_diez", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 3000, issued_at: "2026-02-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+    seedWompiDonor(
+      db,
+      { id: "doc_ofr", environment: "01", donor_email: "beto@example.org", donor_name: "Beto", amount_cents: 4000, issued_at: "2026-02-02T18:00:00.000Z" },
+      { gift_type: "OFRENDA" }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&giftType=DIEZMO", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await response.arrayBuffer())).replace(/^﻿/, "");
+    const rows = csv.split("\r\n").filter((row) => row.length > 0);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain("Ana");
+    expect(csv).not.toContain("Beto");
+  });
+
+  it("emits only the requested columns and rejects an unknown column name with 400 Spanish", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_ana", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 5000, issued_at: "2026-02-01T18:00:00.000Z" },
+      { donor_phone: "70000001", gift_type: "DIEZMO" }
+    );
+
+    const ok = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&columns=nombre,correo", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(ok.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await ok.arrayBuffer())).replace(/^﻿/, "");
+    expect(csv.split("\r\n")[0]).toBe("nombre,correo");
+
+    const bad = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&columns=nombre,inventada", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(bad.status).toBe(400);
+    const body = (await bad.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_export_columns");
+    expect(body.message).toContain("inventada");
+  });
+
+  it("rejects a malformed or inverted date range with 400", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const inverted = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-12-31&to=2025-01-01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(inverted.status).toBe(400);
+    await expect(inverted.json()).resolves.toMatchObject({ error: "invalid_export_range" });
+
+    const malformed = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-1-1&to=2025-12-31", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(malformed.status).toBe(400);
+  });
+});
+
 describe("annual donor certificates", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-05T12:00:00.000Z") });
@@ -2563,6 +2839,36 @@ describe("annual donor certificates", () => {
     expect(ana).toMatchObject({ hasEmail: true, count: 2, totalLabel: "$100.01" });
     const sinCorreo = body.donors.find((donor) => donor.donorName === "Sin Correo");
     expect(sinCorreo).toMatchObject({ hasEmail: false, count: 1 });
+    // Search metadata present even without a query: full-year match set, not truncated.
+    expect(body).toMatchObject({ matchCount: 2, truncated: false });
+  });
+
+  it("filters the preview donors by q while keeping the full-year summary", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    // "ana" (no accent) matches the "Ana" donor via deaccented, case-insensitive compare.
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual?year=2025&q=ana", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      donorCount: number;
+      withEmail: number;
+      matchCount: number;
+      truncated: boolean;
+      donors: Array<{ donorName: string }>;
+    };
+    // Summary spans the whole year regardless of the filter.
+    expect(body.donorCount).toBe(2);
+    expect(body.withEmail).toBe(1);
+    // Only the matching donor is listed.
+    expect(body.matchCount).toBe(1);
+    expect(body.truncated).toBe(false);
+    expect(body.donors.map((donor) => donor.donorName)).toEqual(["Ana"]);
   });
 
   it("rejects future years", async () => {
@@ -2682,6 +2988,128 @@ describe("annual donor certificates", () => {
     );
 
     expect(response.status).toBe(403);
+  });
+
+  it("attaches a complete dossier: summary page plus every accepted DTE", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    const sent: Array<{ attachments?: Array<{ content: Uint8Array }> }> = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message as { attachments?: Array<{ content: Uint8Array }> });
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const pdfBytes = sent[0]?.attachments?.[0]?.content;
+    expect(pdfBytes).toBeDefined();
+    // Ana has 2 accepted donations → 1 summary page + 2 DTE pages.
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-dossier-send-"));
+    const pdfPath = join(dir, "dossier.pdf");
+    writeFileSync(pdfPath, pdfBytes!);
+    const info = execFileSync("pdfinfo", [pdfPath], { encoding: "utf8" });
+    expect(Number(info.match(/Pages:\s+(\d+)/)?.[1] ?? 0)).toBe(3);
+  });
+
+  it("sends only the named donor when the request body identifies one, ignoring the sent-dedupe", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+    // A prior send would normally dedupe Ana away — an explicit single send must resend.
+    db.audits.push({
+      id: "audit_prior",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "DONOR_CERTIFICATE_SENT",
+      entity_type: "donor_certificate",
+      entity_id: "2025:ana@example.org",
+      summary: "prior send",
+      created_at: "2026-07-01T00:00:00.000Z"
+    });
+    const sent: Array<{ to: string }> = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "ana@example.org" })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+        EMAIL: {
+          send: async (message: unknown) => {
+            sent.push(message as { to: string });
+            return { messageId: "cf-cert" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ year: 2025, sent: 1, skipped: 0, failed: 0 });
+    expect(sent.map((message) => message.to)).toEqual(["ana@example.org"]);
+    // Audited as a single send.
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({
+        action: "DONOR_CERTIFICATE_SENT",
+        entity_id: "2025:ana@example.org",
+        metadata_json: expect.stringContaining("\"mode\":\"single\"")
+      })
+    );
+  });
+
+  it("returns 404 with a Spanish message when the named donor is not in the year's aggregation", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "nadie@example.org" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(404);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toMatch(/no (se encontró|tiene)/i);
+  });
+
+  it("returns 400 with a Spanish message when the named donor has no email", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual/send?year=2025", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ donor: "Sin Correo" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toMatch(/correo/i);
   });
 });
 
@@ -3163,6 +3591,212 @@ describe("Wompi webhook integration", () => {
     expect(db.wompiEvents).toHaveLength(0);
     expect(queued).toHaveLength(0);
   });
+
+  it("marks the correlated intent paid_at when an approved di_ webhook arrives", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_paidmark",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_paid_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_paidmark"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.paid_at).toBeTruthy();
+    // The payment marker never advances the intent status — COMPLETED still means MH
+    // accepted the CDE, which only the pipeline sets.
+    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.status).toBe("LINK_CREATED");
+  });
+
+  it("also correlates paid_at from EnlacePago.IdentificadorEnlaceComercio when IdExterno is absent", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_enlacepaid",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_enlace_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      enlacePago: { IdentificadorEnlaceComercio: "di_enlacepaid" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.donationIntents.find((row) => row.id === "di_enlacepaid")?.paid_at).toBeTruthy();
+  });
+
+  it("does not change paid_at on a replayed webhook for an already-paid intent", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_replay",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: "2026-07-04T12:30:00.000Z"
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_replay_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_replay"
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    // markIntentPaid is idempotent (WHERE paid_at IS NULL): the first stamp stands.
+    expect(db.donationIntents.find((row) => row.id === "di_replay")?.paid_at).toBe("2026-07-04T12:30:00.000Z");
+  });
+
+  it("leaves non-intent (legacy static-link) webhooks unaffected — no intent, no error", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_legacy_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      enlacePago: { IdentificadorEnlaceComercio: "DONACION-123" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    // Still processed and queued; nothing to mark paid, no crash.
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ inserted: true, queued: true });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("never lets a paid-marker failure (unknown di_ intent) break webhook processing", async () => {
+    const db = new InMemoryD1();
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    // A di_ id that has no matching intent row — the marker must no-op, not 500.
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_orphan_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_does_not_exist"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({ inserted: true });
+    expect(db.wompiEvents).toHaveLength(1);
+  });
+
+  it("does not mark paid_at for a declined di_ webhook", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_declined",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_declined_tx_1",
+      ResultadoTransaccion: "Rechazada",
+      EsProductiva: false,
+      IdExterno: "di_declined"
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(db.donationIntents.find((row) => row.id === "di_declined")?.paid_at ?? null).toBeNull();
+  });
 });
 
 describe("donation intent correlation", () => {
@@ -3344,7 +3978,7 @@ describe("donation intent correlation", () => {
     });
   });
 
-  it("marks a foreign intent's receptor non-domiciled with the intent país and 00 geography", async () => {
+  it("marks a foreign intent's receptor non-domiciled with the intent país and a null direccion", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, {
       direccion_departamento: "00",
@@ -3359,16 +3993,10 @@ describe("donation intent correlation", () => {
 
     expect(record?.status).toBe("ACCEPTED");
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({
-      codPais: "US",
-      codDomiciliado: 2,
-      direccion: {
-        departamento: "00",
-        municipio: "00",
-        distrito: "00",
-        complemento: "742 Evergreen Terrace, Springfield"
-      }
-    });
+    // MH rejects ANY direccion object for a non-domiciled receptor (00/00/00 AND a
+    // valid SV geography both fail codigoMsg 096, verified live): direccion is null,
+    // the país rides in codPais, and the foreign address stays on the intent record.
+    expect(cde.receptor).toMatchObject({ codPais: "US", codDomiciliado: 2, direccion: null });
   });
 
   it("falls back to the webhook Celular when the intent has no phone", async () => {
@@ -3961,6 +4589,61 @@ describe("deferred transmission when MH is unavailable", () => {
   });
 });
 
+describe("audit pagination", () => {
+  it("pages the audit list by keyset cursor with a stable order", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    for (let i = 0; i < 7; i++) {
+      db.audits.push({
+        id: `audit_${String(i).padStart(3, "0")}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "DTE_ACCEPTED",
+        entity_type: "dte_document",
+        entity_id: `doc_${i}`,
+        summary: `fila ${i}`,
+        metadata_json: "{}",
+        actor_ip: null,
+        actor_context: null,
+        created_at: `2026-07-0${(i % 7) + 1}T10:00:00.000Z`
+      });
+    }
+
+    const first = await worker.fetch(
+      new Request("https://example.org/api/audit?limit=3", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(first.status).toBe(200);
+    const page1 = (await first.json()) as { audit: Array<{ id: string; created_at: string }>; nextCursor: string | null };
+    expect(page1.audit).toHaveLength(3);
+    expect(page1.nextCursor).not.toBeNull();
+    // Newest first.
+    expect(page1.audit[0].created_at >= page1.audit[1].created_at).toBe(true);
+
+    const second = await worker.fetch(
+      new Request(`https://example.org/api/audit?limit=3&cursor=${encodeURIComponent(page1.nextCursor!)}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const page2 = (await second.json()) as { audit: Array<{ id: string }>; nextCursor: string | null };
+    expect(page2.audit).toHaveLength(3);
+    // No overlap between pages.
+    const ids1 = new Set(page1.audit.map((row) => row.id));
+    expect(page2.audit.every((row) => !ids1.has(row.id))).toBe(true);
+
+    const third = await worker.fetch(
+      new Request(`https://example.org/api/audit?limit=3&cursor=${encodeURIComponent(page2.nextCursor!)}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const page3 = (await third.json()) as { audit: Array<{ id: string }>; nextCursor: string | null };
+    expect(page3.audit).toHaveLength(1);
+    expect(page3.nextCursor).toBeNull();
+  });
+});
+
 describe("pipeline failure alerts", () => {
   it("sends an operational alert when a Wompi-triggered DTE fails", async () => {
     const db = new InMemoryD1();
@@ -4376,6 +5059,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 2026-07-11
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -4405,6 +5093,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000); // already expired 5 days ago
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -4432,6 +5125,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 10 days out: crosses 30 and 14 thresholds, not 3
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     const scheduledEnv = env(db, {
@@ -4465,6 +5163,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
     const sentAlerts: unknown[] = [];
     const scheduledEnv = env(db, {
@@ -4484,6 +5187,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const oldExpiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
     db.audits.push({
       id: "audit_prior_alert",
@@ -5105,6 +5813,76 @@ describe("admin backups panel", () => {
 
     expect(response.status).toBe(404);
   });
+
+  it("streams a full-month ZIP of every archived object plus the manifest and audits the download", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 2, body: "line1\nline2\n" },
+      audit_logs: { rowCount: 1, body: "audit\n" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/zip");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="respaldo-2026-04.zip"');
+
+    // Round-trip the streamed ZIP through the system unzip binary (same pattern as
+    // pdf.test.ts shelling out to poppler) to prove listing + exact content.
+    const zipBytes = new Uint8Array(await response.arrayBuffer());
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-backup-zip-"));
+    const zipPath = join(dir, "respaldo.zip");
+    writeFileSync(zipPath, zipBytes);
+    const listing = execFileSync("unzip", ["-t", zipPath], { encoding: "utf8" });
+    expect(listing).toContain("manifest.json");
+    expect(listing).toContain("dte_documents.ndjson");
+    expect(listing).toContain("audit_logs.ndjson");
+    expect(listing).toContain("No errors detected");
+    expect(execFileSync("unzip", ["-p", zipPath, "dte_documents.ndjson"], { encoding: "utf8" })).toBe("line1\nline2\n");
+    expect(execFileSync("unzip", ["-p", zipPath, "audit_logs.ndjson"], { encoding: "utf8" })).toBe("audit\n");
+
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_DOWNLOADED", entity_type: "retention_export", entity_id: "2026-04" })
+    );
+    const audit = db.audits.find((row) => row.action === "RETENTION_DOWNLOADED");
+    expect(JSON.parse(String(audit!.metadata_json))).toMatchObject({ month: "2026-04", table: "__all__" });
+  });
+
+  it("returns 404 for a full-month download of a month without an archive", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("rejects a VIEWER full-month download with 403", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
 });
 
 describe("audit actor context", () => {
@@ -5283,6 +6061,412 @@ describe("audit actor context", () => {
   });
 });
 
+describe("branding", () => {
+  function ownerDb(): InMemoryD1 {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    return db;
+  }
+
+  function authed(role: string): InMemoryD1 {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: `user_${role.toLowerCase()}`, email: `${role.toLowerCase()}@example.org`, name: role, role };
+    return db;
+  }
+
+  it("returns the defaults for the public branding endpoint before anything is set", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/branding"), env(db));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      displayName: "ExamplePerson1",
+      accentColor: "#0f766e",
+      supportEmail: "legacy-contact-1@example.com",
+      logoVersion: null
+    });
+  });
+
+  it("reflects a saved name and color on the public branding endpoint", async () => {
+    const db = ownerDb();
+    const put = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "  Iglesia Central  ", accentColor: "#123ABC", supportEmail: "  legacy-email-119@example.com " })
+      }),
+      env(db)
+    );
+    expect(put.status).toBe(200);
+    await expect(put.json()).resolves.toMatchObject({
+      ok: true,
+      displayName: "Iglesia Central",
+      accentColor: "#123abc",
+      supportEmail: "legacy-email-119@example.com"
+    });
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_UPDATED", entity_type: "app_setting" });
+
+    const response = await worker.fetch(new Request("https://example.org/api/branding"), env(db));
+    await expect(response.json()).resolves.toMatchObject({
+      displayName: "Iglesia Central",
+      accentColor: "#123abc",
+      supportEmail: "legacy-email-119@example.com",
+      logoVersion: null
+    });
+  });
+
+  it("carries the support email in the branding audit metadata", async () => {
+    const db = ownerDb();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia Central", accentColor: "#123abc", supportEmail: "legacy-email-119@example.com" })
+      }),
+      env(db)
+    );
+    const audit = db.audits.at(-1) as { action: string; metadata_json?: string };
+    expect(audit.action).toBe("BRANDING_UPDATED");
+    expect(String(audit.metadata_json)).toContain("legacy-email-119@example.com");
+  });
+
+  it("rejects a malformed support email with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e", supportEmail: "no-arroba" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_branding");
+    expect(body.message).toContain("correo");
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects a bad hex color with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#zzz" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_branding");
+    expect(body.message).toContain("color");
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects an empty name with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "   ", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding" });
+  });
+
+  it("rejects an 81-character name", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "a".repeat(81), accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding" });
+  });
+
+  it("forbids a VIEWER from writing branding", async () => {
+    const db = authed("VIEWER");
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("forbids an OPERATOR from writing branding", async () => {
+    const db = authed("OPERATOR");
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(403);
+  });
+
+  it("requires a session to write branding", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(401);
+  });
+
+  const logoCases: Array<{ contentType: string; ext: string }> = [
+    { contentType: "image/svg+xml", ext: "svg" },
+    { contentType: "image/png", ext: "png" },
+    { contentType: "image/jpeg", ext: "jpg" }
+  ];
+
+  for (const { contentType } of logoCases) {
+    it(`stores a ${contentType} logo and serves it with hardening headers`, async () => {
+      const db = ownerDb();
+      const archive = new FakeArchiveBucket();
+      const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+
+      const put = await worker.fetch(
+        new Request("https://example.org/api/settings/branding/logo", {
+          method: "PUT",
+          headers: { Authorization: "Bearer test-token", "Content-Type": contentType },
+          body: bytes
+        }),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      expect(put.status).toBe(200);
+      const putBody = (await put.json()) as { ok: boolean; logoVersion: string };
+      expect(putBody.ok).toBe(true);
+      expect(putBody.logoVersion).toBeTruthy();
+      expect(archive.putCalls.at(-1)?.key).toBe("branding/logo");
+      expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_LOGO_UPDATED" });
+
+      const publicBranding = await worker.fetch(
+        new Request("https://example.org/api/branding"),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: putBody.logoVersion });
+
+      const logo = await worker.fetch(
+        new Request("https://example.org/api/branding/logo"),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+      expect(logo.status).toBe(200);
+      expect(logo.headers.get("Content-Type")).toBe(contentType);
+      expect(logo.headers.get("Cache-Control")).toBe("public, max-age=300");
+      expect(logo.headers.get("X-Content-Type-Options")).toBe("nosniff");
+      expect(logo.headers.get("Content-Security-Policy")).toBe("script-src 'none'; default-src 'none'; style-src 'unsafe-inline'");
+      await expect(logo.arrayBuffer()).resolves.toEqual(bytes.buffer);
+    });
+  }
+
+  it("rejects a logo upload with an unsupported content type", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/gif" },
+        body: new Uint8Array([1, 2, 3])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding_logo" });
+    expect(archive.putCalls).toHaveLength(0);
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects a logo upload larger than 512 KB", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const bytes = new Uint8Array(512 * 1024 + 1);
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: bytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding_logo" });
+    expect(archive.putCalls).toHaveLength(0);
+  });
+
+  it("returns 404 for the logo stream when none is stored", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/branding/logo"), env(db));
+    expect(response.status).toBe(404);
+  });
+
+  it("removes a stored logo and records an audit", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([9, 9, 9])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    const remove = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(remove.status).toBe(200);
+    await expect(remove.json()).resolves.toMatchObject({ ok: true });
+    expect(archive.deleteCalls).toContain("branding/logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_LOGO_REMOVED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: null });
+  });
+
+  it("forbids a non-owner from uploading a logo", async () => {
+    const db = authed("ADMIN");
+    const archive = new FakeArchiveBucket();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([1, 2, 3])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(response.status).toBe(403);
+    expect(archive.putCalls).toHaveLength(0);
+  });
+});
+
+describe("analytics endpoint (Wompi lane)", () => {
+  it("requires a session (401 without a token)", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/analytics"), env(db));
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects a malformed date range", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-13-40&to=2026-01-01", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_analytics_range" });
+  });
+
+  it("aggregates the Wompi lane and excludes manually issued CDEs by design", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // Wompi-lane accepted doc (environment 00).
+    db.documents.push(
+      testDocument({
+        id: "doc_wompi",
+        wompi_event_id: "wompi_lane",
+        environment: "00",
+        status: "ACCEPTED",
+        donor_email: "lane@example.org",
+        donor_name: "Lane Donor",
+        amount_cents: 5000,
+        issued_at: "2026-06-10T18:00:00.000Z",
+        accepted_at: "2026-06-10T18:00:20.000Z"
+      }),
+      // Manually issued CDE (no wompi_event_id) — must NOT appear in any total.
+      testDocument({
+        id: "doc_manual",
+        wompi_event_id: null,
+        environment: "00",
+        status: "ACCEPTED",
+        donor_email: "manual@example.org",
+        amount_cents: 999999,
+        issued_at: "2026-06-11T18:00:00.000Z"
+      })
+    );
+    db.donationIntents.push({
+      id: "di_lane",
+      status: "COMPLETED",
+      document_id: "doc_wompi",
+      donor_document: "DUI-1",
+      gift_type: "DIEZMO",
+      direccion_departamento: "06",
+      donor_pais: null,
+      created_at: "2026-06-10T17:50:00.000Z",
+      paid_at: "2026-06-10T17:55:00.000Z"
+    });
+    db.emailDeliveries.push({ id: "em_1", document_id: "doc_wompi", status: "SENT", created_at: "2026-06-10T18:01:00.000Z" });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { analytics: Record<string, any> };
+    const analytics = body.analytics;
+    expect(analytics.environment).toBe("00");
+    expect(analytics.hasData).toBe(true);
+    // Only the Wompi-lane doc counts (the 999999 manual CDE is excluded).
+    const june = analytics.giving.monthly.find((point: any) => point.key === "2026-06");
+    expect(june).toMatchObject({ totalCents: 5000, count: 1 });
+    // Gift split routes it to Diezmo via the correlated intent.
+    expect(analytics.giving.giftSplit.find((point: any) => point.key === "2026-06")?.diezmoCents).toBe(5000);
+    // Geography buckets it under department 06.
+    expect(analytics.geography.departments.find((row: any) => row.code === "06")?.count).toBe(1);
+    // Funnel + email pick up the lane intent and delivery.
+    expect(analytics.funnel).toMatchObject({ created: 1, datos: 1, paid: 1, completed: 1 });
+    expect(analytics.email.weekly.reduce((sum: number, point: any) => sum + point.sent, 0)).toBe(1);
+    // Top donors never leak numero de control.
+    expect(JSON.stringify(analytics.giving.topDonors)).not.toContain("numero_control");
+  });
+
+  it("scopes every metric to the requested ambiente", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({ id: "doc_00", wompi_event_id: "w00", environment: "00", amount_cents: 1000, issued_at: "2026-06-10T18:00:00.000Z" }),
+      testDocument({ id: "doc_01", wompi_event_id: "w01", environment: "01", amount_cents: 8000, issued_at: "2026-06-10T18:00:00.000Z" })
+    );
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const body = (await response.json()) as { analytics: Record<string, any> };
+    const june = body.analytics.giving.monthly.find((point: any) => point.key === "2026-06");
+    // Only the 01 doc is counted; the 00 doc is invisible in this ambiente.
+    expect(june).toMatchObject({ totalCents: 8000, count: 1 });
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -5317,14 +6501,25 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
 // directly but still need a well-typed ARCHIVE binding on Env.
 class FakeArchiveBucket {
   readonly objects = new Map<string, Uint8Array>();
+  readonly contentTypes = new Map<string, string>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
   readonly headCalls: string[] = [];
+  readonly deleteCalls: string[] = [];
 
-  async put(key: string, value: unknown): Promise<R2Object> {
+  async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
     const bytes = value instanceof Uint8Array ? value : utf8Bytes(String(value));
     this.objects.set(key, bytes);
+    if (options?.httpMetadata?.contentType) {
+      this.contentTypes.set(key, options.httpMetadata.contentType);
+    }
     this.putCalls.push({ key, bytes });
     return { key } as R2Object;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    this.objects.delete(key);
+    this.contentTypes.delete(key);
   }
 
   async head(key: string): Promise<R2Object | null> {
@@ -5339,9 +6534,12 @@ class FakeArchiveBucket {
     }
     // The backups service consumes get() via arrayBuffer(); expose exactly that,
     // plus a body stream so a downloaded response can be streamed like production R2.
+    // httpMetadata carries the stored content type back to the branding logo route.
     return {
       key,
       body: new Response(bytes).body,
+      size: bytes.byteLength,
+      httpMetadata: this.contentTypes.has(key) ? { contentType: this.contentTypes.get(key) } : {},
       arrayBuffer: async () =>
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
     } as unknown as R2ObjectBody;
@@ -5491,6 +6689,106 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    // ----- Analítica (carril Wompi) -----
+    // Documentos: dte_documents con wompi_event_id, LEFT JOIN a donation_intents por
+    // document_id, filtrado por environment + ventana issued_at, paginado por (issued_at, id).
+    if (this.sql.includes("FROM dte_documents d") && this.sql.includes("LEFT JOIN donation_intents i") && this.sql.includes("d.wompi_event_id IS NOT NULL")) {
+      const [environment, startIso, endIso] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          String(document.issued_at) >= startIso &&
+          String(document.issued_at) < endIso
+      );
+      if (this.sql.includes("(d.issued_at, d.id) > (?, ?)")) {
+        const [afterIssued, afterId] = [String(this.args[3]), String(this.args[4])];
+        documents = documents.filter(
+          (document) => String(document.issued_at) > afterIssued || (String(document.issued_at) === afterIssued && String(document.id) > afterId)
+        );
+      }
+      documents.sort((left, right) => String(left.issued_at).localeCompare(String(right.issued_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = documents.slice(0, limit).map((document) => {
+        const intent = this.db.donationIntents.find((candidate) => candidate.document_id === document.id);
+        return {
+          id: document.id,
+          wompi_event_id: document.wompi_event_id,
+          environment: document.environment,
+          status: document.status,
+          donor_email: document.donor_email ?? null,
+          donor_name: document.donor_name ?? null,
+          amount_cents: document.amount_cents,
+          issued_at: document.issued_at,
+          accepted_at: document.accepted_at ?? null,
+          transmission_deferred_at: document.transmission_deferred_at ?? null,
+          direccion_departamento: intent?.direccion_departamento ?? null,
+          donor_pais: intent?.donor_pais ?? null,
+          gift_type: intent?.gift_type ?? null
+        };
+      });
+      return { results: rows as T[] };
+    }
+    // Intents: donation_intents LEFT JOIN dte_documents, filtrado por ventana created_at
+    // y (documento en el ambiente O sin documento). Distinguible por la proyección de
+    // i.direccion_departamento.
+    if (this.sql.includes("FROM donation_intents i") && this.sql.includes("i.direccion_departamento AS direccion_departamento") && this.sql.includes("LEFT JOIN dte_documents d")) {
+      const [startIso, endIso, environment] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let intents = this.db.donationIntents.filter((intent) => String(intent.created_at) >= startIso && String(intent.created_at) < endIso);
+      intents = intents.filter((intent) => {
+        const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
+        return document ? document.environment === environment : true;
+      });
+      if (this.sql.includes("(i.created_at, i.id) > (?, ?)")) {
+        const [afterCreated, afterId] = [String(this.args[3]), String(this.args[4])];
+        intents = intents.filter(
+          (intent) => String(intent.created_at) > afterCreated || (String(intent.created_at) === afterCreated && String(intent.id) > afterId)
+        );
+      }
+      intents.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = intents.slice(0, limit).map((intent) => ({
+        id: intent.id,
+        status: intent.status,
+        document_id: intent.document_id ?? null,
+        donor_document: intent.donor_document ?? null,
+        gift_type: intent.gift_type ?? null,
+        created_at: intent.created_at,
+        paid_at: intent.paid_at ?? null,
+        direccion_departamento: intent.direccion_departamento ?? null,
+        donor_pais: intent.donor_pais ?? null
+      }));
+      return { results: rows as T[] };
+    }
+    // Emails: email_deliveries JOIN dte_documents (carril Wompi + environment), ventana created_at.
+    if (this.sql.includes("FROM email_deliveries e") && this.sql.includes("JOIN dte_documents d")) {
+      const [startIso, endIso, environment] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let deliveries = this.db.emailDeliveries.filter((delivery) => {
+        const document = this.db.documents.find((candidate) => candidate.id === delivery.document_id);
+        return (
+          document != null &&
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          String(delivery.created_at) >= startIso &&
+          String(delivery.created_at) < endIso
+        );
+      });
+      if (this.sql.includes("(e.created_at, e.id) > (?, ?)")) {
+        const [afterCreated, afterId] = [String(this.args[3]), String(this.args[4])];
+        deliveries = deliveries.filter(
+          (delivery) => String(delivery.created_at) > afterCreated || (String(delivery.created_at) === afterCreated && String(delivery.id) > afterId)
+        );
+      }
+      deliveries.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = deliveries.slice(0, limit).map((delivery) => ({
+        id: delivery.id,
+        document_id: delivery.document_id,
+        status: delivery.status,
+        created_at: delivery.created_at
+      }));
+      return { results: rows as T[] };
+    }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
       // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
       // the fields the deactivation sweep needs.
@@ -5610,6 +6908,55 @@ class Statement {
       const limit = Number(this.args.at(-1) ?? 500);
       return { results: documents.slice(0, limit) as T[] };
     }
+    if (this.sql.includes("FROM dte_documents") && this.sql.includes("LEFT JOIN donation_intents") && this.sql.includes("ORDER BY dte_documents.issued_at ASC, dte_documents.id ASC")) {
+      // CRM contacts export: keyset-paged Wompi-lane ACCEPTED docs for one ambiente,
+      // LEFT JOINed to their correlated COMPLETED intent (0 or 1 per document).
+      const environment = String(this.args[0]);
+      // Binding order mirrors the repository: [environment, startIso, (endIso if
+      // windowed), (cursor issued, cursor id if cursor), limit]. Lower bound is always
+      // present ("" matches all when unwindowed).
+      const startIso = String(this.args[1]);
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.status === "ACCEPTED" &&
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          document.issued_at >= startIso
+      );
+      let cursorBase = 2;
+      if (this.sql.includes("dte_documents.issued_at < ?")) {
+        const endIso = String(this.args[2]);
+        documents = documents.filter((document) => document.issued_at < endIso);
+        cursorBase = 3;
+      }
+      if (this.sql.includes("(dte_documents.issued_at, dte_documents.id) > (?, ?)")) {
+        const [afterIssued, afterId] = [String(this.args[cursorBase]), String(this.args[cursorBase + 1])];
+        documents = documents.filter(
+          (document) => document.issued_at > afterIssued || (document.issued_at === afterIssued && document.id > afterId)
+        );
+      }
+      documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const joined = documents.slice(0, limit).map((document) => {
+        const intent = this.db.donationIntents.find(
+          (candidate) => candidate.document_id === document.id && candidate.status === "COMPLETED"
+        );
+        return {
+          id: document.id,
+          donor_email: document.donor_email,
+          donor_name: document.donor_name,
+          amount_cents: document.amount_cents,
+          issued_at: document.issued_at,
+          intent_donor_phone: intent?.donor_phone ?? null,
+          intent_direccion_complemento: intent?.direccion_complemento ?? null,
+          intent_direccion_departamento: intent?.direccion_departamento ?? null,
+          intent_donor_pais: intent?.donor_pais ?? null,
+          intent_gift_type: intent?.gift_type ?? null,
+          intent_created_at: intent?.created_at ?? null
+        };
+      });
+      return { results: joined as T[] };
+    }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
@@ -5682,10 +7029,27 @@ class Statement {
     }
     if (this.sql.includes("FROM audit_logs")) {
       let audits = [...this.db.audits];
+      let argIndex = 0;
       if (this.sql.includes("a.entity_type = ? AND a.entity_id = ?")) {
         audits = audits.filter((audit) => audit.entity_type === this.args[0] && audit.entity_id === this.args[1]);
+        argIndex = 2;
       }
-      audits.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)));
+      if (this.sql.includes("(a.created_at, a.id) < (?, ?)")) {
+        const cursorCreated = String(this.args[argIndex]);
+        const cursorId = String(this.args[argIndex + 1]);
+        argIndex += 2;
+        audits = audits.filter((audit) => {
+          const created = String(audit.created_at);
+          return created < cursorCreated || (created === cursorCreated && String(audit.id) < cursorId);
+        });
+      }
+      audits.sort(
+        (left, right) =>
+          String(right.created_at).localeCompare(String(left.created_at)) || String(right.id).localeCompare(String(left.id))
+      );
+      if (this.sql.includes("ORDER BY a.created_at DESC, a.id DESC LIMIT ?")) {
+        audits = audits.slice(0, Number(this.args[argIndex] ?? 100));
+      }
       // Mirror the LEFT JOIN users ON u.id = a.actor_id: USER rows resolve to a name/email,
       // SYSTEM rows (and deleted-actor rows) keep NULLs.
       const joined = audits.map((audit) => {
@@ -5839,6 +7203,9 @@ class Statement {
         wompi_url_enlace_largo: null,
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
+        // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
+        // never on create — a fresh intent has not been paid.
+        paid_at: null,
         created_at: "2026-06-26T01:46:47.015Z",
         updated_at: "2026-06-26T01:46:47.015Z",
         expires_at: String(expiresAt)
@@ -5891,6 +7258,17 @@ class Statement {
         intent.status = "COMPLETED";
         intent.document_id = documentId == null ? null : String(documentId);
         intent.updated_at = String(updatedAt);
+      }
+    }
+    if (this.sql.includes("UPDATE donation_intents SET paid_at = ?")) {
+      // markIntentPaid: SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL.
+      // Idempotent (the IS NULL guard) — the first stamp stands, so a webhook replay never
+      // overwrites it. An unknown or already-paid id simply matches nothing.
+      const [paidAt, updatedAt, id] = this.args.map((value) => (value == null ? null : String(value)));
+      const intent = this.db.donationIntents.find((row) => row.id === id);
+      if (intent && (intent.paid_at == null || intent.paid_at === "")) {
+        intent.paid_at = paidAt;
+        intent.updated_at = updatedAt;
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {

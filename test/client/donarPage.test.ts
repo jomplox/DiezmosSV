@@ -16,6 +16,7 @@ import {
   DONAR_POLL_TIMEOUT_MS,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
+  DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
@@ -472,6 +473,19 @@ describe("donar widget handoff", () => {
     expect(DONAR_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
   });
 
+  it("flips to thanks on payment (result.paid) OR the legacy COMPLETED status", () => {
+    // The donor's "thanks" must key on PAYMENT, not MH acceptance: the status endpoint
+    // now returns { status, paid }, and the poll reacts to paid so the wizard reacts
+    // the moment Wompi's webhook stamps paid_at — long before the CDE is accepted.
+    // COMPLETED is kept as the legacy signal so an already-accepted intent still lands.
+    const pollType = donarSource.indexOf("donarApi<{ status: string; paid: boolean }>");
+    expect(pollType).toBeGreaterThan(-1);
+    const pollBlock = donarSource.slice(pollType, pollType + 400);
+    expect(pollBlock).toContain("result.paid");
+    expect(pollBlock).toContain('result.status === "COMPLETED"');
+    expect(pollBlock).toContain('setStage("thanks")');
+  });
+
   it("closes the poll with a neutral message that never implies failure", () => {
     // Entrega framing: these are diezmos y ofrendas, never "pagos".
     expect(DONAR_FALLBACK_MESSAGE).toBe(
@@ -508,7 +522,10 @@ describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
     // Religious framing: the SV fiscal form heading names the aportación, now
     // flagged with the El Salvador emoji instead of a textual path identifier.
-    expect(donarSource).toContain("Entregue su diezmo u ofrenda 🇸🇻");
+    // Both doors share the same general title — only the lane flag differs (the US
+    // side set the copy standard; the SV side matches it).
+    expect(donarSource).toContain("Diezmos y Ofrendas 🇸🇻");
+    expect(donarSource).not.toContain("Entregue su diezmo u ofrenda");
     expect(donarSource).toContain("Tipo de documento");
     expect(donarSource).toContain("Teléfono (opcional)");
     expect(donarSource).toContain("Departamento");
@@ -587,8 +604,9 @@ describe("donar wizard source contract", () => {
   it("assures each door's donor of the legal document their path produces on Paso 1", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
-    expect(donarSource).toContain("Recibirá su comprobante de donación en su dirección de correo electrónico.");
-    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico.");
+    // Formal register mirroring the US lane's "recibo oficial ... (IRS 501c3)".
+    expect(donarSource).toContain("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.");
+    expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });
 
@@ -750,9 +768,67 @@ describe("donar wizard source contract", () => {
     expect(chooseDoor).toContain('foreignResident: false, pais: ""');
   });
 
+  it("keeps every donor screen at the landing width (no jump between steps)", () => {
+    // The two-door landing set the canvas at 560px; the wizard steps used a narrower
+    // 480px card, so the width visibly jumped after choosing a door. One width now.
+    expect(stylesSource).toContain("width: min(560px, 100%)");
+    expect(stylesSource).not.toContain("min(480px");
+  });
+
+  it("auto-sizes the embedded checkout from Wompi's sizeUpdate messages", () => {
+    // pagos.wompi.sv posts { message: "sizeUpdate", height } to its parent as content
+    // grows (their own modal consumes it as height + 35). Driving the iframe height
+    // from it removes the inner scrollbar — the page is the only scroller. The origin
+    // is validated strictly and the height clamped against bogus values.
+    expect(donarSource).toContain('"sizeUpdate"');
+    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    const listener = donarSource.indexOf('payload?.message === "sizeUpdate"');
+    expect(listener).toBeGreaterThan(-1);
+    const originCheck = donarSource.lastIndexOf("event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN", listener);
+    expect(originCheck).toBeGreaterThan(-1);
+    expect(donarSource).toContain("clampEmbedHeight(");
+    // Wompi's own "close" message (their post-payment "Cerrar" AND their back arrow
+    // share it) must NOT blindly return to Paso 2: after a successful payment that
+    // would be wrong. The handler does a one-shot status fetch first — paid/COMPLETED
+    // → thanks, otherwise the existing back-to-Paso-2 behavior.
+    expect(donarSource).toContain('"close"');
+    const closeBranch = donarSource.indexOf('payload?.message === "close"');
+    expect(closeBranch).toBeGreaterThan(-1);
+    const closeBlock = donarSource.slice(closeBranch, closeBranch + 1100);
+    // One-shot status fetch for the current intent inside the close branch (the intent
+    // is captured as activeIntent so the deferred fetch keeps a narrowed reference).
+    expect(closeBlock).toContain(`${"$"}{DONAR_INTENT_PATH}/${"$"}{activeIntent.intentId}/status`);
+    // Both outcomes present: thanks on paid/COMPLETED, else back to Paso 2.
+    expect(closeBlock).toContain('setStage("thanks")');
+    expect(closeBlock).toContain("setStep(2)");
+    // The CSS fallback height remains until the first message arrives; height
+    // transitions are disabled under prefers-reduced-motion.
+    expect(stylesSource).toContain(".donar-embed");
+    const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
+    expect(stylesSource.slice(reducedMotion)).toContain(".donar-embed");
+  });
+
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
     expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
+  });
+
+  it("shows the configured support contact on the donor screens, defaulting to fmce", () => {
+    // The support contact is per-church branding now: DonarSupport renders the FETCHED
+    // branding supportEmail, with DONAR_SUPPORT_EMAIL as the client-side default/fallback.
+    // It stays a discreet mailto line at the bottom of the donor card.
+    expect(donarSource).toContain("DONAR_SUPPORT_EMAIL");
+    expect(DONAR_SUPPORT_EMAIL).toBe("legacy-contact-1@example.com");
+    expect(donarSource).toContain("mailto:");
+    expect(stylesSource).toContain(".donar-support");
+    // DonarSupport receives the support email as a prop (from branding state), and the
+    // page seeds/falls back to the constant so an unbranded deployment is unchanged.
+    const supportComponentAt = donarSource.indexOf("function DonarSupport");
+    expect(supportComponentAt).toBeGreaterThan(-1);
+    const supportComponent = donarSource.slice(supportComponentAt, supportComponentAt + 400);
+    expect(supportComponent).toContain("supportEmail");
+    // The fetched branding supportEmail flows into the support state.
+    expect(donarSource).toContain("branding.supportEmail");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {
@@ -894,7 +970,7 @@ describe("givebutter donar page source contract", () => {
   it("shows the FMCE explanation and the example-campaign giving form", () => {
     expect(donarSource).toContain("GIVEBUTTER_INTRO");
     expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
-    expect(GIVEBUTTER_INTRO).toContain("501(c)(3)");
+    expect(GIVEBUTTER_INTRO).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
@@ -990,7 +1066,7 @@ describe("two-door landing copy", () => {
     expect(DONAR_DOOR_SV_LABEL).toBe("El Salvador y el mundo");
     expect(DONAR_DOOR_SV_DESC).toBe("Comprobante de donación DTE salvadoreño");
     expect(DONAR_DOOR_EEUU_LABEL).toBe("EE. UU.");
-    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501(c)(3))");
+    expect(DONAR_DOOR_EEUU_DESC).toBe("Recibo oficial deducible de impuestos (IRS 501c3)");
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 
@@ -1127,9 +1203,11 @@ describe("monochrome donor-facing restyle", () => {
     }
   });
 
-  it("leaves the admin teal accent (#007c75) present elsewhere in the sheet", () => {
-    // The admin keeps its palette; the teal must still appear on non-donor rules.
+  it("keeps the admin accent on non-donor rules, now driven by the white-label variable", () => {
+    // The admin keeps its teal accent, but it is now sourced from var(--accent, …) so
+    // a single branding setting recolors the whole panel. (The former hardcoded
+    // #007c75 was replaced sheet-wide; the donor rules above stay monochrome.)
     const withoutDonar = stylesSource.replace(/\.donar-[\w-]*[^{]*\{[^}]*\}/g, "");
-    expect(withoutDonar).toContain("#007c75");
+    expect(withoutDonar).toContain("var(--accent, #0f766e)");
   });
 });

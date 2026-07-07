@@ -1,6 +1,14 @@
 import type { DteDocumentRecord } from "../types";
 
-const BRAND_COLOR = "#0f766e";
+// Fallback accent for an unbranded deployment (matches BRANDING_DEFAULTS.accentColor).
+// White-label callers thread a church's own color through the *Options.brandColor.
+const DEFAULT_BRAND_COLOR = "#0f766e";
+
+// Contacto de soporte por defecto para ambas vías (SV y EE. UU.): se muestra una sola
+// vez en el pie compartido. Cada iglesia puede configurar el suyo en Marca; este valor
+// queda solo como respaldo cuando no se ha configurado ninguno.
+const DEFAULT_SUPPORT_EMAIL = "legacy-contact-1@example.com";
+const DEFAULT_ORGANIZATION_NAME = "ExamplePerson1";
 const TEXT_COLOR = "#1f2a2e";
 const MUTED_COLOR = "#52656c";
 const BORDER_COLOR = "#dfe6e8";
@@ -8,6 +16,9 @@ const CARD_BACKGROUND = "#f7f9fa";
 
 export interface DteEmailHtmlOptions {
   organizationName: string;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
 }
 
 export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, options: DteEmailHtmlOptions): string {
@@ -25,7 +36,8 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
     ["Sello de recepción", record.sello_recibido ?? "Pendiente"],
     ["Ambiente", record.environment === "01" ? "Producción" : "Pruebas"]
   ]);
-  return emailDocument(options.organizationName, [
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
+  return emailDocument(options.organizationName, brandColor, options.supportEmail, options.logoUrl, [
     banner,
     paragraphs(bodyText),
     details,
@@ -34,19 +46,33 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
   ]);
 }
 
-export function passwordResetEmailHtml(name: string, link: string, expiresMinutes: number): string {
+export interface BrandingEmailOptions {
+  organizationName: string;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
+}
+
+export function passwordResetEmailHtml(
+  name: string,
+  link: string,
+  expiresMinutes: number,
+  options: BrandingEmailOptions = { organizationName: DEFAULT_ORGANIZATION_NAME }
+): string {
+  const organizationName = options.organizationName || DEFAULT_ORGANIZATION_NAME;
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   const safeLink = escapeHtml(link);
   const button = `
     <table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px auto;">
       <tr>
-        <td style="border-radius:8px;background:${BRAND_COLOR};">
+        <td style="border-radius:8px;background:${brandColor};">
           <a href="${safeLink}" style="display:inline-block;padding:12px 28px;font-family:Arial,Helvetica,sans-serif;font-size:15px;font-weight:bold;color:#ffffff;text-decoration:none;border-radius:8px;">Crear nueva contraseña</a>
         </td>
       </tr>
     </table>`;
-  return emailDocument("ExamplePerson1", [
+  return emailDocument(organizationName, brandColor, options.supportEmail, options.logoUrl, [
     paragraphs(
-      `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ExamplePerson1. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
+      `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ${organizationName}. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
     ),
     button,
     note(`Si el botón no funciona, copie y pegue este enlace en su navegador: ${link}`),
@@ -62,14 +88,20 @@ export interface OperationalAlertInput {
   entityId: string;
 }
 
-export function operationalAlertHtml(alert: OperationalAlertInput, originUrl: string): string {
+export function operationalAlertHtml(
+  alert: OperationalAlertInput,
+  originUrl: string,
+  options: BrandingEmailOptions = { organizationName: DEFAULT_ORGANIZATION_NAME }
+): string {
+  const organizationName = options.organizationName || DEFAULT_ORGANIZATION_NAME;
+  const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   const banner = alertBanner(alert.kind, alert.title);
   const details = detailsCard([
     ["Tipo de evento", alert.kind],
     ["Entidad", alert.entityType],
     ["Identificador", alert.entityId]
   ]);
-  return emailDocument("ExamplePerson1", [
+  return emailDocument(organizationName, brandColor, options.supportEmail, options.logoUrl, [
     banner,
     paragraphs(alert.detail),
     details,
@@ -84,6 +116,9 @@ export interface CertificateEmailInput {
   count: number;
   totalLabel: string;
   isTestEnvironment: boolean;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
 }
 
 export function certificateEmailHtml(input: CertificateEmailInput): string {
@@ -95,7 +130,7 @@ export function certificateEmailHtml(input: CertificateEmailInput): string {
     ["Donaciones", String(input.count)],
     ["Total del año", input.totalLabel]
   ]);
-  return emailDocument(input.organizationName, [
+  return emailDocument(input.organizationName, input.brandColor ?? DEFAULT_BRAND_COLOR, input.supportEmail, input.logoUrl, [
     paragraphs(
       `Estimado(a) ${input.donorName}:\n\n` +
         `Adjuntamos su constancia de donaciones correspondiente al año ${input.year}. ` +
@@ -118,7 +153,19 @@ function alertBanner(kind: string, title: string): string {
   return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:${background};border:1px solid ${border};color:${color};font-weight:bold;text-align:center;">${escapeHtml(title)}</div>`;
 }
 
-function emailDocument(organizationName: string, blocks: string[]): string {
+function emailDocument(
+  organizationName: string,
+  brandColor: string,
+  supportEmail: string | undefined,
+  logoUrl: string | null | undefined,
+  blocks: string[]
+): string {
+  // A configured church contact wins; otherwise fall back to the historical fmce default.
+  const contact = escapeHtml(supportEmail?.trim() || DEFAULT_SUPPORT_EMAIL);
+  const logo = headerLogo(logoUrl, organizationName);
+  // The logo is centered above the name; without one, the header keeps its historical
+  // left-aligned layout so a logo-less deployment renders exactly as before.
+  const headerAlign = logo ? "text-align:center;" : "";
   return `<!DOCTYPE html>
 <html lang="es">
   <head>
@@ -131,8 +178,8 @@ function emailDocument(organizationName: string, blocks: string[]): string {
         <td align="center">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid ${BORDER_COLOR};border-radius:10px;overflow:hidden;">
             <tr>
-              <td style="background:${BRAND_COLOR};padding:18px 28px;">
-                <span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">${escapeHtml(organizationName)}</span><br />
+              <td style="background:${brandColor};padding:18px 28px;${headerAlign}">
+                ${logo}<span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">${escapeHtml(organizationName)}</span><br />
                 <span style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#d2eae7;">Comprobante de Donación Electrónico</span>
               </td>
             </tr>
@@ -143,7 +190,7 @@ function emailDocument(organizationName: string, blocks: string[]): string {
             </tr>
             <tr>
               <td style="padding:16px 28px;border-top:1px solid ${BORDER_COLOR};font-family:Arial,Helvetica,sans-serif;font-size:11px;color:${MUTED_COLOR};">
-                Correo generado automáticamente por ExamplePerson1. Por favor no responda a este mensaje.
+                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.<br />¿Dudas o necesita ayuda? Escríbanos a <a href="mailto:${contact}" style="color:#595959;">${contact}</a>.
               </td>
             </tr>
           </table>
@@ -152,6 +199,19 @@ function emailDocument(organizationName: string, blocks: string[]): string {
     </table>
   </body>
 </html>`;
+}
+
+// The white-label logo in the header, centered above the organization name. Returns "" when
+// no logo is configured (keeps the historical logo-less header untouched). Email clients block
+// remote images by default, so the name text below stays the reliable identifier and the img
+// carries the organization name as alt. Inline, email-safe sizing only: block + auto margins,
+// max-height ~48px / max-width ~200px so any uploaded logo scales down without overflowing.
+function headerLogo(logoUrl: string | null | undefined, organizationName: string): string {
+  const url = logoUrl?.trim();
+  if (!url) {
+    return "";
+  }
+  return `<img src="${escapeHtml(url)}" alt="${escapeHtml(organizationName)}" style="display:block;margin:0 auto 10px;max-height:48px;max-width:200px;" />`;
 }
 
 function statusBanner(record: DteDocumentRecord): string {

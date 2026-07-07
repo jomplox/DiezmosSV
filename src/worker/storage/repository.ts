@@ -3,6 +3,7 @@ import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 import type { AuditRequestContext } from "../services/requestContext";
+import type { ContactSourceRow } from "../services/contacts";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -33,6 +34,23 @@ export interface RetentionCursor {
 // (migrations/0001_init.sql). Every other windowed retention table uses created_at.
 function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
+}
+
+// Raw D1 column shape for the contacts export join (snake_case, intent_* columns
+// null when a document has no correlated COMPLETED intent). Mapped to the camelCase
+// ContactSourceRow before it leaves the repository.
+interface ContactSourceRowRow {
+  id: string;
+  donor_email: string | null;
+  donor_name: string | null;
+  amount_cents: number;
+  issued_at: string;
+  intent_donor_phone: string | null;
+  intent_direccion_complemento: string | null;
+  intent_direccion_departamento: string | null;
+  intent_donor_pais: string | null;
+  intent_gift_type: DonationGiftType | null;
+  intent_created_at: string | null;
 }
 
 export class Repository {
@@ -218,6 +236,18 @@ export class Repository {
     await this.db
       .prepare("UPDATE donation_intents SET status = 'COMPLETED', document_id = ?, updated_at = ? WHERE id = ?")
       .bind(documentId, nowIso(), id)
+      .run();
+  }
+
+  // Stamp the donor's payment (migration 0016). Called by the Wompi webhook when an
+  // approved payment correlates to this intent. Deliberately does NOT touch status:
+  // COMPLETED stays reserved for MH acceptance of the CDE. The `paid_at IS NULL` guard
+  // makes it idempotent — a webhook replay never moves the timestamp, and an unknown or
+  // already-paid intent simply matches nothing (no-op, no error).
+  async markIntentPaid(id: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE donation_intents SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL")
+      .bind(nowIso(), nowIso(), id)
       .run();
   }
 
@@ -437,6 +467,196 @@ export class Repository {
     return rows.results ?? [];
   }
 
+  // Keyset-paged read of Wompi-lane ACCEPTED documents for one ambiente, LEFT JOINed
+  // to their correlated COMPLETED donation intent (0 or 1 per document via
+  // donation_intents.document_id, idx_donation_intents_document_id from migration
+  // 0009). Feeds the CRM contacts export (aggregateDonorContacts): only online
+  // (wompi_event_id NOT NULL), accepted donations, enriched with the intent's
+  // contact fields. The (issued_at, id) cursor bounds each page so a busy
+  // environment is read in fixed chunks, mirroring the annual-certificate paging.
+  async listAcceptedWompiContactRows(
+    environment: Ambiente,
+    cursor: { issuedAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE,
+    window?: { startIso: string; endIso: string }
+  ): Promise<ContactSourceRow[]> {
+    const conditions = [
+      "dte_documents.status = 'ACCEPTED'",
+      "dte_documents.wompi_event_id IS NOT NULL",
+      "dte_documents.environment = ?",
+      "dte_documents.issued_at >= ?"
+    ];
+    // Lower bound is always present: "" (matches everything) when no window is given,
+    // else the window start. The optional upper bound is added only when windowed, so
+    // the unfiltered export keeps its original single-bound query shape.
+    const bindings: Array<string | number> = [environment, window ? window.startIso : ""];
+    if (window) {
+      conditions.push("dte_documents.issued_at < ?");
+      bindings.push(window.endIso);
+    }
+    if (cursor) {
+      conditions.push("(dte_documents.issued_at, dte_documents.id) > (?, ?)");
+      bindings.push(cursor.issuedAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT dte_documents.id AS id,
+                dte_documents.donor_email AS donor_email,
+                dte_documents.donor_name AS donor_name,
+                dte_documents.amount_cents AS amount_cents,
+                dte_documents.issued_at AS issued_at,
+                donation_intents.donor_phone AS intent_donor_phone,
+                donation_intents.direccion_complemento AS intent_direccion_complemento,
+                donation_intents.direccion_departamento AS intent_direccion_departamento,
+                donation_intents.donor_pais AS intent_donor_pais,
+                donation_intents.gift_type AS intent_gift_type,
+                donation_intents.created_at AS intent_created_at
+         FROM dte_documents
+         LEFT JOIN donation_intents
+           ON donation_intents.document_id = dte_documents.id AND donation_intents.status = 'COMPLETED'
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY dte_documents.issued_at ASC, dte_documents.id ASC
+         LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<ContactSourceRowRow>();
+    return (rows.results ?? []).map((row) => ({
+      id: row.id,
+      donorEmail: row.donor_email,
+      donorName: row.donor_name,
+      amountCents: row.amount_cents,
+      issuedAt: row.issued_at,
+      donorPhone: row.intent_donor_phone,
+      direccionComplemento: row.intent_direccion_complemento,
+      direccionDepartamento: row.intent_direccion_departamento,
+      donorPais: row.intent_donor_pais,
+      giftType: row.intent_gift_type,
+      intentCreatedAt: row.intent_created_at
+    }));
+  }
+
+  // ----- Analítica (carril Wompi) -----
+  //
+  // Lectores paginados por keyset (mismo estilo que aggregateAnnualDonors) que
+  // alimentan las funciones puras de src/worker/services/analytics.ts. TODOS filtran
+  // por environment y por el rango [startIso, endIso), y el carril Wompi se restringe
+  // con wompi_event_id IS NOT NULL: los CDE emitidos a mano (rápido/avanzado) quedan
+  // fuera POR DISEÑO porque nunca llevan wompi_event_id.
+
+  // Documentos del carril Wompi emitidos en el rango, con la geografía y el tipo de
+  // regalo del intent correlacionado (LEFT JOIN por document_id) proyectados a cada
+  // fila para que la función pura no tenga que unir en memoria. Filtra por issued_at
+  // y pagina por (issued_at, id).
+  async listWompiLaneDocumentsForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { issuedAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<
+    Array<
+      Pick<
+        DteDocumentRecord,
+        "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
+      > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+    >
+  > {
+    const conditions = ["d.wompi_event_id IS NOT NULL", "d.environment = ?", "d.issued_at >= ?", "d.issued_at < ?"];
+    const bindings: Array<string | number> = [environment, range.startIso, range.endIso];
+    if (cursor) {
+      conditions.push("(d.issued_at, d.id) > (?, ?)");
+      bindings.push(cursor.issuedAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT d.id, d.wompi_event_id, d.environment, d.status, d.donor_email, d.donor_name,
+                d.amount_cents, d.issued_at, d.accepted_at, d.transmission_deferred_at,
+                i.direccion_departamento AS direccion_departamento, i.donor_pais AS donor_pais, i.gift_type AS gift_type
+         FROM dte_documents d
+         LEFT JOIN donation_intents i ON i.document_id = d.id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY d.issued_at ASC, d.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<
+        Pick<
+          DteDocumentRecord,
+          "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
+        > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+      >();
+    return rows.results ?? [];
+  }
+
+  // Intents del carril Wompi creados en el rango, correlacionados a su ambiente vía el
+  // documento emitido (intents COMPLETED) o, para los no completados, por el ambiente
+  // activo (los intents no guardan environment). Aquí filtramos por environment del
+  // documento cuando existe; los intents sin documento se atribuyen a `environment`
+  // pasado por el endpoint (el ambiente activo de emisión). Pagina por (created_at, id).
+  async listDonationIntentsForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { createdAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<
+    Array<
+      Pick<DonationIntentRecord, "id" | "status" | "document_id" | "donor_document" | "gift_type" | "created_at" | "paid_at"> & { direccion_departamento: string | null; donor_pais: string | null }
+    >
+  > {
+    // Intent belongs to the requested ambiente when its emitted document is in that
+    // ambiente; intents that never produced a document (PENDING/LINK_CREATED/EXPIRED)
+    // have no environment column, so they are attributed to the requested ambiente
+    // only when it matches the active emission environment the endpoint passes. To keep
+    // the funnel honest per-ambiente we require: either the joined doc is in `environment`,
+    // or there is no joined doc (unpaid/abandoned) — those are lane intents of the active
+    // ambiente the endpoint is scoped to.
+    const conditions = ["i.created_at >= ?", "i.created_at < ?", "(d.environment = ? OR d.id IS NULL)"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso, environment];
+    if (cursor) {
+      conditions.push("(i.created_at, i.id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT i.id, i.status, i.document_id, i.donor_document, i.gift_type, i.created_at, i.paid_at,
+                i.direccion_departamento AS direccion_departamento, i.donor_pais AS donor_pais
+         FROM donation_intents i
+         LEFT JOIN dte_documents d ON d.id = i.document_id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY i.created_at ASC, i.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<
+        Pick<DonationIntentRecord, "id" | "status" | "document_id" | "donor_document" | "gift_type" | "created_at" | "paid_at"> & { direccion_departamento: string | null; donor_pais: string | null }
+      >();
+    return rows.results ?? [];
+  }
+
+  // Entregas de correo del carril Wompi en el rango: solo las adjuntas a documentos con
+  // wompi_event_id en el ambiente pedido. Pagina por (created_at, id).
+  async listEmailDeliveriesForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { createdAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<Array<{ id: string; document_id: string; status: string; created_at: string }>> {
+    const conditions = ["e.created_at >= ?", "e.created_at < ?", "d.wompi_event_id IS NOT NULL", "d.environment = ?"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso, environment];
+    if (cursor) {
+      conditions.push("(e.created_at, e.id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT e.id, e.document_id, e.status, e.created_at
+         FROM email_deliveries e
+         JOIN dte_documents d ON d.id = e.document_id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY e.created_at ASC, e.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<{ id: string; document_id: string; status: string; created_at: string }>();
+    return rows.results ?? [];
+  }
+
   async updateDocumentSigned(id: string, signedJws: string): Promise<void> {
     await this.db
       .prepare("UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? WHERE id = ?")
@@ -605,6 +825,25 @@ export class Repository {
          FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
          ORDER BY a.created_at DESC LIMIT 100`
       )
+      .all<Record<string, unknown>>()
+      .then((result) => result.results ?? []);
+  }
+
+  // Página del historial general de auditoría: keyset (created_at, id) DESC — el mismo
+  // patrón de cursor del listado de documentos, porque OFFSET degenera con miles de
+  // filas. Devuelve limit+1 filas para que la ruta derive nextCursor sin un COUNT.
+  async listAuditPage(cursor: { createdAt: string; id: string } | null, limit: number): Promise<Array<Record<string, unknown>>> {
+    const bounded = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const where = cursor ? "WHERE (a.created_at, a.id) < (?, ?)" : "";
+    const bindings: string[] = cursor ? [cursor.createdAt, cursor.id] : [];
+    return this.db
+      .prepare(
+        `SELECT a.*, u.name AS actor_name, u.email AS actor_email
+         FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_id
+         ${where}
+         ORDER BY a.created_at DESC, a.id DESC LIMIT ?`
+      )
+      .bind(...bindings, bounded + 1)
       .all<Record<string, unknown>>()
       .then((result) => result.results ?? []);
   }

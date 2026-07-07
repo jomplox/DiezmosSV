@@ -47,6 +47,14 @@ const ROLE_LABELS: Record<DisplayRole, string> = {
 };
 
 const AUDIT_ACTION_LABELS: Record<string, string> = {
+  BRANDING_UPDATED: "Marca actualizada",
+  BRANDING_LOGO_UPDATED: "Logo de marca actualizado",
+  BRANDING_LOGO_REMOVED: "Logo de marca eliminado",
+  DONATION_INTENT_CREATED: "Intención de donación creada",
+  DONATION_INTENT_DATOS_ATTACHED: "Datos fiscales adjuntados a la intención",
+  DONATION_INTENT_COMPLETED: "Intención de donación completada",
+  DONATION_INTENT_AMOUNT_MISMATCH: "Monto de la intención no coincide",
+  DONOR_CERTIFICATES_RUN: "Envío de constancias anuales",
   ADVANCED_CDE_ACCEPTED: "CDE avanzado aceptado",
   ALERT_EMAIL_UPDATED: "Correo de alertas actualizado",
   ADVANCED_CDE_CREATED: "CDE avanzado creado",
@@ -59,6 +67,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   CONTINGENCY_DTE_REJECTED: "CDE de contingencia rechazado",
   CONTINGENCY_OPEN_REUSED: "Contingencia reutilizada",
   CONTINGENCY_OPENED: "Contingencia abierta",
+  CONTACTS_EXPORTED: "Exportación de contactos",
   CREDENTIALS_UPDATED: "Credenciales actualizadas",
   DTE_ACCEPTED: "DTE aceptado",
   DTE_CONTINGENCY_PENDING: "DTE en contingencia",
@@ -112,7 +121,11 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
 };
 
 const ENTITY_LABELS: Record<string, string> = {
+  app_setting: "Configuración",
   contingency_period: "Contingencia",
+  donation_intent: "Intención de donación",
+  donor_certificate: "Constancia de donante",
+  donor_certificate_run: "Envío de constancias",
   credentials: "Credenciales",
   dte_document: "Documento DTE",
   export: "Exportación",

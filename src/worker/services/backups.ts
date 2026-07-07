@@ -143,6 +143,36 @@ export async function verifyBackupMonth(env: Env, repo: Repository, month: strin
   return { ok, files };
 }
 
+// Collects every R2 object of a month's archive (the manifest.json plus each table's
+// NDJSON snapshot) as ZIP entries, so the whole month downloads as one file. Returns
+// null when the month has no manifest (never archived) so the route can 404 exactly
+// like the per-table download. A table named in the manifest but missing from R2 is
+// skipped defensively rather than aborting the whole archive. The manifest is placed
+// first so the archive is self-describing.
+export async function collectBackupMonthObjects(env: Env, month: string): Promise<Array<{ name: string; data: Uint8Array }> | null> {
+  const manifestObject = await env.ARCHIVE.get(retentionManifestKey(month));
+  if (!manifestObject) {
+    return null;
+  }
+  const manifestBytes = new Uint8Array(await manifestObject.arrayBuffer());
+  let manifest: RetentionManifest;
+  try {
+    manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as RetentionManifest;
+  } catch {
+    return null;
+  }
+
+  const entries: Array<{ name: string; data: Uint8Array }> = [{ name: "manifest.json", data: manifestBytes }];
+  for (const table of Object.keys(manifest.tables)) {
+    const object = await env.ARCHIVE.get(retentionTableKey(month, table));
+    if (!object) {
+      continue;
+    }
+    entries.push({ name: `${table}.ndjson`, data: new Uint8Array(await object.arrayBuffer()) });
+  }
+  return entries;
+}
+
 export async function getManifest(env: Env, month: string): Promise<RetentionManifest | null> {
   const object = await env.ARCHIVE.get(retentionManifestKey(month));
   if (!object) {

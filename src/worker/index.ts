@@ -21,14 +21,34 @@ import {
   validateIntentInput
 } from "./services/donations";
 import { EmailService } from "./services/email";
-import { EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
-import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates } from "./services/certificate";
+import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import {
+  BRANDING_ACCENT_COLOR_SETTING_KEY,
+  BRANDING_DISPLAY_NAME_SETTING_KEY,
+  BRANDING_LOGO_MAX_BYTES,
+  BRANDING_LOGO_OBJECT_KEY,
+  BRANDING_LOGO_SETTING_KEY,
+  BRANDING_SUPPORT_EMAIL_SETTING_KEY,
+  BrandingValidationError,
+  loadEmailBranding,
+  normalizeBrandingAccentColor,
+  normalizeBrandingDisplayName,
+  normalizeBrandingLogoContentType,
+  normalizeBrandingSupportEmail,
+  parseBrandingLogoMeta,
+  parseBrandingSettings
+} from "./services/branding";
+import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
+import { computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
+import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
+import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
-import { listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
@@ -241,10 +261,37 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     entityId: record.id,
     summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
   });
+  // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
+  // regardless of it. The donor-facing "thanks" keys on paid_at (the PAYMENT), not on
+  // COMPLETED (the CDE's MH acceptance, which the async pipeline sets and can lag).
+  // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
+  // bad/unknown intent id must never break webhook processing.
+  await markIntentPaidFromWebhook(repo, payload);
   if (inserted && isApprovedDonation(payload)) {
     await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
   }
   return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued: inserted && isApprovedDonation(payload) }, { status: inserted ? 202 : 200 });
+}
+
+// Marks the donation intent this approved webhook fulfills as paid, keyed on the same
+// intent-id correlation the pipeline uses (payload.IdExterno, falling back to the raw
+// enlace identifier). Only "di_"-prefixed ids of approved donations touch the DB, so
+// legacy static-link payloads skip it entirely. Never throws: any failure is swallowed
+// so a bad intent id can never 500 the webhook — the paid marker is a UI convenience,
+// not a correctness gate (the pipeline still owns COMPLETED and the comprobante).
+async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook): Promise<void> {
+  try {
+    if (!isApprovedDonation(payload)) {
+      return;
+    }
+    const intentId = payload.IdExterno ?? payload.EnlacePago?.IdentificadorEnlaceComercio;
+    if (!intentId || !intentId.startsWith("di_")) {
+      return;
+    }
+    await repo.markIntentPaid(intentId);
+  } catch (error) {
+    console.error("No se pudo marcar la intención como pagada", error);
+  }
 }
 
 async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
@@ -261,6 +308,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
     return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
+  }
+
+  // Public branding read: the login screen needs the display name, accent color, and
+  // logo version BEFORE any session exists, so these two routes are unauthenticated.
+  if (url.pathname === "/api/branding" && request.method === "GET") {
+    return handlePublicBrandingRoute(repo);
+  }
+
+  if (url.pathname === "/api/branding/logo" && request.method === "GET") {
+    return handleBrandingLogoStream(env, repo);
   }
 
   // Public donor checkout: unauthenticated, runs before any role check. A body with
@@ -336,7 +393,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Enumeration-safe: unknown ids get the same shape a foreign id would.
       return jsonResponse({ error: "intent_not_found" }, { status: 404 });
     }
-    return jsonResponse({ status: intent.status });
+    // status stays for backward compatibility (COMPLETED = CDE accepted by MH). paid
+    // reflects the payment marker (paid_at), so the donor's wizard can show "thanks" the
+    // moment Wompi confirms the payment, without waiting on MH acceptance.
+    return jsonResponse({ status: intent.status, paid: intent.paid_at != null });
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
@@ -387,7 +447,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
           if (created) {
             const link = `${url.origin}/?reset=${created.token}`;
             try {
-              await new EmailService(env).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
+              const resetBranding = await loadEmailBranding(repo, env);
+              await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
               await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
             } catch (error) {
               await repo.createAudit({
@@ -448,6 +509,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/settings/email-templates") {
     return handleEmailTemplatesRoute(request, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/branding") {
+    return handleBrandingRoute(request, repo, user);
+  }
+
+  if (url.pathname === "/api/settings/branding/logo") {
+    return handleBrandingLogoRoute(request, env, repo, user);
   }
 
   if (url.pathname === "/api/settings/alert-email") {
@@ -528,6 +597,34 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     });
   }
 
+  const backupDownloadAllMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/download-all$/);
+  if (backupDownloadAllMatch && request.method === "GET") {
+    const actor = requireRole(user, "ADMIN");
+    const month = backupDownloadAllMatch[1];
+    const entries = await collectBackupMonthObjects(env, month);
+    if (!entries) {
+      return notFound();
+    }
+    // Same PII-access audit as the per-table download; table "__all__" marks the whole
+    // month was pulled in one archive.
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "RETENTION_DOWNLOADED",
+      entityType: "retention_export",
+      entityId: month,
+      summary: `Descarga completa de respaldo ${month} (${entries.length} archivo(s))`,
+      metadata: { month, table: "__all__", files: entries.length }
+    });
+    const zip = zipStored(entries);
+    return new Response(zip, {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="respaldo-${month}.zip"`
+      }
+    });
+  }
+
   if (url.pathname === "/api/exports/f960" && request.method === "GET") {
     requireRole(user, "ADMIN");
     const selection = await f960Selection(repo, url);
@@ -561,6 +658,77 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     });
   }
 
+  if (url.pathname === "/api/exports/contacts" && request.method === "GET") {
+    // Bulk donor PII for CRM import: ADMIN only (deliberately NOT operator/viewer).
+    const actor = requireRole(user, "ADMIN");
+    const environment = ambienteValue(url.searchParams.get("environment"));
+    if (!environment) {
+      return jsonResponse({ error: "invalid_export_environment", message: "Seleccione un ambiente válido (00 o 01)." }, { status: 400 });
+    }
+
+    // Optional [from, to] day range (YYYY-MM-DD, El Salvador local, inclusive). Both or
+    // neither; malformed/inverted → 400. Reuses the analytics range→ISO-window helper so
+    // the export honours the same El Salvador local-day semantics as the analytics view.
+    const fromParam = url.searchParams.get("from");
+    const toParam = url.searchParams.get("to");
+    let window: { startIso: string; endIso: string } | undefined;
+    if (fromParam || toParam) {
+      const isDate = (value: string | null): value is string =>
+        !!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+      if (!isDate(fromParam) || !isDate(toParam) || fromParam > toParam) {
+        return jsonResponse(
+          { error: "invalid_export_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." },
+          { status: 400 }
+        );
+      }
+      window = elSalvadorRangeWindow({ from: fromParam, to: toParam });
+    }
+
+    // Optional giftType filter (DIEZMO|OFRENDA) — which donations count toward inclusion/totals.
+    const giftTypeParam = url.searchParams.get("giftType");
+    if (giftTypeParam && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA") {
+      return jsonResponse({ error: "invalid_export_gift_type", message: "Seleccione Diezmo, Ofrenda o Todos." }, { status: 400 });
+    }
+    const giftType = giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA" ? giftTypeParam : undefined;
+
+    // Optional column whitelist; an unknown name is a 400 with the offending column named.
+    let columns;
+    try {
+      columns = resolveContactColumns(url.searchParams.get("columns"));
+    } catch (error) {
+      return jsonResponse(
+        { error: "invalid_export_columns", message: error instanceof Error ? error.message : String(error) },
+        { status: 400 }
+      );
+    }
+
+    const contacts = await aggregateDonorContacts(repo, environment, { window, giftType });
+    // Audit carries only the count + environment + applied filters — NEVER any donor PII.
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "CONTACTS_EXPORTED",
+      entityType: "export",
+      entityId: `contacts:${environment}`,
+      summary: `${contacts.length} contactos exportados (ambiente ${environment})`,
+      metadata: {
+        environment,
+        contacts: contacts.length,
+        ...(fromParam ? { from: fromParam, to: toParam } : {}),
+        ...(giftType ? { giftType } : {}),
+        // Only record a column count when a subset was actually requested, so the
+        // default full-export audit keeps its original { environment, contacts } shape.
+        ...(url.searchParams.get("columns") ? { columns: columns.length } : {})
+      }
+    });
+    return new Response(buildContactsCsv(contacts, columns), {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${contactsCsvFilename(environment, contacts.length)}"`
+      }
+    });
+  }
+
   if (url.pathname === "/api/certificates/annual" && request.method === "GET") {
     requireRole(user, "ADMIN");
     const yearParam = url.searchParams.get("year");
@@ -568,7 +736,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (yearError) {
       return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
     }
-    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam)));
+    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam), url.searchParams.get("q")));
   }
 
   if (url.pathname === "/api/certificates/annual/send" && request.method === "POST") {
@@ -579,15 +747,29 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
     }
     const year = Number(yearParam);
-    const result = await sendAnnualCertificates(env, repo, year, actor.id);
+    // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
+    // an absent/empty body runs the full bulk batch as before.
+    const body = (await request.json().catch(() => ({}))) as { donor?: unknown };
+    const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
+    let result;
+    try {
+      result = await sendAnnualCertificates(env, repo, year, actor.id, donorGroupKey);
+    } catch (error) {
+      if (error instanceof SingleDonorSendError) {
+        return jsonResponse({ error: "single_donor_send_error", message: error.message }, { status: error.status });
+      }
+      throw error;
+    }
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "DONOR_CERTIFICATES_RUN",
       entityType: "donor_certificate_run",
       entityId: String(year),
-      summary: `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
-      metadata: result
+      summary: donorGroupKey
+        ? `Constancia ${year} enviada individualmente: ${result.sent} enviada, ${result.failed} fallida`
+        : `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
+      metadata: { ...result, ...(donorGroupKey ? { mode: "single", donorGroupKey } : {}) }
     });
     return jsonResponse(result);
   }
@@ -599,7 +781,33 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/audit" && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return jsonResponse({ audit: await repo.listAudit(url.searchParams.get("entityType") ?? undefined, url.searchParams.get("entityId") ?? undefined) });
+    const entityType = url.searchParams.get("entityType");
+    const entityId = url.searchParams.get("entityId");
+    if (entityType && entityId) {
+      // Entity-scoped history keeps its original (uncapped-page) shape.
+      return jsonResponse({ audit: await repo.listAudit(entityType, entityId), nextCursor: null });
+    }
+    // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
+    // grows forever, so the old flat LIMIT 100 silently hid everything older.
+    const limitParam = Number(url.searchParams.get("limit") ?? "50");
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(Math.trunc(limitParam), 1), 100) : 50;
+    const rawCursor = url.searchParams.get("cursor");
+    let cursor: { createdAt: string; id: string } | null = null;
+    if (rawCursor) {
+      const split = rawCursor.lastIndexOf("|");
+      if (split > 0) {
+        cursor = { createdAt: rawCursor.slice(0, split), id: rawCursor.slice(split + 1) };
+      }
+    }
+    const rows = await repo.listAuditPage(cursor, limit);
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
+    const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
+    return jsonResponse({ audit: page, nextCursor });
+  }
+
+  if (url.pathname === "/api/analytics" && request.method === "GET") {
+    return handleAnalyticsRoute(repo, env, user, url);
   }
 
   // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
@@ -763,6 +971,47 @@ function isProduction(env: Env): boolean {
   return (env.APP_ENV ?? "local").toLowerCase() === "production";
 }
 
+// GET /api/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD&environment=00 — Analítica del
+// carril Wompi (solo lectura, rol VIEWER como /api/audit). Devuelve un único objeto
+// con todas las secciones. Defaults: los últimos 90 días (El Salvador local) y el
+// ambiente de emisión ACTIVO cuando no se especifica environment.
+async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser | null, url: URL): Promise<Response> {
+  requireRole(user, "VIEWER");
+  const now = new Date();
+  const environment = ambienteValue(url.searchParams.get("environment")) ?? (await activeEmissionEnvironment(repo, env));
+  const range = analyticsRange(url.searchParams.get("from"), url.searchParams.get("to"), now);
+  if (!range) {
+    return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
+  }
+  const analytics = await computeAnalytics(repo, range, environment, now, {
+    department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+    country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
+  });
+  return jsonResponse({ analytics });
+}
+
+// Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
+// Salvador local time. Absent params default to the last 90 days ending today. Returns
+// null on a malformed date or an inverted range.
+function analyticsRange(fromParam: string | null, toParam: string | null, now: Date): AnalyticsRange | null {
+  const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  const todayLocal = elSalvadorDateOnly(now);
+  const to = toParam ?? todayLocal;
+  const from = fromParam ?? elSalvadorDateOnly(new Date(now.getTime() - 89 * 86_400_000));
+  if (!isDate(from) || !isDate(to) || from > to) {
+    return null;
+  }
+  return { from, to };
+}
+
+// YYYY-MM-DD of an instant in El Salvador local time (fixed UTC-6).
+function elSalvadorDateOnly(date: Date): string {
+  const local = new Date(date.getTime() - 6 * 3_600_000);
+  const month = local.getUTCMonth() + 1;
+  const day = local.getUTCDate();
+  return `${local.getUTCFullYear()}-${month < 10 ? "0" : ""}${month}-${day < 10 ? "0" : ""}${day}`;
+}
+
 async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
   if (request.method === "GET") {
     requireRole(user, "VIEWER");
@@ -847,6 +1096,144 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
     metadata: { alertEmail: raw }
   });
   return jsonResponse({ ok: true, alertEmail: raw });
+}
+
+// Public branding read (unauthenticated): the login screen consumes this before any
+// session. logoVersion is the cache-busting token clients append to the logo stream
+// URL; null when no logo is stored so the client falls back to the built-in mark.
+async function handlePublicBrandingRoute(repo: Repository): Promise<Response> {
+  const branding = parseBrandingSettings(
+    await repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    await repo.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
+    await repo.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
+  );
+  const logo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+  return jsonResponse({
+    displayName: branding.displayName,
+    accentColor: branding.accentColor,
+    supportEmail: branding.supportEmail,
+    logoVersion: logo?.version ?? null
+  });
+}
+
+// Public branding logo stream (unauthenticated). A church-uploaded SVG can embed
+// scripts, so the response is locked down: a strict CSP that blocks scripts and any
+// subresource fetch, plus nosniff. The short cache keeps the login/header logo snappy
+// while still turning over when the version query changes.
+async function handleBrandingLogoStream(env: Env, repo: Repository): Promise<Response> {
+  const meta = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+  if (!meta) {
+    return notFound();
+  }
+  const object = await env.ARCHIVE.get(BRANDING_LOGO_OBJECT_KEY);
+  if (!object) {
+    return notFound();
+  }
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": object.httpMetadata?.contentType ?? meta.contentType,
+      "Cache-Control": "public, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "script-src 'none'; default-src 'none'; style-src 'unsafe-inline'"
+    }
+  });
+}
+
+// Write branding name + color (OWNER). Both fields are required; validation errors
+// carry Spanish messages. The audit never logs anything sensitive (name/color only).
+async function handleBrandingRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  const body = (await request.json().catch(() => ({}))) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
+  let displayName: string;
+  let accentColor: string;
+  let supportEmail: string;
+  try {
+    displayName = normalizeBrandingDisplayName(body.displayName);
+    accentColor = normalizeBrandingAccentColor(body.accentColor);
+    supportEmail = normalizeBrandingSupportEmail(body.supportEmail);
+  } catch (error) {
+    if (error instanceof BrandingValidationError) {
+      return jsonResponse({ error: "invalid_branding", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  await repo.setSetting(BRANDING_DISPLAY_NAME_SETTING_KEY, displayName, actor.id);
+  await repo.setSetting(BRANDING_ACCENT_COLOR_SETTING_KEY, accentColor, actor.id);
+  await repo.setSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY, supportEmail, actor.id);
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "BRANDING_UPDATED",
+    entityType: "app_setting",
+    entityId: BRANDING_DISPLAY_NAME_SETTING_KEY,
+    summary: `Marca actualizada: ${displayName}`,
+    // Support email is not a secret (it is published on donor pages and email footers).
+    metadata: { displayName, accentColor, supportEmail }
+  });
+  return jsonResponse({ ok: true, displayName, accentColor, supportEmail });
+}
+
+// Upload (PUT) or remove (DELETE) the branding logo (OWNER). The binary goes to R2
+// under BRANDING_LOGO_OBJECT_KEY; its metadata mirrors into app_settings so the public
+// reads stay a single D1 lookup. The audit records the content type and size, never
+// the bytes.
+async function handleBrandingLogoRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+  if (request.method === "DELETE") {
+    const actor = requireRole(user, "OWNER");
+    await env.ARCHIVE.delete(BRANDING_LOGO_OBJECT_KEY);
+    await repo.setSetting(BRANDING_LOGO_SETTING_KEY, "", actor.id);
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "BRANDING_LOGO_REMOVED",
+      entityType: "app_setting",
+      entityId: BRANDING_LOGO_SETTING_KEY,
+      summary: "Logo de marca eliminado",
+      metadata: {}
+    });
+    return jsonResponse({ ok: true, logoVersion: null });
+  }
+  if (request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = requireRole(user, "OWNER");
+  let contentType: string;
+  try {
+    contentType = normalizeBrandingLogoContentType(request.headers.get("Content-Type"));
+  } catch (error) {
+    if (error instanceof BrandingValidationError) {
+      return jsonResponse({ error: "invalid_branding_logo", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  const bytes = new Uint8Array(await request.arrayBuffer());
+  if (bytes.byteLength === 0) {
+    return jsonResponse({ error: "invalid_branding_logo", message: "El archivo del logo está vacío." }, { status: 400 });
+  }
+  if (bytes.byteLength > BRANDING_LOGO_MAX_BYTES) {
+    return jsonResponse({ error: "invalid_branding_logo", message: "El logo no puede superar los 512 KB." }, { status: 400 });
+  }
+  // crypto.randomUUID gives a cache-busting version without a wall-clock read.
+  const version = crypto.randomUUID();
+  await env.ARCHIVE.put(BRANDING_LOGO_OBJECT_KEY, bytes, { httpMetadata: { contentType } });
+  await repo.setSetting(
+    BRANDING_LOGO_SETTING_KEY,
+    JSON.stringify({ contentType, size: bytes.byteLength, version }),
+    actor.id
+  );
+  await repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "BRANDING_LOGO_UPDATED",
+    entityType: "app_setting",
+    entityId: BRANDING_LOGO_SETTING_KEY,
+    summary: "Logo de marca actualizado",
+    metadata: { contentType, size: bytes.byteLength }
+  });
+  return jsonResponse({ ok: true, logoVersion: version });
 }
 
 async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
@@ -1173,7 +1560,8 @@ async function handleDocumentRoute(
     }
     try {
       const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-      const response = await new EmailService(env, templates).sendReceipt(document, toEmail);
+      const branding = await loadEmailBranding(repo, env);
+      const response = await new EmailService(env, templates, branding).sendReceipt(document, toEmail);
       await repo.recordEmailDelivery({
         documentId: document.id,
         toEmail,
@@ -1311,7 +1699,8 @@ async function handleDocumentRoute(
       if (invalidatedDocument.donor_email) {
         try {
           const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-          const emailResponse = await new EmailService(env, templates).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
+          const branding = await loadEmailBranding(repo, env);
+          const emailResponse = await new EmailService(env, templates, branding).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
           await repo.recordEmailDelivery({
             documentId: document.id,
             toEmail: invalidatedDocument.donor_email,

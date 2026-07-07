@@ -13,12 +13,14 @@ import {
   FileSpreadsheet,
   FileText,
   FlaskConical,
+  LineChart,
   Braces,
   History,
   KeyRound,
   Lock,
   LogOut,
   Mail,
+  Palette,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -35,6 +37,7 @@ import {
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
+import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
@@ -42,6 +45,9 @@ import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
+import { AnalyticsView } from "./analyticsView";
+import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
+import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
@@ -78,7 +84,7 @@ import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
+type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
 
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
@@ -89,6 +95,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Clock },
   { id: "audit", label: "Auditoría", icon: History },
+  { id: "analytics", label: "Analítica", icon: LineChart },
   { id: "users", label: "Usuarios", icon: Users },
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
   { id: "credentials", label: "Configuración", icon: Settings, minRole: "OWNER" }
@@ -101,7 +108,8 @@ const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof
   wompi: Cloud,
   emisor: FileText,
   correo: Mail,
-  plantillas: Braces
+  plantillas: Braces,
+  marca: Palette
 };
 
 const FOCUSABLE_SELECTOR =
@@ -179,6 +187,9 @@ export function App() {
   const [documents, setDocuments] = useState<DteDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
+  // Keyset cursor for the audit trail ("<created_at>|<id>"); null = no older pages.
+  const [auditCursor, setAuditCursor] = useState<string | null>(null);
+  const [auditLoadingMore, setAuditLoadingMore] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
@@ -216,7 +227,16 @@ export function App() {
     amountTotal: "0.00"
   });
   const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
+  const [certificateSearch, setCertificateSearch] = useState("");
+  const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
+  // CRM contacts export customization: period preset (with optional custom range), a
+  // gift-type filter, and the selected CSV columns (all on by default).
+  const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
+  const [contactsFrom, setContactsFrom] = useState(currentMonthStartValue);
+  const [contactsTo, setContactsTo] = useState(todayDateValue);
+  const [contactsGiftType, setContactsGiftType] = useState<"todos" | "DIEZMO" | "OFRENDA">("todos");
+  const [contactsColumns, setContactsColumns] = useState<Set<string>>(() => new Set(CONTACT_EXPORT_COLUMNS.map((column) => column.key)));
   const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
   const [backups, setBackups] = useState<BackupMonth[]>([]);
   const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
@@ -231,6 +251,19 @@ export function App() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
+  const [branding, setBranding] = useState<Branding>({ ...CLIENT_BRANDING_DEFAULTS, logoVersion: null });
+  // Analítica (carril Wompi): the view defaults its ambiente selector to the ACTIVE
+  // emission environment, loaded lazily the first time the view is opened. Presets are
+  // computed against `now` so "Este mes" tracks the calendar; the custom range seeds
+  // from the "Personalizado" preset (last 90 days).
+  const analyticsPresets = useMemo(() => analyticsRangePresets(now), [now]);
+  const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsEnvironment, setAnalyticsEnvironment] = useState<"00" | "01" | null>(null);
+  const [analyticsPresetId, setAnalyticsPresetId] = useState<AnalyticsRangePreset["id"]>("trimestre");
+  const [analyticsFrom, setAnalyticsFrom] = useState(() => analyticsRangePresets(new Date()).find((preset) => preset.id === "personalizado")!.from);
+  const [analyticsTo, setAnalyticsTo] = useState(() => analyticsRangePresets(new Date()).find((preset) => preset.id === "personalizado")!.to);
+  const [analyticsGiftFilter, setAnalyticsGiftFilter] = useState<GiftTypeFilter>("todos");
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
@@ -241,6 +274,26 @@ export function App() {
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  // White-label branding boots BEFORE (and independently of) the session check so the
+  // login screen is already branded. A failed fetch keeps the historical defaults.
+  useEffect(() => {
+    let cancelled = false;
+    void fetch("/api/branding")
+      .then((response) => (response.ok ? response.json() : {}))
+      .then((data) => {
+        if (cancelled) return;
+        const next = parseBrandingResponse(data);
+        applyBranding(next);
+        setBranding(next);
+      })
+      .catch(() => {
+        // Keep the defaults already applied via the initial state.
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -257,6 +310,11 @@ export function App() {
   }, [query]);
 
   useEffect(() => {
+    const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [certificateSearch]);
+
+  useEffect(() => {
     document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
   }, [view]);
 
@@ -265,7 +323,66 @@ export function App() {
       return;
     }
     void refresh().catch(handleApiFailure);
-  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear]);
+  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch]);
+
+  // Effective analytics range: a non-custom preset supplies its own bounds; the custom
+  // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
+  const analyticsRange = useMemo(() => {
+    if (analyticsPresetId === "personalizado") {
+      return { from: analyticsFrom, to: analyticsTo };
+    }
+    const preset = analyticsPresets.find((candidate) => candidate.id === analyticsPresetId);
+    return preset ? { from: preset.from, to: preset.to } : { from: analyticsFrom, to: analyticsTo };
+  }, [analyticsPresetId, analyticsPresets, analyticsFrom, analyticsTo]);
+
+  // Default the ambiente selector to the ACTIVE emission environment the first time the
+  // Analítica view is opened (loaded lazily so the rest of the app never pays for it).
+  useEffect(() => {
+    if (view !== "analytics" || !token || analyticsEnvironment) {
+      return;
+    }
+    let cancelled = false;
+    void api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+      .then((result) => {
+        if (!cancelled) setAnalyticsEnvironment(result.emissionEnvironment.environment);
+      })
+      .catch(() => {
+        if (!cancelled) setAnalyticsEnvironment("00");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, token, analyticsEnvironment]);
+
+  // Fetch analytics whenever the view is active and the ambiente or range changes. A
+  // stale-guard drops out-of-order responses so quick filter changes never flicker.
+  useEffect(() => {
+    if (view !== "analytics" || !token || !analyticsEnvironment) {
+      return;
+    }
+    if (analyticsRange.from > analyticsRange.to) {
+      return;
+    }
+    let cancelled = false;
+    setAnalyticsLoading(true);
+    const params = new URLSearchParams({ from: analyticsRange.from, to: analyticsRange.to, environment: analyticsEnvironment });
+    void api<{ analytics: AnalyticsResponse }>(`/api/analytics?${params.toString()}`, token)
+      .then((result) => {
+        if (!cancelled) setAnalytics(result.analytics);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAnalytics(null);
+          handleApiFailure(error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAnalyticsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, token, analyticsEnvironment, analyticsRange.from, analyticsRange.to]);
 
   // The document list does not carry the donor-data-verified flag (it is a per-CDE
   // indexed lookup on the server), so fetch the selected document's detail to learn it.
@@ -336,7 +453,9 @@ export function App() {
     const contingencyResult = await api<{ contingency: ContingencyState }>("/api/contingency", token);
     setContingency(contingencyResult.contingency);
     if (view === "audit") {
-      setAudit((await api<{ audit: AuditRow[] }>("/api/audit", token)).audit);
+      const auditPage = await api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50", token);
+      setAudit(auditPage.audit);
+      setAuditCursor(auditPage.nextCursor);
     }
     if (view === "users" && can(user, "ADMIN")) {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
@@ -361,7 +480,7 @@ export function App() {
       }
       const params = exportParams(exportStartDate, exportEndDate);
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
-      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
       setDonationIntents((await api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token)).intents);
       setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
     }
@@ -539,6 +658,48 @@ export function App() {
     });
   }
 
+  async function downloadContacts() {
+    await runAction("export-contacts", async () => {
+      const environment = emissionEnvironment?.environment;
+      if (!environment) {
+        throw new Error("No se pudo determinar el ambiente activo.");
+      }
+      const selectedColumns = CONTACT_EXPORT_COLUMNS.filter((column) => contactsColumns.has(column.key)).map((column) => column.key);
+      if (selectedColumns.length === 0) {
+        throw new Error("Seleccione al menos una columna para exportar.");
+      }
+      const params = new URLSearchParams({ environment });
+      const range = contactsPeriodRange(contactsPeriod, contactsFrom, contactsTo);
+      if (range) {
+        params.set("from", range.from);
+        params.set("to", range.to);
+      }
+      if (contactsGiftType !== "todos") {
+        params.set("giftType", contactsGiftType);
+      }
+      // Only send `columns` when a strict subset is chosen, so the default full export
+      // keeps its original request shape (and audit).
+      if (selectedColumns.length < CONTACT_EXPORT_COLUMNS.length) {
+        params.set("columns", selectedColumns.join(","));
+      }
+      const response = await fetch(`/api/exports/contacts?${params.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "contactos-donantes.csv");
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast("Contactos exportados");
+    });
+  }
+
   async function verifyBackup(month: string) {
     await runAction(`backup-verify-${month}`, async () => {
       const result = await api<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, token, { method: "POST" });
@@ -566,6 +727,28 @@ export function App() {
       );
       link.click();
       URL.revokeObjectURL(href);
+    });
+  }
+
+  // Downloads the whole month's archive (every table object + manifest) as one ZIP.
+  // Keyed by `backup-download-all-<month>` so only that row's button shows a busy state.
+  async function downloadAllBackup(month: string) {
+    await runAction(`backup-download-all-${month}`, async () => {
+      const response = await fetch(`/api/admin/backups/${month}/download-all`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `respaldo-${month}.zip`);
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast(`Respaldo completo de ${month} descargado.`);
     });
   }
 
@@ -597,7 +780,38 @@ export function App() {
     await runAction("certificates-send", async () => {
       const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, { method: "POST" });
       setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
-      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
+    });
+  }
+
+  // Single-donor send (also the resend path): posts the donor's grouping key. Keyed by
+  // `certificates-send-<groupKey>` so only that row shows a busy state while it runs.
+  async function sendDonorCertificate(donor: AnnualCertificatePreviewDonor) {
+    const preview = certificatePreview;
+    if (!preview) {
+      return;
+    }
+    if (!donor.hasEmail) {
+      setToast("Este donante no tiene correo registrado, por lo que no se le puede enviar la constancia.");
+      return;
+    }
+    const confirmed = window.confirm(
+      `Se enviará la constancia del año ${preview.year} a ${donor.donorName}. ¿Desea continuar?`
+    );
+    if (!confirmed) {
+      return;
+    }
+    await runAction(`certificates-send-${donor.groupKey}`, async () => {
+      const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, {
+        method: "POST",
+        body: { donor: donor.groupKey }
+      });
+      setToast(
+        result.sent > 0
+          ? `Constancia ${result.year} enviada a ${donor.donorName}.`
+          : `No se pudo enviar la constancia a ${donor.donorName}.`
+      );
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
     });
   }
 
@@ -760,10 +974,32 @@ export function App() {
     }
   }
 
+  // Appends the next audit page (keyset cursor); the text filter keeps operating
+  // over everything loaded so far.
+  async function loadMoreAudit() {
+    if (!auditCursor || auditLoadingMore) {
+      return;
+    }
+    setAuditLoadingMore(true);
+    try {
+      const pageResult = await api<{ audit: AuditRow[]; nextCursor: string | null }>(
+        `/api/audit?limit=50&cursor=${encodeURIComponent(auditCursor)}`,
+        token
+      );
+      setAudit((current) => [...current, ...pageResult.audit]);
+      setAuditCursor(pageResult.nextCursor);
+    } catch (err) {
+      setToast(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setAuditLoadingMore(false);
+    }
+  }
+
   if (!token || !user) {
     return (
       <AuthScreen
         notice={authNotice}
+        branding={branding}
         onLogin={login}
         onBootstrap={bootstrap}
         onRequestReset={requestPasswordReset}
@@ -807,9 +1043,13 @@ export function App() {
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
         <div className="sidebar-head">
           <div className="brand">
-            <ShieldCheck size={24} />
+            {brandingLogoSrc(branding.logoVersion) ? (
+              <img className="brand-logo" src={brandingLogoSrc(branding.logoVersion) ?? undefined} alt={branding.displayName} />
+            ) : (
+              <ShieldCheck size={24} />
+            )}
             <div className="brand-text">
-              <strong>ExamplePerson1</strong>
+              <strong>{branding.displayName}</strong>
               <span>Comprobantes de donación</span>
             </div>
           </div>
@@ -955,7 +1195,47 @@ export function App() {
               </button>
             </div>
             <AuditTable rows={filterAuditEntries(audit, auditQuery)} />
+            <div className="audit-pagination">
+              <small>
+                {auditQuery.trim()
+                  ? `${filterAuditEntries(audit, auditQuery).length} de ${audit.length} registros cargados coinciden con el filtro.`
+                  : `${audit.length} registros cargados.`}
+              </small>
+              {auditCursor && (
+                <button type="button" disabled={auditLoadingMore} onClick={() => void loadMoreAudit()}>
+                  {auditLoadingMore ? "Cargando…" : "Cargar más"}
+                </button>
+              )}
+            </div>
           </section>
+        )}
+
+        {view === "analytics" && (
+          <AnalyticsView
+            analytics={analytics}
+            loading={analyticsLoading}
+            environment={analyticsEnvironment ?? "00"}
+            activeEnvironment={analyticsEnvironment}
+            presets={analyticsPresets}
+            presetId={analyticsPresetId}
+            from={analyticsRange.from}
+            to={analyticsRange.to}
+            giftFilter={analyticsGiftFilter}
+            onEnvironmentChange={setAnalyticsEnvironment}
+            onPresetChange={(presetId) => {
+              setAnalyticsPresetId(presetId);
+              // Seed the custom inputs from the chosen preset so switching to
+              // "Personalizado" starts from the last-selected bounds, not stale ones.
+              const preset = analyticsPresets.find((candidate) => candidate.id === presetId);
+              if (preset) {
+                setAnalyticsFrom(preset.from);
+                setAnalyticsTo(preset.to);
+              }
+            }}
+            onFromChange={setAnalyticsFrom}
+            onToChange={setAnalyticsTo}
+            onGiftFilterChange={setAnalyticsGiftFilter}
+          />
         )}
 
         {view === "users" && (
@@ -997,9 +1277,38 @@ export function App() {
               year={certificateYear}
               yearOptions={certificateYearOptions()}
               preview={certificatePreview}
+              search={certificateSearch}
               busy={busy === "certificates-send"}
+              rowBusy={busy}
               onYearChange={setCertificateYear}
+              onSearchChange={setCertificateSearch}
               onSend={sendAnnualCertificates}
+              onSendDonor={sendDonorCertificate}
+            />
+            <ContactsExportPanel
+              environment={emissionEnvironment?.environment ?? null}
+              busy={busy === "export-contacts"}
+              period={contactsPeriod}
+              from={contactsFrom}
+              to={contactsTo}
+              giftType={contactsGiftType}
+              columns={contactsColumns}
+              onPeriodChange={setContactsPeriod}
+              onFromChange={setContactsFrom}
+              onToChange={setContactsTo}
+              onGiftTypeChange={setContactsGiftType}
+              onColumnToggle={(key) =>
+                setContactsColumns((current) => {
+                  const next = new Set(current);
+                  if (next.has(key)) {
+                    next.delete(key);
+                  } else {
+                    next.add(key);
+                  }
+                  return next;
+                })
+              }
+              onDownload={downloadContacts}
             />
             <BackupsPanel
               months={backups}
@@ -1007,6 +1316,7 @@ export function App() {
               busy={busy}
               onVerify={verifyBackup}
               onDownload={downloadBackup}
+              onDownloadAll={downloadAllBackup}
               onExport={exportBackupMonth}
             />
             <OnlineDonationsPanel intents={donationIntents} />
@@ -1020,6 +1330,8 @@ export function App() {
             emailTemplates={emailTemplates}
             emailTemplateDraft={emailTemplateDraft}
             alertEmailDraft={alertEmailDraft}
+            branding={branding}
+            token={token}
             input={credentialInput}
             busy={busy === "credentials"}
             emissionBusy={busy === "emission-environment"}
@@ -1042,6 +1354,10 @@ export function App() {
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onAlertEmailChange={setAlertEmailDraft}
             onAlertEmailSubmit={updateAlertEmail}
+            onBrandingSave={(next) => {
+              applyBranding(next);
+              setBranding(next);
+            }}
             onBootstrapWriter={bootstrapCredentialWriter}
             onRefresh={async () => {
               const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
@@ -1543,23 +1859,79 @@ function certificateYearOptions(): number[] {
   return [current, current - 1, current - 2, current - 3];
 }
 
+// CRM contacts export columns: the server's 11 snake_case headers with Spanish UI
+// labels. `key` is what the endpoint's `columns` param expects; the checkbox group
+// renders `label`. Order matches the CSV header order.
+const CONTACT_EXPORT_COLUMNS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "nombre", label: "Nombre" },
+  { key: "correo", label: "Correo" },
+  { key: "telefono", label: "Teléfono" },
+  { key: "direccion", label: "Dirección" },
+  { key: "departamento", label: "Departamento" },
+  { key: "pais", label: "País" },
+  { key: "primera_donacion", label: "Primera donación" },
+  { key: "ultima_donacion", label: "Última donación" },
+  { key: "total_donado_usd", label: "Total donado (US$)" },
+  { key: "numero_donaciones", label: "Número de donaciones" },
+  { key: "tipo_preferido", label: "Tipo preferido" }
+];
+
+type ContactsPeriod = "todo" | "esteAno" | "anioAnterior" | "personalizado";
+
+// Resolves a period preset into an optional {from, to} YYYY-MM-DD range. "todo" means no
+// range (export everything). "Este año" / "Año anterior" are full calendar years; the
+// custom preset uses the two date inputs verbatim.
+function contactsPeriodRange(period: ContactsPeriod, from: string, to: string): { from: string; to: string } | null {
+  const year = new Date().getFullYear();
+  if (period === "esteAno") {
+    return { from: `${year}-01-01`, to: `${year}-12-31` };
+  }
+  if (period === "anioAnterior") {
+    return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
+  }
+  if (period === "personalizado") {
+    return { from, to };
+  }
+  return null;
+}
+
+// Preview endpoint path for a year + optional donor/email search. The search is sent
+// as `q`; the server caps and reports matchCount/truncated.
+function certificatePreviewPath(year: string, search: string): string {
+  const trimmed = search.trim();
+  return trimmed
+    ? `/api/certificates/annual?year=${year}&q=${encodeURIComponent(trimmed)}`
+    : `/api/certificates/annual?year=${year}`;
+}
+
 function AnnualCertificatePanel({
   year,
   yearOptions,
   preview,
+  search,
   busy,
+  rowBusy,
   onYearChange,
-  onSend
+  onSearchChange,
+  onSend,
+  onSendDonor
 }: {
   year: string;
   yearOptions: number[];
   preview: AnnualCertificatePreview | null;
+  search: string;
   busy: boolean;
+  // The raw busy key so a single row can show its own spinner (certificates-send-<groupKey>).
+  rowBusy: string;
   onYearChange: (year: string) => void;
+  onSearchChange: (value: string) => void;
   onSend: () => Promise<void>;
+  onSendDonor: (donor: AnnualCertificatePreviewDonor) => Promise<void>;
 }) {
   const donors = preview?.donors ?? [];
   const withEmail = preview?.withEmail ?? 0;
+  // Any in-flight send (bulk or a per-row send) disables the other send buttons.
+  const anySending = busy || rowBusy.startsWith("certificates-send");
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -1596,6 +1968,19 @@ function AnnualCertificatePanel({
       <p className="hint">
         Se enviará a los donantes con correo. Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.
       </p>
+      <div className="certificate-search">
+        <input
+          type="search"
+          value={search}
+          placeholder="Buscar donante o correo"
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
+      </div>
+      {preview?.truncated && (
+        <p className="hint certificate-truncated">
+          Mostrando {donors.length} de {preview.matchCount} donantes. Afine la búsqueda para ver el resto.
+        </p>
+      )}
       <div className="table-scroll export-table certificate-table">
         <table>
           <thead>
@@ -1604,27 +1989,142 @@ function AnnualCertificatePanel({
               <th className="numeric">Donaciones</th>
               <th className="numeric">Total</th>
               <th>Correo</th>
+              <th>Enviar</th>
             </tr>
           </thead>
           <tbody>
-            {donors.map((donor) => (
-              <tr key={donor.donorName + (donor.donorEmail ?? "")}>
-                <td>
-                  <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
-                </td>
-                <td className="numeric">{donor.count}</td>
-                <td className="numeric">{donor.totalLabel}</td>
-                <td>{donor.hasEmail ? "Sí" : "—"}</td>
-              </tr>
-            ))}
+            {donors.map((donor) => {
+              const rowSending = rowBusy === `certificates-send-${donor.groupKey}`;
+              return (
+                <tr key={donor.donorName + (donor.donorEmail ?? "")}>
+                  <td>
+                    <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
+                  </td>
+                  <td className="numeric">{donor.count}</td>
+                  <td className="numeric">{donor.totalLabel}</td>
+                  <td>{donor.hasEmail ? "Sí" : "—"}</td>
+                  <td>
+                    <button
+                      className="ghost"
+                      disabled={!donor.hasEmail || rowSending || anySending}
+                      onClick={() => void onSendDonor(donor)}
+                    >
+                      <Download size={14} />
+                      {rowSending ? "Enviando" : "Enviar"}
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
             {donors.length === 0 && (
               <tr>
-                <td colSpan={4}>Sin donaciones aceptadas para este año.</td>
+                <td colSpan={5}>
+                  {search.trim() ? "Ningún donante coincide con la búsqueda." : "Sin donaciones aceptadas para este año."}
+                </td>
               </tr>
             )}
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+// Bulk donor-contacts CSV export for CRM import. Exports the ACTIVE emission
+// ambiente (the same ambiente in which donations are currently issued); the button
+// stays disabled until the active ambiente is known. The period, tipo, and column
+// controls customize which donations count and which columns the CSV carries.
+function ContactsExportPanel({
+  environment,
+  busy,
+  period,
+  from,
+  to,
+  giftType,
+  columns,
+  onPeriodChange,
+  onFromChange,
+  onToChange,
+  onGiftTypeChange,
+  onColumnToggle,
+  onDownload
+}: {
+  environment: EmissionEnvironmentState["environment"] | null;
+  busy: boolean;
+  period: ContactsPeriod;
+  from: string;
+  to: string;
+  giftType: "todos" | "DIEZMO" | "OFRENDA";
+  columns: Set<string>;
+  onPeriodChange: (period: ContactsPeriod) => void;
+  onFromChange: (value: string) => void;
+  onToChange: (value: string) => void;
+  onGiftTypeChange: (value: "todos" | "DIEZMO" | "OFRENDA") => void;
+  onColumnToggle: (key: string) => void;
+  onDownload: () => Promise<void>;
+}) {
+  const noColumns = columns.size === 0;
+  const invalidRange = period === "personalizado" && (!from || !to || from > to);
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Contactos para CRM</h2>
+          <p>Exporte los datos de contacto de sus donantes para importarlos en un CRM como GiveButter.</p>
+        </div>
+        <Users size={20} />
+      </div>
+      <div className="export-controls">
+        <label className="date-field">
+          <span>Período</span>
+          <select value={period} onChange={(event) => onPeriodChange(event.target.value as ContactsPeriod)}>
+            <option value="todo">Todo el tiempo</option>
+            <option value="esteAno">Este año</option>
+            <option value="anioAnterior">Año anterior</option>
+            <option value="personalizado">Personalizado</option>
+          </select>
+        </label>
+        {period === "personalizado" && (
+          <>
+            <label className="date-field">
+              <span>Desde</span>
+              <input type="date" value={from} onChange={(event) => onFromChange(event.target.value)} />
+            </label>
+            <label className="date-field">
+              <span>Hasta</span>
+              <input type="date" value={to} onChange={(event) => onToChange(event.target.value)} />
+            </label>
+          </>
+        )}
+        <label className="date-field">
+          <span>Tipo</span>
+          <select value={giftType} onChange={(event) => onGiftTypeChange(event.target.value as "todos" | "DIEZMO" | "OFRENDA")}>
+            <option value="todos">Todos</option>
+            <option value="DIEZMO">Diezmo</option>
+            <option value="OFRENDA">Ofrenda</option>
+          </select>
+        </label>
+        <button className="primary" disabled={busy || !environment || noColumns || invalidRange} onClick={() => void onDownload()}>
+          <Download size={16} />
+          {busy ? "Preparando" : "Descargar contactos"}
+        </button>
+      </div>
+      <fieldset className="contacts-columns">
+        <legend>Columnas</legend>
+        <div className="contacts-columns-grid">
+          {CONTACT_EXPORT_COLUMNS.map((column) => (
+            <label key={column.key} className="contacts-column-check">
+              <input type="checkbox" checked={columns.has(column.key)} onChange={() => onColumnToggle(column.key)} />
+              <span>{column.label}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {noColumns && <p className="hint contacts-columns-warning">Seleccione al menos una columna para exportar.</p>}
+      {invalidRange && <p className="hint contacts-columns-warning">Revise el rango de fechas: «desde» no puede ser posterior a «hasta».</p>}
+      <p className="hint">
+        Se exportan los contactos del ambiente activo{environment ? ` (${environmentLabel(environment)})` : ""}.
+      </p>
     </section>
   );
 }
@@ -1695,6 +2195,7 @@ function BackupsPanel({
   busy,
   onVerify,
   onDownload,
+  onDownloadAll,
   onExport
 }: {
   months: BackupMonth[];
@@ -1702,6 +2203,7 @@ function BackupsPanel({
   busy: string;
   onVerify: (month: string) => Promise<void>;
   onDownload: (month: string, table: string) => Promise<void>;
+  onDownloadAll: (month: string) => Promise<void>;
   onExport: (month: string) => Promise<void>;
 }) {
   // Only closed months are expected to have a respaldo; en_curso is informational.
@@ -1769,6 +2271,14 @@ function BackupsPanel({
                             </option>
                           ))}
                         </select>
+                        <button
+                          className="ghost"
+                          disabled={busy === `backup-download-all-${month.month}`}
+                          onClick={() => void onDownloadAll(month.month)}
+                        >
+                          <Download size={14} />
+                          {busy === `backup-download-all-${month.month}` ? "Descargando" : "Descargar todo"}
+                        </button>
                         {verify && (
                           <span className={verify.ok ? "backup-verify-ok" : "backup-verify-fail"}>
                             {verify.ok
@@ -1813,6 +2323,8 @@ function CredentialsPanel({
   emailTemplates,
   emailTemplateDraft,
   alertEmailDraft,
+  branding,
+  token,
   input,
   busy,
   emissionBusy,
@@ -1826,6 +2338,7 @@ function CredentialsPanel({
   onEmissionEnvironmentChange,
   onAlertEmailChange,
   onAlertEmailSubmit,
+  onBrandingSave,
   onBootstrapWriter,
   onRefresh
 }: {
@@ -1834,6 +2347,8 @@ function CredentialsPanel({
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
   alertEmailDraft: string;
+  branding: Branding;
+  token: string;
   input: CredentialFormInput;
   busy: boolean;
   emissionBusy: boolean;
@@ -1847,6 +2362,7 @@ function CredentialsPanel({
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onAlertEmailChange: (value: string) => void;
   onAlertEmailSubmit: () => Promise<void>;
+  onBrandingSave: (next: Branding) => void;
   onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
   onRefresh: () => Promise<void>;
 }) {
@@ -1961,7 +2477,9 @@ function CredentialsPanel({
                     <strong>{section.label}</strong>
                     <small>{section.description}</small>
                   </span>
-                  <em className={sectionState}>{sectionState === "ready" ? "Listo" : "Pendiente"}</em>
+                  {sectionState !== "unknown" && (
+                    <em className={sectionState}>{sectionState === "ready" ? "Listo" : "Pendiente"}</em>
+                  )}
                 </button>
               );
             })}
@@ -1976,6 +2494,8 @@ function CredentialsPanel({
                 onChange={onEmailTemplateChange}
                 onSubmit={onEmailTemplateSubmit}
               />
+            ) : activeSection === "marca" ? (
+              <BrandingEditor branding={branding} token={token} onSave={onBrandingSave} />
             ) : (
               <form
                 className="credential-form-panel credential-detail-panel"
@@ -2313,6 +2833,276 @@ function CredentialsPanel({
           onConfirm={() => void confirmEmissionEnvironmentChange()}
         />
       )}
+    </section>
+  );
+}
+
+// The "Marca" (white-label) settings section. OWNER-only, like the other sensitive
+// sections. Edits the church name + accent color (color picker synced to a hex field)
+// and manages the logo (upload with live preview, current-logo preview, remove). On a
+// successful name/color save the accent is live-applied through onSave; the logo save
+// bumps the version so every <img src="/api/branding/logo?v="> refreshes.
+function BrandingEditor({
+  branding,
+  token,
+  onSave
+}: {
+  branding: Branding;
+  token: string;
+  onSave: (next: Branding) => void;
+}) {
+  const [displayName, setDisplayName] = useState(branding.displayName);
+  const [accentColor, setAccentColor] = useState(branding.accentColor);
+  const [supportEmail, setSupportEmail] = useState(branding.supportEmail);
+  const [logoVersion, setLogoVersion] = useState(branding.logoVersion);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [savingText, setSavingText] = useState(false);
+  const [logoBusy, setLogoBusy] = useState(false);
+  const [logoError, setLogoError] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const logoInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Keep the local color hex normalized for the native color input (which only accepts
+  // #rrggbb). A partial/invalid value keeps the picker on the last valid color.
+  const colorForPicker = /^#[0-9a-fA-F]{6}$/.test(accentColor.trim()) ? accentColor.trim().toLowerCase() : branding.accentColor;
+  const currentLogoSrc = brandingLogoSrc(logoVersion);
+
+  async function saveNameAndColor() {
+    const validation = brandingFieldError(displayName, accentColor, supportEmail);
+    if (validation) {
+      setError(validation);
+      setNotice("");
+      return;
+    }
+    setError("");
+    setSavingText(true);
+    try {
+      const result = await api<{ displayName: string; accentColor: string; supportEmail: string }>("/api/settings/branding", token, {
+        method: "PUT",
+        body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase(), supportEmail: supportEmail.trim().toLowerCase() }
+      });
+      setDisplayName(result.displayName);
+      setAccentColor(result.accentColor);
+      setSupportEmail(result.supportEmail);
+      const next: Branding = { displayName: result.displayName, accentColor: result.accentColor, supportEmail: result.supportEmail, logoVersion };
+      onSave(next);
+      setNotice("Marca actualizada.");
+    } catch (err) {
+      setError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setSavingText(false);
+    }
+  }
+
+  async function uploadLogo(file: File) {
+    setLogoError("");
+    if (file.size > BRANDING_LOGO_MAX_BYTES) {
+      setLogoError("El logo no puede superar los 512 KB.");
+      return;
+    }
+    setLogoBusy(true);
+    try {
+      const response = await fetch("/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
+        body: file
+      });
+      const data = (await response.json().catch(() => ({}))) as { logoVersion?: string; message?: string; error?: string };
+      if (!response.ok) {
+        throw new Error(String(data.message ?? data.error ?? `HTTP ${response.status}`));
+      }
+      const nextVersion = data.logoVersion ?? null;
+      setLogoVersion(nextVersion);
+      setPreviewUrl(null);
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: nextVersion });
+      setNotice("Logo actualizado.");
+    } catch (err) {
+      setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLogoBusy(false);
+      if (logoInputRef.current) {
+        logoInputRef.current.value = "";
+      }
+    }
+  }
+
+  async function removeLogo() {
+    setLogoError("");
+    setLogoBusy(true);
+    try {
+      await api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" });
+      setLogoVersion(null);
+      setPreviewUrl(null);
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: null });
+      setNotice("Logo eliminado.");
+    } catch (err) {
+      setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setLogoBusy(false);
+    }
+  }
+
+  function onPickFile(file: File | undefined) {
+    if (!file) return;
+    // Local preview via an object URL, replaced/cleared once the upload resolves.
+    setPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return URL.createObjectURL(file);
+    });
+    void uploadLogo(file);
+  }
+
+  return (
+    <section className="credential-form-panel branding-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Marca</h2>
+          <p>Nombre, color y logo con los que se identifica su organización en el panel y los correos.</p>
+        </div>
+        <Palette size={20} />
+      </div>
+
+      <div className="credential-fields">
+        <label>
+          <span className="plain-field-label">Nombre de la organización</span>
+          <input
+            value={displayName}
+            onChange={(event) => setDisplayName(event.target.value)}
+            placeholder="ExamplePerson1"
+            maxLength={80}
+            aria-label="Nombre de la organización"
+          />
+        </label>
+
+        <div className="credential-field-block">
+          <span className="plain-field-label">Color de acento</span>
+          <div className="branding-color-row">
+            <input
+              type="color"
+              className="branding-color-swatch"
+              value={colorForPicker}
+              onChange={(event) => setAccentColor(event.target.value)}
+              aria-label="Selector de color de acento"
+            />
+            <input
+              className="branding-color-hex"
+              value={accentColor}
+              onChange={(event) => setAccentColor(event.target.value)}
+              placeholder="#0f766e"
+              aria-label="Color de acento en formato hexadecimal"
+            />
+          </div>
+          <small>Recolorea el panel de administración y el encabezado de los correos.</small>
+        </div>
+
+        <label>
+          <span className="plain-field-label">Correo de soporte</span>
+          <input
+            type="email"
+            value={supportEmail}
+            onChange={(event) => setSupportEmail(event.target.value)}
+            placeholder="legacy-contact-1@example.com"
+            maxLength={100}
+            aria-label="Correo de soporte"
+          />
+          <small>Se muestra en las páginas de donación y en el pie de los correos.</small>
+        </label>
+      </div>
+
+      {error && <p className="field-error">{error}</p>}
+
+      <div className="credential-actions">
+        <div>
+          <Palette size={16} />
+          <span>El color se aplica de inmediato en esta pantalla al guardar.</span>
+        </div>
+        <button className="primary" type="button" disabled={savingText} onClick={() => void saveNameAndColor()}>
+          {savingText ? "Guardando" : "Guardar cambios"}
+        </button>
+      </div>
+
+      <div className="credential-field-block branding-logo-block">
+        <div className="credential-section-title">
+          <h3>Logo</h3>
+          <p>Se muestra en el inicio de sesión, el encabezado del panel y la página de donación. SVG, PNG o JPG, hasta 512 KB.</p>
+        </div>
+        <div className="branding-logo-row">
+          <div className="branding-logo-preview" aria-hidden={!previewUrl && !currentLogoSrc}>
+            {previewUrl ? (
+              <img src={previewUrl} alt="Vista previa del logo" />
+            ) : currentLogoSrc ? (
+              <img src={currentLogoSrc} alt={displayName} />
+            ) : (
+              <span className="branding-logo-empty">Sin logo</span>
+            )}
+          </div>
+          <div className="branding-logo-controls">
+            <label className="file-upload-button">
+              <Upload size={16} />
+              {logoBusy ? "Subiendo" : currentLogoSrc ? "Reemplazar logo" : "Subir logo"}
+              <input
+                ref={logoInputRef}
+                className="file-input-hidden"
+                type="file"
+                accept={BRANDING_LOGO_ACCEPT}
+                disabled={logoBusy}
+                onChange={(event) => onPickFile(event.target.files?.[0])}
+              />
+            </label>
+            {currentLogoSrc && (
+              <button type="button" className="danger" disabled={logoBusy} onClick={() => void removeLogo()}>
+                Quitar logo
+              </button>
+            )}
+          </div>
+        </div>
+        {logoError && <p className="field-error">{logoError}</p>}
+      </div>
+
+      <div className="credential-field-block branding-preview-block">
+        <div className="credential-section-title">
+          <h3>Vista previa</h3>
+          <p>Así se verán su nombre, color y logo antes de guardar los cambios.</p>
+        </div>
+        <div className="branding-preview-grid">
+          {/* Correo: a pure div/CSS miniature of the email chrome — NOT an iframe of real
+              email HTML. The header bar carries the draft accent; the body and footer are
+              grayed placeholders showing the draft name, logo, and support email. */}
+          <figure className="branding-preview-card branding-preview-email">
+            <div className="branding-preview-frame">
+              <div className="branding-preview-email-header" style={{ background: colorForPicker }}>
+                {(previewUrl ?? currentLogoSrc) && (
+                  <img className="branding-preview-email-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+                )}
+                <span className="branding-preview-email-name">{displayName || "ExamplePerson1"}</span>
+              </div>
+              <div className="branding-preview-email-body">
+                <span className="branding-preview-line" />
+                <span className="branding-preview-line branding-preview-line-short" />
+              </div>
+              <div className="branding-preview-email-footer">{supportEmail || "legacy-contact-1@example.com"}</div>
+            </div>
+            <figcaption>Así se verá en los correos</figcaption>
+          </figure>
+
+          {/* Página de donación: the donor landing card. Monochrome BY DESIGN — the donor
+              page is never tinted with the accent, so this mock must not use colorForPicker. */}
+          <figure className="branding-preview-card branding-preview-donor">
+            <div className="branding-preview-frame branding-preview-donor-card">
+              {(previewUrl ?? currentLogoSrc) ? (
+                <img className="branding-preview-donor-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+              ) : (
+                <span className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}</span>
+              )}
+              <span className="branding-preview-donor-title">Diezmos y Ofrendas</span>
+            </div>
+            <figcaption>Así se verá en la página de donación</figcaption>
+          </figure>
+        </div>
+      </div>
+
+      {notice && <p className="auth-notice">{notice}</p>}
     </section>
   );
 }
@@ -2703,7 +3493,8 @@ function credentialSettingsPanelDescription(section: CredentialSettingsSectionId
     wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
-    plantillas: "Edite los asuntos y cuerpos de los correos automáticos."
+    plantillas: "Edite los asuntos y cuerpos de los correos automáticos.",
+    marca: "Personalice el nombre, color y logo con los que se identifica su organización."
   };
   return descriptions[section];
 }
@@ -3136,6 +3927,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 
 function AuthScreen({
   notice,
+  branding,
   onLogin,
   onBootstrap,
   onRequestReset,
@@ -3143,6 +3935,7 @@ function AuthScreen({
   bootstrapAvailable
 }: {
   notice?: string;
+  branding: Branding;
   onLogin: (email: string, password: string) => Promise<void>;
   onBootstrap: (email: string, name: string, password: string, setupToken: string) => Promise<void>;
   onRequestReset: (email: string) => Promise<void>;
@@ -3204,8 +3997,12 @@ function AuthScreen({
           }
         }}
       >
-        <ShieldCheck size={32} />
-        <h1>ExamplePerson1</h1>
+        {brandingLogoSrc(branding.logoVersion) ? (
+          <img className="auth-logo" src={brandingLogoSrc(branding.logoVersion) ?? undefined} alt={branding.displayName} />
+        ) : (
+          <ShieldCheck size={32} />
+        )}
+        <h1>{branding.displayName}</h1>
         {bootstrapAvailable && (mode === "login" || mode === "bootstrap") && (
           <div className="segmented">
             <button type="button" className={mode === "login" ? "active" : ""} onClick={() => setMode("login")}>Ingresar</button>
@@ -3952,6 +4749,7 @@ const VIEW_SUBTITLES: Record<View, string> = {
   failures: "CDE con errores o rechazos que requieren su atención.",
   contingency: "Historial de contingencias (solo lectura): la normativa no contempla contingencia para el CDE.",
   audit: "Historial de todas las acciones realizadas en el panel.",
+  analytics: "Tendencias de las donaciones en línea (carril Wompi).",
   users: "Cree cuentas y asigne roles de acceso al panel.",
   credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo.",
   exports: "Exporte los CDE aceptados para el F960 y control interno."
@@ -4581,6 +5379,7 @@ interface F960Preview {
 }
 
 interface AnnualCertificatePreviewDonor {
+  groupKey: string;
   donorName: string;
   donorEmail: string | null;
   hasEmail: boolean;
@@ -4596,6 +5395,8 @@ interface AnnualCertificatePreview {
   withoutEmail: number;
   totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
+  matchCount: number;
+  truncated: boolean;
 }
 
 interface AnnualCertificateSendResult {

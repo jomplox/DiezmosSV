@@ -22,7 +22,9 @@ describe("visual consistency pack", () => {
     expect(thRule).toContain("font-size: 12px;");
     expect(thRule).toContain("letter-spacing: 0.04em;");
     expect(thRule).toContain("text-transform: uppercase;");
-    expect(thRule).toContain("color: #61737a;");
+    // The reskin routes the muted table-header ink through the shared neutral gray
+    // variable instead of the retired teal-gray literal; the label style is unchanged.
+    expect(thRule).toContain("color: var(--ink-muted);");
   });
 
   it("uses short stat labels with one shared caption line in both Stats branches", () => {
