@@ -1185,13 +1185,21 @@ async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser |
 
 // Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
 // Salvador local time. Absent params default to the last 90 days ending today. Returns
-// null on a malformed date or an inverted range.
+// null on a malformed date, an inverted range, or a range wider than one year.
+const MAX_ANALYTICS_RANGE_DAYS = 366;
+
 function analyticsRange(fromParam: string | null, toParam: string | null, now: Date): AnalyticsRange | null {
   const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
   const todayLocal = elSalvadorDateOnly(now);
   const to = toParam ?? todayLocal;
   const from = fromParam ?? elSalvadorDateOnly(new Date(now.getTime() - 89 * 86_400_000));
   if (!isDate(from) || !isDate(to) || from > to) {
+    return null;
+  }
+  const fromTime = Date.parse(`${from}T00:00:00Z`);
+  const toTime = Date.parse(`${to}T00:00:00Z`);
+  const spanDays = Math.floor((toTime - fromTime) / 86_400_000) + 1;
+  if (spanDays > MAX_ANALYTICS_RANGE_DAYS) {
     return null;
   }
   return { from, to };

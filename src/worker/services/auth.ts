@@ -86,7 +86,19 @@ export class AuthService {
       // Verify-then-upgrade: rehash the just-proven password into the current versioned
       // format. No policy check — an existing password may predate the current policy.
       const upgraded = await hashForStorage(password, { enforcePolicy: false });
-      await this.repo.updateUserPasswordHash(row.id, upgraded.hash, upgraded.salt);
+      const upgradedCurrentRow = await this.repo.updateUserPasswordHashIfCurrent(
+        row.id,
+        row.password_hash,
+        row.password_salt,
+        upgraded.hash,
+        upgraded.salt
+      );
+      if (!upgradedCurrentRow) {
+        // The password row changed after verification (for example, a concurrent
+        // reset). Do not create a session for a credential that may no longer be
+        // current.
+        throw new Error("Credenciales inválidas");
+      }
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = addDays(new Date().toISOString(), 1);
