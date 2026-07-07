@@ -202,11 +202,12 @@ describe("BrandingEditor preview styles are namespaced and theme-driven (source 
     expect(previewCss).toContain("var(--");
     expect(previewCss).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
   });
-});
-test("the donor-page preview mark follows the draft name, not a hardcoded default", () => {
-  // Without a logo, the donor mock's placeholder mark must show the DRAFT organization
-  // name (like the email mock) so both previews stay consistent while editing.
-  const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
-  expect(appSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
+
+  it("the donor-page preview mark follows the draft name, not a hardcoded default", () => {
+    // Without a logo, the donor mock's placeholder mark must show the DRAFT organization
+    // name (like the email mock) so both previews stay consistent while editing.
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    expect(appSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
+  });
 });
 
