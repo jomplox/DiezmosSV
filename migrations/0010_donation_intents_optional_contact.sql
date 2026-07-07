@@ -13,6 +13,19 @@ PRAGMA defer_foreign_keys = ON;
 
 ALTER TABLE donation_intents RENAME TO donation_intents_pre0010;
 
+-- Compatibility shim for both variants of 0009 (tabla auxiliar NORMAL, no TEMP:
+-- el authorizer de D1 rechaza CREATE TEMP TABLE con SQLITE_AUTH):
+-- - Original applied databases do not have wompi_url_enlace_largo.
+-- - Fresh/amended 0009 databases do have it, and may have populated values.
+--
+-- SELECT * preserves a real source column when it exists; the trailing NULL alias
+-- supplies the column only for original-0009 databases. When the real column
+-- exists, SQLite disambiguates the trailing alias as wompi_url_enlace_largo:1,
+-- so later reads of wompi_url_enlace_largo keep the stored URL.
+CREATE TABLE donation_intents_pre0010_copy AS
+SELECT *, NULL AS wompi_url_enlace_largo
+FROM donation_intents_pre0010;
+
 CREATE TABLE donation_intents (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN (
@@ -78,21 +91,15 @@ SELECT
   direccion_complemento,
   wompi_id_enlace,
   wompi_url_enlace,
-  -- wompi_url_enlace_largo was added to 0009 after that migration first shipped, so a
-  -- database that applied the original 0009 reaches this rebuild WITHOUT the column and
-  -- reading it here would abort with "no such column". Following the same rule 0004 uses
-  -- (a rebuild copies only columns guaranteed to exist in every prior variant), we insert
-  -- NULL for it. The rebuilt table still declares the column above, so 0011/0012/0015 and
-  -- every later write (e.g. attachIntentLink) find it. On a fresh database there are no
-  -- rows to copy, so the result is identical to reading the column directly.
-  NULL,
+  wompi_url_enlace_largo,
   document_id,
   client_ip,
   created_at,
   updated_at,
   expires_at
-FROM donation_intents_pre0010;
+FROM donation_intents_pre0010_copy;
 
+DROP TABLE donation_intents_pre0010_copy;
 DROP TABLE donation_intents_pre0010;
 
 -- Recreate the three indexes from 0009 verbatim.
