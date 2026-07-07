@@ -84,8 +84,8 @@ function AnalyticsFilters(props: AnalyticsViewProps) {
     <section className="single-panel analytics-filters">
       <div className="panel-head">
         <div>
-          <h2>Analítica</h2>
-          <p>Tendencias de las donaciones en línea (carril Wompi). Los CDE emitidos a mano no se incluyen.</p>
+          <h2>Filtros</h2>
+          <p>Solo donaciones en línea (carril Wompi); los CDE emitidos a mano no se incluyen.</p>
         </div>
         <TrendingUp size={20} />
       </div>
