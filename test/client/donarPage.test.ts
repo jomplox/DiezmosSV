@@ -813,14 +813,22 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
   });
 
-  it("shows the official support contact on the donor screens", () => {
-    // legacy-contact-1@example.com is the official support contact for BOTH lanes. It renders as
-    // a discreet mailto line at the bottom of the donor card — subordinate to the
-    // flow, never competing with it.
+  it("shows the configured support contact on the donor screens, defaulting to fmce", () => {
+    // The support contact is per-church branding now: DonarSupport renders the FETCHED
+    // branding supportEmail, with DONAR_SUPPORT_EMAIL as the client-side default/fallback.
+    // It stays a discreet mailto line at the bottom of the donor card.
     expect(donarSource).toContain("DONAR_SUPPORT_EMAIL");
     expect(DONAR_SUPPORT_EMAIL).toBe("legacy-contact-1@example.com");
     expect(donarSource).toContain("mailto:");
     expect(stylesSource).toContain(".donar-support");
+    // DonarSupport receives the support email as a prop (from branding state), and the
+    // page seeds/falls back to the constant so an unbranded deployment is unchanged.
+    const supportComponentAt = donarSource.indexOf("function DonarSupport");
+    expect(supportComponentAt).toBeGreaterThan(-1);
+    const supportComponent = donarSource.slice(supportComponentAt, supportComponentAt + 400);
+    expect(supportComponent).toContain("supportEmail");
+    // The fetched branding supportEmail flows into the support state.
+    expect(donarSource).toContain("branding.supportEmail");
   });
 
   it("ships donation styles reusing the auth/card visual language", () => {

@@ -2430,6 +2430,7 @@ function BrandingEditor({
 }) {
   const [displayName, setDisplayName] = useState(branding.displayName);
   const [accentColor, setAccentColor] = useState(branding.accentColor);
+  const [supportEmail, setSupportEmail] = useState(branding.supportEmail);
   const [logoVersion, setLogoVersion] = useState(branding.logoVersion);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -2445,7 +2446,7 @@ function BrandingEditor({
   const currentLogoSrc = brandingLogoSrc(logoVersion);
 
   async function saveNameAndColor() {
-    const validation = brandingFieldError(displayName, accentColor);
+    const validation = brandingFieldError(displayName, accentColor, supportEmail);
     if (validation) {
       setError(validation);
       setNotice("");
@@ -2454,13 +2455,14 @@ function BrandingEditor({
     setError("");
     setSavingText(true);
     try {
-      const result = await api<{ displayName: string; accentColor: string }>("/api/settings/branding", token, {
+      const result = await api<{ displayName: string; accentColor: string; supportEmail: string }>("/api/settings/branding", token, {
         method: "PUT",
-        body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase() }
+        body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase(), supportEmail: supportEmail.trim().toLowerCase() }
       });
       setDisplayName(result.displayName);
       setAccentColor(result.accentColor);
-      const next: Branding = { displayName: result.displayName, accentColor: result.accentColor, logoVersion };
+      setSupportEmail(result.supportEmail);
+      const next: Branding = { displayName: result.displayName, accentColor: result.accentColor, supportEmail: result.supportEmail, logoVersion };
       onSave(next);
       setNotice("Marca actualizada.");
     } catch (err) {
@@ -2490,7 +2492,7 @@ function BrandingEditor({
       const nextVersion = data.logoVersion ?? null;
       setLogoVersion(nextVersion);
       setPreviewUrl(null);
-      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, logoVersion: nextVersion });
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: nextVersion });
       setNotice("Logo actualizado.");
     } catch (err) {
       setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
@@ -2509,7 +2511,7 @@ function BrandingEditor({
       await api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" });
       setLogoVersion(null);
       setPreviewUrl(null);
-      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, logoVersion: null });
+      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: null });
       setNotice("Logo eliminado.");
     } catch (err) {
       setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
@@ -2570,6 +2572,19 @@ function BrandingEditor({
           </div>
           <small>Recolorea el panel de administración y el encabezado de los correos.</small>
         </div>
+
+        <label>
+          <span className="plain-field-label">Correo de soporte</span>
+          <input
+            type="email"
+            value={supportEmail}
+            onChange={(event) => setSupportEmail(event.target.value)}
+            placeholder="legacy-contact-1@example.com"
+            maxLength={100}
+            aria-label="Correo de soporte"
+          />
+          <small>Se muestra en las páginas de donación y en el pie de los correos.</small>
+        </label>
       </div>
 
       {error && <p className="field-error">{error}</p>}
@@ -2580,7 +2595,7 @@ function BrandingEditor({
           <span>El color se aplica de inmediato en esta pantalla al guardar.</span>
         </div>
         <button className="primary" type="button" disabled={savingText} onClick={() => void saveNameAndColor()}>
-          {savingText ? "Guardando" : "Guardar nombre y color"}
+          {savingText ? "Guardando" : "Guardar cambios"}
         </button>
       </div>
 

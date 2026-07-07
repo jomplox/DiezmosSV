@@ -6,7 +6,10 @@
 
 export const CLIENT_BRANDING_DEFAULTS = {
   displayName: "ExamplePerson1",
-  accentColor: "#0f766e"
+  accentColor: "#0f766e",
+  // The default support contact shown on donor pages + email footers (mirrors the
+  // worker's BRANDING_DEFAULTS.supportEmail) until a church configures its own.
+  supportEmail: "legacy-contact-1@example.com"
 } as const;
 
 // The single CSS custom property that drives every admin accent shade (see styles.css
@@ -14,14 +17,18 @@ export const CLIENT_BRANDING_DEFAULTS = {
 export const BRANDING_ACCENT_CSS_VAR = "--accent";
 
 export const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
+export const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
 export const BRANDING_LOGO_MAX_BYTES = 512 * 1024;
 export const BRANDING_LOGO_ACCEPT = ".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg";
 
 const ACCENT_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
+// Same pragmatic email shape the worker uses (normalizeBrandingSupportEmail): one @, a
+// dot in the domain, no whitespace.
+const SUPPORT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Client-side pre-validation mirroring the worker's rules, so the Marca form can flag
 // obvious problems before the round-trip. Returns a Spanish error, or null when valid.
-export function brandingFieldError(displayName: string, accentColor: string): string | null {
+export function brandingFieldError(displayName: string, accentColor: string, supportEmail: string): string | null {
   if (!displayName.trim()) {
     return "Ingrese el nombre de la organización.";
   }
@@ -31,12 +38,20 @@ export function brandingFieldError(displayName: string, accentColor: string): st
   if (!ACCENT_COLOR_PATTERN.test(accentColor.trim())) {
     return "Ingrese un color válido en formato #rrggbb.";
   }
+  const email = supportEmail.trim();
+  if (!email) {
+    return "Ingrese un correo de soporte.";
+  }
+  if (email.length > BRANDING_SUPPORT_EMAIL_MAX_LENGTH || !SUPPORT_EMAIL_PATTERN.test(email)) {
+    return "Ingrese un correo de soporte válido.";
+  }
   return null;
 }
 
 export interface Branding {
   displayName: string;
   accentColor: string;
+  supportEmail: string;
   logoVersion: string | null;
 }
 
@@ -52,8 +67,12 @@ export function parseBrandingResponse(data: unknown): Branding {
     typeof record.accentColor === "string" && ACCENT_COLOR_PATTERN.test(record.accentColor.trim())
       ? record.accentColor.trim().toLowerCase()
       : CLIENT_BRANDING_DEFAULTS.accentColor;
+  const supportEmail =
+    typeof record.supportEmail === "string" && SUPPORT_EMAIL_PATTERN.test(record.supportEmail.trim())
+      ? record.supportEmail.trim().toLowerCase()
+      : CLIENT_BRANDING_DEFAULTS.supportEmail;
   const logoVersion = typeof record.logoVersion === "string" && record.logoVersion ? record.logoVersion : null;
-  return { displayName, accentColor, logoVersion };
+  return { displayName, accentColor, supportEmail, logoVersion };
 }
 
 // The cache-busting logo URL. Always version-qualified so a re-upload invalidates the

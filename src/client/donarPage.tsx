@@ -259,11 +259,13 @@ function clampEmbedHeight(height: number): number {
 }
 
 // Official support contact for both lanes — a discreet mailto line at the bottom of
-// every donor card, visually subordinate to the giving flow.
-function DonarSupport() {
+// every donor card, visually subordinate to the giving flow. The address is the church's
+// configured branding supportEmail; DONAR_SUPPORT_EMAIL is the client-side default used
+// until the fetched branding arrives (and if the fetch fails).
+function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: string }) {
   return (
     <p className="donar-support">
-      ¿Dudas o necesita ayuda? Escríbanos a <a href={`mailto:${DONAR_SUPPORT_EMAIL}`}>{DONAR_SUPPORT_EMAIL}</a>
+      ¿Dudas o necesita ayuda? Escríbanos a <a href={`mailto:${supportEmail}`}>{supportEmail}</a>
     </p>
   );
 }
@@ -289,6 +291,10 @@ export function DonarPage() {
   // fallback. The accent color is deliberately NOT applied here — the donor wizard's
   // monochrome Gotham brand is a design decision, so only the logo is branded.
   const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
+  // The church's configured support contact, shown by DonarSupport at the bottom of every
+  // donor card. Seeded with the client-side default so the line renders before (and if)
+  // the /api/branding fetch resolves; replaced with the configured value when it does.
+  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
   // US-donor (Givebutter) path state: gift frequency (Única | Mensual segmented
   // control) and the render-probe fallback for the embedded giving form.
   const [monthly, setMonthly] = useState(false);
@@ -388,6 +394,7 @@ export function DonarPage() {
         const branding = parseBrandingResponse(data);
         const src = brandingLogoSrc(branding.logoVersion);
         setBrandingLogo(src ? { src, name: branding.displayName } : null);
+        setSupportEmail(branding.supportEmail);
       })
       .catch(() => {
         // Keep the built-in default vector.
@@ -763,7 +770,7 @@ export function DonarPage() {
               <span className="donar-door-desc">{DONAR_DOOR_EEUU_DESC}</span>
             </button>
           </div>
-          <DonarSupport />
+          <DonarSupport supportEmail={supportEmail} />
         </div>
       </div>
     );
@@ -1105,7 +1112,7 @@ export function DonarPage() {
           </div>
         )}
 
-        <DonarSupport />
+        <DonarSupport supportEmail={supportEmail} />
       </div>
     </div>
   );

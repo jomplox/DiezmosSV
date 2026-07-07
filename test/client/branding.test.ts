@@ -19,14 +19,32 @@ describe("parseBrandingResponse", () => {
     expect(parseBrandingResponse({})).toEqual({
       displayName: CLIENT_BRANDING_DEFAULTS.displayName,
       accentColor: CLIENT_BRANDING_DEFAULTS.accentColor,
+      supportEmail: CLIENT_BRANDING_DEFAULTS.supportEmail,
       logoVersion: null
     });
   });
 
   it("passes through a full payload", () => {
     expect(
-      parseBrandingResponse({ displayName: "Iglesia Central", accentColor: "#123abc", logoVersion: "v1" })
-    ).toEqual({ displayName: "Iglesia Central", accentColor: "#123abc", logoVersion: "v1" });
+      parseBrandingResponse({
+        displayName: "Iglesia Central",
+        accentColor: "#123abc",
+        supportEmail: "legacy-email-119@example.com",
+        logoVersion: "v1"
+      })
+    ).toEqual({
+      displayName: "Iglesia Central",
+      accentColor: "#123abc",
+      supportEmail: "legacy-email-119@example.com",
+      logoVersion: "v1"
+    });
+  });
+
+  it("lowercases a valid support email and keeps the default for a malformed one", () => {
+    expect(parseBrandingResponse({ supportEmail: "  legacy-email-119@example.com " }).supportEmail).toBe("legacy-email-119@example.com");
+    expect(parseBrandingResponse({ supportEmail: "no-arroba" }).supportEmail).toBe(
+      CLIENT_BRANDING_DEFAULTS.supportEmail
+    );
   });
 
   it("ignores a malformed accent color and keeps the default", () => {
@@ -53,20 +71,28 @@ describe("brandingLogoSrc", () => {
 });
 
 describe("brandingFieldError", () => {
-  it("accepts a valid name and color", () => {
-    expect(brandingFieldError("Iglesia Central", "#0f766e")).toBeNull();
+  it("accepts a valid name, color, and support email", () => {
+    expect(brandingFieldError("Iglesia Central", "#0f766e", "legacy-email-119@example.com")).toBeNull();
   });
 
   it("flags an empty name", () => {
-    expect(brandingFieldError("  ", "#0f766e")).toContain("nombre");
+    expect(brandingFieldError("  ", "#0f766e", "legacy-email-119@example.com")).toContain("nombre");
   });
 
   it("flags an 81-character name", () => {
-    expect(brandingFieldError("a".repeat(81), "#0f766e")).toContain("caracteres");
+    expect(brandingFieldError("a".repeat(81), "#0f766e", "legacy-email-119@example.com")).toContain("caracteres");
   });
 
   it("flags a malformed color", () => {
-    expect(brandingFieldError("Iglesia", "#zz")).toContain("color");
+    expect(brandingFieldError("Iglesia", "#zz", "legacy-email-119@example.com")).toContain("color");
+  });
+
+  it("flags an empty support email", () => {
+    expect(brandingFieldError("Iglesia", "#0f766e", "  ")).toContain("correo");
+  });
+
+  it("flags a malformed support email", () => {
+    expect(brandingFieldError("Iglesia", "#0f766e", "no-arroba")).toContain("correo");
   });
 
   it("exposes an accept string covering the three allowed formats", () => {
@@ -80,6 +106,7 @@ describe("branding defaults", () => {
   it("keeps the historical ExamplePerson1 identity", () => {
     expect(CLIENT_BRANDING_DEFAULTS.displayName).toBe("ExamplePerson1");
     expect(CLIENT_BRANDING_DEFAULTS.accentColor).toBe("#0f766e");
+    expect(CLIENT_BRANDING_DEFAULTS.supportEmail).toBe("legacy-contact-1@example.com");
     expect(BRANDING_ACCENT_CSS_VAR).toBe("--accent");
   });
 });
@@ -105,6 +132,17 @@ describe("App boots branding before the session (source contract)", () => {
   it("fetches the public branding endpoint and applies it", () => {
     expect(appSource).toContain("/api/branding");
     expect(appSource).toContain("applyBranding");
+  });
+});
+
+describe("BrandingEditor edits the support email (source contract)", () => {
+  it("offers a 'Correo de soporte' input saved through the branding PUT", () => {
+    // The Marca form gains a support-email field alongside name + color; it is sent to
+    // /api/settings/branding and explained as the contact shown on donor pages + emails.
+    expect(appSource).toContain("Correo de soporte");
+    expect(appSource).toContain("supportEmail");
+    // Validation runs through the shared brandingFieldError helper before the round-trip.
+    expect(appSource).toContain("brandingFieldError(");
   });
 });
 
