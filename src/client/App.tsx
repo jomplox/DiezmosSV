@@ -3055,7 +3055,7 @@ function BrandingEditor({
               {(previewUrl ?? currentLogoSrc) ? (
                 <img className="branding-preview-donor-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
               ) : (
-                <span className="branding-preview-donor-mark">ExamplePerson1</span>
+                <span className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}</span>
               )}
               <span className="branding-preview-donor-title">Diezmos y Ofrendas</span>
             </div>
