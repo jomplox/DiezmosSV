@@ -3,6 +3,7 @@ import { buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
+import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
@@ -11,6 +12,25 @@ import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
+
+// Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
+// (otro reintento concurrente ya lo reclamó). El handler HTTP lo traduce a un 409.
+export class RejectedWompiRetryConflictError extends Error {
+  constructor(message = "Ya hay un reintento en curso para este documento.") {
+    super(message);
+    this.name = "RejectedWompiRetryConflictError";
+  }
+}
+
+// Estados TERMINALES de un CDE: un veredicto de MH ya sellado (ACCEPTED/REJECTED) o una
+// invalidación. Una reentrega de cola NUNCA debe re-firmar/re-transmitir un documento en
+// estos estados ni sobrescribir un sello de aceptación. NO incluye SIGNED (un CDE
+// diferido sigue su ciclo de reintento del cron) ni FAILED (reintetable).
+const TERMINAL_DTE_STATUSES = new Set(["ACCEPTED", "REJECTED", "INVALIDATED"]);
+
+function isTerminalDteStatus(status: string): boolean {
+  return TERMINAL_DTE_STATUSES.has(status);
+}
 
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
@@ -93,17 +113,37 @@ export class IssuancePipeline {
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
     const intent = await this.correlateIntent(payload);
+    const donorOverride = intent ? donorOverrideFromIntent(intent, payload) : undefined;
+    // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
+    // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
+    // burns a control number on every queue retry, opening a permanent fiscal gap. Reject
+    // it as terminal here — no sequence consumed, no DTE created.
+    const duiReason = invalidWompiDonorDuiReason(payload, donorOverride);
+    if (duiReason) {
+      await this.repo.createAudit({
+        action: "WOMPI_INVALID_DONOR_DUI",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary: duiReason
+      });
+      return null;
+    }
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
+    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
     const identifiers = extractCdeIdentifiers(normalDocument);
+    // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook: for
+    // an empresa (NIT 36) intent the receptor nombre is the razón social, so storing the
+    // webhook cardholder name here would diverge from the signed document. For a natural
+    // person the receptor nombre/correo are the webhook values, so this is unchanged.
+    const summary = cdeDocumentSummary(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
       environment,
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,
       plainJson: normalDocument,
-      donorEmail: payload.Cliente?.EMail ?? null,
-      donorName: donorName(payload),
+      donorEmail: summary.donorEmail,
+      donorName: summary.donorName,
       amountCents: amountCents(payload),
       issuedAt: nowIso()
     });
@@ -178,9 +218,10 @@ export class IssuancePipeline {
     if (!record.wompi_event_id) {
       throw new Error("El documento no proviene de un evento Wompi");
     }
-    const event = await this.repo.getWompiEventById(record.wompi_event_id);
+    const wompiEventId = record.wompi_event_id;
+    const event = await this.repo.getWompiEventById(wompiEventId);
     if (!event) {
-      throw new Error(`Evento Wompi ${record.wompi_event_id} no encontrado`);
+      throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     const config = getEmisorConfig(this.env);
@@ -192,13 +233,21 @@ export class IssuancePipeline {
     const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
     const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-    await this.repo.replaceDocumentPayload(record.id, {
+    // Atomically claim the rebuild before transmitting: only one concurrent operator
+    // retry may move this REJECTED CDE to SIGNED with the freshly rebuilt payload. The
+    // loser matches 0 rows and stops here — it must not transmit a second distinct legal
+    // DTE for the same Wompi event, nor leave the stored payload and the MH result
+    // describing different documents. Signing happens first (above) so a failure before
+    // the claim leaves the row REJECTED and still retryable.
+    const claimed = await this.repo.claimRejectedWompiRebuild(record.id, wompiEventId, {
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,
       plainJson: rebuilt,
-      signedJws,
-      status: "SIGNED"
+      signedJws
     });
+    if (!claimed) {
+      throw new RejectedWompiRetryConflictError();
+    }
     let mhResult: MhResponse;
     try {
       mhResult = await this.mh.transmitDte({
@@ -247,6 +296,13 @@ export class IssuancePipeline {
     if (!record) {
       throw new Error(`Documento DTE ${documentId} no encontrado`);
     }
+    // Idempotencia ante reentregas de cola: un documento ya sellado por MH
+    // (ACCEPTED/REJECTED) o invalidado es TERMINAL. No se re-firma ni se re-transmite,
+    // y su veredicto no se sobrescribe. Los diferidos (SIGNED + marcador) NO son
+    // terminales: siguen su reintento por el cron.
+    if (isTerminalDteStatus(record.status)) {
+      return record;
+    }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
     try {
@@ -284,6 +340,14 @@ export class IssuancePipeline {
       if (error instanceof MhUnavailableError) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
         return this.deferTransmission(record.id, String(error.message));
+      }
+      // Entre nuestra lectura y este fallo, MH pudo haber sellado el documento
+      // (ACCEPTED/REJECTED) o pudo invalidarse: si ya es TERMINAL, un fallo posterior de
+      // bookkeeping (p. ej. la escritura de auditoría) NO debe degradarlo a FAILED. Se
+      // conserva el sello y se devuelve el estado terminal.
+      const latest = await this.repo.getDteDocument(record.id);
+      if (latest && isTerminalDteStatus(latest.status)) {
+        return latest;
       }
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",
@@ -465,6 +529,23 @@ export class IssuancePipeline {
     if (!intent || (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED")) {
       return null;
     }
+    // Defense-in-depth behind the HMAC check: bind the approved payment to the specific
+    // Wompi link minted for this intent. IdExterno alone is donor-influenced, so when the
+    // webhook also carries EnlacePago.Id and the intent has a stored wompi_id_enlace, the
+    // two must match — otherwise a donor-controlled IdExterno could bind a payment to an
+    // unrelated intent and leak that intent's signed CDE + PII to a payer-controlled
+    // address. On mismatch we audit and skip correlation (the webhook then falls back to
+    // non-intent behavior); when either id is absent the check is a no-op.
+    if (payload.EnlacePago?.Id != null && intent.wompi_id_enlace != null && payload.EnlacePago.Id !== intent.wompi_id_enlace) {
+      await this.repo.createAudit({
+        action: "DONATION_INTENT_LINK_MISMATCH",
+        entityType: "donation_intent",
+        entityId: intent.id,
+        summary: `El enlace del webhook ${payload.EnlacePago.Id} no coincide con el enlace de la intención ${intent.wompi_id_enlace}; no se correlaciona`,
+        metadata: { payloadLinkId: payload.EnlacePago.Id, intentLinkId: intent.wompi_id_enlace }
+      });
+      return null;
+    }
     // Premint draft that the donor never completed: the link was minted but the fiscal
     // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
     // would build a receptor with an empty numDocumento that fails CDE schema validation.
@@ -585,6 +666,30 @@ function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWeb
 function cleanNullable(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
   return trimmed ? trimmed : null;
+}
+
+// Pre-allocation guard: is the effective donor DUI invalid? Mirrors buildCdeDocument's
+// receptor derivation so the answer matches what buildCdeDocument would validate. An
+// intent override supplies tipoDocumento/numDocumento directly; a raw webhook declares
+// DUI ("13") only when DocumentoIdentidad carries the 9 digits a DUI needs, so a
+// document that is not a DUI simply passes. Returns a human-friendly reason on failure,
+// else null. Runs BEFORE nextControlSequence so a bad DUI never consumes a control number.
+function invalidWompiDonorDuiReason(payload: WompiWebhook, override: IntentDonorOverride | undefined): string | null {
+  if (override) {
+    return isDuiDocumentType(override.tipoDocumento) ? duiValidationReason(override.numDocumento) : null;
+  }
+  const donorDocumentRaw = cleanNullable(payload.Cliente?.DocumentoIdentidad);
+  const donorIsDui = donorDocumentRaw !== null && cleanDui(donorDocumentRaw).length === 9;
+  return donorIsDui ? duiValidationReason(donorDocumentRaw) : null;
+}
+
+function duiValidationReason(value: string | null): string | null {
+  try {
+    assertValidDui(value);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGeneracion: string; numeroControl: string } {

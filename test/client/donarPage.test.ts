@@ -5,6 +5,7 @@ import {
   DONAR_AMOUNT_CHIPS,
   DONAR_BACK_LABEL,
   DONAR_CONTINUE_LABEL,
+  DONAR_DRAFT_REUSE_WINDOW_MS,
   DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
@@ -408,13 +409,26 @@ describe("donar premint (background draft + datos completion)", () => {
     expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
   });
 
-  it("treats a draft as fresh only when both the amount and the gift type still match", () => {
-    const draft = { amount: "10.00", giftType: "DIEZMO" as const };
-    expect(draftMatchesForm(draft, base)).toBe(true);
+  it("treats a draft as fresh only when the amount, the gift type, and the age are all valid", () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const draft = { amount: "10.00", giftType: "DIEZMO" as const, mintedAt: now };
+    // Just inside the reuse window with amount + tipo unchanged → reuse.
+    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS - 1)).toBe(true);
     // Edited amount → stale (abandon and full-POST).
-    expect(draftMatchesForm(draft, { ...base, amount: "20.00" })).toBe(false);
+    expect(draftMatchesForm(draft, { ...base, amount: "20.00" }, now)).toBe(false);
     // Switched Diezmo → Ofrenda → stale.
-    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" })).toBe(false);
+    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" }, now)).toBe(false);
+    // Held past the reuse window (donor left the tab open) → stale even if values match,
+    // because the retained Wompi link is near/at expiry.
+    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS)).toBe(false);
+  });
+
+  it("keeps the reuse window safely inside the worker's one-hour Wompi link vigencia", () => {
+    // INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS are 1h on the worker; the client window
+    // must be a conservative margin under that so a retained draft is never reused near expiry.
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeGreaterThan(0);
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThan(60 * 60 * 1000);
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThanOrEqual(45 * 60 * 1000);
   });
 });
 
@@ -427,9 +441,10 @@ describe("donar premint source contract", () => {
     // Fire-and-forget: no await on the draft create, errors swallowed.
     expect(donarSource).toContain("void donarApi");
     expect(donarSource).toContain("setDraftIntent(");
-    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) must reuse
-    // the draft already held — never re-mint. Each mint costs a Wompi link and one of
-    // the donor's 5 throttle slots per 15 minutes.
+    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) may reuse the
+    // draft already held only while it is comfortably inside Wompi's validity window —
+    // the draft records its mint time so draftMatchesForm can age it out.
+    expect(donarSource).toContain("mintedAt: Date.now()");
     expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
   });
 
@@ -444,10 +459,19 @@ describe("donar premint source contract", () => {
 
   it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
     // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
-    // Editar from Paso 3 and switching doors clear it. A stale link simply expires
+    // Editar from Paso 3 and switching doors abandon it. A stale link simply expires
     // on the sweep — there is no new deactivation call in the client.
-    expect(donarSource).toContain("setDraftIntent(null)");
+    expect(donarSource).toContain("abandonDraftIntent()");
+    expect(donarSource).toContain("draftGenerationRef.current += 1");
     expect(donarSource).not.toContain("deactivate");
+  });
+
+  it("ignores an abandoned in-flight background draft via a generation guard", () => {
+    // A fire-and-forget mint can resolve AFTER the donor abandoned it (changed door,
+    // Editar). The mint captures a generation id; abandonDraftIntent bumps the ref, so
+    // the resolve path drops the stale response instead of repopulating draftIntent.
+    expect(donarSource).toContain("const generation = draftGenerationRef.current + 1");
+    expect(donarSource).toContain("if (draftGenerationRef.current !== generation)");
   });
 
   it("keeps the Paso 2 submit copy exactly as before", () => {
@@ -744,11 +768,12 @@ describe("donar wizard source contract", () => {
     expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
-  it("preconnects to the checkout host while the donor fills the form", () => {
-    // DNS + TLS to pagos.wompi.sv are warmed on wizard mount, so the Paso 3 embed
-    // skips connection setup on mobile networks.
+  it("preconnects to the checkout host only after the SV/Wompi path is chosen", () => {
+    // DNS + TLS to pagos.wompi.sv are warmed after a donor chooses the SV door, so
+    // chooser-only visits and the EE. UU./Givebutter path do not contact Wompi.
     expect(donarSource).toContain('"preconnect"');
-    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    expect(donarSource).toContain('door !== "sv" || usDonation');
+    expect(donarSource).toContain("[door, usDonation]");
     expect(DONAR_WOMPI_CHECKOUT_ORIGIN).toBe("https://pagos.wompi.sv");
   });
 

@@ -236,12 +236,19 @@ export interface DonationIntentRecord {
   expires_at: string;
 }
 
-// A donation intent joined with the emitted CDE it produced (present only for
-// COMPLETED intents linked via document_id): its numero de control and its
-// donor_name — the donante shown in the admin panel now comes from the document
-// (lifted from the webhook), since the intent no longer stores name/email. Feeds the
-// admin "Donaciones en línea" listing (Task 5).
-export interface DonationIntentListItem extends DonationIntentRecord {
+// The admin "Donaciones en línea" listing (Task 5): an allowlisted view of a donation
+// intent joined with the emitted CDE it produced (present only for COMPLETED intents
+// linked via document_id). Deliberately NOT `DonationIntentRecord` — the listing must
+// not carry donor PII (donor_document, donor_email), the client IP, or the Wompi
+// payment-link URLs. The donante shown in the panel comes from the document's donor_name
+// (lifted from the webhook), since the intent no longer stores name/email.
+export interface DonationIntentListItem {
+  id: string;
+  status: DonationIntentStatus;
+  amount_cents: number;
+  document_id: string | null;
+  gift_type: DonationGiftType | null;
+  created_at: string;
   numero_control: string | null;
   document_donor_name: string | null;
 }

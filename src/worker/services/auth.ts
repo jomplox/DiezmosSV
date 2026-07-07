@@ -19,7 +19,16 @@ const ROLE_RANK: Record<Role, number> = {
   ADMIN: 3,
   OWNER: 4
 };
-const PASSWORD_PBKDF2_ITERATIONS = 100_000;
+// Current PBKDF2 work factor. New and rehashed passwords are stored in the versioned
+// format `pbkdf2$<iterations>$<hex>` so the count travels with the hash and can be
+// changed later without silently breaking verification.
+const PASSWORD_PBKDF2_ITERATIONS = 150_000;
+// Historic counts used by pre-versioning ("countless") rows. The app shipped inline
+// 150k, then a 100k constant (cf8d5a0) under which the surviving staging/local owners
+// were bootstrapped; a countless hash is therefore tried at 100k when the current
+// factor misses, and upgraded to the versioned format on the next successful login.
+const LEGACY_PASSWORD_PBKDF2_ITERATIONS = [100_000];
+const PASSWORD_HASH_SCHEME = "pbkdf2";
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
 export class PasswordResetError extends Error {}
@@ -36,7 +45,7 @@ export class AuthService {
     if (count > 0) {
       throw new Error("La creación del propietario inicial solo está disponible antes de que exista el primer usuario");
     }
-    const hashed = await hashPassword(input.password);
+    const hashed = await hashForStorage(input.password);
     const user = await this.repo.createUser({
       email: input.email,
       name: input.name,
@@ -48,7 +57,7 @@ export class AuthService {
   }
 
   async createUser(input: { email: string; name: string; role: Role; password: string }): Promise<AuthUser> {
-    const hashed = await hashPassword(input.password);
+    const hashed = await hashForStorage(input.password);
     const user = await this.repo.createUser({
       email: input.email,
       name: input.name,
@@ -60,7 +69,7 @@ export class AuthService {
   }
 
   async resetUserPassword(userId: string, password: string): Promise<void> {
-    const hashed = await hashPassword(password);
+    const hashed = await hashForStorage(password);
     await this.repo.setUserPassword(userId, hashed.hash, hashed.salt);
   }
 
@@ -69,9 +78,15 @@ export class AuthService {
     if (!row || row.disabled_at) {
       throw new Error("Credenciales inválidas");
     }
-    const computed = await hashPassword(password, row.password_salt, { enforcePolicy: false });
-    if (!timingSafeEqual(computed.hash, row.password_hash)) {
+    const verified = await verifyPassword(password, row.password_salt, row.password_hash);
+    if (!verified.valid) {
       throw new Error("Credenciales inválidas");
+    }
+    if (verified.needsRehash) {
+      // Verify-then-upgrade: rehash the just-proven password into the current versioned
+      // format. No policy check — an existing password may predate the current policy.
+      const upgraded = await hashForStorage(password, { enforcePolicy: false });
+      await this.repo.updateUserPasswordHash(row.id, upgraded.hash, upgraded.salt);
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = addDays(new Date().toISOString(), 1);
@@ -96,7 +111,7 @@ export class AuthService {
     if (!row) {
       throw new PasswordResetError("El enlace de restablecimiento no es válido o ya expiró. Solicite uno nuevo.");
     }
-    const hashed = await hashPassword(password);
+    const hashed = await hashForStorage(password);
     await this.repo.setUserPassword(String(row.user_id), hashed.hash, hashed.salt);
     await this.repo.markPasswordResetTokenUsed(String(row.token_id));
     return publicUser(row);
@@ -129,7 +144,11 @@ export class AuthError extends Error {
   }
 }
 
-export async function hashPassword(password: string, salt?: string, options: { enforcePolicy?: boolean } = {}): Promise<{ hash: string; salt: string }> {
+export async function hashPassword(
+  password: string,
+  salt?: string,
+  options: { enforcePolicy?: boolean; iterations?: number } = {}
+): Promise<{ hash: string; salt: string }> {
   if (options.enforcePolicy ?? true) {
     const policyError = passwordPolicyError(password);
     if (policyError) {
@@ -142,13 +161,58 @@ export async function hashPassword(password: string, salt?: string, options: { e
     {
       name: "PBKDF2",
       salt: utf8Bytes(effectiveSalt),
-      iterations: PASSWORD_PBKDF2_ITERATIONS,
+      iterations: options.iterations ?? PASSWORD_PBKDF2_ITERATIONS,
       hash: "SHA-256"
     },
     key,
     256
   );
   return { hash: hexFromBytes(new Uint8Array(bits)), salt: effectiveSalt };
+}
+
+// Derives a password at the current work factor and returns it in the versioned stored
+// format. Used everywhere a password is written (create/bootstrap/reset/rehash).
+async function hashForStorage(password: string, options: { enforcePolicy?: boolean } = {}): Promise<{ hash: string; salt: string }> {
+  const derived = await hashPassword(password, undefined, {
+    enforcePolicy: options.enforcePolicy ?? true,
+    iterations: PASSWORD_PBKDF2_ITERATIONS
+  });
+  return { hash: `${PASSWORD_HASH_SCHEME}$${PASSWORD_PBKDF2_ITERATIONS}$${derived.hash}`, salt: derived.salt };
+}
+
+// Splits a stored hash into its iteration count and raw hex. A value without the
+// `pbkdf2$<n>$` marker is a pre-versioning (countless) hash and reports iterations=null.
+function parseStoredHash(stored: string): { iterations: number | null; hash: string } {
+  const parts = stored.split("$");
+  if (parts.length === 3 && parts[0] === PASSWORD_HASH_SCHEME) {
+    const iterations = Number(parts[1]);
+    if (Number.isInteger(iterations) && iterations > 0) {
+      return { iterations, hash: parts[2] };
+    }
+  }
+  return { iterations: null, hash: stored };
+}
+
+// Verifies a password against a stored hash, honouring an embedded iteration count and
+// falling back to the historic legacy counts for countless hashes. needsRehash signals
+// that a successful match should be re-stored at the current work factor/format.
+async function verifyPassword(password: string, salt: string, storedHash: string): Promise<{ valid: boolean; needsRehash: boolean }> {
+  const parsed = parseStoredHash(storedHash);
+  if (parsed.iterations !== null) {
+    const computed = await hashPassword(password, salt, { enforcePolicy: false, iterations: parsed.iterations });
+    if (timingSafeEqual(computed.hash, parsed.hash)) {
+      return { valid: true, needsRehash: parsed.iterations !== PASSWORD_PBKDF2_ITERATIONS };
+    }
+    return { valid: false, needsRehash: false };
+  }
+  for (const iterations of [PASSWORD_PBKDF2_ITERATIONS, ...LEGACY_PASSWORD_PBKDF2_ITERATIONS]) {
+    const computed = await hashPassword(password, salt, { enforcePolicy: false, iterations });
+    if (timingSafeEqual(computed.hash, parsed.hash)) {
+      // Countless hashes always upgrade so they gain an explicit iteration marker.
+      return { valid: true, needsRehash: true };
+    }
+  }
+  return { valid: false, needsRehash: false };
 }
 
 async function sha256Hex(value: string): Promise<string> {

@@ -36,12 +36,12 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   drawKeyValue(page, "Número de control:", record.numero_control, 24, 704, 84, regular, bold, 7.6, black);
   drawKeyValue(page, "Sello de recepción:", record.sello_recibido ?? "TRANSITORIO", 24, 692, 84, regular, bold, 7.6, green);
 
-  page.drawText(`TIPO DE MODELO: v${document.identificacion?.version ?? ""}`, { x: 318, y: 716, size: 7.7, font: regular, color: black });
-  page.drawText(`PREVIO / TIPO DTE: ${record.tipo_dte}`, { x: 404, y: 716, size: 7.7, font: regular, color: black });
-  page.drawText(`TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 704, size: 7.7, font: regular, color: black });
-  page.drawText(`FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 692, size: 7.7, font: bold, color: black });
-  page.drawText("Moneda:", { x: 424, y: 692, size: 7.7, font: regular, color: black });
-  page.drawText(document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 692, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
+  drawTextSafe(page, `TIPO DE MODELO: v${document.identificacion?.version ?? ""}`, { x: 318, y: 716, size: 7.7, font: regular, color: black });
+  drawTextSafe(page, `PREVIO / TIPO DTE: ${record.tipo_dte}`, { x: 404, y: 716, size: 7.7, font: regular, color: black });
+  drawTextSafe(page, `TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 704, size: 7.7, font: regular, color: black });
+  drawTextSafe(page, `FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 692, size: 7.7, font: bold, color: black });
+  drawTextSafe(page, "Moneda:", { x: 424, y: 692, size: 7.7, font: regular, color: black });
+  drawTextSafe(page, document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 692, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
 
   drawCentered(page, "EMISOR:", 675, 7.5, bold, 18, 294);
   drawCentered(page, "RECEPTOR:", 675, 7.5, bold, 318, 276);
@@ -174,11 +174,12 @@ function drawPartyBox(
     innerWidth
   );
   wrapped.forEach((line, index) => {
-    page.drawText(line, { x: left, y: options.y + 26 - index * 10.5, size: addressFontSize, font: options.regular, color: black });
+    drawTextSafe(page, line, { x: left, y: options.y + 26 - index * 10.5, size: addressFontSize, font: options.regular, color: black });
   });
 }
 
 function wrapText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  text = pdfSafeText(text, font);
   const source = clean(text);
   if (!source) {
     return [];
@@ -273,24 +274,24 @@ function clampLines(lines: string[], maxLines: number, font: PDFFont, size: numb
 function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont, bold: PDFFont): void {
   const black = rgb(0, 0, 0);
   drawRoundedRectangle(page, { x: 18, y: 548, width: 576, height: 22, radius: 5, color: black });
-  page.drawText("CANTIDAD", { x: 24, y: 555, size: 8.3, font: regular, color: rgb(1, 1, 1) });
+  drawTextSafe(page, "CANTIDAD", { x: 24, y: 555, size: 8.3, font: regular, color: rgb(1, 1, 1) });
   drawCentered(page, "DESCRIPCIÓN", 555, 8.3, regular, 145, 280, rgb(1, 1, 1));
   drawRightAligned(page, "VALOR", 555, 8.3, regular, 588, rgb(1, 1, 1));
 
-  page.drawText(formatQuantity(numberValue(item.cantidad, 1)), { x: 24, y: 538, size: 8.2, font: regular, color: black });
-  page.drawText(clean(item.descripcion) || "DONACIÓN", { x: 75, y: 538, size: 8.2, font: regular, color: black });
+  drawTextSafe(page, formatQuantity(numberValue(item.cantidad, 1)), { x: 24, y: 538, size: 8.2, font: regular, color: black });
+  drawTextSafe(page, clean(item.descripcion) || "DONACIÓN", { x: 75, y: 538, size: 8.2, font: regular, color: black });
   drawRightAligned(page, formatMoney(numberValue(item.valor, amount), false), 538, 8.2, regular, 588, black);
 }
 
 function drawTotals(page: PDFPage, amount: number, totalLetras: string | null | undefined, regular: PDFFont, bold: PDFFont): void {
   const black = rgb(0, 0, 0);
   drawRoundedRectangle(page, { x: 18, y: 16, width: 354, height: 62, radius: 5, borderColor: rgb(0.45, 0.45, 0.45), borderWidth: 0.7 });
-  page.drawText(`Valor en Letras:  ${amountInWords(amount, totalLetras)}`, { x: 24, y: 66, size: 7.9, font: regular, color: black });
-  page.drawText("Observaciones:", { x: 24, y: 39, size: 7.9, font: regular, color: black });
+  drawTextSafe(page, `Valor en Letras:  ${amountInWords(amount, totalLetras)}`, { x: 24, y: 66, size: 7.9, font: regular, color: black });
+  drawTextSafe(page, "Observaciones:", { x: 24, y: 39, size: 7.9, font: regular, color: black });
 
   drawRoundedRectangle(page, { x: 375, y: 16, width: 220, height: 28, radius: 3, borderColor: black, borderWidth: 1.2 });
-  page.drawText("Total de la Donación", { x: 381, y: 29, size: 8.4, font: bold, color: black });
-  page.drawText("$", { x: 480, y: 29, size: 8.4, font: regular, color: black });
+  drawTextSafe(page, "Total de la Donación", { x: 381, y: 29, size: 8.4, font: bold, color: black });
+  drawTextSafe(page, "$", { x: 480, y: 29, size: 8.4, font: regular, color: black });
   drawRightAligned(page, formatMoney(amount, false), 29, 8.4, bold, 588, black);
 }
 
@@ -316,7 +317,7 @@ function drawQr(page: PDFPage, text: string, x: number, y: number, size: number)
 function drawInvalidatedWatermark(page: PDFPage, font: PDFFont): void {
   const text = "INVALIDADO";
   const size = 116;
-  page.drawText(text, {
+  drawTextSafe(page, text, {
     x: 92,
     y: 95,
     size,
@@ -339,16 +340,16 @@ function drawKeyValue(
   size: number,
   valueColor = rgb(0, 0, 0)
 ): void {
-  page.drawText(label, { x, y, size, font: bold, color: rgb(0, 0, 0) });
-  page.drawText(value, { x: x + labelWidth, y, size, font: regular, color: valueColor });
+  drawTextSafe(page, label, { x, y, size, font: bold, color: rgb(0, 0, 0) });
+  drawTextSafe(page, value, { x: x + labelWidth, y, size, font: regular, color: valueColor });
 }
 
 function drawCentered(page: PDFPage, text: string, y: number, size: number, font: PDFFont, x = 0, width = 612, color = rgb(0, 0, 0)): void {
-  page.drawText(text, { x: x + (width - font.widthOfTextAtSize(text, size)) / 2, y, size, font, color });
+  drawTextSafe(page, text, { x: x + (width - font.widthOfTextAtSize(text, size)) / 2, y, size, font, color });
 }
 
 function drawRightAligned(page: PDFPage, text: string, y: number, size: number, font: PDFFont, rightX: number, color = rgb(0, 0, 0)): void {
-  page.drawText(text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
+  drawTextSafe(page, text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
 }
 
 export function buildDteQrPayload(record: DteDocumentRecord): string {
@@ -483,6 +484,25 @@ function formatDocument(value: string | null | undefined): string {
 
 function onlyDigits(value: string | null | undefined): string {
   return (value ?? "").replace(/\D/g, "");
+}
+
+
+// Los StandardFonts de pdf-lib codifican WinAnsi: un emoji o CJK en un campo escrito
+// por el donante (Wompi los deja pasar) lanzaba en drawText y tumbaba el correo del
+// comprobante. Cada carácter no codificable se reemplaza por "?" antes de dibujar.
+function pdfSafeText(value: string, font: PDFFont): string {
+  return Array.from(value, (char) => {
+    try {
+      font.encodeText(char);
+      return char;
+    } catch {
+      return "?";
+    }
+  }).join("");
+}
+
+function drawTextSafe(page: PDFPage, text: string, options: Parameters<PDFPage["drawText"]>[1] & { font: PDFFont }): void {
+  page.drawText(pdfSafeText(text, options.font), options);
 }
 
 function clean(value: string | null | undefined): string {

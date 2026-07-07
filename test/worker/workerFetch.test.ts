@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
-import { IssuancePipeline } from "../../src/worker/services/pipeline";
+import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
+import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
 
@@ -115,7 +116,7 @@ describe("auth rate limiting", () => {
     vi.useRealTimers();
   });
 
-  function seedAudit(db: InMemoryD1, action: string, entityId: string, createdAt: string): void {
+  function seedAudit(db: InMemoryD1, action: string, entityId: string, createdAt: string, actorIp: string | null = null): void {
     db.audits.push({
       id: `audit_${action}_${db.audits.length}`,
       actor_type: "SYSTEM",
@@ -125,6 +126,7 @@ describe("auth rate limiting", () => {
       entity_id: entityId,
       summary: "seeded",
       metadata_json: "{}",
+      actor_ip: actorIp,
       created_at: createdAt
     });
   }
@@ -207,6 +209,62 @@ describe("auth rate limiting", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ user: { email: "good@example.org", role: "OPERATOR" } });
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_ok" }));
+  });
+
+  it("does not let attacker failures from one IP lock out a victim on another IP", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_victim",
+      email: "victim@example.org",
+      name: "Victim User",
+      role: "ADMIN",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: ""
+    });
+    // An attacker seeds the failure threshold for the victim's email from their own IP.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "victim@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    }
+
+    // The victim, arriving from a different IP with the correct password, must not be
+    // throttled by the attacker's failures.
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.4" },
+        body: JSON.stringify({ email: "victim@example.org", password: "Valid#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ user: { email: "victim@example.org", role: "ADMIN" } });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+  });
+
+  it("still throttles repeated failures from the same IP", async () => {
+    const db = new InMemoryD1();
+    // Five recent failures from a single IP for one email — the sixth must be throttled
+    // before any credential work runs.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "abuser@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    }
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.7" },
+        body: JSON.stringify({ email: "abuser@example.org", password: "whatever" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+    // No credential work ran, so no additional LOGIN_FAILED audit was written.
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(5);
   });
 
   it("throttles password-reset requests but stays enumeration-safe with a 200", async () => {
@@ -313,6 +371,23 @@ describe("donation intents", () => {
     expect(audit?.entity_id).toBe(payload.intentId);
     const metadata = JSON.stringify(audit?.metadata_json ?? "");
     expect(metadata).not.toContain("04182769");
+  });
+
+  it("rejects an oversized public intent body with 413 before any persistence", async () => {
+    // A body over the 16 KiB cap is refused up front, so oversized spam never
+    // reaches validation or D1 (the per-IP throttle counts only persisted rows).
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ filler: "x".repeat(17 * 1024) })),
+      env(db)
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "request_body_too_large",
+      message: "La solicitud es demasiado grande."
+    });
+    expect(db.donationIntents).toHaveLength(0);
   });
 
   it("accepts a numeric amount and a type 37 free-form document without checksum rules", async () => {
@@ -763,6 +838,40 @@ describe("donation intents", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
 
+  it("caps one sweep at INTENT_EXPIRY_SWEEP_LIMIT and lets the next tick continue", async () => {
+    const db = new InMemoryD1();
+    // More expirable rows than a single tick can process, so attacker-created intents
+    // cannot force one cron invocation to snapshot or deactivate an unbounded set.
+    const overflow = 5;
+    for (let i = 0; i < INTENT_EXPIRY_SWEEP_LIMIT + overflow; i += 1) {
+      const suffix = String(i).padStart(4, "0");
+      db.donationIntents.push({
+        id: `di_exp_${suffix}`,
+        status: "PENDING",
+        wompi_id_enlace: null,
+        amount_cents: 2550,
+        expires_at: "2026-07-04T11:00:00.000Z",
+        created_at: "2026-07-04T10:00:00.000Z"
+      });
+    }
+    const expiredCount = () => db.donationIntents.filter((row) => row.status === "EXPIRED").length;
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+      // Exactly the cap expires this tick; the remainder stays PENDING for the next one.
+      expect(expiredCount()).toBe(INTENT_EXPIRY_SWEEP_LIMIT);
+      expect(db.donationIntents.filter((row) => row.status === "PENDING")).toHaveLength(overflow);
+
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+      // The next tick continues from where the first left off.
+      expect(expiredCount()).toBe(INTENT_EXPIRY_SWEEP_LIMIT + overflow);
+      expect(db.donationIntents.some((row) => row.status === "PENDING")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   // ── Premint: draft create (amount + optional giftType only) ────────────────
   //
   // The donor wizard mints the Wompi link in the background when the SV donor
@@ -932,6 +1041,23 @@ describe("donation intents", () => {
       expect(intent.wompi_id_enlace).toBe(123456);
     });
 
+    it("rejects an oversized public datos body with 413 before mutating the draft", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(
+        datosRequest("di_draft_1", { ...validDatos, filler: "x".repeat(17 * 1024) }),
+        env(db)
+      );
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toEqual({
+        error: "request_body_too_large",
+        message: "La solicitud es demasiado grande."
+      });
+      // The draft is untouched: donor data was never attached.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
+    });
+
     it("mirrors the full-create validation messages (invalid DUI)", async () => {
       const db = new InMemoryD1();
       seedDraft(db);
@@ -1065,6 +1191,40 @@ describe("password reset", () => {
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
+  });
+
+  it("builds the reset link from APP_ORIGIN even when the request carries a different origin", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: Array<{ text: string; html?: string }> = [];
+    db.users.push(knownUser());
+
+    // Host-header poisoning: the request arrives via an attacker-controlled origin,
+    // but the emailed reset link must use the canonical APP_ORIGIN so the token
+    // cannot be captured by pointing the link at an attacker host.
+    const response = await worker.fetch(
+      new Request("https://attacker.example/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "operator@example.org" })
+      }),
+      env(db, {
+        APP_ORIGIN: "https://app.example.org",
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message as { text: string; html?: string });
+            return { messageId: "cf-email-reset" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toContain("https://app.example.org/?reset=");
+    expect(sentMessages[0].text).not.toContain("https://attacker.example/?reset=");
+    expect(sentMessages[0].html).toContain('href="https://app.example.org/?reset=');
   });
 
   it("returns ok without creating tokens or sending email for unknown accounts", async () => {
@@ -1280,7 +1440,7 @@ describe("online donation intents listing", () => {
     expect(response.status).toBe(401);
   });
 
-  it("returns the newest intents for a VIEWER, exposing the linked numero de control for COMPLETED", async () => {
+  it("returns only allowlisted intent fields, exposing the linked numero de control for COMPLETED", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
     db.documents.push(
@@ -1353,7 +1513,7 @@ describe("online donation intents listing", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
-      intents: Array<{ id: string; status: string; numero_control: string | null; document_donor_name: string | null; gift_type: string | null }>;
+      intents: Array<Record<string, unknown> & { id: string; status: string; numero_control: string | null; document_donor_name: string | null; gift_type: string | null }>;
     };
     // Newest first: the COMPLETED intent (12:00) precedes the PENDING one (10:00).
     expect(body.intents.map((intent) => intent.id)).toEqual(["di_done", "di_pending"]);
@@ -1365,6 +1525,19 @@ describe("online donation intents listing", () => {
     // The admin listing carries gift_type so the panel can render the Tipo column.
     expect(body.intents[0].gift_type).toBe("DIEZMO");
     expect(body.intents[1].gift_type).toBeNull();
+    // Least privilege: the listing must not carry donor PII, the client IP, or the
+    // payment-link metadata that donation_intents.* used to leak.
+    for (const intent of body.intents) {
+      expect(intent).not.toHaveProperty("donor_document");
+      expect(intent).not.toHaveProperty("donor_document_type");
+      expect(intent).not.toHaveProperty("donor_email");
+      expect(intent).not.toHaveProperty("donor_name");
+      expect(intent).not.toHaveProperty("donor_phone");
+      expect(intent).not.toHaveProperty("direccion_complemento");
+      expect(intent).not.toHaveProperty("client_ip");
+      expect(intent).not.toHaveProperty("wompi_url_enlace");
+      expect(intent).not.toHaveProperty("wompi_url_enlace_largo");
+    }
   });
 });
 
@@ -1425,6 +1598,56 @@ describe("document detail donor-data-verified flag", () => {
 });
 
 describe("user administration", () => {
+  it("stores newly created passwords in the versioned format that carries the iteration count", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "fresh@example.org", name: "Fresh", role: "ADMIN", password: "Fresh#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(201);
+    const created = db.users.find((row) => row.email === "fresh@example.org");
+    expect(String(created?.password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+  });
+
+  it("verifies a legacy countless hash at the historic count and upgrades the row on login", async () => {
+    const db = new InMemoryD1();
+    // A pre-versioning row: raw hex derived at the historic 100k count with no marker.
+    const legacy = await hashPassword("Legacy#Pass2026", "fixed-salt", { enforcePolicy: false, iterations: 100_000 });
+    db.users.push({
+      id: "user_legacy",
+      email: "legacy@example.org",
+      name: "Legacy User",
+      role: "ADMIN",
+      password_hash: legacy.hash,
+      password_salt: legacy.salt,
+      disabled_at: ""
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "legacy@example.org", password: "Legacy#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ user: { email: "legacy@example.org" } });
+    // The legacy hash verified, and the successful login rehashed it into the current
+    // versioned format carrying the iteration count.
+    expect(legacy.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(String(db.users[0].password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+    expect(db.users[0].password_hash).not.toBe(legacy.hash);
+  });
+
   it("updates a user's profile, email, role, and disabled state", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
@@ -1477,6 +1700,128 @@ describe("user administration", () => {
       entity_type: "user",
       entity_id: "user_operator"
     });
+  });
+
+  it("stops an ADMIN from creating or promoting a user to OWNER", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const promote = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "OWNER" })
+      }),
+      env(db)
+    );
+    expect(promote.status).toBe(403);
+    await expect(promote.json()).resolves.toMatchObject({ error: "owner_role_required" });
+    expect(db.users[0].role).toBe("OPERATOR");
+
+    const create = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "new-owner@example.org", name: "New Owner", role: "OWNER", password: "Owner-password1!" })
+      }),
+      env(db)
+    );
+    expect(create.status).toBe(403);
+    await expect(create.json()).resolves.toMatchObject({ error: "owner_role_required" });
+    expect(db.users).toHaveLength(1);
+  });
+
+  it("blocks an ADMIN from modifying or resetting the password of an existing OWNER", async () => {
+    // The reverse escalation vector: resetting an OWNER's password (or disabling the
+    // account) hands the ADMIN that OWNER's session power. Only OWNERs touch OWNERs.
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_owner",
+      email: "owner@example.org",
+      name: "Owner",
+      role: "OWNER",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const reset = await worker.fetch(
+      new Request("https://example.org/api/users/user_owner/password", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "Atacante#2026" })
+      }),
+      env(db)
+    );
+    expect(reset.status).toBe(403);
+    await expect(reset.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+
+    const patch = await worker.fetch(
+      new Request("https://example.org/api/users/user_owner", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ disabled: true })
+      }),
+      env(db)
+    );
+    expect(patch.status).toBe(403);
+    await expect(patch.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0].disabled_at).toBe("");
+  });
+
+  it("lets an OWNER create and promote users to OWNER", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const promote = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "OWNER" })
+      }),
+      env(db)
+    );
+    expect(promote.status).toBe(200);
+    await expect(promote.json()).resolves.toMatchObject({ user: { id: "user_operator", role: "OWNER" } });
+    expect(db.users[0].role).toBe("OWNER");
+
+    const create = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "second-owner@example.org", name: "Second Owner", role: "OWNER", password: "Owner-password1!" })
+      }),
+      env(db)
+    );
+    expect(create.status).toBe(201);
+    await expect(create.json()).resolves.toMatchObject({ user: { role: "OWNER" } });
+    expect(db.users).toHaveLength(2);
   });
 
   it("resets a user's password and revokes active sessions", async () => {
@@ -1680,13 +2025,14 @@ describe("document email resend", () => {
     });
   });
 
-  it("attaches valid DTE JSON even when the document has a signed JWS", async () => {
+  it("attaches the signed JWS artifact when the document has a signed JWS", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    const signedJws = "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature";
     db.documents.push({
       ...testDocument(),
-      signed_jws: "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature"
+      signed_jws: signedJws
     });
 
     const response = await worker.fetch(
@@ -1714,9 +2060,15 @@ describe("document email resend", () => {
     const sentMessage = sentMessages[0] as { attachments: Array<{ filename: string; content: unknown }> };
     const jsonAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".json"));
     expect(jsonAttachment?.content).toBeInstanceOf(Uint8Array);
-    expect(JSON.parse(new TextDecoder().decode(jsonAttachment?.content as Uint8Array))).toMatchObject({
-      receptor: { correo: "legacy-contact-2@example.com" }
-    });
+    // The legally meaningful artifact is the signed JWS, not the unsigned plain_json.
+    expect(new TextDecoder().decode(jsonAttachment?.content as Uint8Array)).toBe(signedJws);
+    // The recorded JSON evidence hash covers the signed artifact actually sent.
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: "doc_1",
+        dte_json_sha256: await sha256Hex(new TextEncoder().encode(signedJws))
+      })
+    );
   });
 
   it("falls back to an HTTP email provider when Cloudflare requires verified destinations", async () => {
@@ -2427,6 +2779,40 @@ describe("F960 CSV export", () => {
     expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="f960-20260601-20260630.csv"');
     await expect(response.text()).resolves.toBe(
       "1;;Example Person;9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;100000001;062026\r\n"
+    );
+  });
+
+  it("neutralizes spreadsheet formulas in donor-controlled CSV fields", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(
+      testDocument({
+        plain_json: JSON.stringify({
+          emisor: { nombre: "ExamplePerson1" },
+          receptor: {
+            nombre: '=HYPERLINK("https://evil.example",A1)',
+            correo: "donor@example.org",
+            tipoDocumento: "13",
+            numDocumento: "@PAYLOAD"
+          },
+          resumen: { valorTotal: 100 },
+          identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
+        })
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960.csv?startDate=2026-06-01&endDate=2026-06-30", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    // The =HYPERLINK name gets a leading apostrophe (then quoted for the embedded "),
+    // the @PAYLOAD document gets one too; benign numeric/hex fields stay bare.
+    await expect(response.text()).resolves.toBe(
+      `1;;"'=HYPERLINK(""https://evil.example"",A1)";9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;'@PAYLOAD;062026\r\n`
     );
   });
 
@@ -3503,6 +3889,71 @@ describe("Wompi webhook integration", () => {
     expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
   });
 
+  it("stores the environment from the signed payload (EsProductiva=false) and audits a mismatch against the active setting", async () => {
+    const db = new InMemoryD1();
+    // Owner has the app set to PRODUCTION emission, but a TEST-mode payment arrives.
+    db.settings.push({ key: "emission_environment", value: "01" });
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_env_tx_mismatch",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        APP_ENV: "production",
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    // The signed test-mode flag wins: the event is stored (and later emitted) as 00,
+    // never as a production DTE, even though the active emission setting is 01.
+    expect(db.wompiEvents[0]).toMatchObject({ transaction_id: "wompi_env_tx_mismatch", environment: "00" });
+    const mismatch = db.audits.find((row) => row.action === "WOMPI_ENVIRONMENT_MISMATCH");
+    expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: db.wompiEvents[0].id });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadEnvironment: string; activeEnvironment: string };
+    expect(metadata).toMatchObject({ payloadEnvironment: "00", activeEnvironment: "01" });
+  });
+
+  it("does not audit a mismatch when the signed payload agrees with the active emission setting", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "emission_environment", value: "00" });
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_env_tx_agree",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.wompiEvents[0]).toMatchObject({ environment: "00" });
+    expect(db.audits.find((row) => row.action === "WOMPI_ENVIRONMENT_MISMATCH")).toBeUndefined();
+  });
+
   it("normalizes the stored raw Wompi body before generating the queued CDE", async () => {
     const db = new InMemoryD1();
     const secret = "wompi-secret";
@@ -3908,6 +4359,10 @@ describe("donation intent correlation", () => {
       telefono: "70001111",
       direccion: INTENT_ADDRESS
     });
+    // Natural-person flow unchanged: donor_name/donor_email track the emitted receptor,
+    // which for a person is the webhook cardholder name and correo.
+    expect(record?.donor_name).toBe("Fallback Cliente");
+    expect(record?.donor_email).toBe("fallback@example.org");
     // The intent is closed and points at the CDE that fulfilled it.
     const intent = db.donationIntents.find((row) => row.id === "di_corr_1");
     expect(intent?.status).toBe("COMPLETED");
@@ -3976,6 +4431,11 @@ describe("donation intent correlation", () => {
       nombre: "Empresa Ejemplo, S.A. de C.V.",
       correo: "fallback@example.org"
     });
+    // Persisted metadata must match the signed document: donor_name is the razón social
+    // (the emitted receptor nombre), NOT the Wompi cardholder name, and donor_email is
+    // the emitted receptor correo.
+    expect(record?.donor_name).toBe("Empresa Ejemplo, S.A. de C.V.");
+    expect(record?.donor_email).toBe("fallback@example.org");
   });
 
   it("marks a foreign intent's receptor non-domiciled with the intent país and a null direccion", async () => {
@@ -4072,6 +4532,41 @@ describe("donation intent correlation", () => {
     expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
     expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+  });
+
+  it("refuses to correlate when the webhook link id does not match the intent's minted link", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db); // wompi_id_enlace: 987654
+    // A donor-influenced IdExterno points at di_corr_1, but the payment was made on a
+    // DIFFERENT Wompi link than the one minted for that intent.
+    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 111111 } }));
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    // No correlation: the CDE falls back to the webhook donor data, and the intent is
+    // left uncompleted so no signed CDE/PII binds to an unrelated intent.
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH");
+    expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadLinkId: number; intentLinkId: number };
+    expect(metadata).toMatchObject({ payloadLinkId: 111111, intentLinkId: 987654 });
+  });
+
+  it("correlates when the webhook link id matches the intent's minted link", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 987654 } }));
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
+    expect(db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH")).toBeUndefined();
   });
 
   it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
@@ -4176,6 +4671,95 @@ describe("donation intent correlation", () => {
     };
     expect(cde.apendice).toContainEqual({ campo: "TipoAportacion", etiqueta: "Tipo", valor: "Ofrenda" });
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  function seedRejectedDoc(db: InMemoryD1, eventId: string, id: string): DteDocumentRecord {
+    const doc = {
+      id,
+      wompi_event_id: eventId,
+      tipo_dte: "15",
+      environment: "00",
+      codigo_generacion: `3333${id}-3333-4333-8333-333333333333`.slice(0, 36),
+      numero_control: `DTE-15-M001P004-0000000000000${id.length}9`,
+      status: "REJECTED",
+      plain_json: JSON.stringify({ receptor: { nombre: "Fallback Cliente" } }),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: "[]",
+      donor_email: "fallback@example.org",
+      donor_name: "Fallback Cliente",
+      amount_cents: 2500,
+      issued_at: "2026-06-26T01:46:47.015Z",
+      accepted_at: null,
+      contingency_period_id: null,
+      transmission_deferred_at: null,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    };
+    db.documents.push(doc as unknown as DteDocumentRecord);
+    return doc as unknown as DteDocumentRecord;
+  }
+
+  it("refuses a concurrent rebuild of an already-claimed REJECTED CDE and transmits only one DTE", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    seedRejectedDoc(db, eventId, "dte_rejected_cas");
+    // Both operator retries capture the same REJECTED snapshot before either claims it.
+    const staleSnapshot = { ...db.documents.find((row) => row.id === "dte_rejected_cas") } as unknown as DteDocumentRecord;
+    const pipeline = new IssuancePipeline(await pipelineEnv(db));
+
+    const first = await pipeline.rebuildRejectedWompiDocument(staleSnapshot);
+    expect(first.accepted).toBe(true);
+    expect(db.documents.find((row) => row.id === "dte_rejected_cas")?.status).toBe("ACCEPTED");
+
+    // The second retry runs on the stale REJECTED snapshot: the compare-and-swap finds the
+    // row is no longer REJECTED and refuses, so no second legal DTE is written/transmitted.
+    await expect(pipeline.rebuildRejectedWompiDocument(staleSnapshot)).rejects.toBeInstanceOf(RejectedWompiRetryConflictError);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED" && row.entity_id === "dte_rejected_cas")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+  });
+
+  it("leaves a REJECTED CDE retryable when the rebuild fails before it can be claimed", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    const record = seedRejectedDoc(db, eventId, "dte_rejected_signfail");
+    // Signing throws (no MH_CERT_XML configured) BEFORE the claim UPDATE runs.
+    const brokenEnv = env(db, { MOCK_EXTERNAL_SERVICES: "true", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) });
+
+    await expect(new IssuancePipeline(brokenEnv).rebuildRejectedWompiDocument(record)).rejects.toThrow();
+
+    // Not a claim conflict, and the row is untouched: still REJECTED, still carrying its
+    // original MH verdict, so the operator can retry once the cause is fixed.
+    const doc = db.documents.find((row) => row.id === "dte_rejected_signfail");
+    expect(doc?.status).toBe("REJECTED");
+    expect(doc?.mh_estado).toBe("RECHAZADO");
+  });
+
+  it("treats an invalid donor DUI as terminal: no control sequence, no document, audited", async () => {
+    const db = new InMemoryD1();
+    // A raw legacy webhook (no intent) whose DocumentoIdentidad looks like a DUI (9
+    // digits) but fails the check digit. buildCdeDocument would declare it type 13 and
+    // throw AFTER the control sequence is allocated, so a queue retry would burn a
+    // control number on every attempt — the guard must reject it BEFORE allocation.
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      IdTransaccion: "wompi_bad_dui_tx",
+      cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+
+    const result = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    // The sequence counter never advanced — no fiscal gap across queue retries.
+    expect(db.nextSequence).toBe(1);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
+    );
   });
 
 });
@@ -4334,6 +4918,8 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].subject).toContain("(en trámite)");
     expect(sent[0].text).toContain("Sello de Recepción");
+    // ...but never claims the deferred CDE already carries an MH reception seal.
+    expect(sent[0].text).not.toContain("con sello de recepción del Ministerio de Hacienda");
     expect(db.emailDeliveries).toContainEqual(
       expect.objectContaining({
         document_id: record!.id,
@@ -4544,6 +5130,51 @@ describe("deferred transmission when MH is unavailable", () => {
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
 
     expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
+  });
+
+  it("lists FAILED and REJECTED under the combined Fallos filter while a deferred SIGNED doc stays out", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      {
+        ...testDocument(),
+        id: "doc_failed_list",
+        codigo_generacion: "CCCCCCC3-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+        numero_control: "DTE-15-M001P004-000000000000803",
+        status: "FAILED",
+        created_at: "2026-06-26T01:50:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_rejected_list",
+        codigo_generacion: "DDDDDDD4-DDDD-4DDD-8DDD-DDDDDDDDDDD4",
+        numero_control: "DTE-15-M001P004-000000000000804",
+        status: "REJECTED",
+        created_at: "2026-06-26T01:51:00.000Z"
+      },
+      // A deferred SIGNED doc (En trámite) must NOT leak into Fallos — that exclusion
+      // is a deliberate product decision (it is awaiting transmission, not failed).
+      {
+        ...testDocument(),
+        id: "doc_deferred_excluded",
+        codigo_generacion: "FFFFFFF6-FFFF-4FFF-8FFF-FFFFFFFFFFF6",
+        numero_control: "DTE-15-M001P004-000000000000806",
+        status: "SIGNED",
+        transmission_deferred_at: "2026-06-26T01:52:00.000Z",
+        created_at: "2026-06-26T01:52:00.000Z"
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?status=FAILED,REJECTED", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { documents: Array<{ id: string }> };
+    expect(body.documents.map((document) => document.id)).toEqual(["doc_rejected_list", "doc_failed_list"]);
   });
 
   it("surfaces deferred docs as En trámite (virtual filter) while a plain SIGNED doc stays out", async () => {
@@ -4793,6 +5424,71 @@ describe("pipeline failure alerts", () => {
     await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_no_alert_email")).rejects.toThrow();
 
     expect(sentAlerts).toHaveLength(0);
+  });
+});
+
+describe("advanced DTE queue idempotency", () => {
+  it("does not re-transmit an already ACCEPTED advanced CDE on queue redelivery", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_accepted",
+      wompi_event_id: null,
+      status: "ACCEPTED",
+      signed_jws: "signed-jws",
+      sello_recibido: "SELLO-EXISTING",
+      accepted_at: "2026-06-26T01:46:48.000Z"
+    });
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_accepted");
+
+    // Terminal document returned untouched: no re-sign, no re-transmit, verdict preserved.
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.sello_recibido).toBe("SELLO-EXISTING");
+    expect(db.audits.filter((row) => row.action === "ADVANCED_CDE_ACCEPTED")).toHaveLength(0);
+    expect(db.audits.filter((row) => row.action === "EMAIL_SENT")).toHaveLength(0);
+  });
+
+  it("does not re-process an INVALIDATED advanced CDE on queue redelivery", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_invalidated",
+      wompi_event_id: null,
+      status: "INVALIDATED",
+      signed_jws: "signed-jws"
+    });
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_invalidated");
+
+    expect(record.status).toBe("INVALIDATED");
+    expect(db.audits.filter((row) => row.action === "ADVANCED_CDE_ACCEPTED" || row.action === "ADVANCED_CDE_REJECTED")).toHaveLength(0);
+  });
+
+  it("does not flip an accepted advanced CDE to FAILED when post-acceptance bookkeeping throws", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({ ...advancedFailingDocument("doc_advanced_postfail"), signed_jws: "signed-jws" });
+    // Make the ADVANCED_CDE_ACCEPTED audit write throw once, AFTER MH has accepted and
+    // the row has already been marked ACCEPTED, forcing the catch path.
+    const realPrepare = db.prepare.bind(db);
+    let failNextAudit = true;
+    db.prepare = (sql: string) => {
+      const stmt = realPrepare(sql);
+      if (sql.includes("INSERT INTO audit_logs") && failNextAudit) {
+        failNextAudit = false;
+        stmt.run = async () => {
+          throw new Error("audit write failed");
+        };
+      }
+      return stmt;
+    };
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_postfail");
+
+    // The MH acceptance seal survives: never overwritten with FAILED.
+    expect(record.status).toBe("ACCEPTED");
+    expect(db.documents.find((row) => row.id === "doc_advanced_postfail")?.status).toBe("ACCEPTED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED" }));
   });
 });
 
@@ -5055,15 +5751,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
   });
 
   it("formats the expiry date in Spanish and counts days remaining in the alert copy", async () => {
-    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-01T09:15:00.000Z") });
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
-    // The sweep reads the real clock in places (threshold math defaults); pin it to
-    // the scheduled time so this fixture can never date-rot (CI failed when the
-    // fixture's expiry drifted across the 3-day threshold in real time).
-    vi.useFakeTimers();
-    vi.setSystemTime(now);
+    // The countdown now reads the scheduled tick's time (passed to worker.scheduled
+    // below), so the fixture is deterministic without pinning the wall clock.
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 2026-07-11
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -5089,15 +5781,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
   });
 
   it("words an already-expired certificate as 'venció hace N días' instead of a negative countdown", async () => {
-    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-01T09:15:00.000Z") });
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
-    // The sweep reads the real clock in places (threshold math defaults); pin it to
-    // the scheduled time so this fixture can never date-rot (CI failed when the
-    // fixture's expiry drifted across the 3-day threshold in real time).
-    vi.useFakeTimers();
-    vi.setSystemTime(now);
+    // The countdown now reads the scheduled tick's time (passed to worker.scheduled
+    // below), so the fixture is deterministic without pinning the wall clock.
     const expiresAt = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000); // already expired 5 days ago
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -5125,11 +5813,8 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
-    // The sweep reads the real clock in places (threshold math defaults); pin it to
-    // the scheduled time so this fixture can never date-rot (CI failed when the
-    // fixture's expiry drifted across the 3-day threshold in real time).
-    vi.useFakeTimers();
-    vi.setSystemTime(now);
+    // The countdown now reads the scheduled tick's time (passed to worker.scheduled
+    // below), so the fixture is deterministic without pinning the wall clock.
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 10 days out: crosses 30 and 14 thresholds, not 3
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     const scheduledEnv = env(db, {
@@ -5163,11 +5848,8 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
-    // The sweep reads the real clock in places (threshold math defaults); pin it to
-    // the scheduled time so this fixture can never date-rot (CI failed when the
-    // fixture's expiry drifted across the 3-day threshold in real time).
-    vi.useFakeTimers();
-    vi.setSystemTime(now);
+    // The countdown now reads the scheduled tick's time (passed to worker.scheduled
+    // below), so the fixture is deterministic without pinning the wall clock.
     const expiresAt = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
     const sentAlerts: unknown[] = [];
     const scheduledEnv = env(db, {
@@ -5187,11 +5869,8 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
-    // The sweep reads the real clock in places (threshold math defaults); pin it to
-    // the scheduled time so this fixture can never date-rot (CI failed when the
-    // fixture's expiry drifted across the 3-day threshold in real time).
-    vi.useFakeTimers();
-    vi.setSystemTime(now);
+    // The countdown now reads the scheduled tick's time (passed to worker.scheduled
+    // below), so the fixture is deterministic without pinning the wall clock.
     const oldExpiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
     db.audits.push({
       id: "audit_prior_alert",
@@ -5477,11 +6156,15 @@ describe("alert email setting", () => {
     expect(putResponse.status).toBe(200);
     await expect(putResponse.json()).resolves.toMatchObject({ ok: true, alertEmail: "owner@example.org" });
     expect(db.settings).toContainEqual(expect.objectContaining({ key: "alert_email", value: "owner@example.org", updated_by: "user_owner" }));
-    expect(db.audits).toContainEqual(expect.objectContaining({
-      action: "ALERT_EMAIL_UPDATED",
+    // The audit records THAT the recipient changed, but never the address itself — the
+    // audit trail is readable by lower roles, so the OWNER-only value must not ride in.
+    const audit = db.audits.find((row) => row.action === "ALERT_EMAIL_UPDATED");
+    expect(audit).toMatchObject({
       entity_type: "app_setting",
-      entity_id: "alert_email"
-    }));
+      entity_id: "alert_email",
+      summary: "Correo de alertas configurado",
+      metadata_json: JSON.stringify({ enabled: true })
+    });
 
     const getResponse = await worker.fetch(
       new Request("https://example.org/api/settings/alert-email", {
@@ -5492,6 +6175,52 @@ describe("alert email setting", () => {
 
     expect(getResponse.status).toBe(200);
     await expect(getResponse.json()).resolves.toMatchObject({ alertEmail: "owner@example.org" });
+  });
+
+  it("redacts a legacy alert-email address from the audit trail for lower roles", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // A row written before the redaction shipped still carries the address in both the
+    // summary and metadata; the read path must scrub it for everyone.
+    db.audits.push({
+      id: "audit_alert_legacy",
+      actor_type: "USER",
+      actor_id: "user_owner",
+      action: "ALERT_EMAIL_UPDATED",
+      entity_type: "app_setting",
+      entity_id: "alert_email",
+      summary: "Correo de alertas configurado a owner@example.org",
+      metadata_json: JSON.stringify({ alertEmail: "owner@example.org" }),
+      actor_ip: null,
+      actor_context: null,
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const scopedResponse = await worker.fetch(
+      new Request("https://example.org/api/audit?entityType=app_setting&entityId=alert_email", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(scopedResponse.status).toBe(200);
+    const scopedBody = (await scopedResponse.json()) as { audit: Array<{ summary?: string; metadata_json?: string }> };
+    expect(JSON.stringify(scopedBody.audit)).not.toContain("owner@example.org");
+    expect(scopedBody.audit[0]).toMatchObject({
+      summary: "Correo de alertas actualizado",
+      metadata_json: "{}"
+    });
+
+    // The general (keyset-paginated) audit trail is the primary VIEWER surface and must
+    // scrub the legacy address too.
+    const generalResponse = await worker.fetch(
+      new Request("https://example.org/api/audit", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(generalResponse.status).toBe(200);
+    const generalBody = (await generalResponse.json()) as { audit: Array<Record<string, unknown>> };
+    expect(JSON.stringify(generalBody.audit)).not.toContain("owner@example.org");
   });
 
   it("allows clearing the alert email to disable alerting", async () => {
@@ -5998,7 +6727,7 @@ describe("audit actor context", () => {
     expect(audit?.actor_context ?? null).toBeNull();
   });
 
-  it("resolves USER audit rows to an actor name and returns the new context fields", async () => {
+  it("nulls sensitive audit actor fields for VIEWER users", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
     db.users.push({
@@ -6049,15 +6778,57 @@ describe("audit actor context", () => {
     const userRow = body.audit.find((row) => row.id === "audit_user_1");
     const systemRow = body.audit.find((row) => row.id === "audit_system_1");
 
-    expect(userRow).toMatchObject({
+    // The non-sensitive display name still resolves; the operator telemetry is nulled.
+    expect(userRow?.actor_name).toBe("Ada Admin");
+    expect(userRow?.actor_email ?? null).toBeNull();
+    expect(userRow?.actor_ip ?? null).toBeNull();
+    expect(userRow?.actor_context ?? null).toBeNull();
+    // SYSTEM rows have no resolvable user and no captured context.
+    expect(systemRow?.actor_name ?? null).toBeNull();
+    expect(systemRow?.actor_ip ?? null).toBeNull();
+  });
+
+  it("returns sensitive audit actor fields for ADMIN users", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin_session", email: "admin-session@example.org", name: "Admin Session", role: "ADMIN" };
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Ada Admin",
+      role: "ADMIN",
+      password_hash: "h",
+      password_salt: "s",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.audits.push({
+      id: "audit_user_1",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "USER_UPDATED",
+      entity_type: "user",
+      entity_id: "user_operator",
+      summary: "Usuario actualizado",
+      metadata_json: "{}",
+      actor_ip: "190.86.1.2",
+      actor_context: JSON.stringify({ city: "San Salvador", country: "SV", asOrganization: "Claro El Salvador" }),
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/audit", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { audit: Array<Record<string, unknown>> };
+    expect(body.audit[0]).toMatchObject({
       actor_name: "Ada Admin",
       actor_email: "admin@example.org",
       actor_ip: "190.86.1.2"
     });
-    expect(JSON.parse(String(userRow?.actor_context))).toMatchObject({ city: "San Salvador" });
-    // SYSTEM rows have no resolvable user and no captured context.
-    expect(systemRow?.actor_name ?? null).toBeNull();
-    expect(systemRow?.actor_ip ?? null).toBeNull();
+    expect(JSON.parse(String(body.audit[0]?.actor_context))).toMatchObject({ city: "San Salvador" });
   });
 });
 
@@ -6592,6 +7363,31 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("status = 'REJECTED'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      // claimRejectedWompiRebuild: conditional CAS that only wins while the row is
+      // still REJECTED. Returns the row (RETURNING id) on success, null when lost.
+      const [codigoGeneracion, numeroControl, plainJson, signedJws, updatedAt, documentId, wompiEventId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.wompi_event_id === wompiEventId && row.status === "REJECTED"
+      );
+      if (!document) {
+        return null;
+      }
+      document.codigo_generacion = String(codigoGeneracion);
+      document.numero_control = String(numeroControl);
+      document.plain_json = String(plainJson);
+      document.signed_jws = signedJws === null ? null : String(signedJws);
+      document.status = "SIGNED";
+      document.sello_recibido = null;
+      document.mh_estado = null;
+      document.mh_observaciones_json = "[]";
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
     if (this.sql.includes("FROM sessions") && this.sql.includes("JOIN users")) {
       return this.db.sessionUser as T | null;
     }
@@ -6603,6 +7399,18 @@ class Statement {
     }
     if (this.sql.includes("FROM users WHERE email = ?")) {
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("actor_ip IS ?")) {
+      const [action, entityId, sinceIso, actorIp] = this.args;
+      return {
+        count: this.db.audits.filter(
+          (audit) =>
+            audit.action === action &&
+            audit.entity_id === entityId &&
+            String(audit.created_at) >= String(sinceIso) &&
+            (audit.actor_ip ?? null) === (actorIp ?? null)
+        ).length
+      } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("created_at >= ?")) {
       const [action, entityId, sinceIso] = this.args.map(String);
@@ -6791,10 +7599,13 @@ class Statement {
     }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
       // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
-      // the fields the deactivation sweep needs.
+      // the fields the deactivation sweep needs, capped oldest-first by the bound limit.
       const nowIso = String(this.args[0]);
+      const limit = Number(this.args[1] ?? Number.POSITIVE_INFINITY);
       const rows = this.db.donationIntents
         .filter((intent) => (intent.status === "PENDING" || intent.status === "LINK_CREATED") && String(intent.expires_at) < nowIso)
+        .sort((left, right) => String(left.expires_at).localeCompare(String(right.expires_at)) || String(left.id).localeCompare(String(right.id)))
+        .slice(0, limit)
         .map((intent) => ({
           id: intent.id,
           wompi_id_enlace: intent.wompi_id_enlace ?? null,
@@ -6815,8 +7626,15 @@ class Statement {
         .slice(0, limit)
         .map((intent) => {
           const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
+          // Mirror the repository's allowlisted projection: the listing exposes only the
+          // fields the admin panel renders, never donor PII or payment-link metadata.
           return {
-            ...intent,
+            id: intent.id,
+            status: intent.status,
+            amount_cents: intent.amount_cents,
+            document_id: intent.document_id ?? null,
+            gift_type: intent.gift_type ?? null,
+            created_at: intent.created_at,
             numero_control: document?.numero_control ?? null,
             document_donor_name: document?.donor_name ?? null
           };
@@ -6964,6 +7782,12 @@ class Statement {
         if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
           // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
           documents = documents.filter((document) => document.status === "SIGNED" && document.transmission_deferred_at != null);
+        } else if (this.sql.includes("status IN")) {
+          const statusPlaceholderList = this.sql.match(/status IN \(([^)]*)\)/)?.[1] ?? "";
+          const statusCount = (statusPlaceholderList.match(/\?/g) ?? []).length;
+          const statuses = this.args.slice(argIndex, argIndex + statusCount).map(String);
+          argIndex += statusCount;
+          documents = documents.filter((document) => statuses.includes(String(document.status)));
         } else if (this.sql.includes("status = ?")) {
           const status = String(this.args[argIndex]);
           argIndex += 1;
@@ -7272,10 +8096,19 @@ class Statement {
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
-      const [updatedAt, nowIso] = this.args.map(String);
-      for (const intent of this.db.donationIntents.filter(
-        (row) => (row.status === "PENDING" || row.status === "LINK_CREATED") && String(row.expires_at) < nowIso
-      )) {
+      const [updatedAt, secondArg] = this.args.map(String);
+      // expireDonationIntentsByIds binds an id list; expireUnpaidIntentsBefore binds
+      // the expiry cutoff. Route on the SQL shape so both paths are modeled.
+      const ids = this.sql.includes("id IN") ? new Set(this.args.slice(1).map(String)) : null;
+      for (const intent of this.db.donationIntents.filter((row) => {
+        if (row.status !== "PENDING" && row.status !== "LINK_CREATED") {
+          return false;
+        }
+        if (ids) {
+          return ids.has(String(row.id));
+        }
+        return String(row.expires_at) < secondArg;
+      })) {
         intent.status = "EXPIRED";
         intent.updated_at = updatedAt;
       }

@@ -89,6 +89,11 @@ type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
 const TOAST_DISMISS_MS = 6000;
+// The Fallos view lists CDE que requieren atención: both FAILED (issuance errors)
+// AND REJECTED (real MH rejections needing operator action). The list endpoint reads
+// this comma-separated value as a multi-status IN filter. Deferred SIGNED docs (En
+// trámite) are excluded on purpose — they are awaiting transmission, not failed.
+export const FAILURE_VIEW_STATUSES = "FAILED,REJECTED";
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
@@ -268,7 +273,7 @@ export function App() {
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
   const pendingInvalidation = useMemo(() => documents.find((document) => document.id === pendingInvalidationId) ?? null, [documents, pendingInvalidationId]);
-  const filteredStatus = view === "failures" ? "FAILED" : status;
+  const filteredStatus = view === "failures" ? FAILURE_VIEW_STATUSES : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
 
   useEffect(() => {
@@ -2444,7 +2449,11 @@ function CredentialsPanel({
     }
   }
   function requestEmissionEnvironmentChange(environment: EmissionEnvironmentState["environment"]): void {
-    if (emissionBusy || runtimeEnvironment.environment === environment) return;
+    // Short-circuit only while busy or when the selected value is ALREADY persisted as a
+    // setting row (a genuinely redundant save). A value that merely matches the deployment
+    // default with no setting row yet must still reach the confirm flow so the owner can
+    // persist the default explicitly — guarding on runtimeEnvironment.environment blocked that.
+    if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;
     setPendingEmissionEnvironment(environment);
   }
   async function confirmEmissionEnvironmentChange(): Promise<void> {

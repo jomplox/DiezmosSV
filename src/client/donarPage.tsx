@@ -156,12 +156,14 @@ interface DonarIntent {
 }
 
 // A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
-// transition, tagged with the amount + gift type it was minted with so Paso 2 submit
-// can tell whether the donor edited either (stale → abandon the draft, full POST).
+// transition, tagged with the amount + gift type AND the mint time so Paso 2 submit can
+// tell whether the donor edited either (stale → full POST) or left the retained link near
+// expiry (aged out → full POST). See draftMatchesForm / DONAR_DRAFT_REUSE_WINDOW_MS.
 interface DonarDraftIntent {
   intent: DonarIntent;
   amount: string;
   giftType: DonarGiftType | "";
+  mintedAt: number;
 }
 
 // The default logo, reusing the vector paths shared with the worker's PDF renderer
@@ -281,6 +283,11 @@ export function DonarPage() {
   // The link minted in the background when the donor entered Paso 2. Held here until
   // Paso 2 submit, which attaches the fiscal data (datos) and reuses this intent.
   const [draftIntent, setDraftIntent] = useState<DonarDraftIntent | null>(null);
+  // Monotonic id for the current premint. Each mint captures the next generation; every
+  // abandon/reset bumps it. A fire-and-forget mint that resolves after the donor abandoned
+  // it (changed door, Editar) sees a newer generation and drops its stale response instead
+  // of repopulating draftIntent.
+  const draftGenerationRef = useRef(0);
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
@@ -353,7 +360,7 @@ export function DonarPage() {
     setStep(1);
     setError("");
     setIntent(null);
-    setDraftIntent(null);
+    abandonDraftIntent();
     setStage("form");
     setDoor(next);
   };
@@ -404,9 +411,14 @@ export function DonarPage() {
     };
   }, []);
 
-  // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
-  // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
+  // Warm DNS + TLS to Wompi's checkout host once the donor commits to the SV/Wompi
+  // path, so the Paso 3 embed skips connection setup (a few hundred ms on mobile
+  // networks). The chooser and the EE. UU./Givebutter path must not disclose
+  // third-party network metadata to Wompi before that flow is actually chosen.
   useEffect(() => {
+    if (door !== "sv" || usDonation) {
+      return;
+    }
     if (document.querySelector(`link[rel="preconnect"][href="${DONAR_WOMPI_CHECKOUT_ORIGIN}"]`)) {
       return;
     }
@@ -414,7 +426,7 @@ export function DonarPage() {
     link.rel = "preconnect";
     link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
     document.head.appendChild(link);
-  }, []);
+  }, [door, usDonation]);
 
   // Inject the Givebutter widget script ONLY when the US donation path first becomes
   // active — never on admin views, never for non-US donors. Guarded like the Wompi
@@ -635,9 +647,10 @@ export function DonarPage() {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
       // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
       // submit. Never blocks the step change; a failure just leaves draftIntent null and
-      // Paso 2 submit falls back to the full POST. A draft that still matches (Atrás →
-      // Continuar without edits) is reused — each mint costs a Wompi link and one of the
-      // donor's throttle slots, so only a missing or stale draft triggers a fresh one.
+      // Paso 2 submit falls back to the full POST. A draft that still matches AND is
+      // comfortably inside the Wompi vigencia (Atrás → Continuar without edits) is reused —
+      // each mint costs a Wompi link and one of the donor's throttle slots, so only a
+      // missing, edited, or aged-out draft triggers a fresh one.
       if (!draftIntent || !draftMatchesForm(draftIntent, form)) {
         mintDraftIntent(form.amount.trim(), form.giftType);
       }
@@ -645,16 +658,32 @@ export function DonarPage() {
     setStep(2);
   }
 
+  // Abandon the held draft: bump the generation so any in-flight mint's resolve is dropped,
+  // then clear it. Used wherever the donor walks away from the current draft (door change,
+  // Editar, and after a submit consumes it) — Atrás Paso 2→1 deliberately does NOT abandon.
+  function abandonDraftIntent() {
+    draftGenerationRef.current += 1;
+    setDraftIntent(null);
+  }
+
   // Fire-and-forget draft create (SV door only). Stores the minted link + the values it
-  // was minted with; errors are swallowed so the wizard degrades to the full POST.
+  // was minted with; errors are swallowed so the wizard degrades to the full POST. Captures
+  // the mint's generation so a response that lands after the donor abandoned it is ignored.
   function mintDraftIntent(amount: string, giftType: DonarGiftType | "") {
+    const generation = draftGenerationRef.current + 1;
+    draftGenerationRef.current = generation;
     setDraftIntent(null);
     void donarApi<DonarIntent>(DONAR_INTENT_PATH, {
       method: "POST",
       body: donationDraftBody({ amount, giftType })
     })
       .then((created) => {
-        setDraftIntent({ intent: created, amount, giftType });
+        // Dropped if the donor abandoned this mint (changed door / Editar) while it was
+        // in flight — a newer generation means draftIntent must not be repopulated.
+        if (draftGenerationRef.current !== generation) {
+          return;
+        }
+        setDraftIntent({ intent: created, amount, giftType, mintedAt: Date.now() });
       })
       .catch(() => {
         // Ignored: Paso 2 submit falls back to the full-body POST.
@@ -691,7 +720,7 @@ export function DonarPage() {
           body: donationIntentBody(form)
         });
       }
-      setDraftIntent(null);
+      abandonDraftIntent();
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -733,7 +762,7 @@ export function DonarPage() {
   function editAmount() {
     setError("");
     setIntent(null);
-    setDraftIntent(null);
+    abandonDraftIntent();
     setStage("form");
     setStep(1);
   }
