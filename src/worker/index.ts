@@ -47,7 +47,8 @@ import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
-import { listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
@@ -592,6 +593,34 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       headers: {
         "Content-Type": contentType,
         "Content-Disposition": `attachment; filename="${filename}"`
+      }
+    });
+  }
+
+  const backupDownloadAllMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/download-all$/);
+  if (backupDownloadAllMatch && request.method === "GET") {
+    const actor = requireRole(user, "ADMIN");
+    const month = backupDownloadAllMatch[1];
+    const entries = await collectBackupMonthObjects(env, month);
+    if (!entries) {
+      return notFound();
+    }
+    // Same PII-access audit as the per-table download; table "__all__" marks the whole
+    // month was pulled in one archive.
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "RETENTION_DOWNLOADED",
+      entityType: "retention_export",
+      entityId: month,
+      summary: `Descarga completa de respaldo ${month} (${entries.length} archivo(s))`,
+      metadata: { month, table: "__all__", files: entries.length }
+    });
+    const zip = zipStored(entries);
+    return new Response(zip, {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="respaldo-${month}.zip"`
       }
     });
   }

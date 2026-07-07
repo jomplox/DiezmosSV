@@ -5590,6 +5590,76 @@ describe("admin backups panel", () => {
 
     expect(response.status).toBe(404);
   });
+
+  it("streams a full-month ZIP of every archived object plus the manifest and audits the download", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 2, body: "line1\nline2\n" },
+      audit_logs: { rowCount: 1, body: "audit\n" }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/zip");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="respaldo-2026-04.zip"');
+
+    // Round-trip the streamed ZIP through the system unzip binary (same pattern as
+    // pdf.test.ts shelling out to poppler) to prove listing + exact content.
+    const zipBytes = new Uint8Array(await response.arrayBuffer());
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-backup-zip-"));
+    const zipPath = join(dir, "respaldo.zip");
+    writeFileSync(zipPath, zipBytes);
+    const listing = execFileSync("unzip", ["-t", zipPath], { encoding: "utf8" });
+    expect(listing).toContain("manifest.json");
+    expect(listing).toContain("dte_documents.ndjson");
+    expect(listing).toContain("audit_logs.ndjson");
+    expect(listing).toContain("No errors detected");
+    expect(execFileSync("unzip", ["-p", zipPath, "dte_documents.ndjson"], { encoding: "utf8" })).toBe("line1\nline2\n");
+    expect(execFileSync("unzip", ["-p", zipPath, "audit_logs.ndjson"], { encoding: "utf8" })).toBe("audit\n");
+
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "RETENTION_DOWNLOADED", entity_type: "retention_export", entity_id: "2026-04" })
+    );
+    const audit = db.audits.find((row) => row.action === "RETENTION_DOWNLOADED");
+    expect(JSON.parse(String(audit!.metadata_json))).toMatchObject({ month: "2026-04", table: "__all__" });
+  });
+
+  it("returns 404 for a full-month download of a month without an archive", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(404);
+  });
+
+  it("rejects a VIEWER full-month download with 403", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
 });
 
 describe("audit actor context", () => {

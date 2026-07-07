@@ -693,6 +693,28 @@ export function App() {
     });
   }
 
+  // Downloads the whole month's archive (every table object + manifest) as one ZIP.
+  // Keyed by `backup-download-all-<month>` so only that row's button shows a busy state.
+  async function downloadAllBackup(month: string) {
+    await runAction(`backup-download-all-${month}`, async () => {
+      const response = await fetch(`/api/admin/backups/${month}/download-all`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `respaldo-${month}.zip`);
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast(`Respaldo completo de ${month} descargado.`);
+    });
+  }
+
   async function exportBackupMonth(month: string) {
     const confirmed = window.confirm(`¿Desea generar el respaldo del mes ${month}? Se exportarán todas las tablas legales a R2.`);
     if (!confirmed) {
@@ -1202,6 +1224,7 @@ export function App() {
               busy={busy}
               onVerify={verifyBackup}
               onDownload={downloadBackup}
+              onDownloadAll={downloadAllBackup}
               onExport={exportBackupMonth}
             />
             <OnlineDonationsPanel intents={donationIntents} />
@@ -1951,6 +1974,7 @@ function BackupsPanel({
   busy,
   onVerify,
   onDownload,
+  onDownloadAll,
   onExport
 }: {
   months: BackupMonth[];
@@ -1958,6 +1982,7 @@ function BackupsPanel({
   busy: string;
   onVerify: (month: string) => Promise<void>;
   onDownload: (month: string, table: string) => Promise<void>;
+  onDownloadAll: (month: string) => Promise<void>;
   onExport: (month: string) => Promise<void>;
 }) {
   // Only closed months are expected to have a respaldo; en_curso is informational.
@@ -2025,6 +2050,14 @@ function BackupsPanel({
                             </option>
                           ))}
                         </select>
+                        <button
+                          className="ghost"
+                          disabled={busy === `backup-download-all-${month.month}`}
+                          onClick={() => void onDownloadAll(month.month)}
+                        >
+                          <Download size={14} />
+                          {busy === `backup-download-all-${month.month}` ? "Descargando" : "Descargar todo"}
+                        </button>
                         {verify && (
                           <span className={verify.ok ? "backup-verify-ok" : "backup-verify-fail"}>
                             {verify.ok
