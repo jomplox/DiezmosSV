@@ -30,7 +30,7 @@ describe("Analítica navigation and wiring", () => {
 describe("Analítica view contract (usted-form Spanish, Wompi lane)", () => {
   it("states the Wompi-lane scope and excludes manual CDEs in copy", () => {
     expect(viewSource).toContain("carril Wompi");
-    expect(viewSource).toContain("Los CDE emitidos a mano no se incluyen.");
+    expect(viewSource).toContain("los CDE emitidos a mano no se incluyen.");
   });
 
   it("offers the required date-range presets and gift-type filter", () => {
