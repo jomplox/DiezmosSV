@@ -46,6 +46,16 @@ describe("monthly backups UI contract", () => {
     expect(appSource).toContain("Exportar mes");
   });
 
+  it("offers a full-month ZIP download for archived months", () => {
+    // "Descargar todo" button alongside the per-table download control.
+    expect(appSource).toContain("Descargar todo");
+    expect(appSource).toContain("async function downloadAllBackup(");
+    expect(appSource).toContain("/download-all");
+    // Busy state keyed per month and a failure toast.
+    expect(appSource).toContain("backup-download-all-");
+    expect(appSource).toContain("respaldo-${month}.zip");
+  });
+
   it("gates the backups card to ADMIN and up, like its neighbouring export panels", () => {
     expect(appSource).toContain('can(user, "ADMIN")');
   });
