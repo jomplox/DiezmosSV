@@ -115,7 +115,7 @@ describe("auth rate limiting", () => {
     vi.useRealTimers();
   });
 
-  function seedAudit(db: InMemoryD1, action: string, entityId: string, createdAt: string): void {
+  function seedAudit(db: InMemoryD1, action: string, entityId: string, createdAt: string, actorIp: string | null = null): void {
     db.audits.push({
       id: `audit_${action}_${db.audits.length}`,
       actor_type: "SYSTEM",
@@ -125,6 +125,7 @@ describe("auth rate limiting", () => {
       entity_id: entityId,
       summary: "seeded",
       metadata_json: "{}",
+      actor_ip: actorIp,
       created_at: createdAt
     });
   }
@@ -207,6 +208,62 @@ describe("auth rate limiting", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ user: { email: "good@example.org", role: "OPERATOR" } });
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_ok" }));
+  });
+
+  it("does not let attacker failures from one IP lock out a victim on another IP", async () => {
+    const db = new InMemoryD1();
+    const hashed = await hashPassword("Valid#Pass2026", "fixed-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_victim",
+      email: "victim@example.org",
+      name: "Victim User",
+      role: "ADMIN",
+      password_hash: hashed.hash,
+      password_salt: hashed.salt,
+      disabled_at: ""
+    });
+    // An attacker seeds the failure threshold for the victim's email from their own IP.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "victim@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    }
+
+    // The victim, arriving from a different IP with the correct password, must not be
+    // throttled by the attacker's failures.
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.4" },
+        body: JSON.stringify({ email: "victim@example.org", password: "Valid#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ user: { email: "victim@example.org", role: "ADMIN" } });
+    expect(db.audits).toContainEqual(expect.objectContaining({ action: "LOGIN", entity_id: "user_victim" }));
+  });
+
+  it("still throttles repeated failures from the same IP", async () => {
+    const db = new InMemoryD1();
+    // Five recent failures from a single IP for one email — the sixth must be throttled
+    // before any credential work runs.
+    for (let i = 0; i < 5; i += 1) {
+      seedAudit(db, "LOGIN_FAILED", "abuser@example.org", `2026-07-04T11:5${i}:00.000Z`, "203.0.113.7");
+    }
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "203.0.113.7" },
+        body: JSON.stringify({ email: "abuser@example.org", password: "whatever" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(429);
+    await expect(response.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+    // No credential work ran, so no additional LOGIN_FAILED audit was written.
+    expect(db.audits.filter((audit) => audit.action === "LOGIN_FAILED")).toHaveLength(5);
   });
 
   it("throttles password-reset requests but stays enumeration-safe with a 200", async () => {
@@ -6717,6 +6774,18 @@ class Statement {
     }
     if (this.sql.includes("FROM users WHERE email = ?")) {
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("actor_ip IS ?")) {
+      const [action, entityId, sinceIso, actorIp] = this.args;
+      return {
+        count: this.db.audits.filter(
+          (audit) =>
+            audit.action === action &&
+            audit.entity_id === entityId &&
+            String(audit.created_at) >= String(sinceIso) &&
+            (audit.actor_ip ?? null) === (actorIp ?? null)
+        ).length
+      } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("created_at >= ?")) {
       const [action, entityId, sinceIso] = this.args.map(String);

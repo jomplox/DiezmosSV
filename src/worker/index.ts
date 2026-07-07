@@ -63,9 +63,11 @@ const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 // Audit-based auth throttling. Failed logins and password-reset requests are
-// counted over a rolling window keyed on (action, entity_id); crossing the
-// threshold short-circuits the endpoint before any credential work runs, so
-// there is no timing oracle to distinguish throttled from rejected.
+// counted over a rolling window; crossing the threshold short-circuits the endpoint
+// before any credential work runs, so there is no timing oracle to distinguish
+// throttled from rejected. Login failures are keyed on (email, caller IP) so a third
+// party cannot lock out a victim's email by spamming failures from another address,
+// while real brute-force from a single IP is still capped.
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const PASSWORD_RESET_LIMIT = 3;
@@ -423,10 +425,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
     const body = (await request.json()) as { email: string; password: string };
     const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
-    const recentFailures = await repo.countAuditEntriesSince("LOGIN_FAILED", normalizedEmail, authThrottleSinceIso());
+    const { ip: callerIp } = auditContextFrom(request);
+    const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
     if (recentFailures >= LOGIN_FAILED_LIMIT) {
       // Short-circuit before authenticating so a throttled attempt costs the same as
-      // any other rejection — no PBKDF2 work, no DB read, no timing signal.
+      // any other rejection — no PBKDF2 work, no DB read, no timing signal. Keyed on
+      // (email, caller IP) so only the abusing IP is throttled, not the victim.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     let result;
