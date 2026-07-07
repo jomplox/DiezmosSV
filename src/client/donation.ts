@@ -69,18 +69,18 @@ export function donarAmountDisplay(amount: string): string {
 // fiscal fields collapse and the embedded Givebutter giving form takes over. No
 // backend involvement: no intent, no webhook, no migration.
 //
-// Widget account code EXAMPLEACCT00001 (dashboard account 000000), campaign "example-campaign" ("Mis Diezmos y Ofrendas",
-// https://givebutter.com/example-campaign). The campaign attribute is UNVERIFIED for the
-// vanity slug (docs say six-character code); the controller can swap this constant
-// for the dashboard short code if the empirical probe shows the slug is rejected.
+// Account code EXAMPLEACCT00001 (dashboard account 000000), campaign "example-campaign"
+// ("Mis Diezmos y Ofrendas", https://givebutter.com/example-campaign). The hosted campaign
+// page sends x-frame-options: sameorigin, so /donar must iframe Givebutter's
+// purpose-built embed URL instead.
 export const GIVEBUTTER_ACCOUNT_ID = "EXAMPLEACCT00001";
 export const GIVEBUTTER_CAMPAIGN = "example-campaign";
-export const GIVEBUTTER_SCRIPT_URL = "https://widgets.givebutter.com/latest.umd.cjs?acct=EXAMPLEACCT00001";
+export const GIVEBUTTER_EMBED_BASE_URL = `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
 // The CAT-020 código for Estados Unidos: the only foreign country that routes to
 // Givebutter (every other país stays on the Wompi + CDE path).
 export const GIVEBUTTER_US_COUNTRY_CODE = "US";
-// Same probe budget as the Wompi widget: if the custom element has not rendered a
-// child (iframe/shadow content) within this window, show the hosted-page fallback.
+// Same probe budget as the Wompi widget: if the direct iframe has not loaded
+// within this window, show the hosted-page fallback.
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
 
 // The US door funds the SAME mother church as the SV door — FMCE is only the US
@@ -160,7 +160,7 @@ export function isUsDonation(form: Pick<DonationFormInput, "foreignResident" | "
   return form.foreignResident && form.pais === GIVEBUTTER_US_COUNTRY_CODE;
 }
 
-// Normalizes the entered monto to a plain dollar string for the widget/URL prefill.
+// Normalizes the entered monto to a plain dollar string for Givebutter URL prefill.
 // Returns "" for a blank/invalid amount so the caller can omit the query param.
 export function givebutterAmountParam(amount: string): string {
   const parsed = Number.parseFloat(amount.trim());
@@ -171,8 +171,7 @@ export function givebutterAmountParam(amount: string): string {
   return Number.isInteger(parsed) ? String(parsed) : String(parsed);
 }
 
-// Query params the Givebutter widget reads from the HOST page URL (written via
-// history.replaceState before mounting, removed when leaving the US path). Monthly
+// Query params shared by the Givebutter iframe and hosted-page fallback. Monthly
 // maps to frequency=monthly; a one-time gift carries no frequency param.
 export function givebutterPrefillParams(input: { amount: string; monthly: boolean }): Record<string, string> {
   const params: Record<string, string> = {};
@@ -186,9 +185,17 @@ export function givebutterPrefillParams(input: { amount: string; monthly: boolea
   return params;
 }
 
+// The frameable Givebutter embed URL discovered from their widget's elements API
+// (2026-07-07). goalBar=false matches the official widget's generated iframe src.
+export function givebutterEmbedUrl(input: { amount: string; monthly: boolean }): string {
+  const params = new URLSearchParams(givebutterPrefillParams(input));
+  params.set("goalBar", "false");
+  return `${GIVEBUTTER_EMBED_BASE_URL}?${params.toString()}`;
+}
+
 // The mandatory hosted-page fallback link. Works with the vanity slug in all cases
-// (Givebutter resolves the slug in share URLs), so it is safe even if the embedded
-// custom element ends up needing the six-character code.
+// (Givebutter resolves the slug in share URLs), so it is safe even if the embed
+// endpoint changes in the future.
 export function givebutterHostedUrl(input: { amount: string; monthly: boolean }): string {
   const params = new URLSearchParams(givebutterPrefillParams(input));
   const query = params.toString();

@@ -47,7 +47,7 @@ import { MhClient } from "./services/mhClient";
 import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
-import { collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
@@ -144,6 +144,17 @@ function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
 
 function donationBodyTooLargeResponse(): Response {
   return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+}
+
+function backupArchiveTooLargeResponse(): Response {
+  return jsonResponse(
+    {
+      error: "backup_archive_too_large",
+      message: "El respaldo mensual es demasiado grande para descargarlo como ZIP. Descarga las tablas individualmente.",
+      limitBytes: BACKUP_MONTH_DOWNLOAD_MAX_BYTES
+    },
+    { status: 413 }
+  );
 }
 
 function authThrottleSinceIso(): string {
@@ -755,7 +766,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (backupDownloadAllMatch && request.method === "GET") {
     const actor = requireRole(user, "ADMIN");
     const month = backupDownloadAllMatch[1];
-    const entries = await collectBackupMonthObjects(env, month);
+    let entries: Array<{ name: string; data: Uint8Array }> | null;
+    try {
+      entries = await collectBackupMonthObjects(env, month);
+    } catch (error) {
+      if (error instanceof BackupArchiveTooLargeError) {
+        return backupArchiveTooLargeResponse();
+      }
+      throw error;
+    }
     if (!entries) {
       return notFound();
     }

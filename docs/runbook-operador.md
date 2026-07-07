@@ -115,11 +115,10 @@ la página muestra el formulario de **Givebutter** de *Friends of Misión Exampl
 entidad 501c3 estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
 no un CDE salvadoreño, así que esas donaciones se procesan por completo en Givebutter: **no pasan por
 Wompi, no generan una donación en línea, no aparecen en la lista de Exportar y no se emite ningún CDE.**
-El propio Givebutter le envía al donante su recibo. Si el donante en realidad sí quiere un CDE
-salvadoreño, hay un enlace bajo el formulario de Givebutter — **«¿Necesita comprobante fiscal
-salvadoreño (CDE)?»** — que devuelve el formulario normal. Si algún donante de EE. UU. le escribe
-preguntando por su CDE, la respuesta correcta es que su donación se procesó en EE. UU. y su recibo
-proviene de Givebutter/FMCE, no del sistema salvadoreño.
+El propio Givebutter le envía al donante su recibo. Si el formulario incrustado no carga, el enlace
+**«Done en GiveButter»** abre la página alojada de Givebutter en una pestaña nueva. Si algún donante
+de EE. UU. le escribe preguntando por su CDE, la respuesta correcta es que su donación se procesó en
+EE. UU. y su recibo proviene de Givebutter/FMCE, no del sistema salvadoreño.
 
 > **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
 > `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del

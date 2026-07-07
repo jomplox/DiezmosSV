@@ -35,7 +35,6 @@ import {
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
-  GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
@@ -44,7 +43,6 @@ import {
   GIVEBUTTER_INTRO,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
-  GIVEBUTTER_SCRIPT_URL,
   donarAmountDisplay,
   donarDatosPath,
   donarStepIndicator,
@@ -56,8 +54,8 @@ import {
   donationStep2ValidationMessage,
   doorFromSearch,
   draftMatchesForm,
+  givebutterEmbedUrl,
   givebutterHostedUrl,
-  givebutterPrefillParams,
   graciasDisplayFromSearch,
   isUsDonation,
   routeParamForDoor,
@@ -303,9 +301,9 @@ export function DonarPage() {
   // the /api/branding fetch resolves; replaced with the configured value when it does.
   const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
   // US-donor (Givebutter) path state: gift frequency (Única | Mensual segmented
-  // control) and the render-probe fallback for the embedded giving form.
+  // control) and the load-probe fallback for the embedded giving frame.
   const [monthly, setMonthly] = useState(false);
-  const [givebutterFallback, setGivebutterFallback] = useState(false);
+  const [givebutterFrameStatus, setGivebutterFrameStatus] = useState<"loading" | "ready" | "delayed">("loading");
   // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
   // (spinner), "ready" once it has, "delayed" when the render budget elapses first
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
@@ -315,7 +313,6 @@ export function DonarPage() {
   // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
   // the inner scrollbar disappears — the page is the only scroller.
   const [embedHeight, setEmbedHeight] = useState<number | null>(null);
-  const givebutterHostRef = useRef<HTMLDivElement | null>(null);
   // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
   // field, and the summary's Editar control (Paso 3 / the US embed step).
   const heroInputRef = useRef<HTMLInputElement | null>(null);
@@ -326,6 +323,7 @@ export function DonarPage() {
   // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
   // "← Cambiar opción" is the only way back — the donor deliberately chose the door.
   const usDonation = door === "eeuu" || isUsDonation(form);
+  const givebutterFrameUrl = givebutterEmbedUrl({ amount: form.amount, monthly });
   const stepCount = usDonation ? DONAR_STEP_COUNT_US : DONAR_STEP_COUNT_SV;
   const displayStep = usDonation && step > DONAR_STEP_COUNT_US ? DONAR_STEP_COUNT_US : step;
   // The Paso 3 (and US embed) summary label: what the donor chose on Paso 1.
@@ -338,8 +336,8 @@ export function DonarPage() {
       : "";
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
-  // existing query, e.g. the Givebutter amount/frequency prefill) so a refresh
-  // keeps the door, then swap the view. null returns to the chooser.
+  // existing query) so a refresh keeps the door, then swap the view. null returns
+  // to the chooser.
   const chooseDoor = (next: DonarDoor | null) => {
     const params = new URLSearchParams(window.location.search);
     const route = routeParamForDoor(next);
@@ -428,69 +426,27 @@ export function DonarPage() {
     document.head.appendChild(link);
   }, [door, usDonation]);
 
-  // Inject the Givebutter widget script ONLY when the US donation path first becomes
-  // active — never on admin views, never for non-US donors. Guarded like the Wompi
-  // injection so it loads at most once per page load. Injected from Paso 1 (before
-  // the embed step) so the giving form upgrades instantly on "Continuar".
-  useEffect(() => {
-    if (!usDonation) {
-      return;
-    }
-    if (document.querySelector(`script[src="${GIVEBUTTER_SCRIPT_URL}"]`)) {
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = GIVEBUTTER_SCRIPT_URL;
-    script.async = true;
-    document.head.appendChild(script);
-  }, [usDonation]);
-
-  // While the US embed step is active: write the chosen amount (and
-  // frequency=monthly when toggled) into the page URL query so the widget
-  // prefills, then run the same render probe as the Wompi widget — if the giving
-  // form has not rendered any child within the timeout, surface the hosted-page
-  // fallback link. On leave (Atrás / Editar / door change) the query is restored
-  // so the fiscal path is clean.
+  // While the US embed step is active: the direct Givebutter iframe receives the
+  // chosen amount/frequency in its own src. No Givebutter script executes on our
+  // origin, and the host /donar URL stays clean.
   useEffect(() => {
     if (!usDonation || step < 2) {
       return;
     }
-    setGivebutterFallback(false);
-    const params = new URLSearchParams(window.location.search);
-    params.delete("amount");
-    params.delete("frequency");
-    for (const [key, value] of Object.entries(givebutterPrefillParams({ amount: form.amount, monthly }))) {
-      params.set(key, value);
-    }
-    const query = params.toString();
-    window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
+    let cancelled = false;
+    setGivebutterFrameStatus("loading");
 
     const probe = window.setTimeout(() => {
-      const host = givebutterHostRef.current;
-      const element = host?.querySelector("givebutter-giving-form");
-      // The widget renders its UI as a child iframe/form OR inside the custom
-      // element's shadow root. An *empty* shadow root does not count: the element
-      // upgrades and attaches a shadow root even when it rejects the account/campaign
-      // (e.g. "Invalid ?acct= format"), so require actual rendered content — a light-
-      // DOM iframe/form, or a non-empty shadow root — before suppressing the fallback.
-      const lightRendered = !!host?.querySelector("iframe, form");
-      const shadowRendered = !!(element?.shadowRoot && element.shadowRoot.childElementCount > 0);
-      if (!lightRendered && !shadowRendered) {
-        setGivebutterFallback(true);
+      if (!cancelled) {
+        setGivebutterFrameStatus((status) => (status === "ready" ? status : "delayed"));
       }
     }, GIVEBUTTER_RENDER_TIMEOUT_MS);
 
     return () => {
+      cancelled = true;
       window.clearTimeout(probe);
-      // Drop only OUR prefill params from the live URL (never a stale snapshot), so
-      // any query the donor arrived with survives and the fiscal/Wompi path is clean.
-      const leaving = new URLSearchParams(window.location.search);
-      leaving.delete("amount");
-      leaving.delete("frequency");
-      const rest = leaving.toString();
-      window.history.replaceState(null, "", `${window.location.pathname}${rest ? `?${rest}` : ""}`);
     };
-  }, [usDonation, step, form.amount, monthly]);
+  }, [usDonation, step, givebutterFrameUrl]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -623,9 +579,7 @@ export function DonarPage() {
   }, [stage, intent]);
 
   // Paso 1 → Paso 2. The SV door gates on gift type + amount; the US door (no
-  // gift type) gates on the amount alone. For the US door the prefill params are
-  // written into the URL BEFORE the embed mounts, so the giving form (which reads
-  // the host URL when it upgrades) always sees the chosen amount/frequency.
+  // gift type) gates on the amount alone.
   function continueFromMonto(event: FormEvent) {
     event.preventDefault();
     const message = usDonation ? donationAmountValidationMessage(form.amount) : donationStep1ValidationMessage(form);
@@ -634,16 +588,7 @@ export function DonarPage() {
       return;
     }
     setError("");
-    if (usDonation) {
-      const params = new URLSearchParams(window.location.search);
-      params.delete("amount");
-      params.delete("frequency");
-      for (const [key, value] of Object.entries(givebutterPrefillParams({ amount: form.amount, monthly }))) {
-        params.set(key, value);
-      }
-      const query = params.toString();
-      window.history.replaceState(null, "", `${window.location.pathname}${query ? `?${query}` : ""}`);
-    } else {
+    if (!usDonation) {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
       // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
       // submit. Never blocks the step change; a failure just leaves draftIntent null and
@@ -1070,15 +1015,16 @@ export function DonarPage() {
             <p className="donar-intro">{GIVEBUTTER_INTRO}</p>
             <p className="donar-english-notice">{GIVEBUTTER_ENGLISH_NOTICE}</p>
 
-            {/* Givebutter reads amount/frequency from the host page URL (written
-                before this step mounts and re-asserted by the prefill effect). The
-                custom element is upgraded by the widgets.givebutter.com script
-                injected on this path. */}
-            <div className="donar-givebutter-widget" ref={givebutterHostRef}>
-              <givebutter-giving-form campaign={GIVEBUTTER_CAMPAIGN} />
-            </div>
+            <iframe
+              className="donar-givebutter-frame"
+              title="Formulario de donación Givebutter"
+              src={givebutterFrameUrl}
+              allow="payment *; clipboard-write"
+              referrerPolicy="strict-origin-when-cross-origin"
+              onLoad={() => setGivebutterFrameStatus("ready")}
+            />
 
-            {givebutterFallback && (
+            {givebutterFrameStatus === "delayed" && (
               <a
                 className="primary donar-givebutter-fallback"
                 href={givebutterHostedUrl({ amount: form.amount, monthly })}
