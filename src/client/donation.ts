@@ -25,6 +25,13 @@ export const DONAR_POLL_TIMEOUT_MS = 180_000;
 // hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
 
+// A background-minted draft carries a Wompi link minted with a one-hour vigencia on the
+// worker (INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS). If the donor leaves the tab open
+// on Paso 1 and returns much later, that link may be dead. Only reuse a retained draft
+// while it is comfortably inside the vigencia; past this conservative window the wizard
+// re-mints on the next Paso 1→2 crossing. 45 min keeps a 15-min margin under the hour.
+export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
+
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 export const DONAR_MIN_AMOUNT = 1;
 
@@ -409,14 +416,20 @@ export function donationDatosBody(form: DonationFormInput): Record<string, unkno
   };
 }
 
-// Whether a background-minted draft still matches the amount + gift type the donor now
-// has in the form. If the donor edited either via Atrás/Editar, the draft is stale and
-// must be abandoned (its link expires on the sweep) in favor of a fresh full POST.
+// Whether a background-minted draft is still safe to reuse. Besides matching the amount +
+// gift type the donor now has in the form, the retained Wompi link must still be
+// comfortably inside its one-hour vigencia (see DONAR_DRAFT_REUSE_WINDOW_MS). If the donor
+// edited either value (Atrás/Editar) or left the link near expiry, the draft is stale and
+// the wizard falls back to a fresh full POST (the old link expires on the sweep). `now` is
+// injectable for deterministic tests; a draft without a mintedAt is treated as just minted.
 export function draftMatchesForm(
-  draft: { amount: string; giftType: DonarGiftType | "" },
-  form: Pick<DonationFormInput, "amount" | "giftType">
+  draft: { amount: string; giftType: DonarGiftType | ""; mintedAt?: number },
+  form: Pick<DonationFormInput, "amount" | "giftType">,
+  now = Date.now()
 ): boolean {
-  return draft.amount === form.amount.trim() && draft.giftType === form.giftType;
+  const matchesValues = draft.amount === form.amount.trim() && draft.giftType === form.giftType;
+  const mintedAt = draft.mintedAt ?? now;
+  return matchesValues && now - mintedAt < DONAR_DRAFT_REUSE_WINDOW_MS;
 }
 
 // The widget consumes urlEnlaceLargo (which already carries a query string), so
