@@ -116,18 +116,54 @@ export function brandingLogoExtension(contentType: BrandingLogoContentType): str
   return LOGO_EXTENSIONS[contentType];
 }
 
-// Load the church's name + accent + support contact from app_settings for an email
-// send. A minimal settings reader (getSetting) is all this needs, so it stays decoupled
-// from the full Repository type and easy to fake in tests.
-export async function loadEmailBranding(settings: {
-  getSetting(key: string): Promise<string | null>;
-}): Promise<{ organizationName: string; brandColor: string; supportEmail: string }> {
+// Load the church's name + accent + support contact + logo URL from app_settings for an
+// email send. A minimal settings reader (getSetting) is all the settings side needs, so
+// it stays decoupled from the full Repository type and easy to fake in tests. The origin
+// (env.APP_ORIGIN, with a workers.dev/example fallback) turns the stored logo version
+// into the ABSOLUTE URL email clients need — a relative path is useless in an inbox.
+export async function loadEmailBranding(
+  settings: {
+    getSetting(key: string): Promise<string | null>;
+  },
+  env: BrandingOriginEnv
+): Promise<{ organizationName: string; brandColor: string; supportEmail: string; logoUrl: string | null }> {
   const branding = parseBrandingSettings(
     await settings.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
     await settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
     await settings.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
   );
-  return { organizationName: branding.displayName, brandColor: branding.accentColor, supportEmail: branding.supportEmail };
+  const logo = parseBrandingLogoMeta(await settings.getSetting(BRANDING_LOGO_SETTING_KEY));
+  return {
+    organizationName: branding.displayName,
+    brandColor: branding.accentColor,
+    supportEmail: branding.supportEmail,
+    logoUrl: logo ? brandingLogoUrl(env, logo.version) : null
+  };
+}
+
+// The origin fields loadEmailBranding needs, kept as a narrow structural type so a plain
+// { APP_ORIGIN } literal satisfies it in tests without dragging in the whole Env.
+export interface BrandingOriginEnv {
+  APP_ORIGIN?: string;
+  CLOUDFLARE_SCRIPT_NAME?: string;
+}
+
+// The public origin an email links back to. Mirrors alerts.originUrl: a configured
+// APP_ORIGIN wins; otherwise the deployed workers.dev host; otherwise a placeholder.
+export function brandingOrigin(env: BrandingOriginEnv): string {
+  const appOrigin = env.APP_ORIGIN?.trim();
+  if (appOrigin) {
+    return appOrigin;
+  }
+  const scriptName = env.CLOUDFLARE_SCRIPT_NAME?.trim();
+  return scriptName ? `https://${scriptName}.workers.dev` : "https://diezmos.example.org";
+}
+
+// Absolute, version-qualified logo URL for email chrome. Trims a trailing slash on the
+// origin so the path has exactly one separator; the ?v= busts the short public cache.
+export function brandingLogoUrl(env: BrandingOriginEnv, version: string): string {
+  const origin = brandingOrigin(env).replace(/\/+$/, "");
+  return `${origin}/api/branding/logo?v=${version}`;
 }
 
 export function parseBrandingSettings(

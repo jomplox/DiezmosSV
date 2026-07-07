@@ -511,7 +511,7 @@ export class IssuancePipeline {
     }
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-      const branding = await loadEmailBranding(this.repo);
+      const branding = await loadEmailBranding(this.repo, this.env);
       const response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
       await this.repo.recordEmailDelivery({
         documentId: record.id,
