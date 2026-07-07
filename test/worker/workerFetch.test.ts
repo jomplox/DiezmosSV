@@ -4870,6 +4870,8 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].subject).toContain("(en trámite)");
     expect(sent[0].text).toContain("Sello de Recepción");
+    // ...but never claims the deferred CDE already carries an MH reception seal.
+    expect(sent[0].text).not.toContain("con sello de recepción del Ministerio de Hacienda");
     expect(db.emailDeliveries).toContainEqual(
       expect.objectContaining({
         document_id: record!.id,
