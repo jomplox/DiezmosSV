@@ -410,8 +410,16 @@ export class Repository {
       // un SIGNED transitorio de pipeline (sin marcador) queda fuera a propósito.
       filters.push("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL");
     } else if (params.status) {
-      filters.push("dte_documents.status = ?");
-      bindings.push(params.status);
+      // Accept a comma-separated status list (e.g. the Fallos view's "FAILED,REJECTED")
+      // as a multi-status IN filter, while a single status keeps the equality clause.
+      const statuses = params.status.split(",").map((status) => status.trim()).filter(Boolean);
+      if (statuses.length === 1) {
+        filters.push("dte_documents.status = ?");
+        bindings.push(statuses[0]);
+      } else if (statuses.length > 1) {
+        filters.push(`dte_documents.status IN (${statuses.map(() => "?").join(", ")})`);
+        bindings.push(...statuses);
+      }
     }
     const ftsQuery = buildDteSearchQuery(params.q);
     if (ftsQuery) {
