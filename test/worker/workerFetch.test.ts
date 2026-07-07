@@ -2012,13 +2012,14 @@ describe("document email resend", () => {
     });
   });
 
-  it("attaches valid DTE JSON even when the document has a signed JWS", async () => {
+  it("attaches the signed JWS artifact when the document has a signed JWS", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    const signedJws = "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature";
     db.documents.push({
       ...testDocument(),
-      signed_jws: "eyJhbGciOiJSUzUxMiJ9.eyJyZWNlcHRvciI6e319fQ.signature"
+      signed_jws: signedJws
     });
 
     const response = await worker.fetch(
@@ -2046,9 +2047,15 @@ describe("document email resend", () => {
     const sentMessage = sentMessages[0] as { attachments: Array<{ filename: string; content: unknown }> };
     const jsonAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".json"));
     expect(jsonAttachment?.content).toBeInstanceOf(Uint8Array);
-    expect(JSON.parse(new TextDecoder().decode(jsonAttachment?.content as Uint8Array))).toMatchObject({
-      receptor: { correo: "legacy-contact-2@example.com" }
-    });
+    // The legally meaningful artifact is the signed JWS, not the unsigned plain_json.
+    expect(new TextDecoder().decode(jsonAttachment?.content as Uint8Array)).toBe(signedJws);
+    // The recorded JSON evidence hash covers the signed artifact actually sent.
+    expect(db.emailDeliveries).toContainEqual(
+      expect.objectContaining({
+        document_id: "doc_1",
+        dte_json_sha256: await sha256Hex(new TextEncoder().encode(signedJws))
+      })
+    );
   });
 
   it("falls back to an HTTP email provider when Cloudflare requires verified destinations", async () => {
