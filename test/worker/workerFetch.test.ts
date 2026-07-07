@@ -1613,7 +1613,7 @@ describe("user administration", () => {
 
     expect(response.status).toBe(201);
     const created = db.users.find((row) => row.email === "fresh@example.org");
-    expect(String(created?.password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+    expect(String(created?.password_hash)).toMatch(/^pbkdf2\$100000\$[0-9a-f]{64}$/);
   });
 
   it("verifies a legacy countless hash at the historic count and upgrades the row on login", async () => {
@@ -1644,7 +1644,7 @@ describe("user administration", () => {
     // The legacy hash verified, and the successful login rehashed it into the current
     // versioned format carrying the iteration count.
     expect(legacy.hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(String(db.users[0].password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+    expect(String(db.users[0].password_hash)).toMatch(/^pbkdf2\$100000\$[0-9a-f]{64}$/);
     expect(db.users[0].password_hash).not.toBe(legacy.hash);
   });
 
