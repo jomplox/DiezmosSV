@@ -459,10 +459,19 @@ describe("donar premint source contract", () => {
 
   it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
     // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
-    // Editar from Paso 3 and switching doors clear it. A stale link simply expires
+    // Editar from Paso 3 and switching doors abandon it. A stale link simply expires
     // on the sweep — there is no new deactivation call in the client.
-    expect(donarSource).toContain("setDraftIntent(null)");
+    expect(donarSource).toContain("abandonDraftIntent()");
+    expect(donarSource).toContain("draftGenerationRef.current += 1");
     expect(donarSource).not.toContain("deactivate");
+  });
+
+  it("ignores an abandoned in-flight background draft via a generation guard", () => {
+    // A fire-and-forget mint can resolve AFTER the donor abandoned it (changed door,
+    // Editar). The mint captures a generation id; abandonDraftIntent bumps the ref, so
+    // the resolve path drops the stale response instead of repopulating draftIntent.
+    expect(donarSource).toContain("const generation = draftGenerationRef.current + 1");
+    expect(donarSource).toContain("if (draftGenerationRef.current !== generation)");
   });
 
   it("keeps the Paso 2 submit copy exactly as before", () => {

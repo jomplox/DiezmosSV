@@ -283,6 +283,11 @@ export function DonarPage() {
   // The link minted in the background when the donor entered Paso 2. Held here until
   // Paso 2 submit, which attaches the fiscal data (datos) and reuses this intent.
   const [draftIntent, setDraftIntent] = useState<DonarDraftIntent | null>(null);
+  // Monotonic id for the current premint. Each mint captures the next generation; every
+  // abandon/reset bumps it. A fire-and-forget mint that resolves after the donor abandoned
+  // it (changed door, Editar) sees a newer generation and drops its stale response instead
+  // of repopulating draftIntent.
+  const draftGenerationRef = useRef(0);
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
@@ -355,7 +360,7 @@ export function DonarPage() {
     setStep(1);
     setError("");
     setIntent(null);
-    setDraftIntent(null);
+    abandonDraftIntent();
     setStage("form");
     setDoor(next);
   };
@@ -653,15 +658,31 @@ export function DonarPage() {
     setStep(2);
   }
 
+  // Abandon the held draft: bump the generation so any in-flight mint's resolve is dropped,
+  // then clear it. Used wherever the donor walks away from the current draft (door change,
+  // Editar, and after a submit consumes it) — Atrás Paso 2→1 deliberately does NOT abandon.
+  function abandonDraftIntent() {
+    draftGenerationRef.current += 1;
+    setDraftIntent(null);
+  }
+
   // Fire-and-forget draft create (SV door only). Stores the minted link + the values it
-  // was minted with; errors are swallowed so the wizard degrades to the full POST.
+  // was minted with; errors are swallowed so the wizard degrades to the full POST. Captures
+  // the mint's generation so a response that lands after the donor abandoned it is ignored.
   function mintDraftIntent(amount: string, giftType: DonarGiftType | "") {
+    const generation = draftGenerationRef.current + 1;
+    draftGenerationRef.current = generation;
     setDraftIntent(null);
     void donarApi<DonarIntent>(DONAR_INTENT_PATH, {
       method: "POST",
       body: donationDraftBody({ amount, giftType })
     })
       .then((created) => {
+        // Dropped if the donor abandoned this mint (changed door / Editar) while it was
+        // in flight — a newer generation means draftIntent must not be repopulated.
+        if (draftGenerationRef.current !== generation) {
+          return;
+        }
         setDraftIntent({ intent: created, amount, giftType, mintedAt: Date.now() });
       })
       .catch(() => {
@@ -699,7 +720,7 @@ export function DonarPage() {
           body: donationIntentBody(form)
         });
       }
-      setDraftIntent(null);
+      abandonDraftIntent();
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -741,7 +762,7 @@ export function DonarPage() {
   function editAmount() {
     setError("");
     setIntent(null);
-    setDraftIntent(null);
+    abandonDraftIntent();
     setStage("form");
     setStep(1);
   }
