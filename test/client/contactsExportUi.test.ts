@@ -26,6 +26,12 @@ describe("CRM contacts export UI contract", () => {
     expect(appSource).toContain('setToast("Contactos exportados")');
   });
 
+  it("loads the active ambiente when admins open the exports view", () => {
+    expect(appSource).toContain('view === "exports" && can(user, "ADMIN")');
+    expect(appSource).toContain('api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)');
+    expect(appSource).toContain("setEmissionEnvironment(environmentResult.emissionEnvironment)");
+  });
+
   it("disables the button until the active ambiente is known and shows a busy state", () => {
     expect(appSource).toContain("disabled={busy || !environment");
     expect(appSource).toContain('busy === "export-contacts"');
