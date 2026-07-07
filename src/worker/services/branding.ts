@@ -7,15 +7,20 @@
 
 export const BRANDING_DISPLAY_NAME_SETTING_KEY = "branding_display_name";
 export const BRANDING_ACCENT_COLOR_SETTING_KEY = "branding_accent_color";
+export const BRANDING_SUPPORT_EMAIL_SETTING_KEY = "branding_support_email";
 export const BRANDING_LOGO_SETTING_KEY = "branding_logo";
 export const BRANDING_LOGO_OBJECT_KEY = "branding/logo";
 
 export const BRANDING_DEFAULTS = {
   displayName: "ExamplePerson1",
-  accentColor: "#0f766e"
+  accentColor: "#0f766e",
+  // The official support contact both donor pages and email footers fall back to when a
+  // church has not configured its own. Keeps an unbranded deployment identical.
+  supportEmail: "legacy-contact-1@example.com"
 } as const;
 
 export const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
+export const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
 // 512 KB: comfortably fits a logo (SVG/optimized PNG/JPEG) while keeping the R2
 // object — and the unauthenticated /api/branding/logo stream — cheap to serve.
 export const BRANDING_LOGO_MAX_BYTES = 512 * 1024;
@@ -32,12 +37,16 @@ const LOGO_EXTENSIONS: Record<BrandingLogoContentType, string> = {
 };
 
 const ACCENT_COLOR_PATTERN = /^#[0-9a-f]{6}$/;
+// The same pragmatic email shape used elsewhere (isValidEmail in App.tsx, normalizeEmail
+// in the worker index): one @, a dot in the domain, no whitespace. Deliberately lenient.
+const SUPPORT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export class BrandingValidationError extends Error {}
 
 export interface BrandingSettings {
   displayName: string;
   accentColor: string;
+  supportEmail: string;
 }
 
 export interface BrandingLogoMeta {
@@ -71,6 +80,25 @@ export function normalizeBrandingAccentColor(value: unknown): string {
   return lowered;
 }
 
+// The support contact shown on donor pages and in email footers. Trimmed, lowercased,
+// validated against the pragmatic email shape and capped at 100 chars. Spanish error.
+export function normalizeBrandingSupportEmail(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new BrandingValidationError("Ingrese un correo de soporte válido.");
+  }
+  const email = value.trim().toLowerCase();
+  if (!email) {
+    throw new BrandingValidationError("Ingrese un correo de soporte.");
+  }
+  if (email.length > BRANDING_SUPPORT_EMAIL_MAX_LENGTH) {
+    throw new BrandingValidationError(`El correo de soporte no puede superar los ${BRANDING_SUPPORT_EMAIL_MAX_LENGTH} caracteres.`);
+  }
+  if (!SUPPORT_EMAIL_PATTERN.test(email)) {
+    throw new BrandingValidationError("Ingrese un correo de soporte válido.");
+  }
+  return email;
+}
+
 export function normalizeBrandingLogoContentType(value: unknown): BrandingLogoContentType {
   if (typeof value !== "string") {
     throw new BrandingValidationError("Suba un logo en formato SVG, PNG o JPG.");
@@ -88,23 +116,29 @@ export function brandingLogoExtension(contentType: BrandingLogoContentType): str
   return LOGO_EXTENSIONS[contentType];
 }
 
-// Load the church's name + accent from app_settings for an email send. A minimal
-// settings reader (getSetting) is all this needs, so it stays decoupled from the full
-// Repository type and easy to fake in tests.
+// Load the church's name + accent + support contact from app_settings for an email
+// send. A minimal settings reader (getSetting) is all this needs, so it stays decoupled
+// from the full Repository type and easy to fake in tests.
 export async function loadEmailBranding(settings: {
   getSetting(key: string): Promise<string | null>;
-}): Promise<{ organizationName: string; brandColor: string }> {
+}): Promise<{ organizationName: string; brandColor: string; supportEmail: string }> {
   const branding = parseBrandingSettings(
     await settings.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
-    await settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY)
+    await settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
+    await settings.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
   );
-  return { organizationName: branding.displayName, brandColor: branding.accentColor };
+  return { organizationName: branding.displayName, brandColor: branding.accentColor, supportEmail: branding.supportEmail };
 }
 
-export function parseBrandingSettings(displayName: string | null, accentColor: string | null): BrandingSettings {
+export function parseBrandingSettings(
+  displayName: string | null,
+  accentColor: string | null,
+  supportEmail: string | null
+): BrandingSettings {
   return {
     displayName: displayName?.trim() || BRANDING_DEFAULTS.displayName,
-    accentColor: accentColor?.trim().toLowerCase() || BRANDING_DEFAULTS.accentColor
+    accentColor: accentColor?.trim().toLowerCase() || BRANDING_DEFAULTS.accentColor,
+    supportEmail: supportEmail?.trim().toLowerCase() || BRANDING_DEFAULTS.supportEmail
   };
 }
 
