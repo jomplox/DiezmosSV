@@ -4521,6 +4521,41 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
+  it("refuses to correlate when the webhook link id does not match the intent's minted link", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db); // wompi_id_enlace: 987654
+    // A donor-influenced IdExterno points at di_corr_1, but the payment was made on a
+    // DIFFERENT Wompi link than the one minted for that intent.
+    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 111111 } }));
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    // No correlation: the CDE falls back to the webhook donor data, and the intent is
+    // left uncompleted so no signed CDE/PII binds to an unrelated intent.
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
+    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
+    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH");
+    expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadLinkId: number; intentLinkId: number };
+    expect(metadata).toMatchObject({ payloadLinkId: 111111, intentLinkId: 987654 });
+  });
+
+  it("correlates when the webhook link id matches the intent's minted link", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 987654 } }));
+
+    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
+    expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
+    expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
+    expect(db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH")).toBeUndefined();
+  });
+
   it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
     const db = new InMemoryD1();
     // A premint draft: link minted, but the donor never attached fiscal data, so the
