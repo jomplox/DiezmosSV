@@ -1,7 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
+import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "../../src/client/displayText";
 
 describe("client display text", () => {
+  it("labels every branding and donation-intent audit action in Spanish", () => {
+    // Every admin change is audited; the Auditoría view must render them in Spanish,
+    // never the readableCode fallback (which reads as noise and got branding changes
+    // reported as "not logged").
+    expect(auditActionLabel("BRANDING_UPDATED")).toBe("Marca actualizada");
+    expect(auditActionLabel("BRANDING_LOGO_UPDATED")).toBe("Logo de marca actualizado");
+    expect(auditActionLabel("BRANDING_LOGO_REMOVED")).toBe("Logo de marca eliminado");
+    expect(auditActionLabel("DONATION_INTENT_CREATED")).toBe("Intención de donación creada");
+    expect(auditActionLabel("DONATION_INTENT_DATOS_ATTACHED")).toBe("Datos fiscales adjuntados a la intención");
+    expect(auditActionLabel("DONATION_INTENT_COMPLETED")).toBe("Intención de donación completada");
+    expect(auditActionLabel("DONATION_INTENT_AMOUNT_MISMATCH")).toBe("Monto de la intención no coincide");
+    expect(auditActionLabel("DONOR_CERTIFICATES_RUN")).toBe("Envío de constancias anuales");
+    expect(entityLabel("app_setting")).toBe("Configuración");
+    expect(entityLabel("donation_intent")).toBe("Intención de donación");
+    expect(entityLabel("donor_certificate_run")).toBe("Envío de constancias");
+    expect(entityLabel("donor_certificate")).toBe("Constancia de donante");
+  });
+
   it("localizes internal status values for user-facing badges", () => {
     expect(statusLabel("ACCEPTED")).toBe("Aceptado");
     expect(statusLabel("INVALIDATED")).toBe("Invalidado");
