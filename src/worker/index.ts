@@ -943,6 +943,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (url.pathname === "/api/users" && request.method === "POST") {
     const actor = requireRole(user, "ADMIN");
     const body = (await request.json()) as { email: string; name: string; role: Role; password: string };
+    // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
+    // creating an OWNER account and then using the OWNER-only credential routes.
+    if (body.role === "OWNER" && actor.role !== "OWNER") {
+      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+    }
     const created = await auth.createUser(body);
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_CREATED", entityType: "user", entityId: created.id, summary: created.email });
     return jsonResponse({ user: created }, { status: 201 });
@@ -970,6 +975,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await request.json().catch(() => ({}))) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
     const patch = userPatchInput(body);
     if (patch instanceof Response) return patch;
+    // Same escalation guard as user creation: promoting an account to OWNER is
+    // reserved for OWNERs.
+    if (patch.role === "OWNER" && actor.role !== "OWNER") {
+      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+    }
     const updated = await repo.updateUser(userMatch[1], patch);
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
     return jsonResponse({ user: updated });
