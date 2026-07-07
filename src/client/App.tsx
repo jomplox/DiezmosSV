@@ -224,6 +224,8 @@ export function App() {
     amountTotal: "0.00"
   });
   const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
+  const [certificateSearch, setCertificateSearch] = useState("");
+  const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
   const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
   const [backups, setBackups] = useState<BackupMonth[]>([]);
@@ -298,6 +300,11 @@ export function App() {
   }, [query]);
 
   useEffect(() => {
+    const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [certificateSearch]);
+
+  useEffect(() => {
     document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
   }, [view]);
 
@@ -306,7 +313,7 @@ export function App() {
       return;
     }
     void refresh().catch(handleApiFailure);
-  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear]);
+  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
   // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
@@ -461,7 +468,7 @@ export function App() {
       }
       const params = exportParams(exportStartDate, exportEndDate);
       setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
-      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
       setDonationIntents((await api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token)).intents);
       setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
     }
@@ -743,7 +750,7 @@ export function App() {
     await runAction("certificates-send", async () => {
       const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, { method: "POST" });
       setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
-      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
     });
   }
 
@@ -774,7 +781,7 @@ export function App() {
           ? `Constancia ${result.year} enviada a ${donor.donorName}.`
           : `No se pudo enviar la constancia a ${donor.donorName}.`
       );
-      setCertificatePreview(await api<AnnualCertificatePreview>(`/api/certificates/annual?year=${certificateYear}`, token));
+      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
     });
   }
 
@@ -1207,9 +1214,11 @@ export function App() {
               year={certificateYear}
               yearOptions={certificateYearOptions()}
               preview={certificatePreview}
+              search={certificateSearch}
               busy={busy === "certificates-send"}
               rowBusy={busy}
               onYearChange={setCertificateYear}
+              onSearchChange={setCertificateSearch}
               onSend={sendAnnualCertificates}
               onSendDonor={sendDonorCertificate}
             />
@@ -1767,23 +1776,36 @@ function certificateYearOptions(): number[] {
   return [current, current - 1, current - 2, current - 3];
 }
 
+// Preview endpoint path for a year + optional donor/email search. The search is sent
+// as `q`; the server caps and reports matchCount/truncated.
+function certificatePreviewPath(year: string, search: string): string {
+  const trimmed = search.trim();
+  return trimmed
+    ? `/api/certificates/annual?year=${year}&q=${encodeURIComponent(trimmed)}`
+    : `/api/certificates/annual?year=${year}`;
+}
+
 function AnnualCertificatePanel({
   year,
   yearOptions,
   preview,
+  search,
   busy,
   rowBusy,
   onYearChange,
+  onSearchChange,
   onSend,
   onSendDonor
 }: {
   year: string;
   yearOptions: number[];
   preview: AnnualCertificatePreview | null;
+  search: string;
   busy: boolean;
   // The raw busy key so a single row can show its own spinner (certificates-send-<groupKey>).
   rowBusy: string;
   onYearChange: (year: string) => void;
+  onSearchChange: (value: string) => void;
   onSend: () => Promise<void>;
   onSendDonor: (donor: AnnualCertificatePreviewDonor) => Promise<void>;
 }) {
@@ -1827,6 +1849,19 @@ function AnnualCertificatePanel({
       <p className="hint">
         Se enviará a los donantes con correo. Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.
       </p>
+      <div className="certificate-search">
+        <input
+          type="search"
+          value={search}
+          placeholder="Buscar donante o correo"
+          onChange={(event) => onSearchChange(event.target.value)}
+        />
+      </div>
+      {preview?.truncated && (
+        <p className="hint certificate-truncated">
+          Mostrando {donors.length} de {preview.matchCount} donantes. Afine la búsqueda para ver el resto.
+        </p>
+      )}
       <div className="table-scroll export-table certificate-table">
         <table>
           <thead>
@@ -1864,7 +1899,9 @@ function AnnualCertificatePanel({
             })}
             {donors.length === 0 && (
               <tr>
-                <td colSpan={5}>Sin donaciones aceptadas para este año.</td>
+                <td colSpan={5}>
+                  {search.trim() ? "Ningún donante coincide con la búsqueda." : "Sin donaciones aceptadas para este año."}
+                </td>
               </tr>
             )}
           </tbody>
@@ -5132,6 +5169,8 @@ interface AnnualCertificatePreview {
   withoutEmail: number;
   totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
+  matchCount: number;
+  truncated: boolean;
 }
 
 interface AnnualCertificateSendResult {

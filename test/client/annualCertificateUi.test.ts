@@ -38,4 +38,19 @@ describe("annual certificate UI contract", () => {
     // Per-row busy state keyed by donor so one row spins without disabling the rest.
     expect(appSource).toContain("certificates-send-");
   });
+
+  it("offers a debounced donor/email search that re-fetches the capped preview", () => {
+    // Search input with the usted-form placeholder.
+    expect(appSource).toContain('placeholder="Buscar donante o correo"');
+    // Debounced search state threaded into the preview endpoint via q.
+    expect(appSource).toContain("debouncedCertificateSearch");
+    expect(appSource).toContain("certificatePreviewPath(certificateYear, debouncedCertificateSearch)");
+    expect(appSource).toContain("year=${year}&q=${encodeURIComponent(trimmed)}");
+    // Truncation notice when the match set exceeds the server cap.
+    expect(appSource).toContain("Mostrando ");
+    expect(appSource).toContain("preview.matchCount");
+    // Empty search result copy is distinct from the no-donations-this-year copy.
+    expect(appSource).toContain("Ningún donante coincide con la búsqueda.");
+    expect(stylesSource).toContain(".certificate-search");
+  });
 });

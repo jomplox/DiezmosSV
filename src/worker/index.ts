@@ -691,7 +691,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (yearError) {
       return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
     }
-    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam)));
+    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam), url.searchParams.get("q")));
   }
 
   if (url.pathname === "/api/certificates/annual/send" && request.method === "POST") {

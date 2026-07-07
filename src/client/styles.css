@@ -1104,6 +1104,23 @@ select,
   min-width: 520px;
 }
 
+.certificate-search {
+  margin: 0 0 12px;
+}
+
+.certificate-search input {
+  width: 100%;
+  max-width: 360px;
+  padding: 8px 12px;
+  border: 1px solid var(--border, #d4d8de);
+  border-radius: 8px;
+  font-size: 14px;
+}
+
+.certificate-truncated {
+  margin-top: 0;
+}
+
 .online-donations-table table {
   min-width: 720px;
 }

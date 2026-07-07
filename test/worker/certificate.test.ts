@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   aggregateAnnualDonors,
+  buildAnnualCertificatePreview,
   certificateYearError,
   elSalvadorYearWindow,
   renderCertificateDossierPdf,
@@ -82,6 +83,63 @@ describe("aggregateAnnualDonors", () => {
     expect(donors[0].groupKey).toBe("Sin Correo");
     expect(donors[0].donorEmail).toBeNull();
     expect(donors[0].hasTestEnvironment).toBe(true);
+  });
+});
+
+describe("buildAnnualCertificatePreview", () => {
+  it("computes summary counts over the FULL year and caps donors to 50 with matchCount/truncated", async () => {
+    // 60 unique donors so the preview must cap at 50.
+    const rows = Array.from({ length: 60 }, (_, index) => {
+      const seq = String(index).padStart(3, "0");
+      return accepted({
+        id: `d${seq}`,
+        donor_email: `donor${seq}@example.org`,
+        donor_name: `Donor ${seq}`,
+        amount_cents: 100,
+        issued_at: `2025-01-01T10:00:00.000Z`,
+        numero_control: `DTE-15-${seq}`
+      });
+    });
+    const preview = await buildAnnualCertificatePreview(new Repository(new FakeAggregationDb(rows) as unknown as D1Database), 2025);
+
+    // Summary reflects the full unfiltered year.
+    expect(preview.donorCount).toBe(60);
+    expect(preview.withEmail).toBe(60);
+    expect(preview.withoutEmail).toBe(0);
+    expect(preview.totalLabel).toBe("$60.00");
+    // Donors capped; new fields describe the full match set.
+    expect(preview.donors).toHaveLength(50);
+    expect(preview.matchCount).toBe(60);
+    expect(preview.truncated).toBe(true);
+  });
+
+  it("filters donors by a deaccented, case-insensitive substring of name OR email, keeping full-year summary", async () => {
+    const rows = [
+      accepted({ id: "a", donor_email: "donor@example.org", donor_name: "Example Person", amount_cents: 500, issued_at: "2025-02-01T10:00:00.000Z", numero_control: "DTE-15-A" }),
+      accepted({ id: "b", donor_email: "maria@example.org", donor_name: "ExamplePerson4", amount_cents: 700, issued_at: "2025-03-01T10:00:00.000Z", numero_control: "DTE-15-B" }),
+      accepted({ id: "c", donor_email: "legacy-contact-5@example.com", donor_name: "ExamplePerson6", amount_cents: 300, issued_at: "2025-04-01T10:00:00.000Z", numero_control: "DTE-15-C" })
+    ];
+    const repo = new Repository(new FakeAggregationDb(rows) as unknown as D1Database);
+
+    // "jose" (no accent) matches "Example Person" (accented) via deaccented compare.
+    const byName = await buildAnnualCertificatePreview(repo, 2025, "example person");
+    expect(byName.donors.map((donor) => donor.donorName)).toEqual(["Example Person"]);
+    expect(byName.matchCount).toBe(1);
+    expect(byName.truncated).toBe(false);
+    // Summary counts still span the whole year, not just the filtered subset.
+    expect(byName.donorCount).toBe(3);
+    expect(byName.withEmail).toBe(3);
+    expect(byName.totalLabel).toBe("$15.00");
+
+    // Substring on the email domain matches across donors.
+    const byEmail = await buildAnnualCertificatePreview(repo, 2025, "example.org");
+    expect(byEmail.matchCount).toBe(2);
+    expect(byEmail.donors.map((donor) => donor.groupKey).sort()).toEqual(["donor@example.org", "maria@example.org"]);
+
+    // An empty/whitespace q behaves as no filter.
+    const noFilter = await buildAnnualCertificatePreview(repo, 2025, "   ");
+    expect(noFilter.matchCount).toBe(3);
+    expect(noFilter.donors).toHaveLength(3);
   });
 });
 
