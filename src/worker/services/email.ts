@@ -23,6 +23,10 @@ export interface EmailBranding {
   organizationName: string;
   brandColor: string;
   supportEmail: string;
+  // Absolute, version-qualified logo URL (or null). Rendered in the header of every rich
+  // HTML email above the organization name; null keeps exactly the historical, logo-less
+  // chrome. Absolute because a relative path is meaningless inside an email client.
+  logoUrl?: string | null;
 }
 
 export class EmailService {
@@ -38,7 +42,7 @@ export class EmailService {
     if (this.branding) {
       return this.branding;
     }
-    return { organizationName: organizationName(this.env), brandColor: "#0f766e", supportEmail: "legacy-contact-1@example.com" };
+    return { organizationName: organizationName(this.env), brandColor: "#0f766e", supportEmail: "legacy-contact-1@example.com", logoUrl: null };
   }
 
   // Sender identity for real dispatch. EMAIL_FROM is required for any actual send;
@@ -107,7 +111,8 @@ export class EmailService {
       html: dteEmailHtml(record, message.text, {
         organizationName: this.resolveBranding().organizationName,
         brandColor: this.resolveBranding().brandColor,
-        supportEmail: this.resolveBranding().supportEmail
+        supportEmail: this.resolveBranding().supportEmail,
+        logoUrl: this.resolveBranding().logoUrl
       }),
       attachments: [
         {
@@ -177,7 +182,8 @@ export class EmailService {
       html: passwordResetEmailHtml(name, link, expiresMinutes, {
         organizationName: branding.organizationName,
         brandColor: branding.brandColor,
-        supportEmail: branding.supportEmail
+        supportEmail: branding.supportEmail,
+        logoUrl: branding.logoUrl
       }),
       attachments: []
     };

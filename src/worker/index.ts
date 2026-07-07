@@ -447,7 +447,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
           if (created) {
             const link = `${url.origin}/?reset=${created.token}`;
             try {
-              const resetBranding = await loadEmailBranding(repo);
+              const resetBranding = await loadEmailBranding(repo, env);
               await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
               await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
             } catch (error) {
@@ -1538,7 +1538,7 @@ async function handleDocumentRoute(
     }
     try {
       const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-      const branding = await loadEmailBranding(repo);
+      const branding = await loadEmailBranding(repo, env);
       const response = await new EmailService(env, templates, branding).sendReceipt(document, toEmail);
       await repo.recordEmailDelivery({
         documentId: document.id,
@@ -1677,7 +1677,7 @@ async function handleDocumentRoute(
       if (invalidatedDocument.donor_email) {
         try {
           const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-          const branding = await loadEmailBranding(repo);
+          const branding = await loadEmailBranding(repo, env);
           const emailResponse = await new EmailService(env, templates, branding).sendInvalidationNotice(invalidatedDocument, invalidatedDocument.donor_email);
           await repo.recordEmailDelivery({
             documentId: document.id,

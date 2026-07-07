@@ -13,6 +13,7 @@ import {
   parseBrandingLogoMeta,
   parseBrandingSettings
 } from "../../src/worker/services/branding";
+import type { Env } from "../../src/worker/types";
 
 describe("normalizeBrandingDisplayName", () => {
   it("trims surrounding whitespace", () => {
@@ -158,25 +159,62 @@ describe("parseBrandingSettings", () => {
 });
 
 describe("loadEmailBranding", () => {
+  const originEnv = { APP_ORIGIN: "https://iglesia.example.org" } as Env;
+
   it("returns the organization name, brand color, and support email from settings", async () => {
     const store: Record<string, string> = {
       branding_display_name: "Iglesia Central",
       branding_accent_color: "#123456",
       branding_support_email: "legacy-email-119@example.com"
     };
-    const branding = await loadEmailBranding({
-      getSetting: async (key: string) => store[key] ?? null
-    });
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => store[key] ?? null
+      },
+      originEnv
+    );
     expect(branding).toEqual({
       organizationName: "Iglesia Central",
       brandColor: "#123456",
-      supportEmail: "legacy-email-119@example.com"
+      supportEmail: "legacy-email-119@example.com",
+      logoUrl: null
     });
   });
 
   it("defaults the support email to fmce when unset", async () => {
-    const branding = await loadEmailBranding({ getSetting: async () => null });
+    const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
     expect(branding.supportEmail).toBe("legacy-contact-1@example.com");
+  });
+
+  it("builds an absolute logo URL from APP_ORIGIN and the stored logo version", async () => {
+    const store: Record<string, string> = {
+      branding_logo: JSON.stringify({ contentType: "image/png", size: 1234, version: "v9" })
+    };
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => store[key] ?? null
+      },
+      originEnv
+    );
+    expect(branding.logoUrl).toBe("https://iglesia.example.org/api/branding/logo?v=v9");
+  });
+
+  it("returns a null logoUrl when no logo meta is stored", async () => {
+    const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
+    expect(branding.logoUrl).toBeNull();
+  });
+
+  it("trims a trailing slash on APP_ORIGIN so the logo URL has exactly one separator", async () => {
+    const store: Record<string, string> = {
+      branding_logo: JSON.stringify({ contentType: "image/svg+xml", size: 10, version: "abc" })
+    };
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => store[key] ?? null
+      },
+      { APP_ORIGIN: "https://iglesia.example.org/" } as Env
+    );
+    expect(branding.logoUrl).toBe("https://iglesia.example.org/api/branding/logo?v=abc");
   });
 });
 

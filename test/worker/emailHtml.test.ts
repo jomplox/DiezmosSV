@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
+import { certificateEmailHtml, dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
+
+const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
 
 describe("HTML email rendering", () => {
   it("renders a branded receipt with the document details card", () => {
@@ -80,6 +82,83 @@ describe("HTML email rendering", () => {
     expect(html).toContain("Contingencia abierta");
     expect(html).toContain("#fdf3e1");
     expect(html).not.toContain("#fdecec");
+  });
+});
+
+describe("HTML email header logo", () => {
+  it("renders the absolute logo image above the organization name on a receipt when a logoUrl is set", () => {
+    const html = dteEmailHtml(record(), "Cuerpo", { organizationName: "Misión ExampleOrganization", logoUrl: LOGO_URL });
+
+    expect(html).toContain(`src="${LOGO_URL}"`);
+    // Alt text is the organization name, so a client that blocks the image still identifies the sender.
+    expect(html).toContain('alt="Misión ExampleOrganization"');
+    // The name text stays as the reliable identifier below the (blockable) image.
+    expect(html).toContain("Misión ExampleOrganization");
+    // Email-safe inline sizing: block + auto margins, capped dimensions.
+    expect(html).toMatch(/max-height:\s*48px/);
+    expect(html).toMatch(/max-width:\s*200px/);
+    expect(html).toMatch(/display:\s*block/);
+    // The logo sits before the name in the header markup.
+    expect(html.indexOf(`src="${LOGO_URL}"`)).toBeLessThan(html.indexOf("Misión ExampleOrganization"));
+  });
+
+  it("renders no header image on a receipt when there is no logoUrl (exactly today's output)", () => {
+    const html = dteEmailHtml(record(), "Cuerpo", { organizationName: "Misión ExampleOrganization" });
+
+    expect(html).not.toContain("<img");
+    expect(html).toContain("Misión ExampleOrganization");
+  });
+
+  it("escapes the organization name used as the logo alt text", () => {
+    const html = dteEmailHtml(record(), "Cuerpo", { organizationName: 'Iglesia "X" & <Y>', logoUrl: LOGO_URL });
+
+    expect(html).not.toContain('alt="Iglesia "X"');
+    expect(html).toContain("&quot;");
+    expect(html).toContain("&amp;");
+  });
+
+  it("renders the header logo on the password reset email when a logoUrl is set", () => {
+    const html = passwordResetEmailHtml("José", "https://example.org/?reset=tok", 45, {
+      organizationName: "Misión ExampleOrganization",
+      logoUrl: LOGO_URL
+    });
+
+    expect(html).toContain(`src="${LOGO_URL}"`);
+    expect(html).toContain('alt="Misión ExampleOrganization"');
+  });
+
+  it("renders no header image on the password reset email when there is no logoUrl", () => {
+    const html = passwordResetEmailHtml("José", "https://example.org/?reset=tok", 45, { organizationName: "Misión ExampleOrganization" });
+
+    expect(html).not.toContain("<img");
+  });
+
+  it("renders the header logo on the annual certificate email when a logoUrl is set", () => {
+    const html = certificateEmailHtml({
+      organizationName: "Misión ExampleOrganization",
+      donorName: "María",
+      year: 2026,
+      count: 3,
+      totalLabel: "$100.00",
+      isTestEnvironment: false,
+      logoUrl: LOGO_URL
+    });
+
+    expect(html).toContain(`src="${LOGO_URL}"`);
+    expect(html).toContain('alt="Misión ExampleOrganization"');
+  });
+
+  it("renders no header image on the annual certificate email when there is no logoUrl", () => {
+    const html = certificateEmailHtml({
+      organizationName: "Misión ExampleOrganization",
+      donorName: "María",
+      year: 2026,
+      count: 3,
+      totalLabel: "$100.00",
+      isTestEnvironment: false
+    });
+
+    expect(html).not.toContain("<img");
   });
 });
 
