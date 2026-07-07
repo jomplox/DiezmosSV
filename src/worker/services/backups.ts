@@ -14,6 +14,18 @@ import {
 
 export type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
 
+// Keep the convenience full-month ZIP endpoint within the Workers memory budget.
+// The ZIP writer is intentionally dependency-free and buffers the resulting archive,
+// so reject archives whose raw R2 payloads would make that bounded buffering unsafe.
+export const BACKUP_MONTH_DOWNLOAD_MAX_BYTES = 32 * 1024 * 1024;
+
+export class BackupArchiveTooLargeError extends Error {
+  constructor(readonly limitBytes: number) {
+    super("Backup archive is too large to download as a ZIP");
+    this.name = "BackupArchiveTooLargeError";
+  }
+}
+
 export interface BackupMonth {
   month: string;
   status: BackupMonthStatus;
@@ -154,7 +166,11 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
   if (!manifestObject) {
     return null;
   }
+  enforceBackupArchiveLimit(manifestObject.size);
   const manifestBytes = new Uint8Array(await manifestObject.arrayBuffer());
+  let totalBytes = manifestBytes.byteLength;
+  enforceBackupArchiveLimit(totalBytes);
+
   let manifest: RetentionManifest;
   try {
     manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as RetentionManifest;
@@ -168,9 +184,19 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
     if (!object) {
       continue;
     }
-    entries.push({ name: `${table}.ndjson`, data: new Uint8Array(await object.arrayBuffer()) });
+    enforceBackupArchiveLimit(totalBytes + object.size);
+    const data = new Uint8Array(await object.arrayBuffer());
+    totalBytes += data.byteLength;
+    enforceBackupArchiveLimit(totalBytes);
+    entries.push({ name: `${table}.ndjson`, data });
   }
   return entries;
+}
+
+function enforceBackupArchiveLimit(totalBytes: number): void {
+  if (totalBytes > BACKUP_MONTH_DOWNLOAD_MAX_BYTES) {
+    throw new BackupArchiveTooLargeError(BACKUP_MONTH_DOWNLOAD_MAX_BYTES);
+  }
 }
 
 export async function getManifest(env: Env, month: string): Promise<RetentionManifest | null> {
