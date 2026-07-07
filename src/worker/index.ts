@@ -150,6 +150,39 @@ function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
+// Operator telemetry captured on audit rows: the client IP, the Cloudflare request
+// context (geo/ISP), and the acting user's email. The OWNER wants this visible in
+// Auditoría, but only to ADMIN+; VIEWERs receive these columns nulled server-side so
+// the values never leave the worker. The client renders the nulls as an em-dash and
+// hides the expandable context row.
+const SENSITIVE_AUDIT_FIELDS = ["actor_ip", "actor_context", "actor_email"] as const;
+
+function canViewSensitiveAudit(user: AuthUser): boolean {
+  return user.role === "ADMIN" || user.role === "OWNER";
+}
+
+function redactAuditForUser(rows: Array<Record<string, unknown>>, user: AuthUser): Array<Record<string, unknown>> {
+  if (canViewSensitiveAudit(user)) {
+    return rows;
+  }
+  return rows.map((row) => {
+    const redacted = { ...row };
+    for (const field of SENSITIVE_AUDIT_FIELDS) {
+      redacted[field] = null;
+    }
+    return redacted;
+  });
+}
+
+async function listAuditForUser(
+  repo: Repository,
+  user: AuthUser,
+  entityType?: string,
+  entityId?: string
+): Promise<Array<Record<string, unknown>>> {
+  return redactAuditForUser(await repo.listAudit(entityType, entityId), user);
+}
+
 // Canonical public origin for links emailed to users (password reset). Built from the
 // configured APP_ORIGIN so a poisoned Host header cannot redirect reset tokens to an
 // attacker; falls back to the request origin only when APP_ORIGIN is unset (local dev).
@@ -897,12 +930,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/audit" && request.method === "GET") {
-    requireRole(user, "VIEWER");
+    const actor = requireRole(user, "VIEWER");
     const entityType = url.searchParams.get("entityType");
     const entityId = url.searchParams.get("entityId");
     if (entityType && entityId) {
       // Entity-scoped history keeps its original (uncapped-page) shape.
-      return jsonResponse({ audit: await repo.listAudit(entityType, entityId), nextCursor: null });
+      return jsonResponse({ audit: await listAuditForUser(repo, actor, entityType, entityId), nextCursor: null });
     }
     // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
     // grows forever, so the old flat LIMIT 100 silently hid everything older.
@@ -920,7 +953,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const page = rows.slice(0, limit);
     const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
     const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
-    return jsonResponse({ audit: page, nextCursor });
+    return jsonResponse({ audit: redactAuditForUser(page, actor), nextCursor });
   }
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
@@ -933,8 +966,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
   // minutos la reintenta.
   if (url.pathname === "/api/contingency" && request.method === "GET") {
-    requireRole(user, "VIEWER");
-    return jsonResponse({ contingency: await contingencyState(repo) });
+    const actor = requireRole(user, "VIEWER");
+    return jsonResponse({ contingency: await contingencyState(repo, actor) });
   }
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {
@@ -1430,7 +1463,7 @@ function isRole(value: unknown): value is Role {
   return value === "VIEWER" || value === "OPERATOR" || value === "ADMIN" || value === "OWNER";
 }
 
-async function contingencyState(repo: Repository): Promise<Record<string, unknown>> {
+async function contingencyState(repo: Repository, user: AuthUser): Promise<Record<string, unknown>> {
   const activeRaw = await repo.getOpenContingency();
   const periodsRaw = await repo.listContingencyPeriods();
   const pendingDocuments = activeRaw
@@ -1449,7 +1482,7 @@ async function contingencyState(repo: Repository): Promise<Record<string, unknow
     batchLines,
     periods,
     events,
-    audit: active ? await repo.listAudit("contingency_period", String(active.id)) : [],
+    audit: active ? await listAuditForUser(repo, user, "contingency_period", String(active.id)) : [],
     summary: {
       pending: pendingDocuments.length,
       open: countPeriodStatus("OPEN"),
@@ -1640,11 +1673,11 @@ async function handleDocumentRoute(
   }
 
   if (!action && request.method === "GET") {
-    requireRole(user, "VIEWER");
+    const actor = requireRole(user, "VIEWER");
     // donorDataVerified: this CDE was produced from a completed donation-intent, so
     // the donor's data came from the validated /donar form rather than the raw webhook.
     const donorDataVerified = (await repo.getCompletedIntentForDocument(document.id)) !== null;
-    return jsonResponse({ document, donorDataVerified, audit: await repo.listAudit("dte_document", document.id) });
+    return jsonResponse({ document, donorDataVerified, audit: await listAuditForUser(repo, actor, "dte_document", document.id) });
   }
 
   if (action === "pdf" && request.method === "GET") {
