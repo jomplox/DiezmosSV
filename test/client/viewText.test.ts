@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { documentListEmptyMessage, viewSubtitle } from "../../src/client/App";
+import { FAILURE_VIEW_STATUSES, documentListEmptyMessage, viewSubtitle } from "../../src/client/App";
 
 describe("viewSubtitle", () => {
   it("gives the Fallos view a subtitle describing errors needing attention", () => {
@@ -36,5 +36,13 @@ describe("documentListEmptyMessage", () => {
   it("keeps the generic no-results message in the documents view regardless of query", () => {
     expect(documentListEmptyMessage("documents", "")).toBe("No hay CDE que coincidan con la búsqueda o el filtro.");
     expect(documentListEmptyMessage("documents", "abc")).toBe("No hay CDE que coincidan con la búsqueda o el filtro.");
+  });
+});
+
+describe("FAILURE_VIEW_STATUSES", () => {
+  it("loads both failed and rejected documents for the Fallos view", () => {
+    // The Fallos subtitle promises errores O rechazos: REJECTED CDEs are real MH
+    // rejections that need operator action, so the view must request both statuses.
+    expect(FAILURE_VIEW_STATUSES.split(",")).toEqual(["FAILED", "REJECTED"]);
   });
 });

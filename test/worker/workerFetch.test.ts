@@ -5119,6 +5119,51 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
   });
 
+  it("lists FAILED and REJECTED under the combined Fallos filter while a deferred SIGNED doc stays out", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      {
+        ...testDocument(),
+        id: "doc_failed_list",
+        codigo_generacion: "CCCCCCC3-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+        numero_control: "DTE-15-M001P004-000000000000803",
+        status: "FAILED",
+        created_at: "2026-06-26T01:50:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_rejected_list",
+        codigo_generacion: "DDDDDDD4-DDDD-4DDD-8DDD-DDDDDDDDDDD4",
+        numero_control: "DTE-15-M001P004-000000000000804",
+        status: "REJECTED",
+        created_at: "2026-06-26T01:51:00.000Z"
+      },
+      // A deferred SIGNED doc (En trámite) must NOT leak into Fallos — that exclusion
+      // is a deliberate product decision (it is awaiting transmission, not failed).
+      {
+        ...testDocument(),
+        id: "doc_deferred_excluded",
+        codigo_generacion: "FFFFFFF6-FFFF-4FFF-8FFF-FFFFFFFFFFF6",
+        numero_control: "DTE-15-M001P004-000000000000806",
+        status: "SIGNED",
+        transmission_deferred_at: "2026-06-26T01:52:00.000Z",
+        created_at: "2026-06-26T01:52:00.000Z"
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?status=FAILED,REJECTED", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { documents: Array<{ id: string }> };
+    expect(body.documents.map((document) => document.id)).toEqual(["doc_rejected_list", "doc_failed_list"]);
+  });
+
   it("surfaces deferred docs as En trámite (virtual filter) while a plain SIGNED doc stays out", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -7642,6 +7687,12 @@ class Statement {
         if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
           // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
           documents = documents.filter((document) => document.status === "SIGNED" && document.transmission_deferred_at != null);
+        } else if (this.sql.includes("status IN")) {
+          const statusPlaceholderList = this.sql.match(/status IN \(([^)]*)\)/)?.[1] ?? "";
+          const statusCount = (statusPlaceholderList.match(/\?/g) ?? []).length;
+          const statuses = this.args.slice(argIndex, argIndex + statusCount).map(String);
+          argIndex += statusCount;
+          documents = documents.filter((document) => statuses.includes(String(document.status)));
         } else if (this.sql.includes("status = ?")) {
           const status = String(this.args[argIndex]);
           argIndex += 1;
