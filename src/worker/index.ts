@@ -1,7 +1,7 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
-import { isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
+import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
@@ -341,7 +341,13 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
   // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
   const repo = new Repository(env.DB, auditContextFrom(request));
-  const environment = await activeEmissionEnvironment(repo, env);
+  // The environment is the signed payload's own EsProductiva flag — never the
+  // owner-controlled active emission setting. A test-mode payment (EsProductiva=false)
+  // must never be emitted as a PRODUCTION DTE just because the deployment defaults to
+  // 01; the signed flag is the fiscal source of truth. When the two disagree we still
+  // honor the payload but audit the disagreement so operators can see it.
+  const environment = ambienteFromWompi(payload);
+  const activeEnvironment = await activeEmissionEnvironment(repo, env);
   const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   await repo.createAudit({
@@ -350,6 +356,15 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     entityId: record.id,
     summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
   });
+  if (inserted && environment !== activeEnvironment) {
+    await repo.createAudit({
+      action: "WOMPI_ENVIRONMENT_MISMATCH",
+      entityType: "wompi_event",
+      entityId: record.id,
+      summary: `El webhook declara ambiente ${environment} pero la emisión activa es ${activeEnvironment}; se honra el del webhook`,
+      metadata: { payloadEnvironment: environment, activeEnvironment }
+    });
+  }
   // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
   // regardless of it. The donor-facing "thanks" keys on paid_at (the PAYMENT), not on
   // COMPLETED (the CDE's MH acceptance, which the async pipeline sets and can lag).

@@ -3869,6 +3869,71 @@ describe("Wompi webhook integration", () => {
     expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
   });
 
+  it("stores the environment from the signed payload (EsProductiva=false) and audits a mismatch against the active setting", async () => {
+    const db = new InMemoryD1();
+    // Owner has the app set to PRODUCTION emission, but a TEST-mode payment arrives.
+    db.settings.push({ key: "emission_environment", value: "01" });
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_env_tx_mismatch",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, {
+        APP_ENV: "production",
+        WOMPI_API_SECRET: secret,
+        ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+      })
+    );
+
+    expect(response.status).toBe(202);
+    // The signed test-mode flag wins: the event is stored (and later emitted) as 00,
+    // never as a production DTE, even though the active emission setting is 01.
+    expect(db.wompiEvents[0]).toMatchObject({ transaction_id: "wompi_env_tx_mismatch", environment: "00" });
+    const mismatch = db.audits.find((row) => row.action === "WOMPI_ENVIRONMENT_MISMATCH");
+    expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: db.wompiEvents[0].id });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadEnvironment: string; activeEnvironment: string };
+    expect(metadata).toMatchObject({ payloadEnvironment: "00", activeEnvironment: "01" });
+  });
+
+  it("does not audit a mismatch when the signed payload agrees with the active emission setting", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "emission_environment", value: "00" });
+    const secret = "wompi-secret";
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_env_tx_agree",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(response.status).toBe(202);
+    expect(db.wompiEvents[0]).toMatchObject({ environment: "00" });
+    expect(db.audits.find((row) => row.action === "WOMPI_ENVIRONMENT_MISMATCH")).toBeUndefined();
+  });
+
   it("normalizes the stored raw Wompi body before generating the queued CDE", async () => {
     const db = new InMemoryD1();
     const secret = "wompi-secret";
