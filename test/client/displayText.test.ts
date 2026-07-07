@@ -62,6 +62,7 @@ describe("client display text", () => {
     expect(auditActionLabel("EMAIL_INVALIDATION_FAILED")).toBe("Aviso de invalidación fallido");
     expect(auditActionLabel("EMAIL_TEMPLATES_UPDATED")).toBe("Plantillas de correo actualizadas");
     expect(auditActionLabel("EMISSION_ENVIRONMENT_UPDATED")).toBe("Ambiente de emisión actualizado");
+    expect(auditActionLabel("CONTACTS_EXPORTED")).toBe("Exportación de contactos");
     expect(auditActionLabel("CLOUDFLARE_WRITER_ENABLED")).toBe("Edición de secretos desde UI habilitada");
     expect(auditActionLabel("ISSUANCE_DEAD_LETTERED")).toBe("Emisión agotó reintentos en cola");
     expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
