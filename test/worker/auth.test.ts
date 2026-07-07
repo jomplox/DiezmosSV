@@ -10,13 +10,11 @@ describe("auth password hashing", () => {
     expect(first.hash).toMatch(/^[0-9a-f]{64}$/);
   });
 
-  it("derives at the restored 150k work factor by default and keeps the legacy 100k distinct", async () => {
-    const current = await hashPassword("Long-enough1!", "fixed-salt", { iterations: 150_000 });
-    const legacy = await hashPassword("Long-enough1!", "fixed-salt", { iterations: 100_000 });
+  it("derives at the Workers-compatible 100k work factor by default", async () => {
+    const current = await hashPassword("Long-enough1!", "fixed-salt", { iterations: 100_000 });
     const byDefault = await hashPassword("Long-enough1!", "fixed-salt");
 
     expect(byDefault.hash).toBe(current.hash);
-    expect(byDefault.hash).not.toBe(legacy.hash);
   });
 
   it("rejects short passwords", async () => {

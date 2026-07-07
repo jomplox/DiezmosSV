@@ -19,15 +19,14 @@ const ROLE_RANK: Record<Role, number> = {
   ADMIN: 3,
   OWNER: 4
 };
-// Current PBKDF2 work factor. New and rehashed passwords are stored in the versioned
-// format `pbkdf2$<iterations>$<hex>` so the count travels with the hash and can be
-// changed later without silently breaking verification.
-const PASSWORD_PBKDF2_ITERATIONS = 150_000;
-// Historic counts used by pre-versioning ("countless") rows. The app shipped inline
-// 150k, then a 100k constant (cf8d5a0) under which the surviving staging/local owners
-// were bootstrapped; a countless hash is therefore tried at 100k when the current
-// factor misses, and upgraded to the versioned format on the next successful login.
-const LEGACY_PASSWORD_PBKDF2_ITERATIONS = [100_000];
+// Current PBKDF2 work factor. Cloudflare Workers rejects counts above 100k, so the
+// versioned storage format keeps the count explicit without asking workerd for an
+// unsupported derivation.
+const PASSWORD_PBKDF2_ITERATIONS = 100_000;
+// Historic counts used by pre-versioning ("countless") rows. The surviving staging
+// owners were bootstrapped at the current Workers-compatible count, so no additional
+// deployed fallback count is safe to try.
+const LEGACY_PASSWORD_PBKDF2_ITERATIONS: number[] = [];
 const PASSWORD_HASH_SCHEME = "pbkdf2";
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
