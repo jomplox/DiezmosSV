@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { EMAIL_TEMPLATE_DEFINITIONS } from "../../src/worker/services/emailTemplates";
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  EMAIL_TEMPLATE_DEFINITIONS,
+  renderEmailTemplate,
+  TRANSITORIO_RECEIPT_TEMPLATE
+} from "../../src/worker/services/emailTemplates";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
@@ -73,6 +78,48 @@ describe("email support contact", () => {
       expect(html).toContain(`>${supportEmail}<`);
       expect(html).not.toContain("legacy-contact-1@example.com");
     }
+  });
+});
+
+describe("transitory (deferred) receipt template", () => {
+  // A deferred CDE (SIGNED + transmission_deferred_at) is emailed BEFORE MH acceptance,
+  // with a PDF that lacks a real sello_recibido. The default dteReceipt copy asserts the
+  // attachment already carries an MH reception seal, which would be a false claim on a
+  // transitorio. The fixed transitory template must never make that claim.
+  function deferredRecord(): DteDocumentRecord {
+    return {
+      id: "doc_defer",
+      status: "SIGNED",
+      environment: "00",
+      donor_name: "Ana",
+      donor_email: "ana@example.org",
+      numero_control: "DTE-15-0001-000000000000042",
+      codigo_generacion: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+      amount_cents: 5000,
+      issued_at: "2026-06-01T12:00:00.000Z",
+      sello_recibido: null,
+      transmission_deferred_at: "2026-06-01T12:01:00.000Z",
+      plain_json: "{}"
+    } as unknown as DteDocumentRecord;
+  }
+
+  const FALSE_SELLO_CLAIM = "con sello de recepción del Ministerio de Hacienda";
+
+  it("frames the deferred receipt as provisional without claiming an MH sello", () => {
+    const message = renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, deferredRecord());
+
+    expect(message.subject).toContain("(en trámite)");
+    expect(message.text).toContain("TRANSITORIA");
+    expect(message.text).toContain("en trámite");
+    // The definitive sello is promised for the FUTURE, never asserted as already obtained.
+    expect(message.text).toContain("en cuanto el Ministerio de Hacienda lo confirme");
+    expect(message.text).not.toContain(FALSE_SELLO_CLAIM);
+  });
+
+  it("keeps the default dteReceipt copy (used only for accepted docs) claiming the sello", () => {
+    // The default receipt is correct for its own use — an ACCEPTED CDE really has a sello.
+    // This locks the contrast that the transitory template above must not reuse it.
+    expect(DEFAULT_EMAIL_TEMPLATES.dteReceipt.body).toContain(FALSE_SELLO_CLAIM);
   });
 });
 
