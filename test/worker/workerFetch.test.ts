@@ -6681,7 +6681,7 @@ describe("audit actor context", () => {
     expect(audit?.actor_context ?? null).toBeNull();
   });
 
-  it("resolves USER audit rows to an actor name and returns the new context fields", async () => {
+  it("nulls sensitive audit actor fields for VIEWER users", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
     db.users.push({
@@ -6732,15 +6732,57 @@ describe("audit actor context", () => {
     const userRow = body.audit.find((row) => row.id === "audit_user_1");
     const systemRow = body.audit.find((row) => row.id === "audit_system_1");
 
-    expect(userRow).toMatchObject({
+    // The non-sensitive display name still resolves; the operator telemetry is nulled.
+    expect(userRow?.actor_name).toBe("Ada Admin");
+    expect(userRow?.actor_email ?? null).toBeNull();
+    expect(userRow?.actor_ip ?? null).toBeNull();
+    expect(userRow?.actor_context ?? null).toBeNull();
+    // SYSTEM rows have no resolvable user and no captured context.
+    expect(systemRow?.actor_name ?? null).toBeNull();
+    expect(systemRow?.actor_ip ?? null).toBeNull();
+  });
+
+  it("returns sensitive audit actor fields for ADMIN users", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin_session", email: "admin-session@example.org", name: "Admin Session", role: "ADMIN" };
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Ada Admin",
+      role: "ADMIN",
+      password_hash: "h",
+      password_salt: "s",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.audits.push({
+      id: "audit_user_1",
+      actor_type: "USER",
+      actor_id: "user_admin",
+      action: "USER_UPDATED",
+      entity_type: "user",
+      entity_id: "user_operator",
+      summary: "Usuario actualizado",
+      metadata_json: "{}",
+      actor_ip: "190.86.1.2",
+      actor_context: JSON.stringify({ city: "San Salvador", country: "SV", asOrganization: "Claro El Salvador" }),
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/audit", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { audit: Array<Record<string, unknown>> };
+    expect(body.audit[0]).toMatchObject({
       actor_name: "Ada Admin",
       actor_email: "admin@example.org",
       actor_ip: "190.86.1.2"
     });
-    expect(JSON.parse(String(userRow?.actor_context))).toMatchObject({ city: "San Salvador" });
-    // SYSTEM rows have no resolvable user and no captured context.
-    expect(systemRow?.actor_name ?? null).toBeNull();
-    expect(systemRow?.actor_ip ?? null).toBeNull();
+    expect(JSON.parse(String(body.audit[0]?.actor_context))).toMatchObject({ city: "San Salvador" });
   });
 });
 
