@@ -1262,8 +1262,10 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
     action: "ALERT_EMAIL_UPDATED",
     entityType: "app_setting",
     entityId: ALERT_EMAIL_SETTING_KEY,
-    summary: raw ? `Correo de alertas configurado a ${raw}` : "Correo de alertas desactivado",
-    metadata: { alertEmail: raw }
+    // The audit trail is readable by lower roles, so record only THAT the recipient
+    // changed — never the OWNER-only address itself.
+    summary: raw ? "Correo de alertas configurado" : "Correo de alertas desactivado",
+    metadata: { enabled: Boolean(raw) }
   });
   return jsonResponse({ ok: true, alertEmail: raw });
 }

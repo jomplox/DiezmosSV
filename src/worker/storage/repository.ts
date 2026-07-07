@@ -42,6 +42,24 @@ function retentionTimestampColumn(table: RetentionTable): "created_at" | "receiv
   return table === "wompi_events" ? "received_at" : "created_at";
 }
 
+// The alert-email setting is OWNER-only, but its ALERT_EMAIL_UPDATED audit rows are
+// readable by lower roles through the audit trail. Newer writes never record the
+// address, but rows written before that fix still carry it in the summary/metadata, so
+// the read path scrubs those columns for the app_setting/alert_email entity regardless
+// of role. It keeps that an update happened; it only drops the address value.
+function redactSensitiveAuditRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return rows.map((row) => {
+    if (row.entity_type !== "app_setting" || row.entity_id !== "alert_email") {
+      return row;
+    }
+    return {
+      ...row,
+      summary: row.action === "ALERT_EMAIL_UPDATED" ? "Correo de alertas actualizado" : row.summary,
+      metadata_json: "{}"
+    };
+  });
+}
+
 // Raw D1 column shape for the contacts export join (snake_case, intent_* columns
 // null when a document has no correlated COMPLETED intent). Mapped to the camelCase
 // ContactSourceRow before it leaves the repository.
@@ -865,7 +883,7 @@ export class Repository {
         )
         .bind(entityType, entityId)
         .all<Record<string, unknown>>()
-        .then((result) => result.results ?? []);
+        .then((result) => redactSensitiveAuditRows(result.results ?? []));
     }
     return this.db
       .prepare(
@@ -874,7 +892,7 @@ export class Repository {
          ORDER BY a.created_at DESC LIMIT 100`
       )
       .all<Record<string, unknown>>()
-      .then((result) => result.results ?? []);
+      .then((result) => redactSensitiveAuditRows(result.results ?? []));
   }
 
   // Página del historial general de auditoría: keyset (created_at, id) DESC — el mismo
@@ -893,7 +911,7 @@ export class Repository {
       )
       .bind(...bindings, bounded + 1)
       .all<Record<string, unknown>>()
-      .then((result) => result.results ?? []);
+      .then((result) => redactSensitiveAuditRows(result.results ?? []));
   }
 
   async createDteEvent(input: {

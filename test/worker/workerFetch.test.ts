@@ -6173,11 +6173,15 @@ describe("alert email setting", () => {
     expect(putResponse.status).toBe(200);
     await expect(putResponse.json()).resolves.toMatchObject({ ok: true, alertEmail: "owner@example.org" });
     expect(db.settings).toContainEqual(expect.objectContaining({ key: "alert_email", value: "owner@example.org", updated_by: "user_owner" }));
-    expect(db.audits).toContainEqual(expect.objectContaining({
-      action: "ALERT_EMAIL_UPDATED",
+    // The audit records THAT the recipient changed, but never the address itself — the
+    // audit trail is readable by lower roles, so the OWNER-only value must not ride in.
+    const audit = db.audits.find((row) => row.action === "ALERT_EMAIL_UPDATED");
+    expect(audit).toMatchObject({
       entity_type: "app_setting",
-      entity_id: "alert_email"
-    }));
+      entity_id: "alert_email",
+      summary: "Correo de alertas configurado",
+      metadata_json: JSON.stringify({ enabled: true })
+    });
 
     const getResponse = await worker.fetch(
       new Request("https://example.org/api/settings/alert-email", {
@@ -6188,6 +6192,52 @@ describe("alert email setting", () => {
 
     expect(getResponse.status).toBe(200);
     await expect(getResponse.json()).resolves.toMatchObject({ alertEmail: "owner@example.org" });
+  });
+
+  it("redacts a legacy alert-email address from the audit trail for lower roles", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // A row written before the redaction shipped still carries the address in both the
+    // summary and metadata; the read path must scrub it for everyone.
+    db.audits.push({
+      id: "audit_alert_legacy",
+      actor_type: "USER",
+      actor_id: "user_owner",
+      action: "ALERT_EMAIL_UPDATED",
+      entity_type: "app_setting",
+      entity_id: "alert_email",
+      summary: "Correo de alertas configurado a owner@example.org",
+      metadata_json: JSON.stringify({ alertEmail: "owner@example.org" }),
+      actor_ip: null,
+      actor_context: null,
+      created_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const scopedResponse = await worker.fetch(
+      new Request("https://example.org/api/audit?entityType=app_setting&entityId=alert_email", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(scopedResponse.status).toBe(200);
+    const scopedBody = (await scopedResponse.json()) as { audit: Array<{ summary?: string; metadata_json?: string }> };
+    expect(JSON.stringify(scopedBody.audit)).not.toContain("owner@example.org");
+    expect(scopedBody.audit[0]).toMatchObject({
+      summary: "Correo de alertas actualizado",
+      metadata_json: "{}"
+    });
+
+    // The general (keyset-paginated) audit trail is the primary VIEWER surface and must
+    // scrub the legacy address too.
+    const generalResponse = await worker.fetch(
+      new Request("https://example.org/api/audit", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(generalResponse.status).toBe(200);
+    const generalBody = (await generalResponse.json()) as { audit: Array<Record<string, unknown>> };
+    expect(JSON.stringify(generalBody.audit)).not.toContain("owner@example.org");
   });
 
   it("allows clearing the alert email to disable alerting", async () => {
