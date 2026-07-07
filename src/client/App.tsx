@@ -13,6 +13,7 @@ import {
   FileSpreadsheet,
   FileText,
   FlaskConical,
+  LineChart,
   Braces,
   History,
   KeyRound,
@@ -44,6 +45,9 @@ import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections, type CredentialSettingsSectionId } from "./credentialSettings";
+import { AnalyticsView } from "./analyticsView";
+import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
+import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
@@ -80,7 +84,7 @@ import { cleanDui, isDuiDocumentType, isValidDui } from "../shared/dui";
 import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "failures" | "contingency" | "audit" | "users" | "exports" | "credentials";
+type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
 
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
@@ -91,6 +95,7 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Clock },
   { id: "audit", label: "Auditoría", icon: History },
+  { id: "analytics", label: "Analítica", icon: LineChart },
   { id: "users", label: "Usuarios", icon: Users },
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
   { id: "credentials", label: "Configuración", icon: Settings, minRole: "OWNER" }
@@ -235,6 +240,18 @@ export function App() {
   const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
   const [branding, setBranding] = useState<Branding>({ ...CLIENT_BRANDING_DEFAULTS, logoVersion: null });
+  // Analítica (carril Wompi): the view defaults its ambiente selector to the ACTIVE
+  // emission environment, loaded lazily the first time the view is opened. Presets are
+  // computed against `now` so "Este mes" tracks the calendar; the custom range seeds
+  // from the "Personalizado" preset (last 90 days).
+  const analyticsPresets = useMemo(() => analyticsRangePresets(now), [now]);
+  const [analytics, setAnalytics] = useState<AnalyticsResponse | null>(null);
+  const [analyticsLoading, setAnalyticsLoading] = useState(false);
+  const [analyticsEnvironment, setAnalyticsEnvironment] = useState<"00" | "01" | null>(null);
+  const [analyticsPresetId, setAnalyticsPresetId] = useState<AnalyticsRangePreset["id"]>("trimestre");
+  const [analyticsFrom, setAnalyticsFrom] = useState(() => analyticsRangePresets(new Date()).find((preset) => preset.id === "personalizado")!.from);
+  const [analyticsTo, setAnalyticsTo] = useState(() => analyticsRangePresets(new Date()).find((preset) => preset.id === "personalizado")!.to);
+  const [analyticsGiftFilter, setAnalyticsGiftFilter] = useState<GiftTypeFilter>("todos");
 
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
@@ -290,6 +307,65 @@ export function App() {
     }
     void refresh().catch(handleApiFailure);
   }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear]);
+
+  // Effective analytics range: a non-custom preset supplies its own bounds; the custom
+  // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
+  const analyticsRange = useMemo(() => {
+    if (analyticsPresetId === "personalizado") {
+      return { from: analyticsFrom, to: analyticsTo };
+    }
+    const preset = analyticsPresets.find((candidate) => candidate.id === analyticsPresetId);
+    return preset ? { from: preset.from, to: preset.to } : { from: analyticsFrom, to: analyticsTo };
+  }, [analyticsPresetId, analyticsPresets, analyticsFrom, analyticsTo]);
+
+  // Default the ambiente selector to the ACTIVE emission environment the first time the
+  // Analítica view is opened (loaded lazily so the rest of the app never pays for it).
+  useEffect(() => {
+    if (view !== "analytics" || !token || analyticsEnvironment) {
+      return;
+    }
+    let cancelled = false;
+    void api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+      .then((result) => {
+        if (!cancelled) setAnalyticsEnvironment(result.emissionEnvironment.environment);
+      })
+      .catch(() => {
+        if (!cancelled) setAnalyticsEnvironment("00");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, token, analyticsEnvironment]);
+
+  // Fetch analytics whenever the view is active and the ambiente or range changes. A
+  // stale-guard drops out-of-order responses so quick filter changes never flicker.
+  useEffect(() => {
+    if (view !== "analytics" || !token || !analyticsEnvironment) {
+      return;
+    }
+    if (analyticsRange.from > analyticsRange.to) {
+      return;
+    }
+    let cancelled = false;
+    setAnalyticsLoading(true);
+    const params = new URLSearchParams({ from: analyticsRange.from, to: analyticsRange.to, environment: analyticsEnvironment });
+    void api<{ analytics: AnalyticsResponse }>(`/api/analytics?${params.toString()}`, token)
+      .then((result) => {
+        if (!cancelled) setAnalytics(result.analytics);
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAnalytics(null);
+          handleApiFailure(error);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setAnalyticsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [view, token, analyticsEnvironment, analyticsRange.from, analyticsRange.to]);
 
   // The document list does not carry the donor-data-verified flag (it is a per-CDE
   // indexed lookup on the server), so fetch the selected document's detail to learn it.
@@ -1016,6 +1092,34 @@ export function App() {
             </div>
             <AuditTable rows={filterAuditEntries(audit, auditQuery)} />
           </section>
+        )}
+
+        {view === "analytics" && (
+          <AnalyticsView
+            analytics={analytics}
+            loading={analyticsLoading}
+            environment={analyticsEnvironment ?? "00"}
+            activeEnvironment={analyticsEnvironment}
+            presets={analyticsPresets}
+            presetId={analyticsPresetId}
+            from={analyticsRange.from}
+            to={analyticsRange.to}
+            giftFilter={analyticsGiftFilter}
+            onEnvironmentChange={setAnalyticsEnvironment}
+            onPresetChange={(presetId) => {
+              setAnalyticsPresetId(presetId);
+              // Seed the custom inputs from the chosen preset so switching to
+              // "Personalizado" starts from the last-selected bounds, not stale ones.
+              const preset = analyticsPresets.find((candidate) => candidate.id === presetId);
+              if (preset) {
+                setAnalyticsFrom(preset.from);
+                setAnalyticsTo(preset.to);
+              }
+            }}
+            onFromChange={setAnalyticsFrom}
+            onToChange={setAnalyticsTo}
+            onGiftFilterChange={setAnalyticsGiftFilter}
+          />
         )}
 
         {view === "users" && (
@@ -4284,6 +4388,7 @@ const VIEW_SUBTITLES: Record<View, string> = {
   failures: "CDE con errores o rechazos que requieren su atención.",
   contingency: "Historial de contingencias (solo lectura): la normativa no contempla contingencia para el CDE.",
   audit: "Historial de todas las acciones realizadas en el panel.",
+  analytics: "Tendencias de las donaciones en línea (carril Wompi).",
   users: "Cree cuentas y asigne roles de acceso al panel.",
   credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo.",
   exports: "Exporte los CDE aceptados para el F960 y control interno."
