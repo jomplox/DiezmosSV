@@ -7,6 +7,7 @@ import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
+import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
@@ -510,7 +511,8 @@ export class IssuancePipeline {
     }
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
-      const response = await new EmailService(this.env, templates).sendReceipt(record, record.donor_email);
+      const branding = await loadEmailBranding(this.repo, this.env);
+      const response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
       await this.repo.recordEmailDelivery({
         documentId: record.id,
         toEmail: record.donor_email,

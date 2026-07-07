@@ -8,6 +8,7 @@ import {
   isCat014UnitCode,
   isCat017PaymentFormCode,
   isCat019ActivityCode,
+  CAT020_COUNTRIES,
   isCat020CountryCode,
   isCat021AssociatedDocumentCode,
   isCat022DocumentTypeCode,
@@ -153,7 +154,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       nombre: override ? override.nombre : name,
       codActividad: null,
       descActividad: null,
-      direccion: override ? { ...override.direccion } : donorAddress(payload, config),
+      direccion: override ? intentReceptorDireccion(override.direccion, override.codPais) : donorAddress(payload, config),
       telefono: override ? override.telefono : donorPhone,
       correo: override ? override.correo : donorEmail,
       codDomiciliado: override?.codDomiciliado ?? (payload.Cliente?.CodigoPais === "SV" || !payload.Cliente?.CodigoPais ? 1 : 2),
@@ -198,6 +199,17 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       // gift_type. The legal descripcion above stays "DONACIÓN"; this is metadata.
       ...(override?.giftType
         ? [{ campo: "TipoAportacion", etiqueta: "Tipo", valor: GIFT_TYPE_APENDICE_LABEL[override.giftType] }]
+        : []),
+      // Receptor extranjero: MH prohíbe el objeto direccion para no domiciliados
+      // (direccion viaja null), así que el país y la dirección que el donante escribió
+      // sobreviven en el DOCUMENTO LEGAL vía apéndice (valor ≤150 por esquema). El PDF
+      // pinta la dirección del receptor desde esta entrada.
+      ...(override && override.codPais && override.direccion.departamento === "00"
+        ? [{
+            campo: "DireccionExtranjera",
+            etiqueta: "Dirección en el extranjero",
+            valor: `${cat020CountryLabel(override.codPais)}: ${override.direccion.complemento}`.slice(0, 150)
+          }]
         : [])
     ]
   };
@@ -431,6 +443,29 @@ function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig
     distrito: config.direccion.distrito,
     complemento: cleanNullable(payload.Cliente?.Direccion) ?? RECEPTOR_ADDRESS_FALLBACK
   };
+}
+
+// Normativa, receptor extranjero (codDomiciliado 2): MH rechaza CUALQUIER objeto
+// direccion — tanto el 00/00/00 del marcador de extranjeros (CAT-008 no define un
+// distrito 00) como una geografía SV válida — con codigoMsg 096 "Campo
+// #/receptor/direccion contiene un valor inválido" (ambas variantes verificadas en
+// ambiente 00 el 2026-07-06). El esquema fe-cd-v2 permite direccion null y la tabla
+// de validaciones marca el distrito del receptor como "cuando aplique": para un no
+// domiciliado no aplica. La direccion viaja null; el país del donante ya está en
+// codPais y su dirección extranjera queda registrada en la intención (D1).
+function cat020CountryLabel(codPais: string): string {
+  return CAT020_COUNTRIES.find((option) => option.code === codPais)?.label ?? codPais;
+}
+
+function intentReceptorDireccion(
+  direccion: { departamento: string; municipio: string; distrito: string; complemento: string },
+  codPais: string | undefined
+): EmisorConfig["direccion"] | null {
+  if (direccion.departamento !== "00") {
+    return { ...direccion };
+  }
+  void codPais;
+  return null;
 }
 
 function validateCdeDui(document: Record<string, unknown>): void {

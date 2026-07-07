@@ -27,6 +27,7 @@ import {
   DONAR_ROUTE_PARAM,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
+  DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
   DONAR_THANK_YOU_TITLE,
@@ -67,6 +68,7 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
+import { brandingLogoSrc, parseBrandingResponse } from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -250,6 +252,24 @@ function UsFlagIcon() {
   );
 }
 
+// Clamp for the height Wompi's checkout reports via its sizeUpdate postMessage: a
+// buggy or hostile frame must not collapse the embed or blow the layout open.
+function clampEmbedHeight(height: number): number {
+  return Math.min(Math.max(Math.round(height), 320), 2400);
+}
+
+// Official support contact for both lanes — a discreet mailto line at the bottom of
+// every donor card, visually subordinate to the giving flow. The address is the church's
+// configured branding supportEmail; DONAR_SUPPORT_EMAIL is the client-side default used
+// until the fetched branding arrives (and if the fetch fails).
+function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: string }) {
+  return (
+    <p className="donar-support">
+      ¿Dudas o necesita ayuda? Escríbanos a <a href={`mailto:${supportEmail}`}>{supportEmail}</a>
+    </p>
+  );
+}
+
 // Public donation wizard + Wompi/Givebutter handoff. Renders WITHOUT a session.
 export function DonarPage() {
   const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
@@ -266,6 +286,15 @@ export function DonarPage() {
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
   // the Givebutter wizard directly, skipping the extranjero mechanics.
   const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
+  // White-label logo for the landing chooser. When a church has uploaded a logo the
+  // donor page shows it in place of the built-in default vector; the vector stays as the
+  // fallback. The accent color is deliberately NOT applied here — the donor wizard's
+  // monochrome Gotham brand is a design decision, so only the logo is branded.
+  const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
+  // The church's configured support contact, shown by DonarSupport at the bottom of every
+  // donor card. Seeded with the client-side default so the line renders before (and if)
+  // the /api/branding fetch resolves; replaced with the configured value when it does.
+  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
   // US-donor (Givebutter) path state: gift frequency (Única | Mensual segmented
   // control) and the render-probe fallback for the embedded giving form.
   const [monthly, setMonthly] = useState(false);
@@ -275,6 +304,10 @@ export function DonarPage() {
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
   // still flips to "ready").
   const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed">("loading");
+  // Height reported by Wompi's checkout via sizeUpdate; null keeps the CSS fallback
+  // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
+  // the inner scrollbar disappears — the page is the only scroller.
+  const [embedHeight, setEmbedHeight] = useState<number | null>(null);
   const givebutterHostRef = useRef<HTMLDivElement | null>(null);
   // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
   // field, and the summary's Editar control (Paso 3 / the US embed step).
@@ -350,6 +383,26 @@ export function DonarPage() {
     }
     summaryEditRef.current?.focus();
   }, [door, step]);
+
+  // Fetch the church's branding for the landing logo (name is used as alt text). Uses
+  // the same unauthenticated /api/branding as the admin; a failure keeps the default vector.
+  useEffect(() => {
+    let cancelled = false;
+    void donarApi<unknown>("/api/branding")
+      .then((data) => {
+        if (cancelled) return;
+        const branding = parseBrandingResponse(data);
+        const src = brandingLogoSrc(branding.logoVersion);
+        setBrandingLogo(src ? { src, name: branding.displayName } : null);
+        setSupportEmail(branding.supportEmail);
+      })
+      .catch(() => {
+        // Keep the built-in default vector.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
   // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
@@ -455,12 +508,68 @@ export function DonarPage() {
       return;
     }
     setHandoff("loading");
+    setEmbedHeight(null);
     const slow = window.setTimeout(() => {
       setHandoff((current) => (current === "loading" ? "delayed" : current));
     }, DONAR_SCRIPT_TIMEOUT_MS);
     return () => {
       window.clearTimeout(slow);
     };
+  }, [stage, intent]);
+
+  // Wompi's checkout posts JSON messages to its parent — the same channel its own
+  // modal widget consumes: { message: "sizeUpdate", height } as the content grows
+  // (their widget renders it as height + 35), and { message: "close" } when the donor
+  // taps the checkout's back arrow OR its post-payment "Cerrar". Origin-checked strictly;
+  // anything unparseable is ignored. "close" does a one-shot status check: paid/COMPLETED
+  // → thanks, otherwise it walks back to Paso 2 (same as our own Atrás from the embed).
+  useEffect(() => {
+    if (stage !== "widget" || !intent) {
+      return;
+    }
+    // Capture the non-null intent so the close handler's deferred fetch keeps a stable,
+    // narrowed reference (the effect re-runs whenever intent changes).
+    const activeIntent = intent;
+    function onWompiMessage(event: MessageEvent) {
+      if (event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN) {
+        return;
+      }
+      let payload: { message?: unknown; height?: unknown };
+      try {
+        payload = JSON.parse(String(event.data));
+      } catch {
+        return;
+      }
+      if (payload?.message === "sizeUpdate" && typeof payload.height === "number") {
+        setEmbedHeight(clampEmbedHeight(payload.height + 35));
+        return;
+      }
+      if (payload?.message === "close") {
+        // Wompi posts { message: "close" } from BOTH its back arrow AND its post-payment
+        // "Cerrar" button. Returning straight to Paso 2 is right for the back arrow but
+        // wrong after a successful payment. So do a one-shot status check first: if the
+        // intent is already paid (or COMPLETED), go to thanks; otherwise fall back to the
+        // existing back-to-Paso-2 behavior. A fetch failure is treated as not-paid.
+        const statusPath = `${DONAR_INTENT_PATH}/${activeIntent.intentId}/status`;
+        void donarApi<{ status: string; paid: boolean }>(statusPath)
+          .then((result) => {
+            if (result.paid || result.status === "COMPLETED") {
+              setStage("thanks");
+            } else {
+              setIntent(null);
+              setStage("form");
+              setStep(2);
+            }
+          })
+          .catch(() => {
+            setIntent(null);
+            setStage("form");
+            setStep(2);
+          });
+      }
+    }
+    window.addEventListener("message", onWompiMessage);
+    return () => window.removeEventListener("message", onWompiMessage);
   }, [stage, intent]);
 
   // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
@@ -483,8 +592,11 @@ export function DonarPage() {
         return;
       }
       try {
-        const result = await donarApi<{ status: string }>(`${DONAR_INTENT_PATH}/${intent.intentId}/status`);
-        if (!cancelled && result.status === "COMPLETED") {
+        const result = await donarApi<{ status: string; paid: boolean }>(`${DONAR_INTENT_PATH}/${intent.intentId}/status`);
+        // The donor's "thanks" keys on PAYMENT (result.paid, stamped by Wompi's webhook)
+        // — not on MH acceptance. COMPLETED is kept as the legacy signal so an intent that
+        // was accepted before the poll observed the payment still lands on thanks.
+        if (!cancelled && (result.paid || result.status === "COMPLETED")) {
           window.clearInterval(timer);
           setStage("thanks");
         }
@@ -636,7 +748,11 @@ export function DonarPage() {
     return (
       <div className="donar-screen">
         <div className="donar-card card donar-landing">
-          <OrganizationLogo />
+          {brandingLogo ? (
+            <img className="donar-logo" src={brandingLogo.src} alt={brandingLogo.name} />
+          ) : (
+            <OrganizationLogo />
+          )}
           <h1>{DONAR_LANDING_HEADING}</h1>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
@@ -654,6 +770,7 @@ export function DonarPage() {
               <span className="donar-door-desc">{DONAR_DOOR_EEUU_DESC}</span>
             </button>
           </div>
+          <DonarSupport supportEmail={supportEmail} />
         </div>
       </div>
     );
@@ -691,15 +808,15 @@ export function DonarPage() {
         <div className="donar-glyph">
           <ShieldCheck size={28} />
         </div>
-        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Entregue su diezmo u ofrenda 🇸🇻"}</h1>
+        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Diezmos y Ofrendas 🇸🇻"}</h1>
 
         {/* Paso 1 assurance: right under the heading, name the legal document this
             door produces — reassurance of the door the donor just chose. */}
         {step === 1 && (
           <p className="donar-assurance">
             {usDonation
-              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501(c)(3)) en su dirección de correo electrónico."
-              : "Recibirá su comprobante de donación en su dirección de correo electrónico."}
+              ? "Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico."
+              : "Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico."}
           </p>
         )}
 
@@ -981,6 +1098,8 @@ export function DonarPage() {
                   className="donar-embed"
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
                   title="Entrega segura con Wompi"
+                  style={embedHeight ? { height: embedHeight } : undefined}
+                  scrolling={embedHeight ? "no" : undefined}
                   onLoad={() => setHandoff("ready")}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
@@ -992,6 +1111,8 @@ export function DonarPage() {
             {stage === "closed" && <p className="auth-notice">{DONAR_FALLBACK_MESSAGE}</p>}
           </div>
         )}
+
+        <DonarSupport supportEmail={supportEmail} />
       </div>
     </div>
   );
@@ -1006,6 +1127,7 @@ export function DonarThankYou({ monto }: { monto?: string }) {
         </div>
         <h1>{DONAR_THANK_YOU_TITLE}</h1>
         {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
+        <DonarSupport />
         <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
       </div>
     </div>

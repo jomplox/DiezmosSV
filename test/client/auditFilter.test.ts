@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { filterAuditEntries } from "../../src/client/auditFilter";
 import type { AuditRow } from "../../src/client/types";
@@ -32,6 +34,16 @@ describe("audit entry filtering", () => {
     expect(filterAuditEntries(withActor, "ada admin")).toHaveLength(1);
     expect(filterAuditEntries(withActor, "bob@example.org")).toHaveLength(1);
     expect(filterAuditEntries(withActor, "190.86.1.2")).toHaveLength(1);
+  });
+
+  it("pages the audit trail with a keyset cursor and a Cargar más control", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    // First page + cursor on refresh; older pages append via the cursor param.
+    expect(appSource).toContain('api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50"');
+    expect(appSource).toContain("cursor=${encodeURIComponent(auditCursor)}");
+    expect(appSource).toContain("Cargar más");
+    // The filter hint clarifies it searches the LOADED rows.
+    expect(appSource).toContain("registros cargados");
   });
 });
 

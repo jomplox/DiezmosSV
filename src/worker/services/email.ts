@@ -16,11 +16,34 @@ export interface EmailDeliveryResult {
   providerDeliveryId: string | null;
 }
 
+// White-label chrome for every email this service sends. Callers that already load
+// settings before a send (receipt/invalidation/certificate/reset) thread the church's
+// branding here; the defaults keep an unbranded deployment on the historical identity.
+export interface EmailBranding {
+  organizationName: string;
+  brandColor: string;
+  supportEmail: string;
+  // Absolute, version-qualified logo URL (or null). Rendered in the header of every rich
+  // HTML email above the organization name; null keeps exactly the historical, logo-less
+  // chrome. Absolute because a relative path is meaningless inside an email client.
+  logoUrl?: string | null;
+}
+
 export class EmailService {
   constructor(
     private readonly env: Env,
-    private readonly templates: EmailTemplateSettings = DEFAULT_EMAIL_TEMPLATES
+    private readonly templates: EmailTemplateSettings = DEFAULT_EMAIL_TEMPLATES,
+    private readonly branding?: EmailBranding
   ) {}
+
+  // Resolve the branding once per send: an explicit branding (loaded from app_settings
+  // by the caller) wins; otherwise fall back to the emisor-derived name + default color.
+  private resolveBranding(): EmailBranding {
+    if (this.branding) {
+      return this.branding;
+    }
+    return { organizationName: organizationName(this.env), brandColor: "#0f766e", supportEmail: "legacy-contact-1@example.com", logoUrl: null };
+  }
 
   // Sender identity for real dispatch. EMAIL_FROM is required for any actual send;
   // mock mode short-circuits before `from` is used, so an unset value stays harmless
@@ -85,7 +108,12 @@ export class EmailService {
       to: toEmail,
       subject: message.subject,
       text: message.text,
-      html: dteEmailHtml(record, message.text, { organizationName: organizationName(this.env) }),
+      html: dteEmailHtml(record, message.text, {
+        organizationName: this.resolveBranding().organizationName,
+        brandColor: this.resolveBranding().brandColor,
+        supportEmail: this.resolveBranding().supportEmail,
+        logoUrl: this.resolveBranding().logoUrl
+      }),
       attachments: [
         {
           filename: pdfAttachment.filename,
@@ -140,17 +168,23 @@ export class EmailService {
   }
 
   async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {
+    const branding = this.resolveBranding();
     const payload: EmailPayload = {
       from: this.resolveFrom(),
       to: toEmail,
-      subject: "Restablecimiento de contraseña - ExamplePerson1",
+      subject: `Restablecimiento de contraseña - ${branding.organizationName}`,
       text:
         `Hola ${name},\n\n` +
-        `Recibimos una solicitud para restablecer su contraseña en ExamplePerson1. ` +
+        `Recibimos una solicitud para restablecer su contraseña en ${branding.organizationName}. ` +
         `Abra este enlace para crear una nueva contraseña (vence en ${expiresMinutes} minutos):\n\n` +
         `${link}\n\n` +
         `Si usted no solicitó este cambio, ignore este mensaje; su contraseña actual sigue vigente.`,
-      html: passwordResetEmailHtml(name, link, expiresMinutes),
+      html: passwordResetEmailHtml(name, link, expiresMinutes, {
+        organizationName: branding.organizationName,
+        brandColor: branding.brandColor,
+        supportEmail: branding.supportEmail,
+        logoUrl: branding.logoUrl
+      }),
       attachments: []
     };
     return this.dispatch(payload, []);

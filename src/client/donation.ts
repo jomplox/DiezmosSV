@@ -57,7 +57,7 @@ export function donarAmountDisplay(amount: string): string {
 // ── US donors → Givebutter / Friends of Misión ExampleOrganization (FMCE) ────────────
 //
 // A US-resident donor gets NO Salvadoran CDE (useless to a US taxpayer); their
-// gift belongs on the US 501(c)(3)'s books and yields a US-deductible receipt from
+// gift belongs on the US 501c3's books and yields a US-deductible receipt from
 // Givebutter. When "Resido en el extranjero" is checked AND país === "US", the SV
 // fiscal fields collapse and the embedded Givebutter giving form takes over. No
 // backend involvement: no intent, no webhook, no migration.
@@ -79,7 +79,7 @@ export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
 // The US door funds the SAME mother church as the SV door — FMCE is only the US
 // giving vehicle, never a different beneficiary. The copy says so explicitly.
 export const GIVEBUTTER_INTRO =
-  "Su diezmo u ofrenda apoya a Misión ExampleOrganization en El Salvador. Se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501(c)(3)) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+  "Su diezmo u ofrenda apoya a Misión ExampleOrganization en El Salvador. Se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
 // "GiveButter" is the brand style (capital G, capital B) and is the anchor text — no
 // raw URL is ever shown to the donor.
 export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done en GiveButter";
@@ -101,6 +101,9 @@ export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario se muestra en inglés.";
 export type DonarDoor = "sv" | "eeuu";
 
 export const DONAR_LANDING_HEADING = "Diezmos y Ofrendas";
+// Official support contact for BOTH lanes (SV fiscal + EE. UU./Givebutter). Rendered
+// as a discreet mailto line at the bottom of every donor screen and in email footers.
+export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
 // tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
@@ -110,7 +113,7 @@ export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
 export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";
 export const DONAR_DOOR_EEUU_LABEL = "EE. UU.";
-export const DONAR_DOOR_EEUU_DESC = "Recibo oficial deducible de impuestos (IRS 501(c)(3))";
+export const DONAR_DOOR_EEUU_DESC = "Recibo oficial deducible de impuestos (IRS 501c3)";
 export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
 
 // Optional deep-link: /donar?ruta=sv or ?ruta=eeuu preselects a door. Read once
