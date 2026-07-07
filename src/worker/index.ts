@@ -44,7 +44,7 @@ import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shar
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
-import { IssuancePipeline } from "./services/pipeline";
+import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
@@ -1744,7 +1744,17 @@ async function handleDocumentRoute(
     if (document.status === "REJECTED" && document.wompi_event_id) {
       // MH rejected the CONTENT of this CDE: retransmitting the same signed JWS
       // would be rejected identically, so rebuild it from the original webhook.
-      const result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
+      let result: MhResponse;
+      try {
+        result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
+      } catch (error) {
+        if (error instanceof RejectedWompiRetryConflictError) {
+          // A concurrent retry already claimed the rebuild: refuse cleanly so we never
+          // transmit a second distinct legal DTE for the same Wompi event.
+          return jsonResponse({ error: "document_retry_in_progress", message: error.message }, { status: 409 });
+        }
+        throw error;
+      }
       await repo.createAudit({
         actorType: "USER",
         actorId: actor.id,

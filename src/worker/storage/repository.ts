@@ -677,16 +677,33 @@ export class Repository {
       .run();
   }
 
-  async replaceDocumentPayload(id: string, input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null; status: string }): Promise<void> {
-    await this.db
+  // CAS claim for an operator rebuild of a REJECTED Wompi CDE. Atomically writes the
+  // freshly rebuilt payload + signature and moves the row REJECTED → SIGNED, clearing
+  // the stale MH verdict in the same statement. Guarded on status = 'REJECTED', so two
+  // concurrent retries can never both proceed: the loser matches 0 rows and gets false,
+  // so it never transmits a second legal DTE for the same Wompi event and can never
+  // leave the stored payload describing a different document than the recorded MH
+  // result. Returns true only for the retry that won the claim.
+  async claimRejectedWompiRebuild(
+    id: string,
+    wompiEventId: string,
+    input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null }
+  ): Promise<boolean> {
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?, status = ?, updated_at = ?
-         WHERE id = ?`
+         SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?,
+             status = 'SIGNED', sello_recibido = NULL, mh_estado = NULL, mh_observaciones_json = '[]', updated_at = ?
+         WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
+         RETURNING id`
       )
-      .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, input.status, nowIso(), id)
-      .run();
+      .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, nowIso(), id, wompiEventId)
+      .first<{ id: string }>();
+    if (!row) {
+      return false;
+    }
     await this.indexDteDocumentById(id);
+    return true;
   }
 
   async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
