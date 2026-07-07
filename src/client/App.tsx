@@ -2223,7 +2223,9 @@ function CredentialsPanel({
                     <strong>{section.label}</strong>
                     <small>{section.description}</small>
                   </span>
-                  <em className={sectionState}>{sectionState === "ready" ? "Listo" : "Pendiente"}</em>
+                  {sectionState !== "unknown" && (
+                    <em className={sectionState}>{sectionState === "ready" ? "Listo" : "Pendiente"}</em>
+                  )}
                 </button>
               );
             })}

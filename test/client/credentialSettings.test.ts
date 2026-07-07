@@ -58,6 +58,16 @@ describe("credentialSectionState", () => {
     });
   });
 
+  test("returns unknown (no badge) before the status has loaded", () => {
+    // On first load the credential status is still in flight; PENDIENTE flashing to
+    // LISTO reads as the UI being wrong. No status -> no badge, for every section.
+    expect(credentialSectionState("mh", null)).toBe("unknown");
+    expect(credentialSectionState("firmador", null)).toBe("unknown");
+    // Even neutral sections show nothing until the panel has data to stand on.
+    expect(credentialSectionState("ambiente", null)).toBe("unknown");
+    expect(credentialSectionState("marca", null)).toBe("unknown");
+  });
+
   test("marks neutral sections as ready because they do not map to a secret group", () => {
     expect(credentialSectionState("ambiente", status)).toBe("ready");
     expect(credentialSectionState("plantillas", status)).toBe("ready");
