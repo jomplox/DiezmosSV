@@ -2449,7 +2449,11 @@ function CredentialsPanel({
     }
   }
   function requestEmissionEnvironmentChange(environment: EmissionEnvironmentState["environment"]): void {
-    if (emissionBusy || runtimeEnvironment.environment === environment) return;
+    // Short-circuit only while busy or when the selected value is ALREADY persisted as a
+    // setting row (a genuinely redundant save). A value that merely matches the deployment
+    // default with no setting row yet must still reach the confirm flow so the owner can
+    // persist the default explicitly — guarding on runtimeEnvironment.environment blocked that.
+    if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;
     setPendingEmissionEnvironment(environment);
   }
   async function confirmEmissionEnvironmentChange(): Promise<void> {
