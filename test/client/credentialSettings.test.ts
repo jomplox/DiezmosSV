@@ -147,3 +147,16 @@ describe("Firmador panel certificate expiry wiring (source contract)", () => {
     expect(appSource).toContain("<strong>{certificateExpiry.label}</strong>");
   });
 });
+
+describe("Ambiente emission-environment save guard (source contract)", () => {
+  test("blocks a redundant save only when the value is already persisted as a setting, not when it merely matches the deployment default", () => {
+    // The Ambiente pre-check must let the owner persist the deployment default explicitly:
+    // it may short-circuit only while busy or when the SELECTED value is already stored as
+    // a setting row (emissionEnvironment.source === "setting"). Guarding on the runtime
+    // environment instead blocked saving the default when no setting row existed yet.
+    expect(appSource).toContain(
+      'if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;'
+    );
+    expect(appSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
+  });
+});
