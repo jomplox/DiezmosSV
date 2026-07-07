@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, randomBytes, randomUUID } from "node:crypto";
 
 const help = `
 DiezmosSV Cloudflare staging smoke test
@@ -108,6 +108,10 @@ async function main() {
   if (config.createUser) {
     logStep("Creating disposable VIEWER user");
     const suffix = Date.now();
+    // Crypto-random and never logged: the timestamp stays in the (non-secret) name/email
+    // for traceability, but the password must not be derivable from smoke output. The
+    // "Smoke-...!1" wrapper guarantees the password policy (upper/lower/number/symbol).
+    const password = `Smoke-${randomBytes(18).toString("base64url")}!1`;
     const created = await jsonRequest("/api/users", {
       method: "POST",
       token: auth.token,
@@ -115,7 +119,7 @@ async function main() {
         name: `Smoke Viewer ${suffix}`,
         email: `smoke-viewer+${suffix}@example.org`,
         role: "VIEWER",
-        password: `Smoke-${suffix}!`
+        password
       }
     });
     results.push({ check: "user_create", ok: true, user: created.user.email });
