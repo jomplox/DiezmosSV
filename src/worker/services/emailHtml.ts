@@ -4,9 +4,10 @@ import type { DteDocumentRecord } from "../types";
 // White-label callers thread a church's own color through the *Options.brandColor.
 const DEFAULT_BRAND_COLOR = "#0f766e";
 
-// Contacto de soporte oficial para ambas vías (SV y EE. UU.): se muestra una sola
-// vez en el pie compartido, así TODOS los correos lo heredan.
-const SUPPORT_EMAIL = "legacy-contact-1@example.com";
+// Contacto de soporte por defecto para ambas vías (SV y EE. UU.): se muestra una sola
+// vez en el pie compartido. Cada iglesia puede configurar el suyo en Marca; este valor
+// queda solo como respaldo cuando no se ha configurado ninguno.
+const DEFAULT_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 const DEFAULT_ORGANIZATION_NAME = "ExamplePerson1";
 const TEXT_COLOR = "#1f2a2e";
 const MUTED_COLOR = "#52656c";
@@ -16,6 +17,7 @@ const CARD_BACKGROUND = "#f7f9fa";
 export interface DteEmailHtmlOptions {
   organizationName: string;
   brandColor?: string;
+  supportEmail?: string;
 }
 
 export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, options: DteEmailHtmlOptions): string {
@@ -34,7 +36,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
     ["Ambiente", record.environment === "01" ? "Producción" : "Pruebas"]
   ]);
   const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
-  return emailDocument(options.organizationName, brandColor, [
+  return emailDocument(options.organizationName, brandColor, options.supportEmail, [
     banner,
     paragraphs(bodyText),
     details,
@@ -46,6 +48,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
 export interface BrandingEmailOptions {
   organizationName: string;
   brandColor?: string;
+  supportEmail?: string;
 }
 
 export function passwordResetEmailHtml(
@@ -65,7 +68,7 @@ export function passwordResetEmailHtml(
         </td>
       </tr>
     </table>`;
-  return emailDocument(organizationName, brandColor, [
+  return emailDocument(organizationName, brandColor, options.supportEmail, [
     paragraphs(
       `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ${organizationName}. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
     ),
@@ -96,7 +99,7 @@ export function operationalAlertHtml(
     ["Entidad", alert.entityType],
     ["Identificador", alert.entityId]
   ]);
-  return emailDocument(organizationName, brandColor, [
+  return emailDocument(organizationName, brandColor, options.supportEmail, [
     banner,
     paragraphs(alert.detail),
     details,
@@ -112,6 +115,7 @@ export interface CertificateEmailInput {
   totalLabel: string;
   isTestEnvironment: boolean;
   brandColor?: string;
+  supportEmail?: string;
 }
 
 export function certificateEmailHtml(input: CertificateEmailInput): string {
@@ -123,7 +127,7 @@ export function certificateEmailHtml(input: CertificateEmailInput): string {
     ["Donaciones", String(input.count)],
     ["Total del año", input.totalLabel]
   ]);
-  return emailDocument(input.organizationName, input.brandColor ?? DEFAULT_BRAND_COLOR, [
+  return emailDocument(input.organizationName, input.brandColor ?? DEFAULT_BRAND_COLOR, input.supportEmail, [
     paragraphs(
       `Estimado(a) ${input.donorName}:\n\n` +
         `Adjuntamos su constancia de donaciones correspondiente al año ${input.year}. ` +
@@ -146,7 +150,9 @@ function alertBanner(kind: string, title: string): string {
   return `<div style="margin:0 0 18px;padding:10px 14px;border-radius:8px;background:${background};border:1px solid ${border};color:${color};font-weight:bold;text-align:center;">${escapeHtml(title)}</div>`;
 }
 
-function emailDocument(organizationName: string, brandColor: string, blocks: string[]): string {
+function emailDocument(organizationName: string, brandColor: string, supportEmail: string | undefined, blocks: string[]): string {
+  // A configured church contact wins; otherwise fall back to the historical fmce default.
+  const contact = escapeHtml(supportEmail?.trim() || DEFAULT_SUPPORT_EMAIL);
   return `<!DOCTYPE html>
 <html lang="es">
   <head>
@@ -171,7 +177,7 @@ function emailDocument(organizationName: string, brandColor: string, blocks: str
             </tr>
             <tr>
               <td style="padding:16px 28px;border-top:1px solid ${BORDER_COLOR};font-family:Arial,Helvetica,sans-serif;font-size:11px;color:${MUTED_COLOR};">
-                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.<br />¿Dudas o necesita ayuda? Escríbanos a <a href="mailto:${SUPPORT_EMAIL}" style="color:#595959;">${SUPPORT_EMAIL}</a>.
+                Correo generado automáticamente por ${escapeHtml(organizationName)}. Por favor no responda a este mensaje.<br />¿Dudas o necesita ayuda? Escríbanos a <a href="mailto:${contact}" style="color:#595959;">${contact}</a>.
               </td>
             </tr>
           </table>

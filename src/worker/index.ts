@@ -28,11 +28,13 @@ import {
   BRANDING_LOGO_MAX_BYTES,
   BRANDING_LOGO_OBJECT_KEY,
   BRANDING_LOGO_SETTING_KEY,
+  BRANDING_SUPPORT_EMAIL_SETTING_KEY,
   BrandingValidationError,
   loadEmailBranding,
   normalizeBrandingAccentColor,
   normalizeBrandingDisplayName,
   normalizeBrandingLogoContentType,
+  normalizeBrandingSupportEmail,
   parseBrandingLogoMeta,
   parseBrandingSettings
 } from "./services/branding";
@@ -932,12 +934,14 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
 async function handlePublicBrandingRoute(repo: Repository): Promise<Response> {
   const branding = parseBrandingSettings(
     await repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
-    await repo.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY)
+    await repo.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
+    await repo.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
   );
   const logo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
   return jsonResponse({
     displayName: branding.displayName,
     accentColor: branding.accentColor,
+    supportEmail: branding.supportEmail,
     logoVersion: logo?.version ?? null
   });
 }
@@ -972,12 +976,14 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
     return methodNotAllowed();
   }
   const actor = requireRole(user, "OWNER");
-  const body = (await request.json().catch(() => ({}))) as { displayName?: unknown; accentColor?: unknown };
+  const body = (await request.json().catch(() => ({}))) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
   let displayName: string;
   let accentColor: string;
+  let supportEmail: string;
   try {
     displayName = normalizeBrandingDisplayName(body.displayName);
     accentColor = normalizeBrandingAccentColor(body.accentColor);
+    supportEmail = normalizeBrandingSupportEmail(body.supportEmail);
   } catch (error) {
     if (error instanceof BrandingValidationError) {
       return jsonResponse({ error: "invalid_branding", message: error.message }, { status: 400 });
@@ -986,6 +992,7 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
   }
   await repo.setSetting(BRANDING_DISPLAY_NAME_SETTING_KEY, displayName, actor.id);
   await repo.setSetting(BRANDING_ACCENT_COLOR_SETTING_KEY, accentColor, actor.id);
+  await repo.setSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY, supportEmail, actor.id);
   await repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
@@ -993,9 +1000,10 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
     entityType: "app_setting",
     entityId: BRANDING_DISPLAY_NAME_SETTING_KEY,
     summary: `Marca actualizada: ${displayName}`,
-    metadata: { displayName, accentColor }
+    // Support email is not a secret (it is published on donor pages and email footers).
+    metadata: { displayName, accentColor, supportEmail }
   });
-  return jsonResponse({ ok: true, displayName, accentColor });
+  return jsonResponse({ ok: true, displayName, accentColor, supportEmail });
 }
 
 // Upload (PUT) or remove (DELETE) the branding logo (OWNER). The binary goes to R2

@@ -22,6 +22,7 @@ export interface EmailDeliveryResult {
 export interface EmailBranding {
   organizationName: string;
   brandColor: string;
+  supportEmail: string;
 }
 
 export class EmailService {
@@ -37,7 +38,7 @@ export class EmailService {
     if (this.branding) {
       return this.branding;
     }
-    return { organizationName: organizationName(this.env), brandColor: "#0f766e" };
+    return { organizationName: organizationName(this.env), brandColor: "#0f766e", supportEmail: "legacy-contact-1@example.com" };
   }
 
   // Sender identity for real dispatch. EMAIL_FROM is required for any actual send;
@@ -105,7 +106,8 @@ export class EmailService {
       text: message.text,
       html: dteEmailHtml(record, message.text, {
         organizationName: this.resolveBranding().organizationName,
-        brandColor: this.resolveBranding().brandColor
+        brandColor: this.resolveBranding().brandColor,
+        supportEmail: this.resolveBranding().supportEmail
       }),
       attachments: [
         {
@@ -174,7 +176,8 @@ export class EmailService {
         `Si usted no solicitó este cambio, ignore este mensaje; su contraseña actual sigue vigente.`,
       html: passwordResetEmailHtml(name, link, expiresMinutes, {
         organizationName: branding.organizationName,
-        brandColor: branding.brandColor
+        brandColor: branding.brandColor,
+        supportEmail: branding.supportEmail
       }),
       attachments: []
     };

@@ -5648,6 +5648,7 @@ describe("branding", () => {
     await expect(response.json()).resolves.toEqual({
       displayName: "ExamplePerson1",
       accentColor: "#0f766e",
+      supportEmail: "legacy-contact-1@example.com",
       logoVersion: null
     });
   });
@@ -5658,16 +5659,58 @@ describe("branding", () => {
       new Request("https://example.org/api/settings/branding", {
         method: "PUT",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName: "  Iglesia Central  ", accentColor: "#123ABC" })
+        body: JSON.stringify({ displayName: "  Iglesia Central  ", accentColor: "#123ABC", supportEmail: "  legacy-email-119@example.com " })
       }),
       env(db)
     );
     expect(put.status).toBe(200);
-    await expect(put.json()).resolves.toMatchObject({ ok: true, displayName: "Iglesia Central", accentColor: "#123abc" });
+    await expect(put.json()).resolves.toMatchObject({
+      ok: true,
+      displayName: "Iglesia Central",
+      accentColor: "#123abc",
+      supportEmail: "legacy-email-119@example.com"
+    });
     expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_UPDATED", entity_type: "app_setting" });
 
     const response = await worker.fetch(new Request("https://example.org/api/branding"), env(db));
-    await expect(response.json()).resolves.toMatchObject({ displayName: "Iglesia Central", accentColor: "#123abc", logoVersion: null });
+    await expect(response.json()).resolves.toMatchObject({
+      displayName: "Iglesia Central",
+      accentColor: "#123abc",
+      supportEmail: "legacy-email-119@example.com",
+      logoVersion: null
+    });
+  });
+
+  it("carries the support email in the branding audit metadata", async () => {
+    const db = ownerDb();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia Central", accentColor: "#123abc", supportEmail: "legacy-email-119@example.com" })
+      }),
+      env(db)
+    );
+    const audit = db.audits.at(-1) as { action: string; metadata_json?: string };
+    expect(audit.action).toBe("BRANDING_UPDATED");
+    expect(String(audit.metadata_json)).toContain("legacy-email-119@example.com");
+  });
+
+  it("rejects a malformed support email with a Spanish message", async () => {
+    const db = ownerDb();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/branding", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: "Iglesia", accentColor: "#0f766e", supportEmail: "no-arroba" })
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_branding");
+    expect(body.message).toContain("correo");
+    expect(db.audits).toHaveLength(0);
   });
 
   it("rejects a bad hex color with a Spanish message", async () => {

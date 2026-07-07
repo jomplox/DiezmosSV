@@ -23,9 +23,9 @@ import { readFileSync as __readEmailHtmlSource } from "node:fs";
 import { resolve as __resolveEmailHtml } from "node:path";
 
 describe("email support contact", () => {
-  it("every HTML email footer carries the official support contact", () => {
-    // legacy-contact-1@example.com is the official support contact for both lanes; the shared
-    // emailDocument chrome renders it once, so every template inherits it.
+  it("keeps the fmce default as the footer fallback in source", () => {
+    // legacy-contact-1@example.com is the default support contact for both lanes; the shared
+    // emailDocument chrome renders it when a church has not configured its own.
     const emailHtmlSource = __readEmailHtmlSource(
       __resolveEmailHtml(import.meta.dirname, "../../src/worker/services/emailHtml.ts"),
       "utf8"
@@ -33,6 +33,46 @@ describe("email support contact", () => {
     expect(emailHtmlSource).toContain("SUPPORT_EMAIL");
     expect(emailHtmlSource).toContain("legacy-contact-1@example.com");
     expect(emailHtmlSource).toContain("mailto:");
+  });
+
+  it("renders the fmce default in every footer when no support email is configured", () => {
+    const receipt = dteEmailHtml(fakeRecord(), "Gracias.", { organizationName: "ExamplePerson1" });
+    const reset = passwordResetEmailHtml("Ana", "https://example.org/?reset=abc", 30, { organizationName: "ExamplePerson1" });
+    const certificate = certificateEmailHtml({
+      organizationName: "MISION EXAMPLEORGANIZATION",
+      donorName: "Ana",
+      year: 2025,
+      count: 1,
+      totalLabel: "$25.00",
+      isTestEnvironment: false
+    });
+    for (const html of [receipt, reset, certificate]) {
+      expect(html).toContain("mailto:legacy-contact-1@example.com");
+      expect(html).toContain(">legacy-contact-1@example.com<");
+    }
+  });
+
+  it("renders the configured support email in the footer when set", () => {
+    const supportEmail = "legacy-email-119@example.com";
+    const receipt = dteEmailHtml(fakeRecord(), "Gracias.", { organizationName: "Iglesia Central", supportEmail });
+    const reset = passwordResetEmailHtml("Ana", "https://example.org/?reset=abc", 30, {
+      organizationName: "Iglesia Central",
+      supportEmail
+    });
+    const certificate = certificateEmailHtml({
+      organizationName: "Iglesia Central",
+      donorName: "Ana",
+      year: 2025,
+      count: 1,
+      totalLabel: "$25.00",
+      isTestEnvironment: false,
+      supportEmail
+    });
+    for (const html of [receipt, reset, certificate]) {
+      expect(html).toContain(`mailto:${supportEmail}`);
+      expect(html).toContain(`>${supportEmail}<`);
+      expect(html).not.toContain("legacy-contact-1@example.com");
+    }
   });
 });
 

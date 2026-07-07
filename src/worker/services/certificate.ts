@@ -438,7 +438,7 @@ export async function sendAnnualCertificates(
   // The certificate keeps the emisor's legal name (it is a fiscal document), but the
   // email chrome still picks up the church's accent color.
   const branding = await loadEmailBranding(repo);
-  const email = new EmailService(env, undefined, { organizationName: emisor.nombre, brandColor: branding.brandColor });
+  const email = new EmailService(env, undefined, { organizationName: emisor.nombre, brandColor: branding.brandColor, supportEmail: branding.supportEmail });
   const issuedOnLabel = elSalvadorDateLabel(new Date().toISOString());
   const result: AnnualCertificateSendResult = { year, sent: 0, skipped: 0, failed: 0 };
   const single = typeof donorGroupKey === "string";
@@ -486,7 +486,8 @@ export async function sendAnnualCertificates(
           count: donor.count,
           totalLabel,
           isTestEnvironment: donor.hasTestEnvironment,
-          brandColor: branding.brandColor
+          brandColor: branding.brandColor,
+          supportEmail: branding.supportEmail
         }),
         pdfBytes,
         filename: `constancia-donaciones-${year}.pdf`
