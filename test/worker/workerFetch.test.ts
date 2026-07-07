@@ -2762,6 +2762,40 @@ describe("F960 CSV export", () => {
     );
   });
 
+  it("neutralizes spreadsheet formulas in donor-controlled CSV fields", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(
+      testDocument({
+        plain_json: JSON.stringify({
+          emisor: { nombre: "ExamplePerson1" },
+          receptor: {
+            nombre: '=HYPERLINK("https://evil.example",A1)',
+            correo: "donor@example.org",
+            tipoDocumento: "13",
+            numDocumento: "@PAYLOAD"
+          },
+          resumen: { valorTotal: 100 },
+          identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
+        })
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/f960.csv?startDate=2026-06-01&endDate=2026-06-30", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    // The =HYPERLINK name gets a leading apostrophe (then quoted for the embedded "),
+    // the @PAYLOAD document gets one too; benign numeric/hex fields stay bare.
+    await expect(response.text()).resolves.toBe(
+      `1;;"'=HYPERLINK(""https://evil.example"",A1)";9300;4;20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE;6CAE5F7EA59045738EF2FE48B14796C4;100.00;'@PAYLOAD;062026\r\n`
+    );
+  });
+
   it("returns preview rows for the selected date range", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
