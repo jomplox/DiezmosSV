@@ -282,7 +282,9 @@ export default {
       console.error("Donation intent expiry sweep failed", error);
     }
     try {
-      await checkCertificateExpiry(env, new Repository(env.DB));
+      // Drive the expiry math from the scheduled tick's time, the same reference the
+      // retention export above uses, so the countdown never depends on the wall clock.
+      await checkCertificateExpiry(env, new Repository(env.DB), event.scheduledTime ?? Date.now());
     } catch (error) {
       console.error("Certificate expiry check failed", error);
     }
@@ -319,8 +321,10 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
 // no-ops when there is nothing to check. Sends at most one alert per
 // threshold crossed (30/14/3 days), deduped by sendOperationalAlert's
 // audit-based mechanism keyed on `${expiresAt}:${threshold}` so a renewed
-// certificate (new expiresAt) re-arms every threshold.
-async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void> {
+// certificate (new expiresAt) re-arms every threshold. nowMs is the scheduled
+// tick's time, threaded from worker.scheduled so the countdown in both the
+// threshold check and the alert copy reads one clock instead of the wall clock.
+async function checkCertificateExpiry(env: Env, repo: Repository, nowMs: number): Promise<void> {
   let certXml: string;
   try {
     certXml = getMhCertificateXml(env);
@@ -331,7 +335,7 @@ async function checkCertificateExpiry(env: Env, repo: Repository): Promise<void>
   if (!expiresAt) {
     return;
   }
-  const remainingDays = Math.floor((new Date(expiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000));
+  const remainingDays = Math.floor((new Date(expiresAt).getTime() - nowMs) / (24 * 60 * 60 * 1000));
   const remainingLabel = remainingDays < 0 ? `venció hace ${Math.abs(remainingDays)} días` : `Quedan ${remainingDays} día(s)`;
   for (const threshold of CERT_EXPIRY_ALERT_THRESHOLD_DAYS) {
     if (remainingDays > threshold) {
