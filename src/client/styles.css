@@ -3966,6 +3966,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .analytics-heatmap {
   border-collapse: collapse;
   font-size: 11px;
+  /* La tabla llena la tarjeta ancha con layout FIJO: la columna de etiquetas queda
+     angosta (ver :first-child) y las 24 columnas de hora se reparten el resto por
+     igual — con layout auto, la columna de etiquetas absorbía todo el sobrante. */
+  width: 100%;
+  table-layout: fixed;
+}
+
+.analytics-heatmap thead th:first-child {
+  width: 52px;
 }
 
 .analytics-cohort th,
@@ -4001,9 +4010,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 }
 
 .analytics-heatmap-cell {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
+  height: 18px;
 }
 
 /* ---- Geography ---- */
