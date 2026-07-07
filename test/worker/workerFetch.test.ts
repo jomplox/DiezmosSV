@@ -372,6 +372,23 @@ describe("donation intents", () => {
     expect(metadata).not.toContain("04182769");
   });
 
+  it("rejects an oversized public intent body with 413 before any persistence", async () => {
+    // A body over the 16 KiB cap is refused up front, so oversized spam never
+    // reaches validation or D1 (the per-IP throttle counts only persisted rows).
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      intentRequest(validIntentBody({ filler: "x".repeat(17 * 1024) })),
+      env(db)
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "request_body_too_large",
+      message: "La solicitud es demasiado grande."
+    });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
   it("accepts a numeric amount and a type 37 free-form document without checksum rules", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
@@ -987,6 +1004,23 @@ describe("donation intents", () => {
       // Still LINK_CREATED and pointing at the same minted link.
       expect(intent.status).toBe("LINK_CREATED");
       expect(intent.wompi_id_enlace).toBe(123456);
+    });
+
+    it("rejects an oversized public datos body with 413 before mutating the draft", async () => {
+      const db = new InMemoryD1();
+      seedDraft(db);
+      const response = await worker.fetch(
+        datosRequest("di_draft_1", { ...validDatos, filler: "x".repeat(17 * 1024) }),
+        env(db)
+      );
+
+      expect(response.status).toBe(413);
+      await expect(response.json()).resolves.toEqual({
+        error: "request_body_too_large",
+        message: "La solicitud es demasiado grande."
+      });
+      // The draft is untouched: donor data was never attached.
+      expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
     });
 
     it("mirrors the full-create validation messages (invalid DUI)", async () => {
