@@ -1660,6 +1660,48 @@ describe("user administration", () => {
     expect(db.users).toHaveLength(1);
   });
 
+  it("blocks an ADMIN from modifying or resetting the password of an existing OWNER", async () => {
+    // The reverse escalation vector: resetting an OWNER's password (or disabling the
+    // account) hands the ADMIN that OWNER's session power. Only OWNERs touch OWNERs.
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_owner",
+      email: "owner@example.org",
+      name: "Owner",
+      role: "OWNER",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const reset = await worker.fetch(
+      new Request("https://example.org/api/users/user_owner/password", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "Atacante#2026" })
+      }),
+      env(db)
+    );
+    expect(reset.status).toBe(403);
+    await expect(reset.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+
+    const patch = await worker.fetch(
+      new Request("https://example.org/api/users/user_owner", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ disabled: true })
+      }),
+      env(db)
+    );
+    expect(patch.status).toBe(403);
+    await expect(patch.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0].disabled_at).toBe("");
+  });
+
   it("lets an OWNER create and promote users to OWNER", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
