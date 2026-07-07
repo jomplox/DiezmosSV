@@ -2502,6 +2502,147 @@ describe("F960 CSV export", () => {
   });
 });
 
+describe("CRM contacts export", () => {
+  function seedWompiDonor(
+    db: InMemoryD1,
+    document: Partial<DteDocumentRecord>,
+    intent?: Record<string, unknown>
+  ): void {
+    const doc = testDocument({ wompi_event_id: `wompi_${document.id}`, ...document });
+    db.documents.push(doc);
+    if (intent) {
+      db.donationIntents.push({
+        id: `intent_${doc.id}`,
+        status: "COMPLETED",
+        document_id: doc.id,
+        created_at: doc.issued_at,
+        donor_phone: null,
+        direccion_complemento: null,
+        direccion_departamento: null,
+        donor_pais: null,
+        gift_type: null,
+        ...intent
+      });
+    }
+  }
+
+  it("returns a BOM-prefixed CSV of unique Wompi-lane donors for the requested ambiente", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      {
+        id: "doc_ana",
+        environment: "01",
+        donor_email: "ana@example.org",
+        donor_name: "Ana",
+        amount_cents: 5000,
+        issued_at: "2026-02-01T18:00:00.000Z"
+      },
+      {
+        donor_phone: "70000001",
+        direccion_complemento: "Calle Nueva",
+        direccion_departamento: "06",
+        gift_type: "DIEZMO"
+      }
+    );
+    // Excluded: production filter (this doc is ambiente 00).
+    seedWompiDonor(db, {
+      id: "doc_other_env",
+      environment: "00",
+      donor_email: "test@example.org",
+      donor_name: "Test",
+      issued_at: "2026-02-02T18:00:00.000Z"
+    });
+    // Excluded: not a Wompi-lane document (no wompi_event_id).
+    seedWompiDonor(db, {
+      id: "doc_manual",
+      environment: "01",
+      wompi_event_id: null,
+      donor_email: "manual@example.org",
+      donor_name: "Manual",
+      issued_at: "2026-02-03T18:00:00.000Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("text/csv; charset=utf-8");
+    expect(response.headers.get("Content-Disposition")).toBe('attachment; filename="contactos-donantes-01-1.csv"');
+    // Response.text() strips a leading BOM per spec, so assert the BOM on raw bytes.
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    expect([bytes[0], bytes[1], bytes[2]]).toEqual([0xef, 0xbb, 0xbf]);
+    const csv = new TextDecoder("utf-8").decode(bytes).replace(/^﻿/, "");
+    const rows = csv.split("\r\n");
+    expect(rows[0]).toBe("nombre,correo,telefono,direccion,departamento,pais,primera_donacion,ultima_donacion,total_donado_usd,numero_donaciones,tipo_preferido");
+    expect(rows[1]).toBe("Ana,ana@example.org,70000001,Calle Nueva,San Salvador,El Salvador,2026-02-01,2026-02-01,50.00,1,Diezmo");
+    // Only the single ambiente-01 Wompi-lane donor.
+    expect(rows.filter((row) => row.length > 0)).toHaveLength(2);
+  });
+
+  it("records a CONTACTS_EXPORTED audit with the count and environment but no PII", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_ana", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", issued_at: "2026-02-01T18:00:00.000Z" },
+      { donor_phone: "70000001", gift_type: "DIEZMO" }
+    );
+
+    await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    const audit = db.audits.find((row) => row.action === "CONTACTS_EXPORTED");
+    expect(audit).toBeDefined();
+    expect(audit!.entity_type).toBe("export");
+    expect(JSON.parse(String(audit!.metadata_json))).toEqual({ environment: "01", contacts: 1 });
+    const serialized = JSON.stringify(audit);
+    expect(serialized).not.toContain("ana@example.org");
+    expect(serialized).not.toContain("70000001");
+    expect(serialized).not.toContain("Ana");
+  });
+
+  it("rejects a missing or invalid environment", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_export_environment" });
+  });
+
+  it("requires an admin role (viewer and operator are rejected)", async () => {
+    for (const role of ["VIEWER", "OPERATOR"]) {
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_x", email: "x@example.org", name: "X", role };
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/exports/contacts?environment=01", {
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(403);
+    }
+  });
+});
+
 describe("annual donor certificates", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-05T12:00:00.000Z") });
@@ -6473,6 +6614,41 @@ class Statement {
       documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id));
       const limit = Number(this.args.at(-1) ?? 500);
       return { results: documents.slice(0, limit) as T[] };
+    }
+    if (this.sql.includes("FROM dte_documents") && this.sql.includes("LEFT JOIN donation_intents") && this.sql.includes("ORDER BY dte_documents.issued_at ASC, dte_documents.id ASC")) {
+      // CRM contacts export: keyset-paged Wompi-lane ACCEPTED docs for one ambiente,
+      // LEFT JOINed to their correlated COMPLETED intent (0 or 1 per document).
+      const environment = String(this.args[0]);
+      let documents = this.db.documents.filter(
+        (document) => document.status === "ACCEPTED" && document.wompi_event_id != null && document.environment === environment
+      );
+      if (this.sql.includes("(dte_documents.issued_at, dte_documents.id) > (?, ?)")) {
+        const [afterIssued, afterId] = [String(this.args[2]), String(this.args[3])];
+        documents = documents.filter(
+          (document) => document.issued_at > afterIssued || (document.issued_at === afterIssued && document.id > afterId)
+        );
+      }
+      documents.sort((left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const joined = documents.slice(0, limit).map((document) => {
+        const intent = this.db.donationIntents.find(
+          (candidate) => candidate.document_id === document.id && candidate.status === "COMPLETED"
+        );
+        return {
+          id: document.id,
+          donor_email: document.donor_email,
+          donor_name: document.donor_name,
+          amount_cents: document.amount_cents,
+          issued_at: document.issued_at,
+          intent_donor_phone: intent?.donor_phone ?? null,
+          intent_direccion_complemento: intent?.direccion_complemento ?? null,
+          intent_direccion_departamento: intent?.direccion_departamento ?? null,
+          intent_donor_pais: intent?.donor_pais ?? null,
+          intent_gift_type: intent?.gift_type ?? null,
+          intent_created_at: intent?.created_at ?? null
+        };
+      });
+      return { results: joined as T[] };
     }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];

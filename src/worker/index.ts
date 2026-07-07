@@ -41,6 +41,7 @@ import {
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
 import { computeAnalytics, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
+import { aggregateDonorContacts, buildContactsCsv, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -624,6 +625,32 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       headers: {
         "Content-Type": XLSX_MIME,
         "Content-Disposition": `attachment; filename="${selection.xlsxFilename}"`
+      }
+    });
+  }
+
+  if (url.pathname === "/api/exports/contacts" && request.method === "GET") {
+    // Bulk donor PII for CRM import: ADMIN only (deliberately NOT operator/viewer).
+    const actor = requireRole(user, "ADMIN");
+    const environment = ambienteValue(url.searchParams.get("environment"));
+    if (!environment) {
+      return jsonResponse({ error: "invalid_export_environment", message: "Seleccione un ambiente válido (00 o 01)." }, { status: 400 });
+    }
+    const contacts = await aggregateDonorContacts(repo, environment);
+    // Audit carries only the count + environment — NEVER any donor PII in the row.
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "CONTACTS_EXPORTED",
+      entityType: "export",
+      entityId: `contacts:${environment}`,
+      summary: `${contacts.length} contactos exportados (ambiente ${environment})`,
+      metadata: { environment, contacts: contacts.length }
+    });
+    return new Response(buildContactsCsv(contacts), {
+      headers: {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="${contactsCsvFilename(environment, contacts.length)}"`
       }
     });
   }
