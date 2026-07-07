@@ -33,12 +33,7 @@ test.beforeEach(async ({ context }) => {
   await context.route("https://mock.wompi.sv/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock wompi hosted flow</body></html>" })
   );
-  // Stub the Givebutter widget CDN and hosted page too. The stubbed script never
-  // upgrades <givebutter-giving-form>, so the render probe times out and the
-  // fallback link state is what renders — exactly the offline-safe path to assert.
-  await context.route("https://widgets.givebutter.com/**", (route) =>
-    route.fulfill({ status: 200, contentType: "application/javascript", body: "/* stubbed givebutter widget */" })
-  );
+  // Stub the Givebutter hosted + embed pages so the iframe path stays offline-safe.
   await context.route("https://givebutter.com/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock givebutter hosted flow</body></html>" })
   );
@@ -151,7 +146,11 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByText("Única · $25.00")).toBeVisible();
   await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
-  await expect(page.locator("givebutter-giving-form")).toHaveAttribute("campaign", "example-campaign");
+  const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
+  await expect(givebutterFrame).toBeVisible();
+  await expect(givebutterFrame).toHaveAttribute("src", /givebutter\.com\/embed\/c\/example-campaign/);
+  await expect(givebutterFrame).toHaveAttribute("src", /amount=25/);
+  await expect(givebutterFrame).toHaveAttribute("src", /goalBar=false/);
 
   // The escape hatch back to the SV fiscal form is GONE.
   await expect(page.getByText("¿Necesita comprobante fiscal salvadoreño (CDE)?")).toHaveCount(0);
@@ -162,21 +161,19 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(hint).toHaveAttribute("href", /givebutter\.com\/example-campaign/);
   await expect(hint).toHaveAttribute("href", /amount=25/);
 
-  // The stubbed widget never renders, so the prominent fallback CTA appears too.
-  const fallback = page.getByRole("link", { name: "Donar en GiveButter" });
-  await expect(fallback).toBeVisible({ timeout: 10_000 });
-  await expect(fallback).toHaveAttribute("href", /givebutter\.com\/example-campaign\?amount=25/);
+  // The direct iframe loaded, so the slow-load CTA is not shown.
+  await expect(page.getByRole("link", { name: "Donar en GiveButter" })).toHaveCount(0);
 
   // "← Atrás" returns to Paso 1 with the wizard state intact...
   await page.getByRole("button", { name: /Atrás/ }).click();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByLabel("Monto")).toHaveValue("25.00");
-  await expect(page.locator("givebutter-giving-form")).toHaveCount(0);
+  await expect(page.locator("iframe.donar-givebutter-frame")).toHaveCount(0);
 
   // ...and "← Cambiar opción" (Paso 1 only) returns to the two-door chooser.
   await page.getByRole("button", { name: /Cambiar opción/ }).click();
   await expect(page.getByRole("button", { name: "El Salvador y el mundo" })).toBeVisible();
-  await expect(page.locator("givebutter-giving-form")).toHaveCount(0);
+  await expect(page.locator("iframe.donar-givebutter-frame")).toHaveCount(0);
 });
 
 test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns to the SV datos", async ({ page }) => {

@@ -27,6 +27,7 @@ import {
   DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
+  GIVEBUTTER_EMBED_BASE_URL,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
   GIVEBUTTER_FALLBACK_HINT,
@@ -35,7 +36,6 @@ import {
   GIVEBUTTER_INTRO,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
-  GIVEBUTTER_SCRIPT_URL,
   GIVEBUTTER_US_COUNTRY_CODE,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_DOOR_EEUU_DESC,
@@ -60,6 +60,7 @@ import {
   donationStep1ValidationMessage,
   donationStep2ValidationMessage,
   draftMatchesForm,
+  givebutterEmbedUrl,
   givebutterHostedUrl,
   givebutterPrefillParams,
   isUsDonation,
@@ -920,9 +921,9 @@ describe("givebutter constants", () => {
     expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
   });
 
-  it("pins the official Givebutter widget script URL scoped to the account", () => {
-    expect(GIVEBUTTER_SCRIPT_URL).toBe("https://widgets.givebutter.com/latest.umd.cjs?acct=EXAMPLEACCT00001");
-    expect(GIVEBUTTER_SCRIPT_URL).toContain(`acct=${GIVEBUTTER_ACCOUNT_ID}`);
+  it("pins the frameable Givebutter embed URL", () => {
+    expect(GIVEBUTTER_EMBED_BASE_URL).toBe("https://givebutter.com/embed/c/example-campaign");
+    expect(GIVEBUTTER_EMBED_BASE_URL).toContain(GIVEBUTTER_CAMPAIGN);
   });
 
   it("routes only US residents to Givebutter (CAT-020 código US)", () => {
@@ -947,8 +948,8 @@ describe("givebutter US-path detection", () => {
   });
 });
 
-describe("givebutter prefill and hosted-url helpers", () => {
-  it("writes amount and (when monthly) frequency=monthly for the widget URL prefill", () => {
+describe("givebutter prefill and URL helpers", () => {
+  it("writes amount and (when monthly) frequency=monthly for Givebutter URLs", () => {
     expect(givebutterPrefillParams({ amount: "25.00", monthly: false })).toEqual({ amount: "25" });
     expect(givebutterPrefillParams({ amount: "25", monthly: true })).toEqual({ amount: "25", frequency: "monthly" });
     // A blank/invalid amount contributes no amount param.
@@ -956,6 +957,18 @@ describe("givebutter prefill and hosted-url helpers", () => {
     expect(givebutterPrefillParams({ amount: "0", monthly: true })).toEqual({ frequency: "monthly" });
     // Cents are preserved.
     expect(givebutterPrefillParams({ amount: "12.50", monthly: false })).toEqual({ amount: "12.5" });
+  });
+
+  it("builds the frameable iframe URL with the slug and embed-only goalBar flag", () => {
+    expect(givebutterEmbedUrl({ amount: "25.00", monthly: false })).toBe(
+      "https://givebutter.com/embed/c/example-campaign?amount=25&goalBar=false"
+    );
+    expect(givebutterEmbedUrl({ amount: "25", monthly: true })).toBe(
+      "https://givebutter.com/embed/c/example-campaign?amount=25&frequency=monthly&goalBar=false"
+    );
+    expect(givebutterEmbedUrl({ amount: "", monthly: false })).toBe(
+      "https://givebutter.com/embed/c/example-campaign?goalBar=false"
+    );
   });
 
   it("builds the hosted-page fallback link with the slug and prefill query", () => {
@@ -992,16 +1005,17 @@ describe("givebutter donar page source contract", () => {
     expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
   });
 
-  it("shows the FMCE explanation and the example-campaign giving form", () => {
+  it("shows the FMCE explanation and the example-campaign iframe", () => {
     expect(donarSource).toContain("GIVEBUTTER_INTRO");
     expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
     expect(GIVEBUTTER_INTRO).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
-    // The embedded custom element targets the campaign.
-    expect(pageSource).toContain("givebutter-giving-form");
-    expect(pageSource).toContain("GIVEBUTTER_CAMPAIGN");
+    // The embedded iframe targets the frameable Givebutter embed URL.
+    expect(pageSource).toContain("donar-givebutter-frame");
+    expect(pageSource).toContain("givebutterFrameUrl");
+    expect(pageSource).toContain("givebutterEmbedUrl({ amount: form.amount, monthly })");
   });
 
   it("uses human GiveButter anchor text, never a raw URL, in the fallback CTA and hint", () => {
@@ -1013,20 +1027,21 @@ describe("givebutter donar page source contract", () => {
     expect(GIVEBUTTER_FALLBACK_HINT).not.toContain("givebutter.com");
   });
 
-  it("injects the Givebutter script only for the US path, once per page load", () => {
-    expect(donarSource).toContain("GIVEBUTTER_SCRIPT_URL");
-    // Guarded like the Wompi injection: a querySelector check prevents a second tag.
-    expect(donarSource).toContain('script[src="${GIVEBUTTER_SCRIPT_URL}"]');
+  it("does not execute the Givebutter widget script on our origin", () => {
+    expect(donarSource).not.toContain("GIVEBUTTER_SCRIPT_URL");
+    expect(donarSource).not.toContain("widgets.givebutter.com");
+    expect(pageSource).not.toContain("givebutter-giving-form");
+    expect(pageSource).toContain("<iframe");
   });
 
-  it("prefills the amount/frequency into the page URL via history.replaceState", () => {
-    expect(donarSource).toContain("givebutterPrefillParams(");
-    expect(donarSource).toContain("history.replaceState");
+  it("prefills amount/frequency in the iframe src, not the /donar URL", () => {
+    expect(pageSource).toContain("src={givebutterFrameUrl}");
+    expect(pageSource).not.toContain("params.delete(\"frequency\")");
   });
 
-  it("removes the prefill params when leaving the US path (clean unmount)", () => {
-    // The effect cleanup restores the URL so the fiscal fields / Wompi path is clean.
+  it("shows the hosted-page CTA if the direct iframe is slow to load", () => {
     expect(donarSource).toContain("GIVEBUTTER_RENDER_TIMEOUT_MS");
+    expect(donarSource).toContain("givebutterFrameStatus");
   });
 
   it("renders the mandatory hosted-page fallback link with the slug URL", () => {
