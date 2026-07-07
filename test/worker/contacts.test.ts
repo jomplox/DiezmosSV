@@ -223,6 +223,36 @@ describe("buildContactsCsv", () => {
     expect(csv.endsWith("\r\n")).toBe(true);
   });
 
+  it("neutralizes spreadsheet formulas in donor-controlled fields, leaving benign values bare", async () => {
+    const db = new FakeContactsDb([
+      row({
+        id: "d1",
+        donorEmail: "donor@example.org",
+        donorName: '=HYPERLINK("http://evil.example",A1)',
+        amountCents: 5000,
+        issuedAt: "2026-02-01T18:00:00.000Z",
+        donorPhone: "70000001",
+        giftType: "DIEZMO",
+        intentCreatedAt: "2026-02-01T18:00:00.000Z"
+      })
+    ]);
+    const contacts = await aggregateDonorContacts(new Repository(db as unknown as D1Database), "01");
+
+    const csv = buildContactsCsv(contacts);
+
+    // BOM and CRLF framing are untouched by the neutralization.
+    expect(csv.startsWith("﻿")).toBe(true);
+    expect(csv.endsWith("\r\n")).toBe(true);
+    const [header, firstRow] = csv.slice(1).split("\r\n");
+    // The header is not donor-controlled and stays exactly as before.
+    expect(header).toBe(CONTACT_CSV_HEADERS.join(","));
+    // The =HYPERLINK name gets a leading apostrophe, then quotes for its embedded ".
+    expect(firstRow).toContain(`"'=HYPERLINK(""http://evil.example"",A1)"`);
+    // A benign email (with an @ that is not leading) is left exactly as-is.
+    expect(firstRow).toContain("donor@example.org");
+    expect(firstRow).not.toContain("'donor@example.org");
+  });
+
   it("names the file with the environment and count", () => {
     expect(contactsCsvFilename("01", 42)).toBe("contactos-donantes-01-42.csv");
     expect(contactsCsvFilename("00", 0)).toBe("contactos-donantes-00-0.csv");
