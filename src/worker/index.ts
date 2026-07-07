@@ -74,6 +74,17 @@ function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
+// Canonical public origin for links emailed to users (password reset). Built from the
+// configured APP_ORIGIN so a poisoned Host header cannot redirect reset tokens to an
+// attacker; falls back to the request origin only when APP_ORIGIN is unset (local dev).
+function resolveAppOrigin(env: Env, url: URL): string {
+  const configured = env.APP_ORIGIN?.trim();
+  if (configured) {
+    return new URL(configured).origin;
+  }
+  return url.origin;
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -445,7 +456,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         } else {
           const created = await auth.createPasswordResetToken(email);
           if (created) {
-            const link = `${url.origin}/?reset=${created.token}`;
+            const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
             try {
               const resetBranding = await loadEmailBranding(repo, env);
               await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
