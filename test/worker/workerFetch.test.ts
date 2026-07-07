@@ -6543,6 +6543,33 @@ describe("admin backups panel", () => {
     expect(response.status).toBe(404);
   });
 
+  it("rejects a full-month ZIP whose objects exceed the memory budget with a Spanish 413", async () => {
+    // The ZIP is buffered in worker memory; enforcement fires DURING collection (before
+    // reading each object) so an oversized month can never balloon memory first.
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    // One object claims a size beyond the 32 MiB budget; its body is tiny so the test
+    // itself stays cheap — the guard must trust the R2-reported size, not read first.
+    await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 2, body: "line1\nline2\n" },
+      audit_logs: { rowCount: 1, body: "audit\n" }
+    });
+    archive.sizeOverrides.set("retention/2026/2026-04/dte_documents.ndjson", 32 * 1024 * 1024 + 1);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "backup_archive_too_large" });
+    // No PII-download audit for a refused archive.
+    expect(db.audits.filter((row) => row.action === "RETENTION_DOWNLOADED")).toHaveLength(0);
+  });
+
   it("streams a full-month ZIP of every archived object plus the manifest and audits the download", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
@@ -6582,6 +6609,26 @@ describe("admin backups panel", () => {
     );
     const audit = db.audits.find((row) => row.action === "RETENTION_DOWNLOADED");
     expect(JSON.parse(String(audit!.metadata_json))).toMatchObject({ month: "2026-04", table: "__all__" });
+  });
+
+  it("rejects an oversized full-month ZIP before auditing the download", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", {
+      dte_documents: { rowCount: 1, body: "x".repeat(33 * 1024 * 1024) }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download-all", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "backup_archive_too_large" });
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "RETENTION_DOWNLOADED" }));
   });
 
   it("returns 404 for a full-month download of a month without an archive", async () => {
@@ -7272,6 +7319,9 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
 // directly but still need a well-typed ARCHIVE binding on Env.
 class FakeArchiveBucket {
   readonly objects = new Map<string, Uint8Array>();
+  // Reported-size overrides so tests can simulate oversized R2 objects without
+  // allocating them (the backup ZIP guard trusts object.size before reading).
+  readonly sizeOverrides = new Map<string, number>();
   readonly contentTypes = new Map<string, string>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
   readonly headCalls: string[] = [];
@@ -7309,7 +7359,7 @@ class FakeArchiveBucket {
     return {
       key,
       body: new Response(bytes).body,
-      size: bytes.byteLength,
+      size: this.sizeOverrides.get(key) ?? bytes.byteLength,
       httpMetadata: this.contentTypes.has(key) ? { contentType: this.contentTypes.get(key) } : {},
       arrayBuffer: async () =>
         bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
