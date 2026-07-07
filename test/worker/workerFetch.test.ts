@@ -7,6 +7,7 @@ import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
+import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
 
@@ -835,6 +836,40 @@ describe("donation intents", () => {
 
     expect(db.donationIntents.find((row) => row.id === "di_link_overdue")?.status).toBe("EXPIRED");
     expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps one sweep at INTENT_EXPIRY_SWEEP_LIMIT and lets the next tick continue", async () => {
+    const db = new InMemoryD1();
+    // More expirable rows than a single tick can process, so attacker-created intents
+    // cannot force one cron invocation to snapshot or deactivate an unbounded set.
+    const overflow = 5;
+    for (let i = 0; i < INTENT_EXPIRY_SWEEP_LIMIT + overflow; i += 1) {
+      const suffix = String(i).padStart(4, "0");
+      db.donationIntents.push({
+        id: `di_exp_${suffix}`,
+        status: "PENDING",
+        wompi_id_enlace: null,
+        amount_cents: 2550,
+        expires_at: "2026-07-04T11:00:00.000Z",
+        created_at: "2026-07-04T10:00:00.000Z"
+      });
+    }
+    const expiredCount = () => db.donationIntents.filter((row) => row.status === "EXPIRED").length;
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+      // Exactly the cap expires this tick; the remainder stays PENDING for the next one.
+      expect(expiredCount()).toBe(INTENT_EXPIRY_SWEEP_LIMIT);
+      expect(db.donationIntents.filter((row) => row.status === "PENDING")).toHaveLength(overflow);
+
+      await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
+      // The next tick continues from where the first left off.
+      expect(expiredCount()).toBe(INTENT_EXPIRY_SWEEP_LIMIT + overflow);
+      expect(db.donationIntents.some((row) => row.status === "PENDING")).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // ── Premint: draft create (amount + optional giftType only) ────────────────
@@ -7100,10 +7135,13 @@ class Statement {
     }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
       // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
-      // the fields the deactivation sweep needs.
+      // the fields the deactivation sweep needs, capped oldest-first by the bound limit.
       const nowIso = String(this.args[0]);
+      const limit = Number(this.args[1] ?? Number.POSITIVE_INFINITY);
       const rows = this.db.donationIntents
         .filter((intent) => (intent.status === "PENDING" || intent.status === "LINK_CREATED") && String(intent.expires_at) < nowIso)
+        .sort((left, right) => String(left.expires_at).localeCompare(String(right.expires_at)) || String(left.id).localeCompare(String(right.id)))
+        .slice(0, limit)
         .map((intent) => ({
           id: intent.id,
           wompi_id_enlace: intent.wompi_id_enlace ?? null,
@@ -7581,10 +7619,19 @@ class Statement {
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
-      const [updatedAt, nowIso] = this.args.map(String);
-      for (const intent of this.db.donationIntents.filter(
-        (row) => (row.status === "PENDING" || row.status === "LINK_CREATED") && String(row.expires_at) < nowIso
-      )) {
+      const [updatedAt, secondArg] = this.args.map(String);
+      // expireDonationIntentsByIds binds an id list; expireUnpaidIntentsBefore binds
+      // the expiry cutoff. Route on the SQL shape so both paths are modeled.
+      const ids = this.sql.includes("id IN") ? new Set(this.args.slice(1).map(String)) : null;
+      for (const intent of this.db.donationIntents.filter((row) => {
+        if (row.status !== "PENDING" && row.status !== "LINK_CREATED") {
+          return false;
+        }
+        if (ids) {
+          return ids.has(String(row.id));
+        }
+        return String(row.expires_at) < secondArg;
+      })) {
         intent.status = "EXPIRED";
         intent.updated_at = updatedAt;
       }
