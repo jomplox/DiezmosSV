@@ -12,6 +12,15 @@ import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { MhClient, MhUnavailableError } from "./mhClient";
 
+// Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
+// (otro reintento concurrente ya lo reclamó). El handler HTTP lo traduce a un 409.
+export class RejectedWompiRetryConflictError extends Error {
+  constructor(message = "Ya hay un reintento en curso para este documento.") {
+    super(message);
+    this.name = "RejectedWompiRetryConflictError";
+  }
+}
+
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
@@ -178,9 +187,10 @@ export class IssuancePipeline {
     if (!record.wompi_event_id) {
       throw new Error("El documento no proviene de un evento Wompi");
     }
-    const event = await this.repo.getWompiEventById(record.wompi_event_id);
+    const wompiEventId = record.wompi_event_id;
+    const event = await this.repo.getWompiEventById(wompiEventId);
     if (!event) {
-      throw new Error(`Evento Wompi ${record.wompi_event_id} no encontrado`);
+      throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     const config = getEmisorConfig(this.env);
@@ -192,13 +202,21 @@ export class IssuancePipeline {
     const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
     const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-    await this.repo.replaceDocumentPayload(record.id, {
+    // Atomically claim the rebuild before transmitting: only one concurrent operator
+    // retry may move this REJECTED CDE to SIGNED with the freshly rebuilt payload. The
+    // loser matches 0 rows and stops here — it must not transmit a second distinct legal
+    // DTE for the same Wompi event, nor leave the stored payload and the MH result
+    // describing different documents. Signing happens first (above) so a failure before
+    // the claim leaves the row REJECTED and still retryable.
+    const claimed = await this.repo.claimRejectedWompiRebuild(record.id, wompiEventId, {
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,
       plainJson: rebuilt,
-      signedJws,
-      status: "SIGNED"
+      signedJws
     });
+    if (!claimed) {
+      throw new RejectedWompiRetryConflictError();
+    }
     let mhResult: MhResponse;
     try {
       mhResult = await this.mh.transmitDte({

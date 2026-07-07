@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
-import { IssuancePipeline } from "../../src/worker/services/pipeline";
+import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -4609,6 +4609,71 @@ describe("donation intent correlation", () => {
     expect(cde.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  function seedRejectedDoc(db: InMemoryD1, eventId: string, id: string): DteDocumentRecord {
+    const doc = {
+      id,
+      wompi_event_id: eventId,
+      tipo_dte: "15",
+      environment: "00",
+      codigo_generacion: `3333${id}-3333-4333-8333-333333333333`.slice(0, 36),
+      numero_control: `DTE-15-M001P004-0000000000000${id.length}9`,
+      status: "REJECTED",
+      plain_json: JSON.stringify({ receptor: { nombre: "Fallback Cliente" } }),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: "[]",
+      donor_email: "fallback@example.org",
+      donor_name: "Fallback Cliente",
+      amount_cents: 2500,
+      issued_at: "2026-06-26T01:46:47.015Z",
+      accepted_at: null,
+      contingency_period_id: null,
+      transmission_deferred_at: null,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    };
+    db.documents.push(doc as unknown as DteDocumentRecord);
+    return doc as unknown as DteDocumentRecord;
+  }
+
+  it("refuses a concurrent rebuild of an already-claimed REJECTED CDE and transmits only one DTE", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    seedRejectedDoc(db, eventId, "dte_rejected_cas");
+    // Both operator retries capture the same REJECTED snapshot before either claims it.
+    const staleSnapshot = { ...db.documents.find((row) => row.id === "dte_rejected_cas") } as unknown as DteDocumentRecord;
+    const pipeline = new IssuancePipeline(await pipelineEnv(db));
+
+    const first = await pipeline.rebuildRejectedWompiDocument(staleSnapshot);
+    expect(first.accepted).toBe(true);
+    expect(db.documents.find((row) => row.id === "dte_rejected_cas")?.status).toBe("ACCEPTED");
+
+    // The second retry runs on the stale REJECTED snapshot: the compare-and-swap finds the
+    // row is no longer REJECTED and refuses, so no second legal DTE is written/transmitted.
+    await expect(pipeline.rebuildRejectedWompiDocument(staleSnapshot)).rejects.toBeInstanceOf(RejectedWompiRetryConflictError);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED" && row.entity_id === "dte_rejected_cas")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+  });
+
+  it("leaves a REJECTED CDE retryable when the rebuild fails before it can be claimed", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook());
+    const record = seedRejectedDoc(db, eventId, "dte_rejected_signfail");
+    // Signing throws (no MH_CERT_XML configured) BEFORE the claim UPDATE runs.
+    const brokenEnv = env(db, { MOCK_EXTERNAL_SERVICES: "true", EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) });
+
+    await expect(new IssuancePipeline(brokenEnv).rebuildRejectedWompiDocument(record)).rejects.toThrow();
+
+    // Not a claim conflict, and the row is untouched: still REJECTED, still carrying its
+    // original MH verdict, so the operator can retry once the cause is fixed.
+    const doc = db.documents.find((row) => row.id === "dte_rejected_signfail");
+    expect(doc?.status).toBe("REJECTED");
+    expect(doc?.mh_estado).toBe("RECHAZADO");
+  });
+
 });
 
 // Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
@@ -7023,6 +7088,31 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("status = 'REJECTED'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      // claimRejectedWompiRebuild: conditional CAS that only wins while the row is
+      // still REJECTED. Returns the row (RETURNING id) on success, null when lost.
+      const [codigoGeneracion, numeroControl, plainJson, signedJws, updatedAt, documentId, wompiEventId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.wompi_event_id === wompiEventId && row.status === "REJECTED"
+      );
+      if (!document) {
+        return null;
+      }
+      document.codigo_generacion = String(codigoGeneracion);
+      document.numero_control = String(numeroControl);
+      document.plain_json = String(plainJson);
+      document.signed_jws = signedJws === null ? null : String(signedJws);
+      document.status = "SIGNED";
+      document.sello_recibido = null;
+      document.mh_estado = null;
+      document.mh_observaciones_json = "[]";
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
     if (this.sql.includes("FROM sessions") && this.sql.includes("JOIN users")) {
       return this.db.sessionUser as T | null;
     }
