@@ -73,7 +73,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
     nrc: formatNrc(receptor.nrc),
     documentLabel: documentLabelFor(receptor.tipoDocumento),
     documentNumber: formatDocument(receptor.numDocumento),
-    addressLines: [receptorContactLine(receptor)]
+    addressLines: [receptorContactLine(receptor, foreignAddressFromApendice(document))]
   });
 
   drawItemsTable(page, item, amount, regular, bold);
@@ -160,7 +160,10 @@ function drawPartyBox(
   drawKeyValue(page, options.nameLabel, clean(options.name), left, options.y + options.height - 16, valueX - left, options.regular, options.bold, 7.2, black);
   drawKeyValue(page, "Actividad económica:", clean(options.activity), left, options.y + options.height - 38, valueX - left, options.regular, options.bold, 7.2, black);
   drawKeyValue(page, "NRC:", options.nrc ?? "", left, options.y + options.height - 60, 26, options.regular, options.bold, 7.2, black);
-  drawKeyValue(page, options.documentLabel, options.documentNumber ?? "", docX, options.y + options.height - 60, 22, options.regular, options.bold, 7.2, black);
+  // Ancho de etiqueta dinámico: "Documento:"/"Pasaporte:" son más anchas que los 22pt
+  // fijos pensados para "DUI:"/"NIT:", y el número se imprimía ENCIMA de la etiqueta.
+  const documentLabelWidth = Math.max(22, options.bold.widthOfTextAtSize(options.documentLabel, 7.2) + 3);
+  drawKeyValue(page, options.documentLabel, options.documentNumber ?? "", docX, options.y + options.height - 60, documentLabelWidth, options.regular, options.bold, 7.2, black);
   const addressFontSize = 7.1;
   const innerWidth = options.width - 12;
   const wrapped = clampLines(
@@ -371,10 +374,20 @@ function emisorLines(emisor: Party): string[] {
   return [[establishment, correo].filter(Boolean).join(" / "), `• ${address} /`].filter(Boolean);
 }
 
-function receptorContactLine(receptor: Party): string {
-  return [receptorAddressText(receptor), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
+function receptorContactLine(receptor: Party, foreignAddress: string | null): string {
+  return [receptorAddressText(receptor, foreignAddress), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
     .filter(Boolean)
     .join(" / ");
+}
+
+// El documento legal de un receptor extranjero lleva direccion null (MH rechaza el
+// objeto para no domiciliados); su país y la dirección que escribió viajan en el
+// apéndice DireccionExtranjera, de donde el PDF los recupera.
+function foreignAddressFromApendice(document: CdePdfJson): string | null {
+  const entries = Array.isArray(document.apendice) ? (document.apendice as unknown[]) : [];
+  const entry = entries.find((item) => item && typeof item === "object" && (item as Record<string, unknown>).campo === "DireccionExtranjera");
+  const valor = entry ? (entry as Record<string, unknown>).valor : null;
+  return typeof valor === "string" && valor.trim() ? valor.trim() : null;
 }
 
 // Foreign receptor (the 00 "Otro (Para extranjeros)" geography): the CAT-008/012/013
@@ -382,7 +395,18 @@ function receptorContactLine(receptor: Party): string {
 // complemento followed by their CAT-020 country label instead. This special case
 // lives here (not in addressText) because codPais sits on the receptor, outside the
 // direccion object addressText receives.
-function receptorAddressText(receptor: Party): string {
+function receptorAddressText(receptor: Party, foreignAddress: string | null): string {
+  // Documentos actuales: direccion null + apéndice DireccionExtranjera.
+  if (!receptor.direccion) {
+    if (foreignAddress) {
+      return foreignAddress;
+    }
+    // Sin apéndice (p. ej. documentos ajenos al asistente): al menos el país.
+    const country = findCatalogOption(CAT020_COUNTRIES, receptor.codPais);
+    const nonDomiciled = receptor.codDomiciliado === 2 || receptor.codDomiciliado === "2";
+    return nonDomiciled && country ? country.label : "";
+  }
+  // Documentos históricos (pre-fix): el marcador 00 "Otro (Para extranjeros)".
   if (clean(receptor.direccion?.departamento) === "00") {
     const country = findCatalogOption(CAT020_COUNTRIES, receptor.codPais);
     return [clean(receptor.direccion?.complemento), country?.label]
@@ -555,6 +579,7 @@ interface CdePdfJson {
   receptor?: Party;
   donante?: Party;
   cuerpoDocumento?: CdeItem[];
+  apendice?: unknown;
   resumen?: {
     valorTotal?: number;
     totalLetras?: string | null;
@@ -576,6 +601,7 @@ interface Party {
   } | null;
   telefono?: string | null;
   correo?: string | null;
+  codDomiciliado?: number | string | null;
   codEstable?: string | null;
   // CAT-020 nationality country; drives the foreign-address rendering when the
   // direccion carries the 00 "Otro (Para extranjeros)" geography.
