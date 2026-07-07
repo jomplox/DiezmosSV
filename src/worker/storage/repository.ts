@@ -1225,6 +1225,15 @@ export class Repository {
       .run();
     await this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(nowIso(), userId).run();
   }
+
+  // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does
+  // NOT revoke sessions — the credential is unchanged, only its stored encoding.
+  async updateUserPasswordHash(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
+    await this.db
+      .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
+      .bind(passwordHash, passwordSalt, nowIso(), userId)
+      .run();
+  }
 }
 
 function normalizeDocumentListLimit(value: number | undefined): number {

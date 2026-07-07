@@ -1516,6 +1516,56 @@ describe("document detail donor-data-verified flag", () => {
 });
 
 describe("user administration", () => {
+  it("stores newly created passwords in the versioned format that carries the iteration count", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "fresh@example.org", name: "Fresh", role: "ADMIN", password: "Fresh#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(201);
+    const created = db.users.find((row) => row.email === "fresh@example.org");
+    expect(String(created?.password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+  });
+
+  it("verifies a legacy countless hash at the historic count and upgrades the row on login", async () => {
+    const db = new InMemoryD1();
+    // A pre-versioning row: raw hex derived at the historic 100k count with no marker.
+    const legacy = await hashPassword("Legacy#Pass2026", "fixed-salt", { enforcePolicy: false, iterations: 100_000 });
+    db.users.push({
+      id: "user_legacy",
+      email: "legacy@example.org",
+      name: "Legacy User",
+      role: "ADMIN",
+      password_hash: legacy.hash,
+      password_salt: legacy.salt,
+      disabled_at: ""
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "legacy@example.org", password: "Legacy#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ user: { email: "legacy@example.org" } });
+    // The legacy hash verified, and the successful login rehashed it into the current
+    // versioned format carrying the iteration count.
+    expect(legacy.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(String(db.users[0].password_hash)).toMatch(/^pbkdf2\$150000\$[0-9a-f]{64}$/);
+    expect(db.users[0].password_hash).not.toBe(legacy.hash);
+  });
+
   it("updates a user's profile, email, role, and disabled state", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
