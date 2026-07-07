@@ -420,6 +420,10 @@ export class Repository {
     return record;
   }
 
+  async markWompiEventProcessed(id: string): Promise<void> {
+    await this.db.prepare("UPDATE wompi_events SET processed_at = ? WHERE id = ? AND processed_at IS NULL").bind(nowIso(), id).run();
+  }
+
   async getDteDocument(id: string): Promise<DteDocumentRecord | null> {
     return this.db.prepare("SELECT * FROM dte_documents WHERE id = ?").bind(id).first<DteDocumentRecord>();
   }
@@ -1300,12 +1304,26 @@ export class Repository {
   }
 
   // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does
-  // NOT revoke sessions — the credential is unchanged, only its stored encoding.
-  async updateUserPasswordHash(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
-      .bind(passwordHash, passwordSalt, nowIso(), userId)
-      .run();
+  // NOT revoke sessions — the credential is unchanged, only its stored encoding. The
+  // update is compare-and-swap guarded so a stale login cannot overwrite a concurrent
+  // password reset/change that landed after verification.
+  async updateUserPasswordHashIfCurrent(
+    userId: string,
+    currentPasswordHash: string,
+    currentPasswordSalt: string,
+    passwordHash: string,
+    passwordSalt: string
+  ): Promise<boolean> {
+    const updated = await this.db
+      .prepare(
+        `UPDATE users
+            SET password_hash = ?, password_salt = ?, updated_at = ?
+          WHERE id = ? AND password_hash = ? AND password_salt = ?
+          RETURNING id`
+      )
+      .bind(passwordHash, passwordSalt, nowIso(), userId, currentPasswordHash, currentPasswordSalt)
+      .first<{ id: string }>();
+    return Boolean(updated);
   }
 }
 
