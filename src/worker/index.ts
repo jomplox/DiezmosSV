@@ -226,10 +226,12 @@ export default {
     try {
       const repo = new Repository(env.DB);
       const now = nowIso();
-      // Snapshot what the UPDATE will expire BEFORE running it (afterwards the rows
-      // no longer match the predicate), so we can deactivate their Wompi links.
+      // Process a bounded page per tick: snapshot the capped set of expiring intents,
+      // then expire exactly that page by id, so public intent creation cannot force one
+      // cron invocation to snapshot or deactivate an unbounded row set. The remainder
+      // is picked up by the next tick.
       const expiring = await repo.listIntentsExpiringBefore(now);
-      await repo.expireUnpaidIntentsBefore(now);
+      await repo.expireDonationIntentsByIds(expiring.map((intent) => intent.id), now);
       const wompi = new WompiApiService(env);
       for (const intent of expiring) {
         if (intent.wompi_id_enlace == null) {

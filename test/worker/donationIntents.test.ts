@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Repository } from "../../src/worker/storage/repository";
+import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import type { DonationIntentRecord } from "../../src/worker/types";
 
 // Lightweight D1 fake: records every prepared SQL + bindings and serves rows from
@@ -181,6 +181,31 @@ describe("donation intents repository", () => {
     expect(update!.sql).toContain("status IN ('PENDING','LINK_CREATED')");
     expect(update!.sql).toContain("expires_at < ?");
     expect(update!.args).toContain("2026-07-05T13:00:00.000Z");
+  });
+
+  it("lists a bounded oldest-first page of expiring intents", async () => {
+    const { repository, db } = repo();
+
+    await repository.listIntentsExpiringBefore("2026-07-05T13:00:00.000Z");
+
+    const select = db.calls.find((call) => call.sql.includes("SELECT id, wompi_id_enlace"));
+    expect(select).toBeTruthy();
+    // Oldest-first + LIMIT caps the snapshot so attacker-created intents cannot force
+    // one cron invocation to read (and deactivate) an unbounded row set.
+    expect(select!.sql).toContain("ORDER BY expires_at ASC, id ASC LIMIT ?");
+    expect(select!.args).toEqual(["2026-07-05T13:00:00.000Z", INTENT_EXPIRY_SWEEP_LIMIT]);
+  });
+
+  it("expires only the bounded page of intent ids the sweep processed", async () => {
+    const { repository, db } = repo();
+
+    await repository.expireDonationIntentsByIds(["di_old", "di_older"], "2026-07-05T13:00:00.000Z");
+
+    const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("id IN"));
+    expect(update).toBeTruthy();
+    expect(update!.sql).toContain("status IN ('PENDING','LINK_CREATED')");
+    expect(update!.sql).toContain("id IN (?, ?)");
+    expect(update!.args).toEqual(["2026-07-05T13:00:00.000Z", "di_old", "di_older"]);
   });
 
   it("counts recent intents by client IP within a window for throttling", async () => {

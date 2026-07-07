@@ -19,6 +19,12 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
+// Rows one cron sweep may expire (and deactivate the Wompi links of) per tick. Caps
+// the outbound Wompi fanout so attacker-created expired intents cannot translate into
+// an unbounded burst of API calls in a single invocation; the remainder is picked up
+// by the next tick.
+export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+
 export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
@@ -256,14 +262,32 @@ export class Repository {
   // Wompi links of exactly the rows it is about to expire. Read this BEFORE the
   // UPDATE (afterwards the rows no longer match) — its results feed
   // WompiApiService.deactivatePaymentLink.
-  async listIntentsExpiringBefore(nowIso: string): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>> {
+  async listIntentsExpiringBefore(nowIso: string, limit = INTENT_EXPIRY_SWEEP_LIMIT): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>> {
     // gift_type is projected so the deactivation sweep can resend the SAME
-    // nombreProducto the create sent (a PUT replaces the whole link object).
+    // nombreProducto the create sent (a PUT replaces the whole link object). The page
+    // is capped and ordered oldest-first so attacker-created expired intents cannot
+    // force one cron invocation to snapshot (or deactivate) an unbounded row set; the
+    // next tick continues from the remaining PENDING/LINK_CREATED rows.
+    const safeLimit = Math.max(1, Math.min(Math.trunc(limit), INTENT_EXPIRY_SWEEP_LIMIT));
     const result = await this.db
-      .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
-      .bind(nowIso)
+      .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ? ORDER BY expires_at ASC, id ASC LIMIT ?")
+      .bind(nowIso, safeLimit)
       .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>();
     return result.results;
+  }
+
+  // Marks only the bounded page the cron sweep just snapshotted as EXPIRED, so link
+  // deactivation and status expiry stay in the same capped unit of work and a later
+  // tick can continue from rows this one did not process.
+  async expireDonationIntentsByIds(ids: string[], updatedAt: string): Promise<void> {
+    if (ids.length === 0) {
+      return;
+    }
+    const placeholders = ids.map(() => "?").join(", ");
+    await this.db
+      .prepare(`UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND id IN (${placeholders})`)
+      .bind(updatedAt, ...ids)
+      .run();
   }
 
   // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
