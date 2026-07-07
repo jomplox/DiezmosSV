@@ -22,6 +22,16 @@ export class RejectedWompiRetryConflictError extends Error {
   }
 }
 
+// Estados TERMINALES de un CDE: un veredicto de MH ya sellado (ACCEPTED/REJECTED) o una
+// invalidación. Una reentrega de cola NUNCA debe re-firmar/re-transmitir un documento en
+// estos estados ni sobrescribir un sello de aceptación. NO incluye SIGNED (un CDE
+// diferido sigue su ciclo de reintento del cron) ni FAILED (reintetable).
+const TERMINAL_DTE_STATUSES = new Set(["ACCEPTED", "REJECTED", "INVALIDATED"]);
+
+function isTerminalDteStatus(status: string): boolean {
+  return TERMINAL_DTE_STATUSES.has(status);
+}
+
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
@@ -281,6 +291,13 @@ export class IssuancePipeline {
     if (!record) {
       throw new Error(`Documento DTE ${documentId} no encontrado`);
     }
+    // Idempotencia ante reentregas de cola: un documento ya sellado por MH
+    // (ACCEPTED/REJECTED) o invalidado es TERMINAL. No se re-firma ni se re-transmite,
+    // y su veredicto no se sobrescribe. Los diferidos (SIGNED + marcador) NO son
+    // terminales: siguen su reintento por el cron.
+    if (isTerminalDteStatus(record.status)) {
+      return record;
+    }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
     try {
@@ -318,6 +335,14 @@ export class IssuancePipeline {
       if (error instanceof MhUnavailableError) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
         return this.deferTransmission(record.id, String(error.message));
+      }
+      // Entre nuestra lectura y este fallo, MH pudo haber sellado el documento
+      // (ACCEPTED/REJECTED) o pudo invalidarse: si ya es TERMINAL, un fallo posterior de
+      // bookkeeping (p. ej. la escritura de auditoría) NO debe degradarlo a FAILED. Se
+      // conserva el sello y se devuelve el estado terminal.
+      const latest = await this.repo.getDteDocument(record.id);
+      if (latest && isTerminalDteStatus(latest.status)) {
+        return latest;
       }
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",

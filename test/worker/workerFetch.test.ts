@@ -5316,6 +5316,71 @@ describe("pipeline failure alerts", () => {
   });
 });
 
+describe("advanced DTE queue idempotency", () => {
+  it("does not re-transmit an already ACCEPTED advanced CDE on queue redelivery", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_accepted",
+      wompi_event_id: null,
+      status: "ACCEPTED",
+      signed_jws: "signed-jws",
+      sello_recibido: "SELLO-EXISTING",
+      accepted_at: "2026-06-26T01:46:48.000Z"
+    });
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_accepted");
+
+    // Terminal document returned untouched: no re-sign, no re-transmit, verdict preserved.
+    expect(record.status).toBe("ACCEPTED");
+    expect(record.sello_recibido).toBe("SELLO-EXISTING");
+    expect(db.audits.filter((row) => row.action === "ADVANCED_CDE_ACCEPTED")).toHaveLength(0);
+    expect(db.audits.filter((row) => row.action === "EMAIL_SENT")).toHaveLength(0);
+  });
+
+  it("does not re-process an INVALIDATED advanced CDE on queue redelivery", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_invalidated",
+      wompi_event_id: null,
+      status: "INVALIDATED",
+      signed_jws: "signed-jws"
+    });
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_invalidated");
+
+    expect(record.status).toBe("INVALIDATED");
+    expect(db.audits.filter((row) => row.action === "ADVANCED_CDE_ACCEPTED" || row.action === "ADVANCED_CDE_REJECTED")).toHaveLength(0);
+  });
+
+  it("does not flip an accepted advanced CDE to FAILED when post-acceptance bookkeeping throws", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({ ...advancedFailingDocument("doc_advanced_postfail"), signed_jws: "signed-jws" });
+    // Make the ADVANCED_CDE_ACCEPTED audit write throw once, AFTER MH has accepted and
+    // the row has already been marked ACCEPTED, forcing the catch path.
+    const realPrepare = db.prepare.bind(db);
+    let failNextAudit = true;
+    db.prepare = (sql: string) => {
+      const stmt = realPrepare(sql);
+      if (sql.includes("INSERT INTO audit_logs") && failNextAudit) {
+        failNextAudit = false;
+        stmt.run = async () => {
+          throw new Error("audit write failed");
+        };
+      }
+      return stmt;
+    };
+
+    const record = await new IssuancePipeline(env(db, { MOCK_EXTERNAL_SERVICES: "true" })).processDteDocument("doc_advanced_postfail");
+
+    // The MH acceptance seal survives: never overwritten with FAILED.
+    expect(record.status).toBe("ACCEPTED");
+    expect(db.documents.find((row) => row.id === "doc_advanced_postfail")?.status).toBe("ACCEPTED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED" }));
+  });
+});
+
 describe("issuance dead-letter and stalled-event sweep", () => {
   function deadLetterBatch(body: IssuanceMessage, queueName: string) {
     const ack = vi.fn();
