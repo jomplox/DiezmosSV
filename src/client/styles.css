@@ -1121,6 +1121,36 @@ select,
   margin-top: 0;
 }
 
+.contacts-columns {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #d4d8de);
+  border-radius: 8px;
+}
+
+.contacts-columns legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.contacts-columns-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 16px;
+}
+
+.contacts-column-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+}
+
+.contacts-columns-warning {
+  color: var(--danger, #b42318);
+}
+
 .online-donations-table table {
   min-width: 720px;
 }

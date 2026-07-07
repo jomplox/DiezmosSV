@@ -4,6 +4,7 @@ import {
   buildContactsCsv,
   contactsCsvFilename,
   CONTACT_CSV_HEADERS,
+  resolveContactColumns,
   type ContactSourceRow
 } from "../../src/worker/services/contacts";
 import { Repository } from "../../src/worker/storage/repository";
@@ -131,6 +132,66 @@ describe("aggregateDonorContacts", () => {
 
     expect(contacts.map((contact) => contact.nombre)).toEqual(["Abel", "Zoe"]);
   });
+
+  it("restricts aggregates to a [startIso, endIso) issued_at window", async () => {
+    const db = new FakeContactsDb([
+      row({ id: "old", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 1000, issuedAt: "2024-12-31T18:00:00.000Z", intentCreatedAt: "2024-12-31T18:00:00.000Z" }),
+      row({ id: "in1", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 2500, issuedAt: "2025-03-01T18:00:00.000Z", intentCreatedAt: "2025-03-01T18:00:00.000Z" }),
+      row({ id: "in2", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 2500, issuedAt: "2025-11-01T18:00:00.000Z", intentCreatedAt: "2025-11-01T18:00:00.000Z" }),
+      // Exactly at endIso: excluded by the half-open window.
+      row({ id: "edge", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 9999, issuedAt: "2026-01-01T06:00:00.000Z", intentCreatedAt: "2026-01-01T06:00:00.000Z" })
+    ]);
+
+    const contacts = await aggregateDonorContacts(new Repository(db as unknown as D1Database), "01", {
+      window: { startIso: "2025-01-01T06:00:00.000Z", endIso: "2026-01-01T06:00:00.000Z" }
+    });
+
+    expect(contacts).toHaveLength(1);
+    // Only the two in-window donations count toward totals/dates/count.
+    expect(contacts[0].numeroDonaciones).toBe(2);
+    expect(contacts[0].totalDonadoUsd).toBe("50.00");
+    expect(contacts[0].primeraDonacion).toBe("2025-03-01");
+    expect(contacts[0].ultimaDonacion).toBe("2025-11-01");
+  });
+
+  it("counts only donations of the requested giftType and drops donors with none", async () => {
+    const db = new FakeContactsDb([
+      // Ana: one DIEZMO + one OFRENDA.
+      row({ id: "a1", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 3000, issuedAt: "2025-02-01T18:00:00.000Z", giftType: "DIEZMO", intentCreatedAt: "2025-02-01T18:00:00.000Z" }),
+      row({ id: "a2", donorEmail: "ana@example.org", donorName: "Ana", amountCents: 1000, issuedAt: "2025-03-01T18:00:00.000Z", giftType: "OFRENDA", intentCreatedAt: "2025-03-01T18:00:00.000Z" }),
+      // Beto: only OFRENDA — must disappear entirely under a DIEZMO filter.
+      row({ id: "b1", donorEmail: "beto@example.org", donorName: "Beto", amountCents: 5000, issuedAt: "2025-04-01T18:00:00.000Z", giftType: "OFRENDA", intentCreatedAt: "2025-04-01T18:00:00.000Z" })
+    ]);
+
+    const contacts = await aggregateDonorContacts(new Repository(db as unknown as D1Database), "01", { giftType: "DIEZMO" });
+
+    expect(contacts).toHaveLength(1);
+    expect(contacts[0].nombre).toBe("Ana");
+    // Only the DIEZMO donation counts toward totals/count; tipo_preferido reflects the filter.
+    expect(contacts[0].numeroDonaciones).toBe(1);
+    expect(contacts[0].totalDonadoUsd).toBe("30.00");
+    expect(contacts[0].tipoPreferido).toBe("Diezmo");
+  });
+});
+
+describe("resolveContactColumns", () => {
+  it("defaults to all headers when no columns param is given", () => {
+    expect(resolveContactColumns(null)).toEqual([...CONTACT_CSV_HEADERS]);
+    expect(resolveContactColumns("")).toEqual([...CONTACT_CSV_HEADERS]);
+  });
+
+  it("returns the requested subset in canonical header order", () => {
+    // Requested out of order; result follows CONTACT_CSV_HEADERS order.
+    expect(resolveContactColumns("correo,nombre")).toEqual(["nombre", "correo"]);
+  });
+
+  it("throws a Spanish error naming an invalid column", () => {
+    expect(() => resolveContactColumns("nombre,telefonoo")).toThrow(/telefonoo/);
+  });
+
+  it("rejects an all-invalid or empty-after-trim selection", () => {
+    expect(() => resolveContactColumns(",,")).toThrow();
+  });
 });
 
 describe("buildContactsCsv", () => {
@@ -166,6 +227,27 @@ describe("buildContactsCsv", () => {
     expect(contactsCsvFilename("01", 42)).toBe("contactos-donantes-01-42.csv");
     expect(contactsCsvFilename("00", 0)).toBe("contactos-donantes-00-0.csv");
   });
+
+  it("emits only the selected columns in header order when given a subset", async () => {
+    const db = new FakeContactsDb([
+      row({
+        id: "d1",
+        donorEmail: "ana@example.org",
+        donorName: "Ana",
+        amountCents: 5000,
+        issuedAt: "2026-02-01T18:00:00.000Z",
+        donorPhone: "70000001",
+        giftType: "DIEZMO",
+        intentCreatedAt: "2026-02-01T18:00:00.000Z"
+      })
+    ]);
+    const contacts = await aggregateDonorContacts(new Repository(db as unknown as D1Database), "01");
+
+    const csv = buildContactsCsv(contacts, ["nombre", "correo", "total_donado_usd"]);
+    const [header, firstRow] = csv.slice(1).split("\r\n");
+    expect(header).toBe("nombre,correo,total_donado_usd");
+    expect(firstRow).toBe("Ana,ana@example.org,50.00");
+  });
 });
 
 function row(overrides: Partial<ContactSourceRow> & Pick<ContactSourceRow, "id" | "issuedAt" | "amountCents">): ContactSourceRow {
@@ -200,8 +282,18 @@ class FakeContactsDb {
           return { results: [] };
         }
         let filtered = [...rows];
+        // args: [environment, startIso, (endIso if windowed), (cursor issued, cursor id if cursor), limit].
+        // The service always binds a lower bound at args[1] ("" matches all when no window).
+        const startIso = String(args[1]);
+        filtered = filtered.filter((candidate) => candidate.issuedAt >= startIso);
+        let cursorBase = 2;
+        if (sql.includes("dte_documents.issued_at < ?")) {
+          const endIso = String(args[2]);
+          filtered = filtered.filter((candidate) => candidate.issuedAt < endIso);
+          cursorBase = 3;
+        }
         if (sql.includes("(dte_documents.issued_at, dte_documents.id) > (?, ?)")) {
-          const [afterIssued, afterId] = [String(args[2]), String(args[3])];
+          const [afterIssued, afterId] = [String(args[cursorBase]), String(args[cursorBase + 1])];
           filtered = filtered.filter(
             (candidate) => candidate.issuedAt > afterIssued || (candidate.issuedAt === afterIssued && candidate.id > afterId)
           );

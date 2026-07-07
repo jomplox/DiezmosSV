@@ -2641,6 +2641,119 @@ describe("CRM contacts export", () => {
       expect(response.status).toBe(403);
     }
   });
+
+  it("restricts the export to a from/to date window (El Salvador local, inclusive)", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    // Before the window (2024) and inside the window (2025-06).
+    seedWompiDonor(
+      db,
+      { id: "doc_old", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 1000, issued_at: "2024-06-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+    seedWompiDonor(
+      db,
+      { id: "doc_in", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 5000, issued_at: "2025-06-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-01-01&to=2025-12-31", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await response.arrayBuffer())).replace(/^﻿/, "");
+    const rows = csv.split("\r\n").filter((row) => row.length > 0);
+    // Header + one donor; the 2025 donation is the only one counted (total 50.00).
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain("50.00");
+    expect(rows[1]).not.toContain("60.00");
+  });
+
+  it("filters counted donations by giftType and drops donors with none", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_diez", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 3000, issued_at: "2026-02-01T18:00:00.000Z" },
+      { gift_type: "DIEZMO" }
+    );
+    seedWompiDonor(
+      db,
+      { id: "doc_ofr", environment: "01", donor_email: "beto@example.org", donor_name: "Beto", amount_cents: 4000, issued_at: "2026-02-02T18:00:00.000Z" },
+      { gift_type: "OFRENDA" }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&giftType=DIEZMO", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await response.arrayBuffer())).replace(/^﻿/, "");
+    const rows = csv.split("\r\n").filter((row) => row.length > 0);
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toContain("Ana");
+    expect(csv).not.toContain("Beto");
+  });
+
+  it("emits only the requested columns and rejects an unknown column name with 400 Spanish", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedWompiDonor(
+      db,
+      { id: "doc_ana", environment: "01", donor_email: "ana@example.org", donor_name: "Ana", amount_cents: 5000, issued_at: "2026-02-01T18:00:00.000Z" },
+      { donor_phone: "70000001", gift_type: "DIEZMO" }
+    );
+
+    const ok = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&columns=nombre,correo", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(ok.status).toBe(200);
+    const csv = new TextDecoder("utf-8").decode(new Uint8Array(await ok.arrayBuffer())).replace(/^﻿/, "");
+    expect(csv.split("\r\n")[0]).toBe("nombre,correo");
+
+    const bad = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&columns=nombre,inventada", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(bad.status).toBe(400);
+    const body = (await bad.json()) as { error: string; message: string };
+    expect(body.error).toBe("invalid_export_columns");
+    expect(body.message).toContain("inventada");
+  });
+
+  it("rejects a malformed or inverted date range with 400", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const inverted = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-12-31&to=2025-01-01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(inverted.status).toBe(400);
+    await expect(inverted.json()).resolves.toMatchObject({ error: "invalid_export_range" });
+
+    const malformed = await worker.fetch(
+      new Request("https://example.org/api/exports/contacts?environment=01&from=2025-1-1&to=2025-12-31", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(malformed.status).toBe(400);
+  });
 });
 
 describe("annual donor certificates", () => {
@@ -6719,11 +6832,25 @@ class Statement {
       // CRM contacts export: keyset-paged Wompi-lane ACCEPTED docs for one ambiente,
       // LEFT JOINed to their correlated COMPLETED intent (0 or 1 per document).
       const environment = String(this.args[0]);
+      // Binding order mirrors the repository: [environment, startIso, (endIso if
+      // windowed), (cursor issued, cursor id if cursor), limit]. Lower bound is always
+      // present ("" matches all when unwindowed).
+      const startIso = String(this.args[1]);
       let documents = this.db.documents.filter(
-        (document) => document.status === "ACCEPTED" && document.wompi_event_id != null && document.environment === environment
+        (document) =>
+          document.status === "ACCEPTED" &&
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          document.issued_at >= startIso
       );
+      let cursorBase = 2;
+      if (this.sql.includes("dte_documents.issued_at < ?")) {
+        const endIso = String(this.args[2]);
+        documents = documents.filter((document) => document.issued_at < endIso);
+        cursorBase = 3;
+      }
       if (this.sql.includes("(dte_documents.issued_at, dte_documents.id) > (?, ?)")) {
-        const [afterIssued, afterId] = [String(this.args[2]), String(this.args[3])];
+        const [afterIssued, afterId] = [String(this.args[cursorBase]), String(this.args[cursorBase + 1])];
         documents = documents.filter(
           (document) => document.issued_at > afterIssued || (document.issued_at === afterIssued && document.id > afterId)
         );

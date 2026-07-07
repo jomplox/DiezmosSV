@@ -85,21 +85,44 @@ export const CONTACT_CSV_HEADERS = [
   "tipo_preferido"
 ] as const;
 
+// Optional filters for the CRM contacts export. `window` restricts the counted
+// donations to a [startIso, endIso) issued_at range (El Salvador local semantics are
+// resolved by the caller). `giftType` restricts the counted donations to those whose
+// correlated intent carries that gift type. Both narrow the set that feeds the
+// aggregates, so totals/dates/count/tipo_preferido reflect exactly the filtered
+// donations; a donor left with zero counted donations drops out of the export.
+export interface ContactAggregateOptions {
+  window?: { startIso: string; endIso: string };
+  giftType?: DonationGiftType;
+}
+
 // Aggregates Wompi-lane ACCEPTED documents for one ambiente into one contact per
 // unique donor. Identity key: donor_email lowercased, fallback donor_name — the
 // same convention as aggregateAnnualDonors. Enrichment (phone/address/departamento/
 // país) comes from the donor's MOST RECENT correlated intent; tipo_preferido from
 // the majority of the donor's correlated intents' gift_type. Documents are read in
 // keyset-paged chunks so a busy environment never loads unbounded rows at once.
-export async function aggregateDonorContacts(repo: Repository, environment: Ambiente): Promise<DonorContact[]> {
+export async function aggregateDonorContacts(
+  repo: Repository,
+  environment: Ambiente,
+  options: ContactAggregateOptions = {}
+): Promise<DonorContact[]> {
+  const { window, giftType } = options;
   const groups = new Map<string, ContactAccumulator>();
   let cursor: { issuedAt: string; id: string } | null = null;
   for (;;) {
-    const rows = await repo.listAcceptedWompiContactRows(environment, cursor, RETENTION_PAGE_SIZE);
+    const rows = await repo.listAcceptedWompiContactRows(environment, cursor, RETENTION_PAGE_SIZE, window);
     if (rows.length === 0) {
       break;
     }
     for (const row of rows) {
+      // The keyset cursor must advance over EVERY fetched row (below), but a row whose
+      // gift type doesn't match the filter contributes nothing to the aggregates. The
+      // window is already applied in SQL; the gift-type filter is applied here so the
+      // query stays stable and the correlated intent's type is what gates inclusion.
+      if (giftType && row.giftType !== giftType) {
+        continue;
+      }
       // Identity + displayed correo both use the lowercased email: two casings of the
       // same address are one donor and export as one canonical contact.
       const email = normalizeText(row.donorEmail)?.toLowerCase() ?? null;
@@ -250,35 +273,66 @@ function normalizeText(value: string | null | undefined): string | null {
   return trimmed.length ? trimmed : null;
 }
 
+export type ContactColumn = (typeof CONTACT_CSV_HEADERS)[number];
+
+// Maps each header to the DonorContact field it renders. Kept beside CONTACT_CSV_HEADERS
+// so a column subset stays a straight lookup rather than a positional index.
+const CONTACT_COLUMN_VALUE: Record<ContactColumn, (contact: DonorContact) => string> = {
+  nombre: (contact) => contact.nombre,
+  correo: (contact) => contact.correo,
+  telefono: (contact) => contact.telefono,
+  direccion: (contact) => contact.direccion,
+  departamento: (contact) => contact.departamento,
+  pais: (contact) => contact.pais,
+  primera_donacion: (contact) => contact.primeraDonacion,
+  ultima_donacion: (contact) => contact.ultimaDonacion,
+  total_donado_usd: (contact) => contact.totalDonadoUsd,
+  numero_donaciones: (contact) => String(contact.numeroDonaciones),
+  tipo_preferido: (contact) => contact.tipoPreferido
+};
+
+// Validates and normalises a comma-separated `columns` param into the canonical header
+// order. Null/empty → all columns. An unknown column name throws a Spanish error naming
+// the offender (the route maps this to a 400). An empty-after-trim selection also throws.
+export function resolveContactColumns(columnsParam: string | null | undefined): ContactColumn[] {
+  const raw = (columnsParam ?? "").trim();
+  if (!raw) {
+    return [...CONTACT_CSV_HEADERS];
+  }
+  const requested = raw
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  // A non-empty param (e.g. ",,") that resolves to no real column names is malformed,
+  // not "default all" — only a genuinely absent/blank param defaults to every column.
+  if (requested.length === 0) {
+    throw new Error(`No indicó ninguna columna válida. Columnas permitidas: ${CONTACT_CSV_HEADERS.join(", ")}.`);
+  }
+  const allowed = new Set<string>(CONTACT_CSV_HEADERS);
+  for (const name of requested) {
+    if (!allowed.has(name)) {
+      throw new Error(`La columna «${name}» no es válida. Columnas permitidas: ${CONTACT_CSV_HEADERS.join(", ")}.`);
+    }
+  }
+  const selected = new Set(requested);
+  // Emit in canonical header order regardless of the request order.
+  return CONTACT_CSV_HEADERS.filter((header) => selected.has(header));
+}
+
 // The contacts CSV: UTF-8 BOM + CRLF rows, semicolon-free comma-delimited fields
 // with F960-style quoting/escaping (a field containing a delimiter, quote, or
-// newline is wrapped in quotes and its quotes doubled).
-export function buildContactsCsv(contacts: DonorContact[]): string {
-  const lines = [CONTACT_CSV_HEADERS.map(csvField).join(",")];
+// newline is wrapped in quotes and its quotes doubled). `columns` (default all)
+// selects and orders the emitted columns.
+export function buildContactsCsv(contacts: DonorContact[], columns: readonly ContactColumn[] = CONTACT_CSV_HEADERS): string {
+  const lines = [columns.map(csvField).join(",")];
   for (const contact of contacts) {
-    lines.push(contactFields(contact).map(csvField).join(","));
+    lines.push(columns.map((column) => csvField(CONTACT_COLUMN_VALUE[column](contact))).join(","));
   }
   return `﻿${lines.join("\r\n")}\r\n`;
 }
 
 export function contactsCsvFilename(environment: Ambiente, count: number): string {
   return `contactos-donantes-${environment}-${count}.csv`;
-}
-
-function contactFields(contact: DonorContact): string[] {
-  return [
-    contact.nombre,
-    contact.correo,
-    contact.telefono,
-    contact.direccion,
-    contact.departamento,
-    contact.pais,
-    contact.primeraDonacion,
-    contact.ultimaDonacion,
-    contact.totalDonadoUsd,
-    String(contact.numeroDonaciones),
-    contact.tipoPreferido
-  ];
 }
 
 function csvField(value: string): string {
