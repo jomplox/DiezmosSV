@@ -2726,6 +2726,36 @@ describe("annual donor certificates", () => {
     expect(ana).toMatchObject({ hasEmail: true, count: 2, totalLabel: "$100.01" });
     const sinCorreo = body.donors.find((donor) => donor.donorName === "Sin Correo");
     expect(sinCorreo).toMatchObject({ hasEmail: false, count: 1 });
+    // Search metadata present even without a query: full-year match set, not truncated.
+    expect(body).toMatchObject({ matchCount: 2, truncated: false });
+  });
+
+  it("filters the preview donors by q while keeping the full-year summary", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    seedYear(db);
+
+    // "ana" (no accent) matches the "Ana" donor via deaccented, case-insensitive compare.
+    const response = await worker.fetch(
+      new Request("https://example.org/api/certificates/annual?year=2025&q=ana", { headers: { Authorization: "Bearer test-token" } }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      donorCount: number;
+      withEmail: number;
+      matchCount: number;
+      truncated: boolean;
+      donors: Array<{ donorName: string }>;
+    };
+    // Summary spans the whole year regardless of the filter.
+    expect(body.donorCount).toBe(2);
+    expect(body.withEmail).toBe(1);
+    // Only the matching donor is listed.
+    expect(body.matchCount).toBe(1);
+    expect(body.truncated).toBe(false);
+    expect(body.donors.map((donor) => donor.donorName)).toEqual(["Ana"]);
   });
 
   it("rejects future years", async () => {

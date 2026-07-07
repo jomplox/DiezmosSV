@@ -370,24 +370,59 @@ export interface AnnualCertificatePreviewDonor {
 
 export interface AnnualCertificatePreview {
   year: number;
+  // donorCount/withEmail/withoutEmail/totalLabel are ALWAYS computed over the full,
+  // unfiltered year — the summary describes the whole statement run, not the current
+  // search. Only `donors` narrows to (and is capped over) the search results.
   donorCount: number;
   withEmail: number;
   withoutEmail: number;
   totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
+  // Total donors matching the search `q` (or the full year when q is empty). `donors`
+  // is the first ANNUAL_PREVIEW_LIMIT of these in aggregation order; `truncated` is
+  // true when matchCount exceeds that cap so the UI can show "Mostrando N de M".
+  matchCount: number;
+  truncated: boolean;
 }
 
-export async function buildAnnualCertificatePreview(repo: Repository, year: number): Promise<AnnualCertificatePreview> {
+// A busy year can have thousands of donors; the preview table (and its JSON payload)
+// collapses at that scale, so the preview returns at most this many donor rows. The
+// summary counts and matchCount still describe the full set.
+export const ANNUAL_PREVIEW_LIMIT = 50;
+
+// Fold accents and lowercase so a search for "jose" finds "José". NFD splits a base
+// letter from its combining diacritic; stripping the U+0300–U+036F combining range
+// removes the accent. Applied to BOTH the query and each candidate before comparing.
+function deaccentLower(value: string): string {
+  return value
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase();
+}
+
+export async function buildAnnualCertificatePreview(repo: Repository, year: number, q?: string | null): Promise<AnnualCertificatePreview> {
   const donors = await aggregateAnnualDonors(repo, year);
+  // Summary is over the FULL year, independent of the search filter.
   const withEmail = donors.filter((donor) => donor.donorEmail).length;
   const totalCents = donors.reduce((sum, donor) => sum + donor.totalCents, 0);
+
+  const needle = deaccentLower((q ?? "").trim());
+  const matches = needle
+    ? donors.filter(
+        (donor) =>
+          deaccentLower(donor.donorName).includes(needle) || deaccentLower(donor.donorEmail ?? "").includes(needle)
+      )
+    : donors;
+
   return {
     year,
     donorCount: donors.length,
     withEmail,
     withoutEmail: donors.length - withEmail,
     totalLabel: `$${formatCents(totalCents)}`,
-    donors: donors.map((donor) => ({
+    matchCount: matches.length,
+    truncated: matches.length > ANNUAL_PREVIEW_LIMIT,
+    donors: matches.slice(0, ANNUAL_PREVIEW_LIMIT).map((donor) => ({
       groupKey: donor.groupKey,
       donorName: donor.donorName,
       donorEmail: donor.donorEmail,
