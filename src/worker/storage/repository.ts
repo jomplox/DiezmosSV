@@ -1012,6 +1012,13 @@ export class Repository {
       .run();
   }
 
+  // Rol del usuario objetivo para los guards de gestión de usuarios (un ADMIN nunca
+  // toca a un OWNER). Null cuando el usuario no existe.
+  async getUserRole(id: string): Promise<string | null> {
+    const row = await this.db.prepare("SELECT role FROM users WHERE id = ?").bind(id).first<{ role: string }>();
+    return row?.role ?? null;
+  }
+
   async listUsers(): Promise<Array<Record<string, unknown>>> {
     return this.db
       .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT 100")

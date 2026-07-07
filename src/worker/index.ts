@@ -960,6 +960,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   const passwordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
   if (passwordMatch && request.method === "POST") {
     const actor = requireRole(user, "ADMIN");
+    // Vector inverso de escalación: restablecer la contraseña de un OWNER le daría a
+    // un ADMIN esa sesión. Solo un propietario modifica a otro propietario.
+    if (actor.role !== "OWNER" && (await repo.getUserRole(passwordMatch[1])) === "OWNER") {
+      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
+    }
     const body = (await request.json().catch(() => ({}))) as { password?: unknown };
     if (typeof body.password !== "string" || !body.password) {
       return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
@@ -983,6 +988,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     // reserved for OWNERs.
     if (patch.role === "OWNER" && actor.role !== "OWNER") {
       return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+    }
+    // Y el vector inverso: un ADMIN tampoco modifica (desactiva, renombra, degrada) a
+    // un OWNER existente.
+    if (actor.role !== "OWNER" && (await repo.getUserRole(userMatch[1])) === "OWNER") {
+      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
     }
     const updated = await repo.updateUser(userMatch[1], patch);
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
