@@ -131,14 +131,19 @@ export class IssuancePipeline {
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
     const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
     const identifiers = extractCdeIdentifiers(normalDocument);
+    // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook: for
+    // an empresa (NIT 36) intent the receptor nombre is the razón social, so storing the
+    // webhook cardholder name here would diverge from the signed document. For a natural
+    // person the receptor nombre/correo are the webhook values, so this is unchanged.
+    const summary = cdeDocumentSummary(normalDocument);
     let record = await this.repo.createDteDocument({
       wompiEventId,
       environment,
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,
       plainJson: normalDocument,
-      donorEmail: payload.Cliente?.EMail ?? null,
-      donorName: donorName(payload),
+      donorEmail: summary.donorEmail,
+      donorName: summary.donorName,
       amountCents: amountCents(payload),
       issuedAt: nowIso()
     });

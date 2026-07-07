@@ -4346,6 +4346,10 @@ describe("donation intent correlation", () => {
       telefono: "70001111",
       direccion: INTENT_ADDRESS
     });
+    // Natural-person flow unchanged: donor_name/donor_email track the emitted receptor,
+    // which for a person is the webhook cardholder name and correo.
+    expect(record?.donor_name).toBe("Fallback Cliente");
+    expect(record?.donor_email).toBe("fallback@example.org");
     // The intent is closed and points at the CDE that fulfilled it.
     const intent = db.donationIntents.find((row) => row.id === "di_corr_1");
     expect(intent?.status).toBe("COMPLETED");
@@ -4414,6 +4418,11 @@ describe("donation intent correlation", () => {
       nombre: "Empresa Ejemplo, S.A. de C.V.",
       correo: "fallback@example.org"
     });
+    // Persisted metadata must match the signed document: donor_name is the razón social
+    // (the emitted receptor nombre), NOT the Wompi cardholder name, and donor_email is
+    // the emitted receptor correo.
+    expect(record?.donor_name).toBe("Empresa Ejemplo, S.A. de C.V.");
+    expect(record?.donor_email).toBe("fallback@example.org");
   });
 
   it("marks a foreign intent's receptor non-domiciled with the intent país and a null direccion", async () => {
