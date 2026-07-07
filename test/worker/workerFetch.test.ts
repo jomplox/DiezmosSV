@@ -1067,6 +1067,40 @@ describe("password reset", () => {
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
   });
 
+  it("builds the reset link from APP_ORIGIN even when the request carries a different origin", async () => {
+    const db = new InMemoryD1();
+    const sentMessages: Array<{ text: string; html?: string }> = [];
+    db.users.push(knownUser());
+
+    // Host-header poisoning: the request arrives via an attacker-controlled origin,
+    // but the emailed reset link must use the canonical APP_ORIGIN so the token
+    // cannot be captured by pointing the link at an attacker host.
+    const response = await worker.fetch(
+      new Request("https://attacker.example/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "operator@example.org" })
+      }),
+      env(db, {
+        APP_ORIGIN: "https://app.example.org",
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentMessages.push(message as { text: string; html?: string });
+            return { messageId: "cf-email-reset" };
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(200);
+    expect(sentMessages).toHaveLength(1);
+    expect(sentMessages[0].text).toContain("https://app.example.org/?reset=");
+    expect(sentMessages[0].text).not.toContain("https://attacker.example/?reset=");
+    expect(sentMessages[0].html).toContain('href="https://app.example.org/?reset=');
+  });
+
   it("returns ok without creating tokens or sending email for unknown accounts", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
