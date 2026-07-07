@@ -477,7 +477,8 @@ export class Repository {
   async listAcceptedWompiContactRows(
     environment: Ambiente,
     cursor: { issuedAt: string; id: string } | null,
-    limit = RETENTION_PAGE_SIZE
+    limit = RETENTION_PAGE_SIZE,
+    window?: { startIso: string; endIso: string }
   ): Promise<ContactSourceRow[]> {
     const conditions = [
       "dte_documents.status = 'ACCEPTED'",
@@ -485,7 +486,14 @@ export class Repository {
       "dte_documents.environment = ?",
       "dte_documents.issued_at >= ?"
     ];
-    const bindings: Array<string | number> = [environment, ""];
+    // Lower bound is always present: "" (matches everything) when no window is given,
+    // else the window start. The optional upper bound is added only when windowed, so
+    // the unfiltered export keeps its original single-bound query shape.
+    const bindings: Array<string | number> = [environment, window ? window.startIso : ""];
+    if (window) {
+      conditions.push("dte_documents.issued_at < ?");
+      bindings.push(window.endIso);
+    }
     if (cursor) {
       conditions.push("(dte_documents.issued_at, dte_documents.id) > (?, ?)");
       bindings.push(cursor.issuedAt, cursor.id);

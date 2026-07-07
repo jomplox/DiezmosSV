@@ -227,6 +227,13 @@ export function App() {
   const [certificateSearch, setCertificateSearch] = useState("");
   const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
+  // CRM contacts export customization: period preset (with optional custom range), a
+  // gift-type filter, and the selected CSV columns (all on by default).
+  const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
+  const [contactsFrom, setContactsFrom] = useState(currentMonthStartValue);
+  const [contactsTo, setContactsTo] = useState(todayDateValue);
+  const [contactsGiftType, setContactsGiftType] = useState<"todos" | "DIEZMO" | "OFRENDA">("todos");
+  const [contactsColumns, setContactsColumns] = useState<Set<string>>(() => new Set(CONTACT_EXPORT_COLUMNS.map((column) => column.key)));
   const [donationIntents, setDonationIntents] = useState<DonationIntentListItem[]>([]);
   const [backups, setBackups] = useState<BackupMonth[]>([]);
   const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
@@ -652,7 +659,25 @@ export function App() {
       if (!environment) {
         throw new Error("No se pudo determinar el ambiente activo.");
       }
-      const response = await fetch(`/api/exports/contacts?environment=${environment}`, {
+      const selectedColumns = CONTACT_EXPORT_COLUMNS.filter((column) => contactsColumns.has(column.key)).map((column) => column.key);
+      if (selectedColumns.length === 0) {
+        throw new Error("Seleccione al menos una columna para exportar.");
+      }
+      const params = new URLSearchParams({ environment });
+      const range = contactsPeriodRange(contactsPeriod, contactsFrom, contactsTo);
+      if (range) {
+        params.set("from", range.from);
+        params.set("to", range.to);
+      }
+      if (contactsGiftType !== "todos") {
+        params.set("giftType", contactsGiftType);
+      }
+      // Only send `columns` when a strict subset is chosen, so the default full export
+      // keeps its original request shape (and audit).
+      if (selectedColumns.length < CONTACT_EXPORT_COLUMNS.length) {
+        params.set("columns", selectedColumns.join(","));
+      }
+      const response = await fetch(`/api/exports/contacts?${params.toString()}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       if (!response.ok) {
@@ -1225,6 +1250,26 @@ export function App() {
             <ContactsExportPanel
               environment={emissionEnvironment?.environment ?? null}
               busy={busy === "export-contacts"}
+              period={contactsPeriod}
+              from={contactsFrom}
+              to={contactsTo}
+              giftType={contactsGiftType}
+              columns={contactsColumns}
+              onPeriodChange={setContactsPeriod}
+              onFromChange={setContactsFrom}
+              onToChange={setContactsTo}
+              onGiftTypeChange={setContactsGiftType}
+              onColumnToggle={(key) =>
+                setContactsColumns((current) => {
+                  const next = new Set(current);
+                  if (next.has(key)) {
+                    next.delete(key);
+                  } else {
+                    next.add(key);
+                  }
+                  return next;
+                })
+              }
               onDownload={downloadContacts}
             />
             <BackupsPanel
@@ -1776,6 +1821,42 @@ function certificateYearOptions(): number[] {
   return [current, current - 1, current - 2, current - 3];
 }
 
+// CRM contacts export columns: the server's 11 snake_case headers with Spanish UI
+// labels. `key` is what the endpoint's `columns` param expects; the checkbox group
+// renders `label`. Order matches the CSV header order.
+const CONTACT_EXPORT_COLUMNS: ReadonlyArray<{ key: string; label: string }> = [
+  { key: "nombre", label: "Nombre" },
+  { key: "correo", label: "Correo" },
+  { key: "telefono", label: "Teléfono" },
+  { key: "direccion", label: "Dirección" },
+  { key: "departamento", label: "Departamento" },
+  { key: "pais", label: "País" },
+  { key: "primera_donacion", label: "Primera donación" },
+  { key: "ultima_donacion", label: "Última donación" },
+  { key: "total_donado_usd", label: "Total donado (US$)" },
+  { key: "numero_donaciones", label: "Número de donaciones" },
+  { key: "tipo_preferido", label: "Tipo preferido" }
+];
+
+type ContactsPeriod = "todo" | "esteAno" | "anioAnterior" | "personalizado";
+
+// Resolves a period preset into an optional {from, to} YYYY-MM-DD range. "todo" means no
+// range (export everything). "Este año" / "Año anterior" are full calendar years; the
+// custom preset uses the two date inputs verbatim.
+function contactsPeriodRange(period: ContactsPeriod, from: string, to: string): { from: string; to: string } | null {
+  const year = new Date().getFullYear();
+  if (period === "esteAno") {
+    return { from: `${year}-01-01`, to: `${year}-12-31` };
+  }
+  if (period === "anioAnterior") {
+    return { from: `${year - 1}-01-01`, to: `${year - 1}-12-31` };
+  }
+  if (period === "personalizado") {
+    return { from, to };
+  }
+  return null;
+}
+
 // Preview endpoint path for a year + optional donor/email search. The search is sent
 // as `q`; the server caps and reports matchCount/truncated.
 function certificatePreviewPath(year: string, search: string): string {
@@ -1913,16 +1994,39 @@ function AnnualCertificatePanel({
 
 // Bulk donor-contacts CSV export for CRM import. Exports the ACTIVE emission
 // ambiente (the same ambiente in which donations are currently issued); the button
-// stays disabled until the active ambiente is known.
+// stays disabled until the active ambiente is known. The period, tipo, and column
+// controls customize which donations count and which columns the CSV carries.
 function ContactsExportPanel({
   environment,
   busy,
+  period,
+  from,
+  to,
+  giftType,
+  columns,
+  onPeriodChange,
+  onFromChange,
+  onToChange,
+  onGiftTypeChange,
+  onColumnToggle,
   onDownload
 }: {
   environment: EmissionEnvironmentState["environment"] | null;
   busy: boolean;
+  period: ContactsPeriod;
+  from: string;
+  to: string;
+  giftType: "todos" | "DIEZMO" | "OFRENDA";
+  columns: Set<string>;
+  onPeriodChange: (period: ContactsPeriod) => void;
+  onFromChange: (value: string) => void;
+  onToChange: (value: string) => void;
+  onGiftTypeChange: (value: "todos" | "DIEZMO" | "OFRENDA") => void;
+  onColumnToggle: (key: string) => void;
   onDownload: () => Promise<void>;
 }) {
+  const noColumns = columns.size === 0;
+  const invalidRange = period === "personalizado" && (!from || !to || from > to);
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -1933,11 +2037,53 @@ function ContactsExportPanel({
         <Users size={20} />
       </div>
       <div className="export-controls">
-        <button className="primary" disabled={busy || !environment} onClick={() => void onDownload()}>
+        <label className="date-field">
+          <span>Período</span>
+          <select value={period} onChange={(event) => onPeriodChange(event.target.value as ContactsPeriod)}>
+            <option value="todo">Todo el tiempo</option>
+            <option value="esteAno">Este año</option>
+            <option value="anioAnterior">Año anterior</option>
+            <option value="personalizado">Personalizado</option>
+          </select>
+        </label>
+        {period === "personalizado" && (
+          <>
+            <label className="date-field">
+              <span>Desde</span>
+              <input type="date" value={from} onChange={(event) => onFromChange(event.target.value)} />
+            </label>
+            <label className="date-field">
+              <span>Hasta</span>
+              <input type="date" value={to} onChange={(event) => onToChange(event.target.value)} />
+            </label>
+          </>
+        )}
+        <label className="date-field">
+          <span>Tipo</span>
+          <select value={giftType} onChange={(event) => onGiftTypeChange(event.target.value as "todos" | "DIEZMO" | "OFRENDA")}>
+            <option value="todos">Todos</option>
+            <option value="DIEZMO">Diezmo</option>
+            <option value="OFRENDA">Ofrenda</option>
+          </select>
+        </label>
+        <button className="primary" disabled={busy || !environment || noColumns || invalidRange} onClick={() => void onDownload()}>
           <Download size={16} />
           {busy ? "Preparando" : "Descargar contactos"}
         </button>
       </div>
+      <fieldset className="contacts-columns">
+        <legend>Columnas</legend>
+        <div className="contacts-columns-grid">
+          {CONTACT_EXPORT_COLUMNS.map((column) => (
+            <label key={column.key} className="contacts-column-check">
+              <input type="checkbox" checked={columns.has(column.key)} onChange={() => onColumnToggle(column.key)} />
+              <span>{column.label}</span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+      {noColumns && <p className="hint contacts-columns-warning">Seleccione al menos una columna para exportar.</p>}
+      {invalidRange && <p className="hint contacts-columns-warning">Revise el rango de fechas: «desde» no puede ser posterior a «hasta».</p>}
       <p className="hint">
         Se exportan los contactos del ambiente activo{environment ? ` (${environmentLabel(environment)})` : ""}.
       </p>

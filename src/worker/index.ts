@@ -39,9 +39,9 @@ import {
   parseBrandingSettings
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
-import { computeAnalytics, type AnalyticsRange } from "./services/analytics";
+import { computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
-import { aggregateDonorContacts, buildContactsCsv, contactsCsvFilename } from "./services/contacts";
+import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -665,8 +665,45 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (!environment) {
       return jsonResponse({ error: "invalid_export_environment", message: "Seleccione un ambiente válido (00 o 01)." }, { status: 400 });
     }
-    const contacts = await aggregateDonorContacts(repo, environment);
-    // Audit carries only the count + environment — NEVER any donor PII in the row.
+
+    // Optional [from, to] day range (YYYY-MM-DD, El Salvador local, inclusive). Both or
+    // neither; malformed/inverted → 400. Reuses the analytics range→ISO-window helper so
+    // the export honours the same El Salvador local-day semantics as the analytics view.
+    const fromParam = url.searchParams.get("from");
+    const toParam = url.searchParams.get("to");
+    let window: { startIso: string; endIso: string } | undefined;
+    if (fromParam || toParam) {
+      const isDate = (value: string | null): value is string =>
+        !!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+      if (!isDate(fromParam) || !isDate(toParam) || fromParam > toParam) {
+        return jsonResponse(
+          { error: "invalid_export_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." },
+          { status: 400 }
+        );
+      }
+      window = elSalvadorRangeWindow({ from: fromParam, to: toParam });
+    }
+
+    // Optional giftType filter (DIEZMO|OFRENDA) — which donations count toward inclusion/totals.
+    const giftTypeParam = url.searchParams.get("giftType");
+    if (giftTypeParam && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA") {
+      return jsonResponse({ error: "invalid_export_gift_type", message: "Seleccione Diezmo, Ofrenda o Todos." }, { status: 400 });
+    }
+    const giftType = giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA" ? giftTypeParam : undefined;
+
+    // Optional column whitelist; an unknown name is a 400 with the offending column named.
+    let columns;
+    try {
+      columns = resolveContactColumns(url.searchParams.get("columns"));
+    } catch (error) {
+      return jsonResponse(
+        { error: "invalid_export_columns", message: error instanceof Error ? error.message : String(error) },
+        { status: 400 }
+      );
+    }
+
+    const contacts = await aggregateDonorContacts(repo, environment, { window, giftType });
+    // Audit carries only the count + environment + applied filters — NEVER any donor PII.
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
@@ -674,9 +711,17 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       entityType: "export",
       entityId: `contacts:${environment}`,
       summary: `${contacts.length} contactos exportados (ambiente ${environment})`,
-      metadata: { environment, contacts: contacts.length }
+      metadata: {
+        environment,
+        contacts: contacts.length,
+        ...(fromParam ? { from: fromParam, to: toParam } : {}),
+        ...(giftType ? { giftType } : {}),
+        // Only record a column count when a subset was actually requested, so the
+        // default full-export audit keeps its original { environment, contacts } shape.
+        ...(url.searchParams.get("columns") ? { columns: columns.length } : {})
+      }
     });
-    return new Response(buildContactsCsv(contacts), {
+    return new Response(buildContactsCsv(contacts, columns), {
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition": `attachment; filename="${contactsCsvFilename(environment, contacts.length)}"`
