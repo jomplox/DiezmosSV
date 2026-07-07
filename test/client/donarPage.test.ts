@@ -744,11 +744,12 @@ describe("donar wizard source contract", () => {
     expect(stylesSource.slice(reducedMotion)).toContain(".donar-spinner");
   });
 
-  it("preconnects to the checkout host while the donor fills the form", () => {
-    // DNS + TLS to pagos.wompi.sv are warmed on wizard mount, so the Paso 3 embed
-    // skips connection setup on mobile networks.
+  it("preconnects to the checkout host only after the SV/Wompi path is chosen", () => {
+    // DNS + TLS to pagos.wompi.sv are warmed after a donor chooses the SV door, so
+    // chooser-only visits and the EE. UU./Givebutter path do not contact Wompi.
     expect(donarSource).toContain('"preconnect"');
-    expect(donarSource).toContain("DONAR_WOMPI_CHECKOUT_ORIGIN");
+    expect(donarSource).toContain('door !== "sv" || usDonation');
+    expect(donarSource).toContain("[door, usDonation]");
     expect(DONAR_WOMPI_CHECKOUT_ORIGIN).toBe("https://pagos.wompi.sv");
   });
 
