@@ -290,17 +290,6 @@ export class Repository {
       .run();
   }
 
-  // Bulk sweep of intents that were never paid: both PENDING and LINK_CREATED
-  // rows past their expiry flip to EXPIRED. LINK_CREATED is included so an
-  // abandoned checkout (link minted, donor never paid) does not sit unexpired
-  // forever. Filters on (status, expires_at) — the index added in 0009.
-  async expireUnpaidIntentsBefore(nowIso: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ?")
-      .bind(nowIso, nowIso)
-      .run();
-  }
-
   // Per-IP throttle: counts intents created by one client_ip at or after sinceIso.
   async countRecentIntentsByIp(clientIp: string, sinceIso: string): Promise<number> {
     const row = await this.db
