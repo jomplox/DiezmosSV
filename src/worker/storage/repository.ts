@@ -3,6 +3,7 @@ import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 import type { AuditRequestContext } from "../services/requestContext";
+import type { ContactSourceRow } from "../services/contacts";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -33,6 +34,23 @@ export interface RetentionCursor {
 // (migrations/0001_init.sql). Every other windowed retention table uses created_at.
 function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
+}
+
+// Raw D1 column shape for the contacts export join (snake_case, intent_* columns
+// null when a document has no correlated COMPLETED intent). Mapped to the camelCase
+// ContactSourceRow before it leaves the repository.
+interface ContactSourceRowRow {
+  id: string;
+  donor_email: string | null;
+  donor_name: string | null;
+  amount_cents: number;
+  issued_at: string;
+  intent_donor_phone: string | null;
+  intent_direccion_complemento: string | null;
+  intent_direccion_departamento: string | null;
+  intent_donor_pais: string | null;
+  intent_gift_type: DonationGiftType | null;
+  intent_created_at: string | null;
 }
 
 export class Repository {
@@ -447,6 +465,66 @@ export class Repository {
       .bind(...bindings, limit)
       .all<DteDocumentRecord>();
     return rows.results ?? [];
+  }
+
+  // Keyset-paged read of Wompi-lane ACCEPTED documents for one ambiente, LEFT JOINed
+  // to their correlated COMPLETED donation intent (0 or 1 per document via
+  // donation_intents.document_id, idx_donation_intents_document_id from migration
+  // 0009). Feeds the CRM contacts export (aggregateDonorContacts): only online
+  // (wompi_event_id NOT NULL), accepted donations, enriched with the intent's
+  // contact fields. The (issued_at, id) cursor bounds each page so a busy
+  // environment is read in fixed chunks, mirroring the annual-certificate paging.
+  async listAcceptedWompiContactRows(
+    environment: Ambiente,
+    cursor: { issuedAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<ContactSourceRow[]> {
+    const conditions = [
+      "dte_documents.status = 'ACCEPTED'",
+      "dte_documents.wompi_event_id IS NOT NULL",
+      "dte_documents.environment = ?",
+      "dte_documents.issued_at >= ?"
+    ];
+    const bindings: Array<string | number> = [environment, ""];
+    if (cursor) {
+      conditions.push("(dte_documents.issued_at, dte_documents.id) > (?, ?)");
+      bindings.push(cursor.issuedAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT dte_documents.id AS id,
+                dte_documents.donor_email AS donor_email,
+                dte_documents.donor_name AS donor_name,
+                dte_documents.amount_cents AS amount_cents,
+                dte_documents.issued_at AS issued_at,
+                donation_intents.donor_phone AS intent_donor_phone,
+                donation_intents.direccion_complemento AS intent_direccion_complemento,
+                donation_intents.direccion_departamento AS intent_direccion_departamento,
+                donation_intents.donor_pais AS intent_donor_pais,
+                donation_intents.gift_type AS intent_gift_type,
+                donation_intents.created_at AS intent_created_at
+         FROM dte_documents
+         LEFT JOIN donation_intents
+           ON donation_intents.document_id = dte_documents.id AND donation_intents.status = 'COMPLETED'
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY dte_documents.issued_at ASC, dte_documents.id ASC
+         LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<ContactSourceRowRow>();
+    return (rows.results ?? []).map((row) => ({
+      id: row.id,
+      donorEmail: row.donor_email,
+      donorName: row.donor_name,
+      amountCents: row.amount_cents,
+      issuedAt: row.issued_at,
+      donorPhone: row.intent_donor_phone,
+      direccionComplemento: row.intent_direccion_complemento,
+      direccionDepartamento: row.intent_direccion_departamento,
+      donorPais: row.intent_donor_pais,
+      giftType: row.intent_gift_type,
+      intentCreatedAt: row.intent_created_at
+    }));
   }
 
   // ----- Analítica (carril Wompi) -----
