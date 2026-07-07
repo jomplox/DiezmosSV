@@ -4674,6 +4674,30 @@ describe("donation intent correlation", () => {
     expect(doc?.mh_estado).toBe("RECHAZADO");
   });
 
+  it("treats an invalid donor DUI as terminal: no control sequence, no document, audited", async () => {
+    const db = new InMemoryD1();
+    // A raw legacy webhook (no intent) whose DocumentoIdentidad looks like a DUI (9
+    // digits) but fails the check digit. buildCdeDocument would declare it type 13 and
+    // throw AFTER the control sequence is allocated, so a queue retry would burn a
+    // control number on every attempt — the guard must reject it BEFORE allocation.
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      IdTransaccion: "wompi_bad_dui_tx",
+      cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+
+    const result = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    // The sequence counter never advanced — no fiscal gap across queue retries.
+    expect(db.nextSequence).toBe(1);
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
+    );
+  });
+
 });
 
 // Normativa: el Anexo de validaciones del evento de contingencia (campo 35) solo
