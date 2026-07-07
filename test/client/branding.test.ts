@@ -152,3 +152,54 @@ describe("Donor landing uses the uploaded logo when present (source contract)", 
     expect(donarSource).toContain("OrganizationLogo");
   });
 });
+
+describe("BrandingEditor renders a live Vista previa block (source contract)", () => {
+  it("shows a captioned preview block with both channel mocks", () => {
+    // A "Vista previa" block below the logo controls with two side-by-side miniature
+    // mocks, each with a Spanish caption describing where the branding will show.
+    expect(appSource).toContain("Vista previa");
+    expect(appSource).toContain("branding-preview");
+    expect(appSource).toContain("Así se verá en los correos");
+    expect(appSource).toContain("Así se verá en la página de donación");
+    // Labeled channels: an email chrome mock and a donor landing card mock.
+    expect(appSource).toContain("Correo");
+    expect(appSource).toContain("Página de donación");
+  });
+
+  it("drives the preview from the editor's unsaved draft values", () => {
+    // The email header mock tints with the draft accent color (colorForPicker) and shows
+    // the draft display name; the footer shows the draft support email. The logo comes
+    // from the draft preview object URL or the current logo src.
+    const previewStart = appSource.indexOf("branding-preview");
+    const previewRegion = appSource.slice(previewStart, previewStart + 3000);
+    expect(previewRegion).toContain("colorForPicker");
+    expect(previewRegion).toContain("displayName");
+    expect(previewRegion).toContain("supportEmail");
+    expect(previewRegion).toContain("previewUrl");
+    expect(previewRegion).toContain("currentLogoSrc");
+  });
+
+  it("keeps the donor-page mock monochrome (never tinted with the accent)", () => {
+    // The donor landing is monochrome by design: its mock must not paint the accent
+    // color onto the card. Only the email mock's header carries the accent.
+    const donorMockStart = appSource.indexOf("branding-preview-donor");
+    expect(donorMockStart).toBeGreaterThan(-1);
+    const donorMock = appSource.slice(donorMockStart, donorMockStart + 700);
+    expect(donorMock).not.toContain("colorForPicker");
+    expect(donorMock).toContain("Diezmos y Ofrendas");
+  });
+});
+
+describe("BrandingEditor preview styles are namespaced and theme-driven (source contract)", () => {
+  it("defines .branding-preview-* classes without introducing new hex literals", () => {
+    // Isolate every rule whose selector line mentions .branding-preview and assert those
+    // rules use theme variables, never a raw hex (theme variables only, no new hexes).
+    const previewRules = stylesSource
+      .split(/(?=\n\.[a-z])/i)
+      .filter((rule) => /\.branding-preview/.test(rule.split("{")[0] ?? ""));
+    expect(previewRules.length).toBeGreaterThan(0);
+    const previewCss = previewRules.join("\n");
+    expect(previewCss).toContain("var(--");
+    expect(previewCss).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
+  });
+});
