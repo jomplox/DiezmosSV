@@ -126,6 +126,7 @@ export class IssuancePipeline {
         entityId: wompiEventId,
         summary: duiReason
       });
+      await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
     }
     const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);

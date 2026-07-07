@@ -1648,6 +1648,39 @@ describe("user administration", () => {
     expect(db.users[0].password_hash).not.toBe(legacy.hash);
   });
 
+  it("does not create a session when a legacy login rehash loses a password-reset race", async () => {
+    const db = new InMemoryD1();
+    const legacy = await hashPassword("Legacy#Pass2026", "fixed-salt", { enforcePolicy: false, iterations: 100_000 });
+    const reset = await hashPassword("Reset#Pass2026", "reset-salt", { enforcePolicy: false });
+    db.users.push({
+      id: "user_legacy",
+      email: "legacy@example.org",
+      name: "Legacy User",
+      role: "ADMIN",
+      password_hash: legacy.hash,
+      password_salt: legacy.salt,
+      disabled_at: ""
+    });
+    db.beforePasswordRehashCas = () => {
+      db.users[0].password_hash = reset.hash;
+      db.users[0].password_salt = reset.salt;
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "legacy@example.org", password: "Legacy#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
+    expect(db.users[0].password_hash).toBe(reset.hash);
+    expect(db.sessions).toHaveLength(0);
+  });
+
   it("updates a user's profile, email, role, and disabled state", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
@@ -4760,6 +4793,29 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
     );
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+  });
+
+  it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      IdTransaccion: "wompi_bad_dui_sweep_tx",
+      cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+    const pipeline = new IssuancePipeline({
+      ...(await pipelineEnv(db)),
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+
+    await pipeline.processWompiEvent(eventId);
+    await pipeline.sweepStalledWompiEvents();
+
+    expect(queued).toHaveLength(0);
+    expect(db.audits.some((audit) => audit.action === "WOMPI_EVENT_REQUEUED" && audit.entity_id === eventId)).toBe(false);
+    expect(db.audits.some((audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId)).toBe(false);
   });
 
 });
@@ -7200,6 +7256,17 @@ describe("analytics endpoint (Wompi lane)", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_analytics_range" });
   });
 
+  it("rejects analytics ranges wider than one year", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=1900-01-01&to=9998-12-31", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_analytics_range" });
+  });
+
   it("aggregates the Wompi lane and excludes manually issued CDEs by design", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -7392,6 +7459,7 @@ class InMemoryD1 {
   readonly donationIntents: Array<Record<string, unknown>> = [];
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
+  beforePasswordRehashCas: (() => void) | null = null;
 
   prepare(sql: string): Statement {
     this.preparedSql.push(sql);
@@ -7413,6 +7481,26 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("UPDATE users") &&
+      this.sql.includes("password_hash = ?") &&
+      this.sql.includes("password_salt = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [passwordHash, passwordSalt, updatedAt, userId, currentPasswordHash, currentPasswordSalt] = this.args;
+      this.db.beforePasswordRehashCas?.();
+      this.db.beforePasswordRehashCas = null;
+      const user = this.db.users.find(
+        (row) => row.id === userId && row.password_hash === currentPasswordHash && row.password_salt === currentPasswordSalt
+      );
+      if (!user) {
+        return null;
+      }
+      user.password_hash = passwordHash;
+      user.password_salt = passwordSalt;
+      user.updated_at = updatedAt;
+      return { id: user.id } as T;
+    }
     if (
       this.sql.includes("UPDATE dte_documents") &&
       this.sql.includes("status = 'REJECTED'") &&
@@ -8266,6 +8354,13 @@ class Statement {
         created_at: "2026-06-26T01:46:47.015Z",
         updated_at: "2026-06-26T01:46:47.015Z"
       });
+    }
+    if (this.sql.includes("UPDATE wompi_events SET processed_at = ?")) {
+      const [processedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      if (event && !event.processed_at) {
+        event.processed_at = processedAt;
+      }
     }
     if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
       const [documentId, processedAt, wompiEventId] = this.args;

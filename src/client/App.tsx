@@ -484,10 +484,24 @@ export function App() {
         return;
       }
       const params = exportParams(exportStartDate, exportEndDate);
-      setExportPreview(await api<F960Preview>(`/api/exports/f960?${params}`, token));
-      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
-      setDonationIntents((await api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token)).intents);
-      setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
+      const [
+        f960Preview,
+        certificateResult,
+        donationIntentResult,
+        backupsResult,
+        environmentResult
+      ] = await Promise.all([
+        api<F960Preview>(`/api/exports/f960?${params}`, token),
+        api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token),
+        api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token),
+        api<BackupsGrid>("/api/admin/backups", token),
+        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+      ]);
+      setExportPreview(f960Preview);
+      setCertificatePreview(certificateResult);
+      setDonationIntents(donationIntentResult.intents);
+      setBackups(backupsResult.months);
+      setEmissionEnvironment(environmentResult.emissionEnvironment);
     }
   }
 
