@@ -254,6 +254,39 @@ function redPixelBounds(
   };
 }
 
+describe("renderDtePdf foreign receptor", () => {
+  it("prints the país and the apéndice foreign address when direccion is null, without label overlap", async () => {
+    const record = testDocument();
+    const plain = JSON.parse(record.plain_json) as Record<string, any>;
+    plain.receptor.direccion = null;
+    plain.receptor.codPais = "AI";
+    plain.receptor.codDomiciliado = 2;
+    plain.receptor.tipoDocumento = "37";
+    plain.receptor.numDocumento = "29092948";
+    plain.apendice = [
+      ...(plain.apendice ?? []),
+      { campo: "DireccionExtranjera", etiqueta: "Dirección en el extranjero", valor: "Anguila: 742 Evergreen Terrace" }
+    ];
+    record.plain_json = JSON.stringify(plain);
+
+    const pdf = await renderDtePdf(record);
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-foreign-"));
+    const pdfPath = join(dir, "doc.pdf");
+    const txtPath = join(dir, "doc.txt");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+    const text = readFileSync(txtPath, "utf8");
+
+    // The receptor box shows the donor's real country + typed address (from the apéndice).
+    expect(text).toContain("Anguila: 742 Evergreen Terrace");
+    // No overlap: with the fixed label width, "Documento:" and its number extract as
+    // intact tokens instead of interleaved characters (the reported glitch).
+    expect(text).toContain("Documento:");
+    expect(text).toContain("29092948");
+    expect(text).not.toMatch(/Documen[0-9]/);
+  });
+});
+
 function testDocument(): DteDocumentRecord {
   return {
     id: "doc_1",

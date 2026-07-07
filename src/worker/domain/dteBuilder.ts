@@ -199,6 +199,17 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       // gift_type. The legal descripcion above stays "DONACIÓN"; this is metadata.
       ...(override?.giftType
         ? [{ campo: "TipoAportacion", etiqueta: "Tipo", valor: GIFT_TYPE_APENDICE_LABEL[override.giftType] }]
+        : []),
+      // Receptor extranjero: MH prohíbe el objeto direccion para no domiciliados
+      // (direccion viaja null), así que el país y la dirección que el donante escribió
+      // sobreviven en el DOCUMENTO LEGAL vía apéndice (valor ≤150 por esquema). El PDF
+      // pinta la dirección del receptor desde esta entrada.
+      ...(override && override.codPais && override.direccion.departamento === "00"
+        ? [{
+            campo: "DireccionExtranjera",
+            etiqueta: "Dirección en el extranjero",
+            valor: `${cat020CountryLabel(override.codPais)}: ${override.direccion.complemento}`.slice(0, 150)
+          }]
         : [])
     ]
   };
@@ -442,6 +453,10 @@ function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig
 // de validaciones marca el distrito del receptor como "cuando aplique": para un no
 // domiciliado no aplica. La direccion viaja null; el país del donante ya está en
 // codPais y su dirección extranjera queda registrada en la intención (D1).
+function cat020CountryLabel(codPais: string): string {
+  return CAT020_COUNTRIES.find((option) => option.code === codPais)?.label ?? codPais;
+}
+
 function intentReceptorDireccion(
   direccion: { departamento: string; municipio: string; distrito: string; complemento: string },
   codPais: string | undefined

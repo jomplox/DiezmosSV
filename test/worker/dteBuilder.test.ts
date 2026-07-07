@@ -323,6 +323,35 @@ describe("DTE builders", () => {
     // is "cuando aplique": for codDomiciliado 2 the direccion travels null; the donor's
     // country rides in codPais and the foreign address stays on the intent record.
     expect(document.receptor.direccion).toBeNull();
+    // The donor's typed foreign address must survive on the LEGAL document: it rides
+    // the apéndice (informational), since MH forbids a direccion object for
+    // non-domiciled receptors. The PDF renders the receptor address from this entry.
+    const apendice = document.apendice as Array<{ campo: string; etiqueta: string; valor: string }>;
+    const foreign = apendice.find((entry) => entry.campo === "DireccionExtranjera");
+    expect(foreign).toEqual({
+      campo: "DireccionExtranjera",
+      etiqueta: "Dirección en el extranjero",
+      valor: "Estados Unidos: 742 Evergreen Terrace, Springfield"
+    });
+    // Schema cap: valor is 150 max.
+    expect(foreign!.valor.length).toBeLessThanOrEqual(150);
+  });
+
+  it("adds no foreign-address apéndice for domestic intents", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 1,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00"),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Example Person",
+        correo: "donor@example.org",
+        telefono: null,
+        direccion: { departamento: "05", municipio: "24", distrito: "01", complemento: "Calle Donante 123" }
+      }
+    }) as Record<string, any>;
+    const apendice = document.apendice as Array<{ campo: string }>;
+    expect(apendice.find((entry) => entry.campo === "DireccionExtranjera")).toBeUndefined();
   });
 
   it("keeps the payload-derived codPais/codDomiciliado when the override carries none", () => {
