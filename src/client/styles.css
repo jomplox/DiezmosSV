@@ -2143,6 +2143,121 @@ select,
   flex-wrap: wrap;
 }
 
+/* Live "Vista previa" block: two side-by-side channel mocks driven by the editor's
+   unsaved draft. All color comes from theme variables; the email header accent is the
+   ONLY tint and it is applied inline from the draft color (never here), while the donor
+   mock stays deliberately monochrome. */
+.branding-preview-block {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.branding-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: 8px;
+}
+
+/* Stack the two mocks on narrow viewports. */
+@media (max-width: 560px) {
+  .branding-preview-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.branding-preview-card {
+  margin: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.branding-preview-card figcaption {
+  font-size: 12px;
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+.branding-preview-frame {
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.branding-preview-email-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px;
+  text-align: center;
+}
+
+.branding-preview-email-logo {
+  display: block;
+  max-height: 28px;
+  max-width: 120px;
+  object-fit: contain;
+}
+
+.branding-preview-email-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--surface);
+  word-break: break-word;
+}
+
+.branding-preview-email-body {
+  display: grid;
+  gap: 6px;
+  padding: 14px 12px;
+}
+
+.branding-preview-line {
+  height: 8px;
+  border-radius: 4px;
+  background: var(--surface-muted);
+}
+
+.branding-preview-line-short {
+  width: 60%;
+}
+
+.branding-preview-email-footer {
+  padding: 8px 12px;
+  border-top: 1px solid var(--line);
+  font-size: 10px;
+  color: var(--ink-muted);
+  word-break: break-word;
+}
+
+.branding-preview-donor-card {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 20px 14px;
+}
+
+.branding-preview-donor-logo {
+  display: block;
+  max-height: 40px;
+  max-width: 140px;
+  object-fit: contain;
+}
+
+.branding-preview-donor-mark {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.branding-preview-donor-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-secondary);
+}
+
 .email-template-guidance {
   display: grid;
   gap: 10px;

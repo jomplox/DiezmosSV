@@ -3022,6 +3022,48 @@ function BrandingEditor({
         {logoError && <p className="field-error">{logoError}</p>}
       </div>
 
+      <div className="credential-field-block branding-preview-block">
+        <div className="credential-section-title">
+          <h3>Vista previa</h3>
+          <p>Así se verán su nombre, color y logo antes de guardar los cambios.</p>
+        </div>
+        <div className="branding-preview-grid">
+          {/* Correo: a pure div/CSS miniature of the email chrome — NOT an iframe of real
+              email HTML. The header bar carries the draft accent; the body and footer are
+              grayed placeholders showing the draft name, logo, and support email. */}
+          <figure className="branding-preview-card branding-preview-email">
+            <div className="branding-preview-frame">
+              <div className="branding-preview-email-header" style={{ background: colorForPicker }}>
+                {(previewUrl ?? currentLogoSrc) && (
+                  <img className="branding-preview-email-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+                )}
+                <span className="branding-preview-email-name">{displayName || "ExamplePerson1"}</span>
+              </div>
+              <div className="branding-preview-email-body">
+                <span className="branding-preview-line" />
+                <span className="branding-preview-line branding-preview-line-short" />
+              </div>
+              <div className="branding-preview-email-footer">{supportEmail || "legacy-contact-1@example.com"}</div>
+            </div>
+            <figcaption>Así se verá en los correos</figcaption>
+          </figure>
+
+          {/* Página de donación: the donor landing card. Monochrome BY DESIGN — the donor
+              page is never tinted with the accent, so this mock must not use colorForPicker. */}
+          <figure className="branding-preview-card branding-preview-donor">
+            <div className="branding-preview-frame branding-preview-donor-card">
+              {(previewUrl ?? currentLogoSrc) ? (
+                <img className="branding-preview-donor-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+              ) : (
+                <span className="branding-preview-donor-mark">ExamplePerson1</span>
+              )}
+              <span className="branding-preview-donor-title">Diezmos y Ofrendas</span>
+            </div>
+            <figcaption>Así se verá en la página de donación</figcaption>
+          </figure>
+        </div>
+      </div>
+
       {notice && <p className="auth-notice">{notice}</p>}
     </section>
   );
