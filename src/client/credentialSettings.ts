@@ -21,7 +21,9 @@ export type CredentialSettingsSectionId =
   | "plantillas"
   | "marca";
 
-export type CredentialSettingsSectionState = "ready" | "pending";
+// "unknown" = the credential status has not loaded yet: the nav renders NO badge
+// instead of a PENDIENTE that snaps to LISTO once the fetch lands.
+export type CredentialSettingsSectionState = "ready" | "pending" | "unknown";
 
 export interface CredentialSettingsSection {
   id: CredentialSettingsSectionId;
@@ -85,11 +87,14 @@ export function credentialSectionState(
   sectionId: CredentialSettingsSectionId,
   status: CredentialStatus | null
 ): CredentialSettingsSectionState {
+  if (!status) {
+    return "unknown";
+  }
   const section = credentialSettingsSections.find((item) => item.id === sectionId);
   if (!section || section.groupIds.length === 0) {
     return "ready";
   }
-  return section.groupIds.every((groupId) => status?.groups[groupId]?.ready) ? "ready" : "pending";
+  return section.groupIds.every((groupId) => status.groups[groupId]?.ready) ? "ready" : "pending";
 }
 
 // Firmador status line thresholds: green (>60 días), amarillo (<=60 días),
