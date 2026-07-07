@@ -39,6 +39,8 @@ import {
   parseBrandingSettings
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
+import { computeAnalytics, type AnalyticsRange } from "./services/analytics";
+import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -681,6 +683,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ audit: await repo.listAudit(url.searchParams.get("entityType") ?? undefined, url.searchParams.get("entityId") ?? undefined) });
   }
 
+  if (url.pathname === "/api/analytics" && request.method === "GET") {
+    return handleAnalyticsRoute(repo, env, user, url);
+  }
+
   // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
   // Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
   // así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
@@ -840,6 +846,47 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
 function isProduction(env: Env): boolean {
   return (env.APP_ENV ?? "local").toLowerCase() === "production";
+}
+
+// GET /api/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD&environment=00 — Analítica del
+// carril Wompi (solo lectura, rol VIEWER como /api/audit). Devuelve un único objeto
+// con todas las secciones. Defaults: los últimos 90 días (El Salvador local) y el
+// ambiente de emisión ACTIVO cuando no se especifica environment.
+async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser | null, url: URL): Promise<Response> {
+  requireRole(user, "VIEWER");
+  const now = new Date();
+  const environment = ambienteValue(url.searchParams.get("environment")) ?? (await activeEmissionEnvironment(repo, env));
+  const range = analyticsRange(url.searchParams.get("from"), url.searchParams.get("to"), now);
+  if (!range) {
+    return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
+  }
+  const analytics = await computeAnalytics(repo, range, environment, now, {
+    department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+    country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
+  });
+  return jsonResponse({ analytics });
+}
+
+// Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
+// Salvador local time. Absent params default to the last 90 days ending today. Returns
+// null on a malformed date or an inverted range.
+function analyticsRange(fromParam: string | null, toParam: string | null, now: Date): AnalyticsRange | null {
+  const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+  const todayLocal = elSalvadorDateOnly(now);
+  const to = toParam ?? todayLocal;
+  const from = fromParam ?? elSalvadorDateOnly(new Date(now.getTime() - 89 * 86_400_000));
+  if (!isDate(from) || !isDate(to) || from > to) {
+    return null;
+  }
+  return { from, to };
+}
+
+// YYYY-MM-DD of an instant in El Salvador local time (fixed UTC-6).
+function elSalvadorDateOnly(date: Date): string {
+  const local = new Date(date.getTime() - 6 * 3_600_000);
+  const month = local.getUTCMonth() + 1;
+  const day = local.getUTCDate();
+  return `${local.getUTCFullYear()}-${month < 10 ? "0" : ""}${month}-${day < 10 ? "0" : ""}${day}`;
 }
 
 async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {

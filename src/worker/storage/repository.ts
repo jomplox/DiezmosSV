@@ -449,6 +449,128 @@ export class Repository {
     return rows.results ?? [];
   }
 
+  // ----- Analítica (carril Wompi) -----
+  //
+  // Lectores paginados por keyset (mismo estilo que aggregateAnnualDonors) que
+  // alimentan las funciones puras de src/worker/services/analytics.ts. TODOS filtran
+  // por environment y por el rango [startIso, endIso), y el carril Wompi se restringe
+  // con wompi_event_id IS NOT NULL: los CDE emitidos a mano (rápido/avanzado) quedan
+  // fuera POR DISEÑO porque nunca llevan wompi_event_id.
+
+  // Documentos del carril Wompi emitidos en el rango, con la geografía y el tipo de
+  // regalo del intent correlacionado (LEFT JOIN por document_id) proyectados a cada
+  // fila para que la función pura no tenga que unir en memoria. Filtra por issued_at
+  // y pagina por (issued_at, id).
+  async listWompiLaneDocumentsForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { issuedAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<
+    Array<
+      Pick<
+        DteDocumentRecord,
+        "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
+      > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+    >
+  > {
+    const conditions = ["d.wompi_event_id IS NOT NULL", "d.environment = ?", "d.issued_at >= ?", "d.issued_at < ?"];
+    const bindings: Array<string | number> = [environment, range.startIso, range.endIso];
+    if (cursor) {
+      conditions.push("(d.issued_at, d.id) > (?, ?)");
+      bindings.push(cursor.issuedAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT d.id, d.wompi_event_id, d.environment, d.status, d.donor_email, d.donor_name,
+                d.amount_cents, d.issued_at, d.accepted_at, d.transmission_deferred_at,
+                i.direccion_departamento AS direccion_departamento, i.donor_pais AS donor_pais, i.gift_type AS gift_type
+         FROM dte_documents d
+         LEFT JOIN donation_intents i ON i.document_id = d.id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY d.issued_at ASC, d.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<
+        Pick<
+          DteDocumentRecord,
+          "id" | "wompi_event_id" | "environment" | "status" | "donor_email" | "donor_name" | "amount_cents" | "issued_at" | "accepted_at" | "transmission_deferred_at"
+        > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
+      >();
+    return rows.results ?? [];
+  }
+
+  // Intents del carril Wompi creados en el rango, correlacionados a su ambiente vía el
+  // documento emitido (intents COMPLETED) o, para los no completados, por el ambiente
+  // activo (los intents no guardan environment). Aquí filtramos por environment del
+  // documento cuando existe; los intents sin documento se atribuyen a `environment`
+  // pasado por el endpoint (el ambiente activo de emisión). Pagina por (created_at, id).
+  async listDonationIntentsForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { createdAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<
+    Array<
+      Pick<DonationIntentRecord, "id" | "status" | "document_id" | "donor_document" | "gift_type" | "created_at" | "paid_at"> & { direccion_departamento: string | null; donor_pais: string | null }
+    >
+  > {
+    // Intent belongs to the requested ambiente when its emitted document is in that
+    // ambiente; intents that never produced a document (PENDING/LINK_CREATED/EXPIRED)
+    // have no environment column, so they are attributed to the requested ambiente
+    // only when it matches the active emission environment the endpoint passes. To keep
+    // the funnel honest per-ambiente we require: either the joined doc is in `environment`,
+    // or there is no joined doc (unpaid/abandoned) — those are lane intents of the active
+    // ambiente the endpoint is scoped to.
+    const conditions = ["i.created_at >= ?", "i.created_at < ?", "(d.environment = ? OR d.id IS NULL)"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso, environment];
+    if (cursor) {
+      conditions.push("(i.created_at, i.id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT i.id, i.status, i.document_id, i.donor_document, i.gift_type, i.created_at, i.paid_at,
+                i.direccion_departamento AS direccion_departamento, i.donor_pais AS donor_pais
+         FROM donation_intents i
+         LEFT JOIN dte_documents d ON d.id = i.document_id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY i.created_at ASC, i.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<
+        Pick<DonationIntentRecord, "id" | "status" | "document_id" | "donor_document" | "gift_type" | "created_at" | "paid_at"> & { direccion_departamento: string | null; donor_pais: string | null }
+      >();
+    return rows.results ?? [];
+  }
+
+  // Entregas de correo del carril Wompi en el rango: solo las adjuntas a documentos con
+  // wompi_event_id en el ambiente pedido. Pagina por (created_at, id).
+  async listEmailDeliveriesForAnalytics(
+    range: { startIso: string; endIso: string },
+    environment: Ambiente,
+    cursor: { createdAt: string; id: string } | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<Array<{ id: string; document_id: string; status: string; created_at: string }>> {
+    const conditions = ["e.created_at >= ?", "e.created_at < ?", "d.wompi_event_id IS NOT NULL", "d.environment = ?"];
+    const bindings: Array<string | number> = [range.startIso, range.endIso, environment];
+    if (cursor) {
+      conditions.push("(e.created_at, e.id) > (?, ?)");
+      bindings.push(cursor.createdAt, cursor.id);
+    }
+    const rows = await this.db
+      .prepare(
+        `SELECT e.id, e.document_id, e.status, e.created_at
+         FROM email_deliveries e
+         JOIN dte_documents d ON d.id = e.document_id
+         WHERE ${conditions.join(" AND ")}
+         ORDER BY e.created_at ASC, e.id ASC LIMIT ?`
+      )
+      .bind(...bindings, limit)
+      .all<{ id: string; document_id: string; status: string; created_at: string }>();
+    return rows.results ?? [];
+  }
+
   async updateDocumentSigned(id: string, signedJws: string): Promise<void> {
     await this.db
       .prepare("UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? WHERE id = ?")

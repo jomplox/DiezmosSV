@@ -5930,6 +5930,109 @@ describe("branding", () => {
   });
 });
 
+describe("analytics endpoint (Wompi lane)", () => {
+  it("requires a session (401 without a token)", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(new Request("https://example.org/api/analytics"), env(db));
+    expect(response.status).toBe(401);
+  });
+
+  it("rejects a malformed date range", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-13-40&to=2026-01-01", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_analytics_range" });
+  });
+
+  it("aggregates the Wompi lane and excludes manually issued CDEs by design", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    // Wompi-lane accepted doc (environment 00).
+    db.documents.push(
+      testDocument({
+        id: "doc_wompi",
+        wompi_event_id: "wompi_lane",
+        environment: "00",
+        status: "ACCEPTED",
+        donor_email: "lane@example.org",
+        donor_name: "Lane Donor",
+        amount_cents: 5000,
+        issued_at: "2026-06-10T18:00:00.000Z",
+        accepted_at: "2026-06-10T18:00:20.000Z"
+      }),
+      // Manually issued CDE (no wompi_event_id) — must NOT appear in any total.
+      testDocument({
+        id: "doc_manual",
+        wompi_event_id: null,
+        environment: "00",
+        status: "ACCEPTED",
+        donor_email: "manual@example.org",
+        amount_cents: 999999,
+        issued_at: "2026-06-11T18:00:00.000Z"
+      })
+    );
+    db.donationIntents.push({
+      id: "di_lane",
+      status: "COMPLETED",
+      document_id: "doc_wompi",
+      donor_document: "DUI-1",
+      gift_type: "DIEZMO",
+      direccion_departamento: "06",
+      donor_pais: null,
+      created_at: "2026-06-10T17:50:00.000Z",
+      paid_at: "2026-06-10T17:55:00.000Z"
+    });
+    db.emailDeliveries.push({ id: "em_1", document_id: "doc_wompi", status: "SENT", created_at: "2026-06-10T18:01:00.000Z" });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { analytics: Record<string, any> };
+    const analytics = body.analytics;
+    expect(analytics.environment).toBe("00");
+    expect(analytics.hasData).toBe(true);
+    // Only the Wompi-lane doc counts (the 999999 manual CDE is excluded).
+    const june = analytics.giving.monthly.find((point: any) => point.key === "2026-06");
+    expect(june).toMatchObject({ totalCents: 5000, count: 1 });
+    // Gift split routes it to Diezmo via the correlated intent.
+    expect(analytics.giving.giftSplit.find((point: any) => point.key === "2026-06")?.diezmoCents).toBe(5000);
+    // Geography buckets it under department 06.
+    expect(analytics.geography.departments.find((row: any) => row.code === "06")?.count).toBe(1);
+    // Funnel + email pick up the lane intent and delivery.
+    expect(analytics.funnel).toMatchObject({ created: 1, datos: 1, paid: 1, completed: 1 });
+    expect(analytics.email.weekly.reduce((sum: number, point: any) => sum + point.sent, 0)).toBe(1);
+    // Top donors never leak numero de control.
+    expect(JSON.stringify(analytics.giving.topDonors)).not.toContain("numero_control");
+  });
+
+  it("scopes every metric to the requested ambiente", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({ id: "doc_00", wompi_event_id: "w00", environment: "00", amount_cents: 1000, issued_at: "2026-06-10T18:00:00.000Z" }),
+      testDocument({ id: "doc_01", wompi_event_id: "w01", environment: "01", amount_cents: 8000, issued_at: "2026-06-10T18:00:00.000Z" })
+    );
+    const response = await worker.fetch(
+      new Request("https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=01", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const body = (await response.json()) as { analytics: Record<string, any> };
+    const june = body.analytics.giving.monthly.find((point: any) => point.key === "2026-06");
+    // Only the 01 doc is counted; the 00 doc is invisible in this ambiente.
+    expect(june).toMatchObject({ totalCents: 8000, count: 1 });
+  });
+});
+
 function bootstrapRequest(options: { token?: string } = {}): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
@@ -6152,6 +6255,106 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    // ----- Analítica (carril Wompi) -----
+    // Documentos: dte_documents con wompi_event_id, LEFT JOIN a donation_intents por
+    // document_id, filtrado por environment + ventana issued_at, paginado por (issued_at, id).
+    if (this.sql.includes("FROM dte_documents d") && this.sql.includes("LEFT JOIN donation_intents i") && this.sql.includes("d.wompi_event_id IS NOT NULL")) {
+      const [environment, startIso, endIso] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          String(document.issued_at) >= startIso &&
+          String(document.issued_at) < endIso
+      );
+      if (this.sql.includes("(d.issued_at, d.id) > (?, ?)")) {
+        const [afterIssued, afterId] = [String(this.args[3]), String(this.args[4])];
+        documents = documents.filter(
+          (document) => String(document.issued_at) > afterIssued || (String(document.issued_at) === afterIssued && String(document.id) > afterId)
+        );
+      }
+      documents.sort((left, right) => String(left.issued_at).localeCompare(String(right.issued_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = documents.slice(0, limit).map((document) => {
+        const intent = this.db.donationIntents.find((candidate) => candidate.document_id === document.id);
+        return {
+          id: document.id,
+          wompi_event_id: document.wompi_event_id,
+          environment: document.environment,
+          status: document.status,
+          donor_email: document.donor_email ?? null,
+          donor_name: document.donor_name ?? null,
+          amount_cents: document.amount_cents,
+          issued_at: document.issued_at,
+          accepted_at: document.accepted_at ?? null,
+          transmission_deferred_at: document.transmission_deferred_at ?? null,
+          direccion_departamento: intent?.direccion_departamento ?? null,
+          donor_pais: intent?.donor_pais ?? null,
+          gift_type: intent?.gift_type ?? null
+        };
+      });
+      return { results: rows as T[] };
+    }
+    // Intents: donation_intents LEFT JOIN dte_documents, filtrado por ventana created_at
+    // y (documento en el ambiente O sin documento). Distinguible por la proyección de
+    // i.direccion_departamento.
+    if (this.sql.includes("FROM donation_intents i") && this.sql.includes("i.direccion_departamento AS direccion_departamento") && this.sql.includes("LEFT JOIN dte_documents d")) {
+      const [startIso, endIso, environment] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let intents = this.db.donationIntents.filter((intent) => String(intent.created_at) >= startIso && String(intent.created_at) < endIso);
+      intents = intents.filter((intent) => {
+        const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
+        return document ? document.environment === environment : true;
+      });
+      if (this.sql.includes("(i.created_at, i.id) > (?, ?)")) {
+        const [afterCreated, afterId] = [String(this.args[3]), String(this.args[4])];
+        intents = intents.filter(
+          (intent) => String(intent.created_at) > afterCreated || (String(intent.created_at) === afterCreated && String(intent.id) > afterId)
+        );
+      }
+      intents.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = intents.slice(0, limit).map((intent) => ({
+        id: intent.id,
+        status: intent.status,
+        document_id: intent.document_id ?? null,
+        donor_document: intent.donor_document ?? null,
+        gift_type: intent.gift_type ?? null,
+        created_at: intent.created_at,
+        paid_at: intent.paid_at ?? null,
+        direccion_departamento: intent.direccion_departamento ?? null,
+        donor_pais: intent.donor_pais ?? null
+      }));
+      return { results: rows as T[] };
+    }
+    // Emails: email_deliveries JOIN dte_documents (carril Wompi + environment), ventana created_at.
+    if (this.sql.includes("FROM email_deliveries e") && this.sql.includes("JOIN dte_documents d")) {
+      const [startIso, endIso, environment] = [String(this.args[0]), String(this.args[1]), String(this.args[2])];
+      let deliveries = this.db.emailDeliveries.filter((delivery) => {
+        const document = this.db.documents.find((candidate) => candidate.id === delivery.document_id);
+        return (
+          document != null &&
+          document.wompi_event_id != null &&
+          document.environment === environment &&
+          String(delivery.created_at) >= startIso &&
+          String(delivery.created_at) < endIso
+        );
+      });
+      if (this.sql.includes("(e.created_at, e.id) > (?, ?)")) {
+        const [afterCreated, afterId] = [String(this.args[3]), String(this.args[4])];
+        deliveries = deliveries.filter(
+          (delivery) => String(delivery.created_at) > afterCreated || (String(delivery.created_at) === afterCreated && String(delivery.id) > afterId)
+        );
+      }
+      deliveries.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
+      const limit = Number(this.args.at(-1) ?? 500);
+      const rows = deliveries.slice(0, limit).map((delivery) => ({
+        id: delivery.id,
+        document_id: delivery.document_id,
+        status: delivery.status,
+        created_at: delivery.created_at
+      }));
+      return { results: rows as T[] };
+    }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
       // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
       // the fields the deactivation sweep needs.
