@@ -156,12 +156,14 @@ interface DonarIntent {
 }
 
 // A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
-// transition, tagged with the amount + gift type it was minted with so Paso 2 submit
-// can tell whether the donor edited either (stale → abandon the draft, full POST).
+// transition, tagged with the amount + gift type AND the mint time so Paso 2 submit can
+// tell whether the donor edited either (stale → full POST) or left the retained link near
+// expiry (aged out → full POST). See draftMatchesForm / DONAR_DRAFT_REUSE_WINDOW_MS.
 interface DonarDraftIntent {
   intent: DonarIntent;
   amount: string;
   giftType: DonarGiftType | "";
+  mintedAt: number;
 }
 
 // The default logo, reusing the vector paths shared with the worker's PDF renderer
@@ -640,9 +642,10 @@ export function DonarPage() {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
       // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
       // submit. Never blocks the step change; a failure just leaves draftIntent null and
-      // Paso 2 submit falls back to the full POST. A draft that still matches (Atrás →
-      // Continuar without edits) is reused — each mint costs a Wompi link and one of the
-      // donor's throttle slots, so only a missing or stale draft triggers a fresh one.
+      // Paso 2 submit falls back to the full POST. A draft that still matches AND is
+      // comfortably inside the Wompi vigencia (Atrás → Continuar without edits) is reused —
+      // each mint costs a Wompi link and one of the donor's throttle slots, so only a
+      // missing, edited, or aged-out draft triggers a fresh one.
       if (!draftIntent || !draftMatchesForm(draftIntent, form)) {
         mintDraftIntent(form.amount.trim(), form.giftType);
       }
@@ -659,7 +662,7 @@ export function DonarPage() {
       body: donationDraftBody({ amount, giftType })
     })
       .then((created) => {
-        setDraftIntent({ intent: created, amount, giftType });
+        setDraftIntent({ intent: created, amount, giftType, mintedAt: Date.now() });
       })
       .catch(() => {
         // Ignored: Paso 2 submit falls back to the full-body POST.

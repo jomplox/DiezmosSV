@@ -5,6 +5,7 @@ import {
   DONAR_AMOUNT_CHIPS,
   DONAR_BACK_LABEL,
   DONAR_CONTINUE_LABEL,
+  DONAR_DRAFT_REUSE_WINDOW_MS,
   DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
@@ -408,13 +409,26 @@ describe("donar premint (background draft + datos completion)", () => {
     expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
   });
 
-  it("treats a draft as fresh only when both the amount and the gift type still match", () => {
-    const draft = { amount: "10.00", giftType: "DIEZMO" as const };
-    expect(draftMatchesForm(draft, base)).toBe(true);
+  it("treats a draft as fresh only when the amount, the gift type, and the age are all valid", () => {
+    const now = Date.UTC(2026, 0, 1, 12, 0, 0);
+    const draft = { amount: "10.00", giftType: "DIEZMO" as const, mintedAt: now };
+    // Just inside the reuse window with amount + tipo unchanged → reuse.
+    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS - 1)).toBe(true);
     // Edited amount → stale (abandon and full-POST).
-    expect(draftMatchesForm(draft, { ...base, amount: "20.00" })).toBe(false);
+    expect(draftMatchesForm(draft, { ...base, amount: "20.00" }, now)).toBe(false);
     // Switched Diezmo → Ofrenda → stale.
-    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" })).toBe(false);
+    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" }, now)).toBe(false);
+    // Held past the reuse window (donor left the tab open) → stale even if values match,
+    // because the retained Wompi link is near/at expiry.
+    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS)).toBe(false);
+  });
+
+  it("keeps the reuse window safely inside the worker's one-hour Wompi link vigencia", () => {
+    // INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS are 1h on the worker; the client window
+    // must be a conservative margin under that so a retained draft is never reused near expiry.
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeGreaterThan(0);
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThan(60 * 60 * 1000);
+    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThanOrEqual(45 * 60 * 1000);
   });
 });
 
@@ -427,9 +441,10 @@ describe("donar premint source contract", () => {
     // Fire-and-forget: no await on the draft create, errors swallowed.
     expect(donarSource).toContain("void donarApi");
     expect(donarSource).toContain("setDraftIntent(");
-    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) must reuse
-    // the draft already held — never re-mint. Each mint costs a Wompi link and one of
-    // the donor's 5 throttle slots per 15 minutes.
+    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) may reuse the
+    // draft already held only while it is comfortably inside Wompi's validity window —
+    // the draft records its mint time so draftMatchesForm can age it out.
+    expect(donarSource).toContain("mintedAt: Date.now()");
     expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
   });
 
