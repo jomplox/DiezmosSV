@@ -473,15 +473,16 @@ país is Estados Unidos (`US`)**, the SV fiscal fields collapse entirely and the
 US-deductible receipt, not a Salvadoran CDE, and the gift belongs on the US entity's books — so these
 donations flow entirely through Givebutter and **never touch Wompi, the intent table, the webhook, or
 the CDE pipeline**. There is **no backend involvement**: no intent is created, no migration exists, and
-Givebutter emails its own tax receipt. The widget script (`widgets.givebutter.com`) is injected only
-when this path first activates (never on admin views, never for non-US donors), and the chosen amount
-plus an optional **"Donación mensual"** toggle (`frequency=monthly`) are prefilled into the page URL for
-the widget. If the embedded form does not render within ~4 s, a prominent **"Donar en GiveButter"**
-link to `https://givebutter.com/example-campaign?amount=…` (opens in a new tab) is shown; a small **"Done en
+Givebutter emails its own tax receipt. The page embeds Givebutter's frameable
+`https://givebutter.com/embed/c/example-campaign` iframe directly — **not** the
+`widgets.givebutter.com` script — so third-party JavaScript does not execute on the app origin. The
+chosen amount plus an optional **"Donación mensual"** toggle (`frequency=monthly`) are prefilled in the
+iframe URL. If the embedded form does not load within ~4 s, a prominent **"Donar en GiveButter"** link
+to `https://givebutter.com/example-campaign?amount=…` (opens in a new tab) is shown; a small **"Done en
 GiveButter"** version of that link is always present beneath the form (GiveButter is the anchor text —
 no raw URL is shown). There is **no escape hatch** back to the SV form: the donor deliberately chose the
 EE. UU. door, and **"← Cambiar opción"** is the way back. All Givebutter constants (account, campaign,
-script URL) live in `src/client/donation.ts`.
+embed URL) live in `src/client/donation.ts`.
 
 Both doors fund the **same** mother church in El Salvador — Friends of Misión ExampleOrganization (the US
 501(c)(3)) is only the US giving vehicle, never a different beneficiary; the copy is residence-based, not

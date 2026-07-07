@@ -3506,8 +3506,12 @@ pre {
   gap: 14px;
 }
 
-.donar-givebutter-widget {
-  min-height: 64px;
+.donar-givebutter-frame {
+  width: min(100%, 440px);
+  min-height: 860px;
+  border: 0;
+  justify-self: center;
+  background: #fff;
 }
 
 /* Givebutter cannot be localized: the widget always renders in English. */
