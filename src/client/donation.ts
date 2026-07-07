@@ -204,7 +204,8 @@ export const DONAR_WIDGET_DELAYED_MESSAGE =
   "Esto está tardando más de lo esperado. Puede continuar su entrega en la página segura de Wompi:";
 export const DONAR_WIDGET_FALLBACK_CTA = "Continuar en Wompi";
 
-// Preconnect target for the Paso 3 embed: DNS + TLS are warmed on wizard mount.
+// Preconnect target for the Paso 3 embed: DNS + TLS are warmed only after the donor
+// chooses the SV/Wompi path, so chooser-only visits do not contact Wompi.
 export const DONAR_WOMPI_CHECKOUT_ORIGIN = "https://pagos.wompi.sv";
 
 // postMessage payload the thank-you page sends to its opener (the /donar view)

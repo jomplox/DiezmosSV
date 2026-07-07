@@ -404,9 +404,14 @@ export function DonarPage() {
     };
   }, []);
 
-  // Warm DNS + TLS to Wompi's checkout host while the donor fills the form, so the
-  // Paso 3 embed skips connection setup (a few hundred ms on mobile networks).
+  // Warm DNS + TLS to Wompi's checkout host once the donor commits to the SV/Wompi
+  // path, so the Paso 3 embed skips connection setup (a few hundred ms on mobile
+  // networks). The chooser and the EE. UU./Givebutter path must not disclose
+  // third-party network metadata to Wompi before that flow is actually chosen.
   useEffect(() => {
+    if (door !== "sv" || usDonation) {
+      return;
+    }
     if (document.querySelector(`link[rel="preconnect"][href="${DONAR_WOMPI_CHECKOUT_ORIGIN}"]`)) {
       return;
     }
@@ -414,7 +419,7 @@ export function DonarPage() {
     link.rel = "preconnect";
     link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
     document.head.appendChild(link);
-  }, []);
+  }, [door, usDonation]);
 
   // Inject the Givebutter widget script ONLY when the US donation path first becomes
   // active — never on admin views, never for non-US donors. Guarded like the Wompi
