@@ -1131,6 +1131,17 @@ export class Repository {
     return Number(row?.count ?? 0);
   }
 
+  // Same rolling-window count as above, but additionally scoped to the caller's IP
+  // (null-safe via IS). Used by the login throttle so an attacker cannot lock out a
+  // victim's email by seeding failures from a different address.
+  async countAuditEntriesSinceForIp(action: string, entityId: string, actorIp: string | null, sinceIso: string): Promise<number> {
+    const row = await this.db
+      .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ? AND created_at >= ? AND actor_ip IS ?")
+      .bind(action, entityId, sinceIso, actorIp)
+      .first<{ count: number }>();
+    return Number(row?.count ?? 0);
+  }
+
   // Paged reads for the monthly legal-retention export (Task 1). Each call reads at
   // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged
