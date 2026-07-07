@@ -67,6 +67,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   CONTINGENCY_DTE_REJECTED: "CDE de contingencia rechazado",
   CONTINGENCY_OPEN_REUSED: "Contingencia reutilizada",
   CONTINGENCY_OPENED: "Contingencia abierta",
+  CONTACTS_EXPORTED: "Exportación de contactos",
   CREDENTIALS_UPDATED: "Credenciales actualizadas",
   DTE_ACCEPTED: "DTE aceptado",
   DTE_CONTINGENCY_PENDING: "DTE en contingencia",

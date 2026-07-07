@@ -639,6 +639,30 @@ export function App() {
     });
   }
 
+  async function downloadContacts() {
+    await runAction("export-contacts", async () => {
+      const environment = emissionEnvironment?.environment;
+      if (!environment) {
+        throw new Error("No se pudo determinar el ambiente activo.");
+      }
+      const response = await fetch(`/api/exports/contacts?environment=${environment}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "contactos-donantes.csv");
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast("Contactos exportados");
+    });
+  }
+
   async function verifyBackup(month: string) {
     await runAction(`backup-verify-${month}`, async () => {
       const result = await api<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, token, { method: "POST" });
@@ -1166,6 +1190,11 @@ export function App() {
               onYearChange={setCertificateYear}
               onSend={sendAnnualCertificates}
               onSendDonor={sendDonorCertificate}
+            />
+            <ContactsExportPanel
+              environment={emissionEnvironment?.environment ?? null}
+              busy={busy === "export-contacts"}
+              onDownload={downloadContacts}
             />
             <BackupsPanel
               months={backups}
@@ -1818,6 +1847,40 @@ function AnnualCertificatePanel({
           </tbody>
         </table>
       </div>
+    </section>
+  );
+}
+
+// Bulk donor-contacts CSV export for CRM import. Exports the ACTIVE emission
+// ambiente (the same ambiente in which donations are currently issued); the button
+// stays disabled until the active ambiente is known.
+function ContactsExportPanel({
+  environment,
+  busy,
+  onDownload
+}: {
+  environment: EmissionEnvironmentState["environment"] | null;
+  busy: boolean;
+  onDownload: () => Promise<void>;
+}) {
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Contactos para CRM</h2>
+          <p>Exporte los datos de contacto de sus donantes para importarlos en un CRM como GiveButter.</p>
+        </div>
+        <Users size={20} />
+      </div>
+      <div className="export-controls">
+        <button className="primary" disabled={busy || !environment} onClick={() => void onDownload()}>
+          <Download size={16} />
+          {busy ? "Preparando" : "Descargar contactos"}
+        </button>
+      </div>
+      <p className="hint">
+        Se exportan los contactos del ambiente activo{environment ? ` (${environmentLabel(environment)})` : ""}.
+      </p>
     </section>
   );
 }
