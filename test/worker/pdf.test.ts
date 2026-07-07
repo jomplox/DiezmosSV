@@ -254,6 +254,29 @@ function redPixelBounds(
   };
 }
 
+describe("renderDtePdf unicode sanitization", () => {
+  it("replaces unsupported Unicode from donor-controlled fields instead of throwing", async () => {
+    // Wompi passes donor-typed strings straight through; WinAnsi StandardFonts throw
+    // on emoji/CJK, which killed the receipt email. Unsupported chars become "?".
+    const record = testDocument();
+    const plain = JSON.parse(record.plain_json) as Record<string, any>;
+    plain.receptor.nombre = "Jose 🙏 Vega";
+    plain.receptor.direccion = { departamento: "06", municipio: "23", distrito: "03", complemento: "Casa 🏠 azul 你好" };
+    plain.cuerpoDocumento[0].descripcion = "Diezmo 🙏 familiar";
+    record.plain_json = JSON.stringify(plain);
+
+    const pdf = await renderDtePdf(record);
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-unicode-"));
+    const pdfPath = join(dir, "doc.pdf");
+    const txtPath = join(dir, "doc.txt");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+    const text = readFileSync(txtPath, "utf8");
+    expect(text).toContain("JOSE ? VEGA");
+    expect(text).toContain("Casa ? azul ??");
+  });
+});
+
 describe("renderDtePdf foreign receptor", () => {
   it("prints the país and the apéndice foreign address when direccion is null, without label overlap", async () => {
     const record = testDocument();
