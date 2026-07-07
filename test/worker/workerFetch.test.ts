@@ -1513,6 +1513,86 @@ describe("user administration", () => {
     });
   });
 
+  it("stops an ADMIN from creating or promoting a user to OWNER", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const promote = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "OWNER" })
+      }),
+      env(db)
+    );
+    expect(promote.status).toBe(403);
+    await expect(promote.json()).resolves.toMatchObject({ error: "owner_role_required" });
+    expect(db.users[0].role).toBe("OPERATOR");
+
+    const create = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "new-owner@example.org", name: "New Owner", role: "OWNER", password: "Owner-password1!" })
+      }),
+      env(db)
+    );
+    expect(create.status).toBe(403);
+    await expect(create.json()).resolves.toMatchObject({ error: "owner_role_required" });
+    expect(db.users).toHaveLength(1);
+  });
+
+  it("lets an OWNER create and promote users to OWNER", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+
+    const promote = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ role: "OWNER" })
+      }),
+      env(db)
+    );
+    expect(promote.status).toBe(200);
+    await expect(promote.json()).resolves.toMatchObject({ user: { id: "user_operator", role: "OWNER" } });
+    expect(db.users[0].role).toBe("OWNER");
+
+    const create = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "second-owner@example.org", name: "Second Owner", role: "OWNER", password: "Owner-password1!" })
+      }),
+      env(db)
+    );
+    expect(create.status).toBe(201);
+    await expect(create.json()).resolves.toMatchObject({ user: { role: "OWNER" } });
+    expect(db.users).toHaveLength(2);
+  });
+
   it("resets a user's password and revokes active sessions", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
