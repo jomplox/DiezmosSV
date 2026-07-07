@@ -78,7 +78,14 @@ SELECT
   direccion_complemento,
   wompi_id_enlace,
   wompi_url_enlace,
-  wompi_url_enlace_largo,
+  -- wompi_url_enlace_largo was added to 0009 after that migration first shipped, so a
+  -- database that applied the original 0009 reaches this rebuild WITHOUT the column and
+  -- reading it here would abort with "no such column". Following the same rule 0004 uses
+  -- (a rebuild copies only columns guaranteed to exist in every prior variant), we insert
+  -- NULL for it. The rebuilt table still declares the column above, so 0011/0012/0015 and
+  -- every later write (e.g. attachIntentLink) find it. On a fresh database there are no
+  -- rows to copy, so the result is identical to reading the column directly.
+  NULL,
   document_id,
   client_ip,
   created_at,
