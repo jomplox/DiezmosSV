@@ -3669,3 +3669,396 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   outline: 2px solid var(--accent, #0f766e);
   outline-offset: 2px;
 }
+
+/* ===== Analítica (carril Wompi) ===== */
+/* Charts are hand-rolled SVG themed exclusively with the existing variables; no new
+   hex colors and no animations (prefers-reduced-motion is respected by having none). */
+
+.analytics-view {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.analytics-panel,
+.analytics-filters {
+  padding: 20px;
+}
+
+.analytics-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.analytics-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.analytics-field > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 650;
+}
+
+.analytics-field select,
+.analytics-field input[type="date"] {
+  min-height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  padding: 0 12px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.analytics-segmented {
+  display: inline-flex;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.analytics-segmented button {
+  border: none;
+  border-radius: 0;
+  min-height: 38px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font-weight: 650;
+}
+
+.analytics-segmented button + button {
+  border-left: 1px solid var(--line-strong);
+}
+
+.analytics-segmented button.active {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+}
+
+.analytics-note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--ink-secondary);
+}
+
+.analytics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+
+.analytics-card {
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  padding: 14px;
+  background: var(--surface);
+  min-width: 0;
+}
+
+.analytics-card-wide {
+  grid-column: 1 / -1;
+}
+
+.analytics-card-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+
+.analytics-empty,
+.analytics-empty-small {
+  color: var(--ink-muted);
+  font-size: 13px;
+}
+
+.analytics-empty-small {
+  font-size: 12px;
+  padding: 12px 0;
+}
+
+.analytics-muted {
+  color: var(--ink-muted);
+}
+
+.analytics-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.analytics-axis {
+  stroke: var(--line-strong);
+  stroke-width: 1;
+}
+
+.analytics-axis-label,
+.analytics-legend {
+  font-size: 8px;
+  fill: var(--ink-muted);
+}
+
+.analytics-legend-current,
+.analytics-legend-ok {
+  fill: var(--accent-ink);
+}
+
+.analytics-legend-prior {
+  fill: var(--ink-muted);
+}
+
+.analytics-legend-danger {
+  fill: var(--danger-ink);
+}
+
+.analytics-area {
+  fill: var(--accent-tint);
+}
+
+.analytics-line {
+  stroke: var(--accent);
+  stroke-width: 2;
+}
+
+.analytics-line-prior {
+  stroke: var(--line-strong);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+}
+
+.analytics-dot {
+  fill: var(--accent);
+}
+
+.analytics-bar {
+  fill: var(--accent);
+}
+
+.analytics-bar-returning,
+.analytics-bar-ofrenda {
+  fill: var(--accent-tint-border);
+}
+
+.analytics-bar-new,
+.analytics-bar-diezmo {
+  fill: var(--accent);
+}
+
+.analytics-bar-ok {
+  fill: var(--ok);
+}
+
+.analytics-bar-danger {
+  fill: var(--danger);
+}
+
+.analytics-bar-warn {
+  fill: var(--warn);
+}
+
+/* ---- Funnel ---- */
+.analytics-funnel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.analytics-funnel-row {
+  display: grid;
+  grid-template-columns: 100px 1fr 48px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.analytics-funnel-label {
+  color: var(--ink-secondary);
+  font-weight: 650;
+}
+
+.analytics-funnel-track {
+  position: relative;
+  background: var(--surface-muted);
+  border-radius: 6px;
+  height: 24px;
+  overflow: hidden;
+}
+
+.analytics-funnel-bar {
+  height: 100%;
+  background: var(--accent-tint);
+  border-right: 2px solid var(--accent);
+}
+
+.analytics-funnel-count {
+  position: absolute;
+  top: 0;
+  left: 8px;
+  line-height: 24px;
+  font-weight: 700;
+  color: var(--accent-strong-ink);
+}
+
+.analytics-funnel-drop {
+  color: var(--danger-ink);
+  font-weight: 650;
+  text-align: right;
+}
+
+.analytics-stats-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.analytics-stat {
+  font-size: 13px;
+  color: var(--ink-secondary);
+}
+
+.analytics-projection strong {
+  color: var(--accent-ink);
+}
+
+/* ---- Tables (donors, lapsed, cohort, heatmap) ---- */
+.analytics-table-scroll {
+  overflow-x: auto;
+}
+
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.analytics-table th,
+.analytics-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.analytics-table th.numeric,
+.analytics-table td.numeric,
+.analytics-cohort th.numeric,
+.analytics-cohort td.numeric {
+  text-align: right;
+}
+
+.analytics-donor-name {
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.analytics-donor-email {
+  font-size: 11px;
+  color: var(--ink-muted);
+}
+
+.analytics-cohort,
+.analytics-heatmap {
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.analytics-cohort th,
+.analytics-cohort td {
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.analytics-cohort-cell {
+  color: var(--accent-strong-ink);
+  font-weight: 600;
+}
+
+.analytics-heatmap th,
+.analytics-heatmap td {
+  border: 1px solid var(--line);
+}
+
+.analytics-heatmap-hour {
+  font-size: 8px;
+  color: var(--ink-muted);
+  padding: 2px;
+  font-weight: 500;
+}
+
+.analytics-heatmap-day {
+  font-size: 10px;
+  color: var(--ink-secondary);
+  padding: 2px 6px;
+  text-align: right;
+  font-weight: 650;
+}
+
+.analytics-heatmap-cell {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+}
+
+/* ---- Geography ---- */
+.analytics-geo {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.analytics-geo-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-secondary);
+  margin-bottom: 6px;
+}
+
+.analytics-geo-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.analytics-geo-list li {
+  display: grid;
+  grid-template-columns: 96px 1fr auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.analytics-geo-label {
+  color: var(--ink-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analytics-geo-track {
+  background: var(--surface-muted);
+  border-radius: 5px;
+  height: 12px;
+  overflow: hidden;
+}
+
+.analytics-geo-bar {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.analytics-geo-value {
+  color: var(--ink);
+  font-weight: 650;
+  white-space: nowrap;
+}

@@ -267,3 +267,127 @@ export interface BackupVerifyResult {
   ok: boolean;
   files: BackupVerifyFile[];
 }
+
+// ----- Analítica (carril Wompi) -----
+// Mirror of the /api/analytics response. Amounts are integer cents; the client formats.
+
+export interface AnalyticsMonthlyPoint {
+  key: string;
+  totalCents: number;
+  count: number;
+  averageCents: number;
+}
+
+export interface AnalyticsWeeklyPoint {
+  key: string;
+  totalCents: number;
+  count: number;
+}
+
+export interface AnalyticsGiftSplitPoint {
+  key: string;
+  diezmoCents: number;
+  ofrendaCents: number;
+  otherCents: number;
+}
+
+export interface AnalyticsDonorMixPoint {
+  key: string;
+  newDonors: number;
+  returningDonors: number;
+}
+
+export interface AnalyticsYoyPoint {
+  month: string;
+  currentCents: number;
+  priorCents: number;
+}
+
+export interface AnalyticsTopDonor {
+  donorName: string;
+  donorEmail: string | null;
+  count: number;
+  totalCents: number;
+}
+
+export interface AnalyticsGeoBucket {
+  code: string;
+  label: string;
+  count: number;
+  totalCents: number;
+}
+
+export interface AnalyticsFunnel {
+  created: number;
+  datos: number;
+  paid: number;
+  completed: number;
+  datosDropPct: number;
+  paidDropPct: number;
+  completedDropPct: number;
+  medianMinutesToPay: number;
+}
+
+export interface AnalyticsMhHealth {
+  medianLatencySeconds: number;
+  p90LatencySeconds: number;
+  weeklyRejections: Array<{ key: string; count: number }>;
+  weeklyDeferred: Array<{ key: string; count: number }>;
+}
+
+export interface AnalyticsEmailWeeklyPoint {
+  key: string;
+  sent: number;
+  failed: number;
+}
+
+export interface AnalyticsCohortRow {
+  cohort: string;
+  size: number;
+  retention: number[];
+}
+
+export interface AnalyticsLapsedDonor {
+  donorName: string;
+  donorEmail: string | null;
+  totalCents: number;
+  lastGiftAt: string;
+}
+
+export interface AnalyticsHeatmapCell {
+  day: number;
+  hour: number;
+  count: number;
+}
+
+export interface AnalyticsProjection {
+  currentMonthKey: string;
+  currentMonthCents: number;
+  movingAverageCents: number;
+  runRateCents: number;
+}
+
+export interface AnalyticsResponse {
+  range: { from: string; to: string };
+  environment: "00" | "01" | null;
+  hasData: boolean;
+  giving: {
+    monthly: AnalyticsMonthlyPoint[];
+    weekly: AnalyticsWeeklyPoint[];
+    giftSplit: AnalyticsGiftSplitPoint[];
+    donorMix: AnalyticsDonorMixPoint[];
+    yoy: AnalyticsYoyPoint[];
+    topDonors: AnalyticsTopDonor[];
+  };
+  geography: {
+    departments: AnalyticsGeoBucket[];
+    foreign: AnalyticsGeoBucket[];
+  };
+  funnel: AnalyticsFunnel;
+  mhHealth: AnalyticsMhHealth;
+  email: { weekly: AnalyticsEmailWeeklyPoint[] };
+  cohorts: AnalyticsCohortRow[];
+  lapsed: { count: number; donors: AnalyticsLapsedDonor[] };
+  heatmap: AnalyticsHeatmapCell[];
+  projection: AnalyticsProjection;
+}
