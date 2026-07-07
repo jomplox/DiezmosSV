@@ -187,6 +187,9 @@ export function App() {
   const [documents, setDocuments] = useState<DteDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
+  // Keyset cursor for the audit trail ("<created_at>|<id>"); null = no older pages.
+  const [auditCursor, setAuditCursor] = useState<string | null>(null);
+  const [auditLoadingMore, setAuditLoadingMore] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
@@ -450,7 +453,9 @@ export function App() {
     const contingencyResult = await api<{ contingency: ContingencyState }>("/api/contingency", token);
     setContingency(contingencyResult.contingency);
     if (view === "audit") {
-      setAudit((await api<{ audit: AuditRow[] }>("/api/audit", token)).audit);
+      const auditPage = await api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50", token);
+      setAudit(auditPage.audit);
+      setAuditCursor(auditPage.nextCursor);
     }
     if (view === "users" && can(user, "ADMIN")) {
       setUsers((await api<{ users: User[] }>("/api/users", token)).users);
@@ -969,6 +974,27 @@ export function App() {
     }
   }
 
+  // Appends the next audit page (keyset cursor); the text filter keeps operating
+  // over everything loaded so far.
+  async function loadMoreAudit() {
+    if (!auditCursor || auditLoadingMore) {
+      return;
+    }
+    setAuditLoadingMore(true);
+    try {
+      const pageResult = await api<{ audit: AuditRow[]; nextCursor: string | null }>(
+        `/api/audit?limit=50&cursor=${encodeURIComponent(auditCursor)}`,
+        token
+      );
+      setAudit((current) => [...current, ...pageResult.audit]);
+      setAuditCursor(pageResult.nextCursor);
+    } catch (err) {
+      setToast(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setAuditLoadingMore(false);
+    }
+  }
+
   if (!token || !user) {
     return (
       <AuthScreen
@@ -1169,6 +1195,18 @@ export function App() {
               </button>
             </div>
             <AuditTable rows={filterAuditEntries(audit, auditQuery)} />
+            <div className="audit-pagination">
+              <small>
+                {auditQuery.trim()
+                  ? `${filterAuditEntries(audit, auditQuery).length} de ${audit.length} registros cargados coinciden con el filtro.`
+                  : `${audit.length} registros cargados.`}
+              </small>
+              {auditCursor && (
+                <button type="button" disabled={auditLoadingMore} onClick={() => void loadMoreAudit()}>
+                  {auditLoadingMore ? "Cargando…" : "Cargar más"}
+                </button>
+              )}
+            </div>
           </section>
         )}
 

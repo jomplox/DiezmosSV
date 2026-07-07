@@ -781,7 +781,29 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/audit" && request.method === "GET") {
     requireRole(user, "VIEWER");
-    return jsonResponse({ audit: await repo.listAudit(url.searchParams.get("entityType") ?? undefined, url.searchParams.get("entityId") ?? undefined) });
+    const entityType = url.searchParams.get("entityType");
+    const entityId = url.searchParams.get("entityId");
+    if (entityType && entityId) {
+      // Entity-scoped history keeps its original (uncapped-page) shape.
+      return jsonResponse({ audit: await repo.listAudit(entityType, entityId), nextCursor: null });
+    }
+    // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
+    // grows forever, so the old flat LIMIT 100 silently hid everything older.
+    const limitParam = Number(url.searchParams.get("limit") ?? "50");
+    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(Math.trunc(limitParam), 1), 100) : 50;
+    const rawCursor = url.searchParams.get("cursor");
+    let cursor: { createdAt: string; id: string } | null = null;
+    if (rawCursor) {
+      const split = rawCursor.lastIndexOf("|");
+      if (split > 0) {
+        cursor = { createdAt: rawCursor.slice(0, split), id: rawCursor.slice(split + 1) };
+      }
+    }
+    const rows = await repo.listAuditPage(cursor, limit);
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
+    const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
+    return jsonResponse({ audit: page, nextCursor });
   }
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {

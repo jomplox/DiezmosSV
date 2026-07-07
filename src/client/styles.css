@@ -4089,6 +4089,15 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
   color: var(--accent-ink);
 }
 
+.audit-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--ink-muted);
+}
+
 /* ---- Tables (donors, lapsed, cohort, heatmap) ---- */
 .analytics-table-scroll {
   overflow-x: auto;
