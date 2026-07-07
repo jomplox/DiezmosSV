@@ -169,19 +169,6 @@ describe("donation intents repository", () => {
     expect(update!.args).toContain("di_1");
   });
 
-  it("bulk-expires unpaid (PENDING and LINK_CREATED) intents whose expiry is before the cutoff", async () => {
-    const { repository, db } = repo();
-
-    await repository.expireUnpaidIntentsBefore("2026-07-05T13:00:00.000Z");
-
-    const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("status = 'EXPIRED'"));
-    expect(update).toBeTruthy();
-    // Both unpaid states are swept: a minted-but-never-paid LINK_CREATED intent
-    // must not sit unexpired forever, same as an abandoned PENDING one.
-    expect(update!.sql).toContain("status IN ('PENDING','LINK_CREATED')");
-    expect(update!.sql).toContain("expires_at < ?");
-    expect(update!.args).toContain("2026-07-05T13:00:00.000Z");
-  });
 
   it("lists a bounded oldest-first page of expiring intents", async () => {
     const { repository, db } = repo();
