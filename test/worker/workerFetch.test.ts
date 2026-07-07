@@ -1440,7 +1440,7 @@ describe("online donation intents listing", () => {
     expect(response.status).toBe(401);
   });
 
-  it("returns the newest intents for a VIEWER, exposing the linked numero de control for COMPLETED", async () => {
+  it("returns only allowlisted intent fields, exposing the linked numero de control for COMPLETED", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
     db.documents.push(
@@ -1513,7 +1513,7 @@ describe("online donation intents listing", () => {
 
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
-      intents: Array<{ id: string; status: string; numero_control: string | null; document_donor_name: string | null; gift_type: string | null }>;
+      intents: Array<Record<string, unknown> & { id: string; status: string; numero_control: string | null; document_donor_name: string | null; gift_type: string | null }>;
     };
     // Newest first: the COMPLETED intent (12:00) precedes the PENDING one (10:00).
     expect(body.intents.map((intent) => intent.id)).toEqual(["di_done", "di_pending"]);
@@ -1525,6 +1525,19 @@ describe("online donation intents listing", () => {
     // The admin listing carries gift_type so the panel can render the Tipo column.
     expect(body.intents[0].gift_type).toBe("DIEZMO");
     expect(body.intents[1].gift_type).toBeNull();
+    // Least privilege: the listing must not carry donor PII, the client IP, or the
+    // payment-link metadata that donation_intents.* used to leak.
+    for (const intent of body.intents) {
+      expect(intent).not.toHaveProperty("donor_document");
+      expect(intent).not.toHaveProperty("donor_document_type");
+      expect(intent).not.toHaveProperty("donor_email");
+      expect(intent).not.toHaveProperty("donor_name");
+      expect(intent).not.toHaveProperty("donor_phone");
+      expect(intent).not.toHaveProperty("direccion_complemento");
+      expect(intent).not.toHaveProperty("client_ip");
+      expect(intent).not.toHaveProperty("wompi_url_enlace");
+      expect(intent).not.toHaveProperty("wompi_url_enlace_largo");
+    }
   });
 });
 
@@ -7580,8 +7593,15 @@ class Statement {
         .slice(0, limit)
         .map((intent) => {
           const document = this.db.documents.find((candidate) => candidate.id === intent.document_id);
+          // Mirror the repository's allowlisted projection: the listing exposes only the
+          // fields the admin panel renders, never donor PII or payment-link metadata.
           return {
-            ...intent,
+            id: intent.id,
+            status: intent.status,
+            amount_cents: intent.amount_cents,
+            document_id: intent.document_id ?? null,
+            gift_type: intent.gift_type ?? null,
+            created_at: intent.created_at,
             numero_control: document?.numero_control ?? null,
             document_donor_name: document?.donor_name ?? null
           };

@@ -305,9 +305,19 @@ export class Repository {
   // status. The donante shown in the panel comes from the document (lifted from the
   // webhook), since the intent no longer stores name/email.
   async listRecentDonationIntents(limit = 50): Promise<DonationIntentListItem[]> {
+    // Least privilege: allowlist only the columns the admin "Donaciones en línea" panel
+    // renders (status, tipo, amount, donante-from-document, numero de control, fecha).
+    // A prior `SELECT donation_intents.*` shipped donor PII (donor_document, donor_email),
+    // the client IP, and the Wompi payment-link URLs to the browser even though nothing
+    // renders them.
     const rows = await this.db
       .prepare(
-        `SELECT donation_intents.*,
+        `SELECT donation_intents.id,
+                donation_intents.status,
+                donation_intents.amount_cents,
+                donation_intents.document_id,
+                donation_intents.gift_type,
+                donation_intents.created_at,
                 dte_documents.numero_control AS numero_control,
                 dte_documents.donor_name AS document_donor_name
          FROM donation_intents
