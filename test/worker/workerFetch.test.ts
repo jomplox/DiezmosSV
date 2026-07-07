@@ -5059,6 +5059,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 2026-07-11
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -5088,6 +5093,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000); // already expired 5 days ago
     const sentAlerts: Array<{ to: string; subject: string; text: string }> = [];
     const scheduledEnv = env(db, {
@@ -5115,6 +5125,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000); // 10 days out: crosses 30 and 14 thresholds, not 3
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     const scheduledEnv = env(db, {
@@ -5148,6 +5163,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const expiresAt = new Date(now.getTime() + 45 * 24 * 60 * 60 * 1000);
     const sentAlerts: unknown[] = [];
     const scheduledEnv = env(db, {
@@ -5167,6 +5187,11 @@ describe("certificate expiry alerts (15-minute cron)", () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const now = new Date("2026-07-01T09:15:00.000Z");
+    // The sweep reads the real clock in places (threshold math defaults); pin it to
+    // the scheduled time so this fixture can never date-rot (CI failed when the
+    // fixture's expiry drifted across the 3-day threshold in real time).
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const oldExpiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
     db.audits.push({
       id: "audit_prior_alert",
