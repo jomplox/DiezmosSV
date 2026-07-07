@@ -72,6 +72,80 @@ const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const PASSWORD_RESET_LIMIT = 3;
 
+// The public donation endpoints parse untrusted JSON before any validation or
+// persistence, and the per-IP throttle counts only PERSISTED intents — so oversized
+// invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
+// payloads are a few hundred bytes) so an oversized request is rejected up front.
+const PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES = 16 * 1024;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super("Request body too large");
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+// Reads a JSON body while enforcing a byte cap: a declared Content-Length over the
+// limit is rejected immediately, and a chunked/undeclared body is bounded as it
+// streams so a lying (or absent) length header cannot bypass the cap. Malformed JSON
+// resolves to {} to preserve the endpoints' prior tolerant parsing.
+async function readJsonBodyWithLimit(request: Request, limitBytes: number): Promise<Record<string, unknown>> {
+  const contentLength = request.headers.get("content-length");
+  if (contentLength) {
+    const parsedLength = Number.parseInt(contentLength, 10);
+    if (Number.isFinite(parsedLength) && parsedLength > limitBytes) {
+      throw new RequestBodyTooLargeError();
+    }
+  }
+
+  const body = request.body;
+  if (!body) {
+    return {};
+  }
+
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value) {
+        total += value.byteLength;
+        if (total > limitBytes) {
+          throw new RequestBodyTooLargeError();
+        }
+        chunks.push(value);
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(concatBytes(chunks, total)));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
+function donationBodyTooLargeResponse(): Response {
+  return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+}
+
 function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
@@ -344,7 +418,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       // Short-circuit before any validation/persistence so a throttled attempt is cheap.
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return donationBodyTooLargeResponse();
+      }
+      throw error;
+    }
     const draft = isDraftIntentBody(body);
     let input;
     try {
@@ -380,9 +462,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     let data;
     try {
-      const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+      const body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
       data = validateDatosInput(body);
     } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return donationBodyTooLargeResponse();
+      }
       if (error instanceof IntentValidationError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
       }
