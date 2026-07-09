@@ -3,7 +3,7 @@ import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEven
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
-import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
+import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
   applyIntentDatos,
@@ -22,6 +22,12 @@ import {
 } from "./services/donations";
 import { EmailService } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
+import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
+import {
+  assertDeploymentAllowsAmbiente,
+  deploymentEnvironmentPolicy,
+  EnvironmentNotAllowedError
+} from "./services/environmentPolicy";
 import {
   BRANDING_ACCENT_COLOR_SETTING_KEY,
   BRANDING_DONOR_LOGO_OBJECT_KEY,
@@ -49,16 +55,26 @@ import { MhClient } from "./services/mhClient";
 import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
+import { projectAuditRows } from "./services/auditProjection";
 import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
-import type { DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
+import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { timingSafeEqual } from "./utils/encoding";
-import { jsonResponse, methodNotAllowed, notFound } from "./utils/http";
+import {
+  InvalidJsonBodyError,
+  jsonResponse,
+  methodNotAllowed,
+  notFound,
+  readBodyBytes,
+  readBodyText,
+  readJsonObject,
+  RequestBodyTooLargeError
+} from "./utils/http";
 
 const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
@@ -78,7 +94,9 @@ const PASSWORD_RESET_LIMIT = 3;
 // persistence, and the per-IP throttle counts only PERSISTED intents — so oversized
 // invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
 // payloads are a few hundred bytes) so an oversized request is rejected up front.
-const PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES = 16 * 1024;
+const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
+const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
+const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
 
 type BrandingLogoSlot = {
   settingKey: string;
@@ -110,70 +128,6 @@ const DONOR_LOGO_SLOT: BrandingLogoSlot = {
   removedSummary: "Logo de donantes eliminado"
 };
 
-class RequestBodyTooLargeError extends Error {
-  constructor() {
-    super("Request body too large");
-    this.name = "RequestBodyTooLargeError";
-  }
-}
-
-// Reads a JSON body while enforcing a byte cap: a declared Content-Length over the
-// limit is rejected immediately, and a chunked/undeclared body is bounded as it
-// streams so a lying (or absent) length header cannot bypass the cap. Malformed JSON
-// resolves to {} to preserve the endpoints' prior tolerant parsing.
-async function readJsonBodyWithLimit(request: Request, limitBytes: number): Promise<Record<string, unknown>> {
-  const contentLength = request.headers.get("content-length");
-  if (contentLength) {
-    const parsedLength = Number.parseInt(contentLength, 10);
-    if (Number.isFinite(parsedLength) && parsedLength > limitBytes) {
-      throw new RequestBodyTooLargeError();
-    }
-  }
-
-  const body = request.body;
-  if (!body) {
-    return {};
-  }
-
-  const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) {
-        break;
-      }
-      if (value) {
-        total += value.byteLength;
-        if (total > limitBytes) {
-          throw new RequestBodyTooLargeError();
-        }
-        chunks.push(value);
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  try {
-    const parsed = JSON.parse(new TextDecoder().decode(concatBytes(chunks, total)));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function concatBytes(chunks: Uint8Array[], total: number): Uint8Array {
-  const out = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    out.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return out;
-}
-
 function donationBodyTooLargeResponse(): Response {
   return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
 }
@@ -193,37 +147,13 @@ function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
-// Operator telemetry captured on audit rows: the client IP, the Cloudflare request
-// context (geo/ISP), and the acting user's email. The OWNER wants this visible in
-// Auditoría, but only to ADMIN+; VIEWERs receive these columns nulled server-side so
-// the values never leave the worker. The client renders the nulls as an em-dash and
-// hides the expandable context row.
-const SENSITIVE_AUDIT_FIELDS = ["actor_ip", "actor_context", "actor_email"] as const;
-
-function canViewSensitiveAudit(user: AuthUser): boolean {
-  return user.role === "ADMIN" || user.role === "OWNER";
-}
-
-function redactAuditForUser(rows: Array<Record<string, unknown>>, user: AuthUser): Array<Record<string, unknown>> {
-  if (canViewSensitiveAudit(user)) {
-    return rows;
-  }
-  return rows.map((row) => {
-    const redacted = { ...row };
-    for (const field of SENSITIVE_AUDIT_FIELDS) {
-      redacted[field] = null;
-    }
-    return redacted;
-  });
-}
-
 async function listAuditForUser(
   repo: Repository,
   user: AuthUser,
   entityType?: string,
   entityId?: string
 ): Promise<Array<Record<string, unknown>>> {
-  return redactAuditForUser(await repo.listAudit(entityType, entityId), user);
+  return projectAuditRows(await repo.listAudit(entityType, entityId), user.role);
 }
 
 // Canonical public origin for links emailed to users (password reset). Built from the
@@ -249,8 +179,17 @@ export default {
       }
       return env.ASSETS.fetch(request);
     } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
+      }
+      if (error instanceof InvalidJsonBodyError) {
+        return jsonResponse({ error: "invalid_json_body", message: "La solicitud no contiene JSON válido." }, { status: 400 });
+      }
       if (error instanceof AuthError) {
         return jsonResponse({ error: "auth_error", message: error.message }, { status: error.status });
+      }
+      if (error instanceof EnvironmentNotAllowedError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
       }
       return jsonResponse({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }
@@ -398,7 +337,7 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   if (request.method !== "POST") {
     return methodNotAllowed();
   }
-  const rawBody = await request.text();
+  const rawBody = await readBodyText(request, WOMPI_WEBHOOK_BODY_LIMIT_BYTES);
   const valid = await verifyWompiHash(rawBody, wompiHashHeader(request), requireSecret(env, "WOMPI_API_SECRET"));
   if (!valid) {
     return jsonResponse({ error: "invalid_wompi_hash" }, { status: 401 });
@@ -421,13 +360,12 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
   // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
   const repo = new Repository(env.DB, auditContextFrom(request));
-  // The environment is the signed payload's own EsProductiva flag — never the
-  // owner-controlled active emission setting. A test-mode payment (EsProductiva=false)
-  // must never be emitted as a PRODUCTION DTE just because the deployment defaults to
-  // 01; the signed flag is the fiscal source of truth. When the two disagree we still
-  // honor the payload but audit the disagreement so operators can see it.
+  // The signed payload remains the event's fiscal environment, but the deployment
+  // capability decides whether this Worker may issue it. Incompatible events are
+  // retained as evidence and quarantined from paid marking and the issuance queue.
   const environment = ambienteFromWompi(payload);
-  const activeEnvironment = await activeEmissionEnvironment(repo, env);
+  const policy = deploymentEnvironmentPolicy(env);
+  const environmentAllowed = policy.allowedAmbiente === environment;
   const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
   await repo.createAudit({
@@ -436,13 +374,13 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     entityId: record.id,
     summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
   });
-  if (inserted && environment !== activeEnvironment) {
+  if (inserted && !environmentAllowed) {
     await repo.createAudit({
       action: "WOMPI_ENVIRONMENT_MISMATCH",
       entityType: "wompi_event",
       entityId: record.id,
-      summary: `El webhook declara ambiente ${environment} pero la emisión activa es ${activeEnvironment}; se honra el del webhook`,
-      metadata: { payloadEnvironment: environment, activeEnvironment }
+      summary: `El webhook declara ambiente ${environment}, incompatible con este despliegue; queda en cuarentena`,
+      metadata: { payloadEnvironment: environment, activeEnvironment: policy.allowedAmbiente }
     });
   }
   // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
@@ -450,29 +388,29 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // COMPLETED (the CDE's MH acceptance, which the async pipeline sets and can lag).
   // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
   // bad/unknown intent id must never break webhook processing.
-  await markIntentPaidFromWebhook(repo, payload);
-  if (inserted && isApprovedDonation(payload)) {
+  if (environmentAllowed) {
+    await markIntentPaidFromWebhook(repo, payload);
+  }
+  const queued = inserted && environmentAllowed && isApprovedDonation(payload);
+  if (queued) {
     await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
   }
-  return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued: inserted && isApprovedDonation(payload) }, { status: inserted ? 202 : 200 });
+  return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued }, { status: inserted ? 202 : 200 });
 }
 
-// Marks the donation intent this approved webhook fulfills as paid, keyed on the same
-// intent-id correlation the pipeline uses (payload.IdExterno, falling back to the raw
-// enlace identifier). Only "di_"-prefixed ids of approved donations touch the DB, so
-// legacy static-link payloads skip it entirely. Never throws: any failure is swallowed
-// so a bad intent id can never 500 the webhook — the paid marker is a UI convenience,
-// not a correctness gate (the pipeline still owns COMPLETED and the comprobante).
+// Marks payment only after the shared resolver binds both Wompi identifiers to the
+// exact stored intent/link. Legacy static-link payloads remain untouched. Never throws:
+// the paid marker is donor-UI convenience while the pipeline owns fiscal completion.
 async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook): Promise<void> {
   try {
     if (!isApprovedDonation(payload)) {
       return;
     }
-    const intentId = payload.IdExterno ?? payload.EnlacePago?.IdentificadorEnlaceComercio;
-    if (!intentId || !intentId.startsWith("di_")) {
+    const binding = await resolveDonationIntentBinding(repo, payload);
+    if (binding.kind !== "bound" || binding.intent.wompi_id_enlace === null) {
       return;
     }
-    await repo.markIntentPaid(intentId);
+    await repo.markIntentPaid(binding.intent.id, binding.intent.wompi_id_enlace);
   } catch (error) {
     console.error("No se pudo marcar la intención como pagada", error);
   }
@@ -521,7 +459,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     let body: Record<string, unknown>;
     try {
-      body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
+      body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
         return donationBodyTooLargeResponse();
@@ -563,7 +501,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     }
     let data;
     try {
-      const body = await readJsonBodyWithLimit(request, PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES);
+      const body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
       data = validateDatosInput(body);
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
@@ -575,7 +513,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     try {
-      await applyIntentDatos(repo, intentDatosMatch[1], data);
+      await applyIntentDatos(repo, intentDatosMatch[1], request.headers.get("X-Donation-Datos-Token") ?? "", data);
       return jsonResponse({ ok: true });
     } catch (error) {
       if (error instanceof IntentDatosError) {
@@ -602,14 +540,14 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (!hasValidBootstrapOwnerToken(request, env)) {
       return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
     }
-    const body = (await request.json()) as { email: string; name: string; password: string };
+    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; password: string };
     const owner = await auth.bootstrapOwner(body);
     await repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
     return jsonResponse({ user: owner }, { status: 201 });
   }
 
   if (url.pathname === "/api/auth/login" && request.method === "POST") {
-    const body = (await request.json()) as { email: string; password: string };
+    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
     const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
     const { ip: callerIp } = auditContextFrom(request);
     const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
@@ -631,7 +569,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
-    const body = (await request.json()) as { email?: string };
+    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
     const email = String(body.email ?? "").trim();
     if (email) {
       // Resolve the account first so the throttle can key on its id (matching
@@ -668,7 +606,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/password-reset/confirm" && request.method === "POST") {
-    const body = (await request.json()) as { token?: string; password?: string };
+    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { token?: string; password?: string };
     try {
       const resetUser = await auth.confirmPasswordReset(String(body.token ?? ""), String(body.password ?? ""));
       await repo.createAudit({ actorType: "USER", actorId: resetUser.id, action: "PASSWORD_RESET_COMPLETED", entityType: "user", entityId: resetUser.id, summary: resetUser.email });
@@ -677,7 +615,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       if (error instanceof PasswordResetError) {
         return jsonResponse({ error: "invalid_reset_token", message: error.message }, { status: 400 });
       }
-      return jsonResponse({ error: "weak_password", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+      if (error instanceof PasswordPolicyError) {
+        return jsonResponse({ error: "weak_password", message: error.message }, { status: 400 });
+      }
+      throw error;
     }
   }
 
@@ -962,7 +903,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const year = Number(yearParam);
     // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
     // an absent/empty body runs the full bulk batch as before.
-    const body = (await request.json().catch(() => ({}))) as { donor?: unknown };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { donor?: unknown };
     const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
     let result;
     try {
@@ -1016,7 +957,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const page = rows.slice(0, limit);
     const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
     const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
-    return jsonResponse({ audit: redactAuditForUser(page, actor), nextCursor });
+    return jsonResponse({ audit: projectAuditRows(page, actor.role), nextCursor });
   }
 
   if (url.pathname === "/api/analytics" && request.method === "GET") {
@@ -1035,10 +976,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/test/dte" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
-    if (isProduction(env)) {
+    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const input = (await request.json().catch(() => ({}))) as DirectCdeInput;
+    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput;
     const donorFields = directDonorFields(input);
     if (donorFields instanceof Response) return donorFields;
     const config = getEmisorConfig(env);
@@ -1077,10 +1018,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/test/dte/advanced-template" && request.method === "POST") {
     requireRole(user, "OPERATOR");
-    if (isProduction(env)) {
+    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const input = (await request.json().catch(() => ({}))) as DirectCdeInput;
+    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput;
     const donorFields = templateDonorFields(input);
     if (donorFields instanceof Response) return donorFields;
     try {
@@ -1098,10 +1039,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/test/dte/advanced" && request.method === "POST") {
     const actor = requireRole(user, "OPERATOR");
-    if (isProduction(env)) {
+    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const body = (await request.json().catch(() => ({}))) as { draft?: unknown };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { draft?: unknown };
     const config = getEmisorConfig(env);
     const environment = await activeEmissionEnvironment(repo, env);
     let document: Record<string, unknown>;
@@ -1144,7 +1085,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
 
   if (url.pathname === "/api/users" && request.method === "POST") {
     const actor = requireRole(user, "ADMIN");
-    const body = (await request.json()) as { email: string; name: string; role: Role; password: string };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; role: Role; password: string };
     // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
     // creating an OWNER account and then using the OWNER-only credential routes.
     if (body.role === "OWNER" && actor.role !== "OWNER") {
@@ -1163,14 +1104,20 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (actor.role !== "OWNER" && (await repo.getUserRole(passwordMatch[1])) === "OWNER") {
       return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
     }
-    const body = (await request.json().catch(() => ({}))) as { password?: unknown };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { password?: unknown };
     if (typeof body.password !== "string" || !body.password) {
       return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
     }
     try {
       await auth.resetUserPassword(passwordMatch[1], body.password);
     } catch (error) {
-      return jsonResponse({ error: "invalid_user_password", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+      if (error instanceof PasswordPolicyError) {
+        return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
+      }
+      if (error instanceof UserNotFoundError) {
+        return jsonResponse({ error: "user_not_found", message: error.message }, { status: 404 });
+      }
+      throw error;
     }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_PASSWORD_RESET", entityType: "user", entityId: passwordMatch[1], summary: "Contraseña restablecida por administrador" });
     return jsonResponse({ ok: true });
@@ -1179,7 +1126,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
   if (userMatch && request.method === "PATCH") {
     const actor = requireRole(user, "ADMIN");
-    const body = (await request.json().catch(() => ({}))) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
     const patch = userPatchInput(body);
     if (patch instanceof Response) return patch;
     // Same escalation guard as user creation: promoting an account to OWNER is
@@ -1198,10 +1145,6 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   return notFound();
-}
-
-function isProduction(env: Env): boolean {
-  return (env.APP_ENV ?? "local").toLowerCase() === "production";
 }
 
 // GET /api/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD&environment=00 — Analítica del
@@ -1262,11 +1205,12 @@ async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: 
     return methodNotAllowed();
   }
   const actor = requireRole(user, "OWNER");
-  const body = (await request.json().catch(() => ({}))) as { environment?: unknown };
+  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { environment?: unknown };
   const environment = ambienteValue(body.environment);
   if (!environment) {
     return jsonResponse({ error: "invalid_emission_environment", message: "Seleccione Pruebas 00 o Producción 01." }, { status: 400 });
   }
+  assertDeploymentAllowsAmbiente(env, environment);
   await repo.setSetting(EMISSION_ENVIRONMENT_SETTING, environment, actor.id);
   await repo.createAudit({
     actorType: "USER",
@@ -1290,7 +1234,7 @@ async function handleEmailTemplatesRoute(request: Request, repo: Repository, use
     return methodNotAllowed();
   }
   const actor = requireRole(user, "OWNER");
-  const body = (await request.json().catch(() => ({}))) as { templates?: unknown };
+  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown };
   try {
     const templates = normalizeEmailTemplateSettings(body.templates);
     await repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
@@ -1321,7 +1265,7 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
     return methodNotAllowed();
   }
   const actor = requireRole(user, "OWNER");
-  const body = (await request.json().catch(() => ({}))) as { alertEmail?: unknown };
+  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { alertEmail?: unknown };
   const alertEmail = normalizeAlertRecipients(typeof body.alertEmail === "string" ? body.alertEmail : "");
   if (alertEmail === null) {
     return jsonResponse({ error: "invalid_alert_email", message: "Ingrese correos válidos separados por coma." }, { status: 400 });
@@ -1391,7 +1335,7 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
     return methodNotAllowed();
   }
   const actor = requireRole(user, "OWNER");
-  const body = (await request.json().catch(() => ({}))) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
+  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
   let displayName: string;
   let accentColor: string;
   let supportEmail: string;
@@ -1454,7 +1398,7 @@ async function handleBrandingLogoRoute(request: Request, env: Env, repo: Reposit
     }
     throw error;
   }
-  const bytes = new Uint8Array(await request.arrayBuffer());
+  const bytes = await readBodyBytes(request, BRANDING_LOGO_MAX_BYTES);
   if (bytes.byteLength === 0) {
     return jsonResponse({ error: "invalid_branding_logo", message: "El archivo del logo está vacío." }, { status: 400 });
   }
@@ -1481,22 +1425,32 @@ async function handleBrandingLogoRoute(request: Request, env: Env, repo: Reposit
   return jsonResponse({ ok: true, [slot.versionField]: version });
 }
 
-async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {
+async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<Ambiente> {
+  const policy = deploymentEnvironmentPolicy(env);
+  if (!policy.allowedAmbiente) {
+    throw new EnvironmentNotAllowedError("00", policy);
+  }
   const configured = ambienteValue(await repo.getSetting(EMISSION_ENVIRONMENT_SETTING));
-  return configured ?? defaultEmissionEnvironment(env);
+  return configured === policy.allowedAmbiente ? configured : policy.allowedAmbiente;
 }
 
-async function emissionEnvironmentState(repo: Repository, env: Env): Promise<{ environment: "00" | "01"; source: "setting" | "deployment_default"; appEnv: string }> {
+async function emissionEnvironmentState(repo: Repository, env: Env): Promise<{
+  environment: Ambiente;
+  source: "setting" | "deployment_default";
+  appEnv: string;
+  locked: true;
+  allowedEnvironments: Ambiente[];
+}> {
+  const policy = deploymentEnvironmentPolicy(env);
   const configured = ambienteValue(await repo.getSetting(EMISSION_ENVIRONMENT_SETTING));
+  const matchingSetting = configured !== null && configured === policy.allowedAmbiente;
   return {
-    environment: configured ?? defaultEmissionEnvironment(env),
-    source: configured ? "setting" : "deployment_default",
-    appEnv: env.APP_ENV ?? "local"
+    environment: policy.allowedAmbiente ?? "00",
+    source: matchingSetting ? "setting" : "deployment_default",
+    appEnv: policy.appEnv,
+    locked: true,
+    allowedEnvironments: policy.allowedAmbiente ? [policy.allowedAmbiente] : []
   };
-}
-
-function defaultEmissionEnvironment(env: Env): "00" | "01" {
-  return isProduction(env) ? "01" : "00";
 }
 
 function ambienteValue(value: unknown): "00" | "01" | null {
@@ -1676,10 +1630,11 @@ async function handleCredentialsRoute(request: Request, env: Env, repo: Reposito
     return methodNotAllowed();
   }
 
-  const input = (await request.json()) as CredentialUpdateInput;
+  const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as CredentialUpdateInput;
   if (input.environment !== "test" && input.environment !== "production") {
     return jsonResponse({ error: "invalid_credential_environment" }, { status: 400 });
   }
+  assertDeploymentAllowsAmbiente(env, input.environment === "production" ? "01" : "00");
   const patch = buildCredentialSecretPatch(input);
   if (Object.keys(patch).length === 0) {
     return jsonResponse({ error: "no_credentials_supplied" }, { status: 400 });
@@ -1709,7 +1664,7 @@ async function handleCredentialWriterTokenRoute(request: Request, env: Env, repo
   if (request.method !== "POST") {
     return methodNotAllowed();
   }
-  const body = (await request.json().catch(() => ({}))) as { token?: unknown };
+  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { token?: unknown };
   const token = typeof body.token === "string" ? body.token.trim() : "";
   if (!token) {
     return jsonResponse({ error: "cloudflare_token_required", message: "Ingrese el token API de Cloudflare." }, { status: 400 });
@@ -1742,13 +1697,14 @@ async function handleDocumentRoute(
   documentId: string,
   action?: string
 ): Promise<Response> {
+  const mutationAction = action === "email" || action === "resend" || action === "retry" || action === "invalidate";
+  const actor = requireRole(user, mutationAction ? "OPERATOR" : "VIEWER");
   const document = await repo.getDteDocument(documentId);
   if (!document) {
     return notFound();
   }
 
   if (!action && request.method === "GET") {
-    const actor = requireRole(user, "VIEWER");
     // donorDataVerified: this CDE was produced from a completed donation-intent, so
     // the donor's data came from the validated /donar form rather than the raw webhook.
     const donorDataVerified = (await repo.getCompletedIntentForDocument(document.id)) !== null;
@@ -1756,7 +1712,6 @@ async function handleDocumentRoute(
   }
 
   if (action === "pdf" && request.method === "GET") {
-    requireRole(user, "VIEWER");
     const pdf = await renderDtePdf(document);
     return new Response(pdf, {
       headers: {
@@ -1767,7 +1722,6 @@ async function handleDocumentRoute(
   }
 
   if (action === "json" && request.method === "GET") {
-    requireRole(user, "VIEWER");
     return new Response(document.plain_json, {
       headers: {
         "Content-Type": "application/json",
@@ -1777,8 +1731,7 @@ async function handleDocumentRoute(
   }
 
   if (action === "email" && request.method === "PATCH") {
-    const actor = requireRole(user, "OPERATOR");
-    const body = (await request.json()) as { email?: string };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
     const email = normalizeEmail(body.email);
     if (!email) {
       return jsonResponse({ error: "invalid_email", message: "Ingrese un correo válido." }, { status: 400 });
@@ -1797,8 +1750,7 @@ async function handleDocumentRoute(
   }
 
   if (action === "resend" && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    const body = (await request.json().catch(() => ({}))) as { email?: string };
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { email?: string };
     const toEmail = body.email ?? document.donor_email;
     if (!toEmail) {
       return jsonResponse({ error: "missing_email" }, { status: 400 });
@@ -1839,7 +1791,6 @@ async function handleDocumentRoute(
   }
 
   if (action === "retry" && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
     if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
@@ -1849,6 +1800,7 @@ async function handleDocumentRoute(
         { status: 409 }
       );
     }
+    assertDeploymentAllowsAmbiente(env, document.environment);
     if (document.status === "REJECTED" && document.wompi_event_id) {
       // MH rejected the CONTENT of this CDE: retransmitting the same signed JWS
       // would be rejected identically, so rebuild it from the original webhook.
@@ -1902,7 +1854,6 @@ async function handleDocumentRoute(
   }
 
   if (action === "invalidate" && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
     if (document.status !== "ACCEPTED" || !document.sello_recibido || !document.accepted_at) {
       return jsonResponse({ error: "document_not_accepted" }, { status: 409 });
     }
@@ -1910,7 +1861,8 @@ async function handleDocumentRoute(
     if (!isWithinDeadline(deadline)) {
       return jsonResponse({ error: "outside_legal_window", deadline }, { status: 409 });
     }
-    const body = (await request.json()) as Partial<InvalidationInput>;
+    assertDeploymentAllowsAmbiente(env, document.environment);
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as Partial<InvalidationInput>;
     if (body.tipoAnulacion === 1 && !body.codigoGeneracionR) {
       return jsonResponse({ error: "replacement_required_for_tipo_1" }, { status: 400 });
     }

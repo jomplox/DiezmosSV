@@ -52,7 +52,7 @@ describe("credentialSectionState", () => {
     expect(credentialSettingsSections.find((section) => section.id === "mh")).toMatchObject({
       label: "Ministerio de Hacienda",
       description: "API, certificado firmador y llave privada.",
-      groupIds: ["mhTest", "mhProduction", "signer"]
+      groupIds: ["signer"]
     });
     expect(credentialSettingsSections.find((section) => section.label.includes("Firmador"))).toBeUndefined();
   });
@@ -78,8 +78,27 @@ describe("credentialSectionState", () => {
     });
   });
 
-  test("marks a section pending when any mapped secret group is not ready", () => {
-    expect(credentialSectionState("mh", status)).toBe("pending");
+  test("uses only the deployment-compatible MH lane for readiness", () => {
+    expect(credentialSectionState("mh", status)).toBe("ready");
+    expect(credentialSectionState("mh", {
+      ...status,
+      target: { ...status.target, appEnv: "production" },
+      groups: {
+        ...status.groups,
+        mhTest: { ...status.groups.mhTest, ready: false },
+        mhProduction: { ...status.groups.mhProduction, ready: true }
+      }
+    })).toBe("ready");
+  });
+
+  test("keeps MH readiness pending for a missing or unknown deployment lane", () => {
+    expect(credentialSectionState("mh", {
+      ...status,
+      target: { ...status.target, appEnv: "preview" }
+    })).toBe("pending");
+  });
+
+  test("marks a section pending when a mapped compatible secret group is not ready", () => {
     expect(credentialSectionState("correo", status)).toBe("pending");
   });
 
@@ -168,14 +187,9 @@ describe("Correo alert recipients (source contract)", () => {
 });
 
 describe("Ambiente emission-environment save guard (source contract)", () => {
-  test("blocks a redundant save only when the value is already persisted as a setting, not when it merely matches the deployment default", () => {
-    // The Ambiente pre-check must let the owner persist the deployment default explicitly:
-    // it may short-circuit only while busy or when the SELECTED value is already stored as
-    // a setting row (emissionEnvironment.source === "setting"). Guarding on the runtime
-    // environment instead blocked saving the default when no setting row existed yet.
-    expect(appSource).toContain(
-      'if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;'
-    );
+  test("rejects deployment-incompatible choices and only short-circuits a matching persisted setting", () => {
+    expect(appSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");
+    expect(appSource).toContain('emissionEnvironment.environment === environment && emissionEnvironment.source === "setting"');
     expect(appSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
   });
 });

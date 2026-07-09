@@ -8,6 +8,7 @@ import type { DonationIntentRecord } from "../../src/worker/types";
 class RecordingD1 {
   readonly calls: Array<{ sql: string; args: unknown[] }> = [];
   readonly intents = new Map<string, DonationIntentRecord>();
+  intentDatosUpdateSucceeds = false;
 
   prepare(sql: string) {
     return new RecordingStatement(this, sql);
@@ -25,6 +26,9 @@ class RecordingStatement {
 
   async first<T>(): Promise<T | null> {
     this.db.calls.push({ sql: this.sql, args: this.args });
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("RETURNING id")) {
+      return (this.db.intentDatosUpdateSucceeds ? { id: String(this.args.at(-3)) } : null) as T | null;
+    }
     if (this.sql.includes("FROM donation_intents WHERE id = ?")) {
       return (this.db.intents.get(String(this.args[0])) ?? null) as T | null;
     }
@@ -72,7 +76,8 @@ describe("donation intents repository", () => {
       donorPais: null,
       giftType: null,
       clientIp: "203.0.113.9",
-      expiresAt: "2026-07-05T13:00:00.000Z"
+      expiresAt: "2026-07-05T13:00:00.000Z",
+      datosTokenHash: null
     });
 
     expect(created.id).toBe("di_seed");
@@ -92,8 +97,9 @@ describe("donation intents repository", () => {
     expect(insert!.args[5]).toBeNull();
     // donor_pais is bound null for a domestic intent (position 12, after complemento).
     expect(insert!.args[11]).toBeNull();
-    // gift_type is the LAST bind (index 14, after expires_at at 13); null here.
+    // gift_type stays at index 14; the capability hash is appended after it.
     expect(insert!.args[14]).toBeNull();
+    expect(insert!.args[15]).toBeNull();
   });
 
   it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
@@ -115,7 +121,8 @@ describe("donation intents repository", () => {
       donorPais: "US",
       giftType: "DIEZMO",
       clientIp: "203.0.113.9",
-      expiresAt: "2026-07-05T13:00:00.000Z"
+      expiresAt: "2026-07-05T13:00:00.000Z",
+      datosTokenHash: "a".repeat(64)
     });
 
     const insert = db.calls.find((call) => call.sql.includes("INSERT INTO donation_intents"));
@@ -126,6 +133,35 @@ describe("donation intents repository", () => {
     // A chosen gift type is bound as the last INSERT arg.
     expect(insert!.args).toContain("DIEZMO");
     expect(insert!.args[14]).toBe("DIEZMO");
+    expect(insert!.args[15]).toBe("a".repeat(64));
+  });
+
+  it("consumes a datos capability with one guarded UPDATE RETURNING", async () => {
+    const { repository, db } = repo();
+    db.intentDatosUpdateSucceeds = true;
+
+    const updated = await repository.applyIntentDatosWithCapability("di_1", "b".repeat(64), {
+      donorDocumentType: "13",
+      donorDocument: "10000001-9",
+      donorName: null,
+      donorPhone: "70001122",
+      direccionDepartamento: "06",
+      direccionMunicipio: "23",
+      direccionDistrito: "14",
+      direccionComplemento: "Colonia Escalón",
+      donorPais: null
+    });
+
+    expect(updated).toBe(true);
+    const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("RETURNING id"));
+    expect(update).toBeTruthy();
+    expect(update!.sql).toContain("datos_token_hash = NULL");
+    expect(update!.sql).toContain("datos_token_hash = ?");
+    expect(update!.sql).toContain("status = 'LINK_CREATED'");
+    expect(update!.sql).toContain("paid_at IS NULL");
+    expect(update!.sql).toContain("donor_document IS NULL");
+    expect(update!.sql).toContain("expires_at > ?");
+    expect(update!.args).toContain("b".repeat(64));
   });
 
   it("reads a single intent by id", async () => {
@@ -230,6 +266,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     wompi_url_enlace_largo: null,
     document_id: null,
     client_ip: "203.0.113.9",
+    datos_token_hash: null,
     paid_at: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",

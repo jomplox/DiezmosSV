@@ -24,6 +24,8 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    env:
+      DIEZMOSSV_ENV_FILE: .dev.vars.ci
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v6
@@ -32,8 +34,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      # Provide committed NON-SECRET demo env (mock mode, demo emisor + cert).
-      - run: cp .dev.vars.ci .dev.vars
       # Fresh runner has no .wrangler state, so this seeds an empty local D1
       # (bootstrap path). playwright.config.ts's webServer builds + starts wrangler.
       - run: npx wrangler d1 migrations apply diezmossv-local-db-example --local

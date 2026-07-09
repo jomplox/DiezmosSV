@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
+import { lstatSync } from "node:fs";
+import { homedir } from "node:os";
+import { isAbsolute, join, resolve } from "node:path";
+import { loadEnvFile } from "node:process";
 
 const help = `
 DiezmosSV Cloudflare staging smoke test
@@ -30,6 +34,9 @@ Optional env:
 Usage:
   npm run smoke:staging
   npm run smoke:staging -- --dry-run
+
+Environment file:
+  DIEZMOSSV_ENV_FILE      Optional absolute path; defaults to the approved out-of-tree staging-smoke.env
 `;
 
 const args = new Set(process.argv.slice(2));
@@ -37,6 +44,24 @@ if (args.has("--help") || args.has("-h")) {
   process.stdout.write(help);
   process.exit(0);
 }
+
+const configuredEnvFile = process.env.DIEZMOSSV_ENV_FILE?.trim();
+const envFile = configuredEnvFile
+  ? (isAbsolute(configuredEnvFile) ? configuredEnvFile : resolve(process.cwd(), configuredEnvFile))
+  : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "env", "staging-smoke.env");
+let envFileStat;
+try {
+  envFileStat = lstatSync(envFile);
+} catch (error) {
+  if (error?.code === "ENOENT") {
+    fail(`Environment file not found: ${envFile}`);
+  }
+  throw error;
+}
+if (!envFileStat.isFile() || envFileStat.isSymbolicLink()) {
+  fail(`Environment path must be a regular non-symlink file: ${envFile}`);
+}
+loadEnvFile(envFile);
 
 const dryRun = args.has("--dry-run");
 const required = ["STAGING_URL", "STAGING_EMAIL", "STAGING_PASSWORD", "WOMPI_API_SECRET", "SMOKE_DONOR_DOCUMENT"];
@@ -75,8 +100,7 @@ if (dryRun) {
   log("dry-run", {
     baseUrl: config.baseUrl,
     paths: config.paths,
-    donorEmail: config.donorEmail,
-    donorDocument: redact(config.donorDocument),
+    donorIdentityConfigured: Boolean(config.donorEmail && config.donorDocument),
     amount: config.amount,
     signedWebhookShape: Boolean(signWompiPayload(JSON.stringify(payload), config.wompiSecret)),
     willCreateUser: config.createUser,
@@ -279,7 +303,7 @@ async function pollAcceptedDocument(token, donorEmail, startedAt) {
     }
     await sleep(config.pollMs);
   }
-  fail(`Timed out waiting for accepted ambiente 00 DTE for ${donorEmail}. Last seen: ${JSON.stringify(lastSeen)}`);
+  fail(`Timed out waiting for the configured smoke donor's accepted ambiente 00 DTE. Last seen: ${JSON.stringify(lastSeen)}`);
 }
 
 function buildWompiPayload(input, transactionId) {
@@ -413,11 +437,6 @@ function parseJson(text) {
   } catch {
     return { raw: text };
   }
-}
-
-function redact(value) {
-  if (value.length <= 4) return "****";
-  return `${value.slice(0, 2)}***${value.slice(-2)}`;
 }
 
 function assert(condition, message) {

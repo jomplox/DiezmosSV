@@ -2,9 +2,9 @@ import { defineConfig, devices } from "@playwright/test";
 
 // Playwright drives a REAL local Cloudflare Worker (SPA + API in one process),
 // not vite. The webServer below builds the client, applies local D1 migrations,
-// and starts `wrangler dev` on port 8787. Env comes from .dev.vars — in CI the
-// workflow copies .dev.vars.ci onto .dev.vars first (see .github/workflows/ci.yml
-// and the header of e2e/smoke.spec.ts for the local invocation).
+// and starts `wrangler dev` on port 8787 through the private env-file runner.
+// CI sets DIEZMOSSV_ENV_FILE=.dev.vars.ci; local runs can point at any approved
+// out-of-tree operator env without copying it into the checkout.
 //
 // Set PW_PERSIST_TO=<dir> to point wrangler at an isolated state directory
 // (recommended locally so the smoke test starts from a fresh D1 and never
@@ -15,7 +15,7 @@ const persistTo = process.env.PW_PERSIST_TO;
 const persistFlag = persistTo ? ` --persist-to ${persistTo}` : "";
 
 const migrateCommand = `npx wrangler d1 migrations apply diezmossv-local-db-example --local${persistFlag}`;
-const devCommand = `npx wrangler dev --port 8787 --ip 127.0.0.1${persistFlag}`;
+const devCommand = `npm run dev:worker -- --port 8787 --ip 127.0.0.1${persistFlag}`;
 
 export default defineConfig({
   testDir: "./e2e",

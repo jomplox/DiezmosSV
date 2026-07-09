@@ -387,6 +387,7 @@ describe("donar premint (background draft + datos completion)", () => {
     const body = donationDatosBody(base);
     expect(body).not.toHaveProperty("amount");
     expect(body).not.toHaveProperty("giftType");
+    expect(body).not.toHaveProperty("datosToken");
     // Same field mapping as the full intent body minus amount/giftType.
     expect(body).toMatchObject({
       donorDocumentType: "13",
@@ -456,6 +457,13 @@ describe("donar premint source contract", () => {
     expect(donarSource).toContain("donationDatosBody(form)");
     // Fallback: no usable draft → the existing full-body POST still works.
     expect(donarSource).toContain("donationIntentBody(form)");
+  });
+
+  it("keeps the one-time datos capability in memory and sends it only as a header", () => {
+    expect(donarSource).toContain("if (!created.datosToken)");
+    expect(donarSource).toContain('"X-Donation-Datos-Token": draftIntent.intent.datosToken ?? ""');
+    expect(donarSource).not.toMatch(/localStorage[^\n]*datosToken|sessionStorage[^\n]*datosToken/);
+    expect(donarSource).not.toMatch(/urlEnlace[^\n]*datosToken|datosToken[^\n]*urlEnlace/);
   });
 
   it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {

@@ -8,7 +8,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  *
  * The Worker is started by playwright.config.ts's webServer, which builds the
  * client, applies local D1 migrations, and runs `wrangler dev` on port 8787 with
- * env from .dev.vars. Mock mode (MOCK_EXTERNAL_SERVICES="true") makes MH
+ * env from DIEZMOSSV_ENV_FILE. Mock mode (MOCK_EXTERNAL_SERVICES="true") makes MH
  * transmission + email synthetic so a quick CDE reaches ACEPTADO via the local
  * queue within ~1-5s.
  *
@@ -17,18 +17,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
  * checkout's local D1 usually already has users, run it against an isolated,
  * fresh wrangler state directory locally:
  *
- *   cp .dev.vars .dev.vars.bak            # (optional) keep your real secrets
- *   cp .dev.vars.ci .dev.vars             # committed NON-SECRET demo values
- *   PW_PERSIST_TO="$(mktemp -d)" npx playwright test
- *   cp .dev.vars.bak .dev.vars            # restore afterwards
+ *   DIEZMOSSV_ENV_FILE=.dev.vars.ci PW_PERSIST_TO="$(mktemp -d)" npx playwright test
  *
- * Or simply run with your own .dev.vars but point at a scratch state dir so your
- * real local D1 is never touched:
- *
- *   PW_PERSIST_TO="$(mktemp -d)" npx playwright test
- *
- * CI copies .dev.vars.ci -> .dev.vars and runs on a fresh runner (no .wrangler
- * state), so the bootstrap path is exercised without any persist dir.
+ * CI selects .dev.vars.ci directly and runs on a fresh runner (no .wrangler state),
+ * so the bootstrap path is exercised without any persist dir.
  */
 
 const OWNER = {
