@@ -4,8 +4,223 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ExamplePerson1</title>
+    <script>
+      document.documentElement.setAttribute(
+        "data-bootstrap-route",
+        window.location.pathname.startsWith("/donar") ? "donor" : "admin"
+      );
+    </script>
+    <style id="bootstrap-shell-styles">
+      :root {
+        background: #f6f6f6;
+        color: #1b2328;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background: #f6f6f6;
+      }
+
+      #app-bootstrap {
+        min-height: 100vh;
+      }
+
+      .bootstrap-admin-shell {
+        min-height: 100vh;
+        display: grid;
+        grid-template-columns: 56px minmax(0, 1fr);
+        background: #f6f6f6;
+      }
+
+      .bootstrap-rail {
+        background: #101418;
+        display: grid;
+        align-content: start;
+        justify-items: center;
+        gap: 18px;
+        padding: 18px 0;
+      }
+
+      .bootstrap-rail-mark,
+      .bootstrap-rail-dot {
+        border-radius: 999px;
+        background: #2a2f34;
+      }
+
+      .bootstrap-rail-mark {
+        width: 24px;
+        height: 24px;
+        margin-bottom: 10px;
+      }
+
+      .bootstrap-rail-dot {
+        width: 18px;
+        height: 18px;
+      }
+
+      .bootstrap-workspace {
+        padding: 28px 24px 40px;
+      }
+
+      .bootstrap-heading,
+      .bootstrap-line,
+      .bootstrap-input,
+      .bootstrap-row,
+      .bootstrap-card {
+        background: #ffffff;
+        border: 1px solid #eeeeee;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.07);
+      }
+
+      .bootstrap-heading {
+        width: min(320px, 70%);
+        height: 34px;
+        border-radius: 8px;
+      }
+
+      .bootstrap-line {
+        width: min(220px, 55%);
+        height: 12px;
+        margin-top: 10px;
+        border-radius: 999px;
+        box-shadow: none;
+      }
+
+      .bootstrap-card {
+        margin-top: 24px;
+        padding: 18px;
+        border-radius: 14px;
+      }
+
+      .bootstrap-input {
+        height: 42px;
+        border-radius: 10px;
+        box-shadow: none;
+      }
+
+      .bootstrap-row {
+        height: 44px;
+        margin-top: 10px;
+        border-radius: 8px;
+        box-shadow: none;
+      }
+
+      .bootstrap-donor-card {
+        display: none;
+        width: min(560px, calc(100% - 32px));
+        margin: 32px auto 48px;
+        padding: 36px 40px 40px;
+        background: #ffffff;
+        border: 1px solid #eeeeee;
+        border-radius: 16px;
+        box-shadow: 0 18px 48px rgba(0, 0, 0, 0.07);
+      }
+
+      .bootstrap-logo {
+        width: min(260px, 70%);
+        height: 82px;
+        margin: 0 auto 22px;
+        border-radius: 12px;
+        background: #eeeeee;
+      }
+
+      .bootstrap-title {
+        width: min(280px, 80%);
+        height: 30px;
+        margin: 0 auto 20px;
+        border-radius: 999px;
+        background: #111111;
+      }
+
+      .bootstrap-copy {
+        width: min(450px, 100%);
+        height: 14px;
+        margin: 0 auto 16px;
+        border-radius: 999px;
+        background: #eeeeee;
+      }
+
+      .bootstrap-copy.short {
+        width: min(260px, 70%);
+        margin-bottom: 32px;
+      }
+
+      .bootstrap-door-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .bootstrap-door {
+        min-height: 190px;
+        border: 1px solid #dddddd;
+        border-radius: 12px;
+        background: #ffffff;
+      }
+
+      html[data-bootstrap-route="donor"] .bootstrap-admin-shell {
+        display: none;
+      }
+
+      html[data-bootstrap-route="donor"] .bootstrap-donor-card {
+        display: block;
+      }
+
+      @media (max-width: 640px) {
+        .bootstrap-admin-shell {
+          grid-template-columns: 1fr;
+        }
+
+        .bootstrap-rail {
+          display: none;
+        }
+
+        .bootstrap-workspace {
+          padding: 20px 16px 32px;
+        }
+
+        .bootstrap-donor-card {
+          padding: 28px 22px 32px;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div id="app-bootstrap" aria-hidden="true">
+      <div class="bootstrap-admin-shell">
+        <aside class="bootstrap-rail">
+          <div class="bootstrap-rail-mark"></div>
+          <div class="bootstrap-rail-dot"></div>
+          <div class="bootstrap-rail-dot"></div>
+          <div class="bootstrap-rail-dot"></div>
+          <div class="bootstrap-rail-dot"></div>
+          <div class="bootstrap-rail-dot"></div>
+        </aside>
+        <main class="bootstrap-workspace">
+          <div class="bootstrap-heading"></div>
+          <div class="bootstrap-line"></div>
+          <section class="bootstrap-card">
+            <div class="bootstrap-input"></div>
+            <div class="bootstrap-row"></div>
+            <div class="bootstrap-row"></div>
+            <div class="bootstrap-row"></div>
+          </section>
+        </main>
+      </div>
+      <div class="bootstrap-donor-card">
+        <div class="bootstrap-logo"></div>
+        <div class="bootstrap-title"></div>
+        <div class="bootstrap-copy"></div>
+        <div class="bootstrap-copy short"></div>
+        <div class="bootstrap-door-grid">
+          <div class="bootstrap-door"></div>
+          <div class="bootstrap-door"></div>
+        </div>
+      </div>
+    </div>
     <div id="root"></div>
     <script type="module" src="/src/client/main.tsx"></script>
   </body>

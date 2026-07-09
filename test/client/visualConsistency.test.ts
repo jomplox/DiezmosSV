@@ -51,9 +51,102 @@ describe("visual consistency pack", () => {
     expect(detailsBlock).toContain("<pre>{JSON.stringify(plain, null, 2)}</pre>");
   });
 
+  it("keeps the document detail email row compact and aligned", () => {
+    expect(appSource).toContain('<dt className="detail-email-label">Correo de envío</dt>');
+    expect(appSource).toContain('<dd className="detail-email-value">');
+    expect(stylesSource).toContain("margin: 12px 0 10px;");
+    expect(stylesSource).toMatch(/\.detail-email-label,\s*\.detail-email-value\s*\{[\s\S]*?font-size: 14px;[\s\S]*?line-height: 1\.35;[\s\S]*?\}/);
+    expect(stylesSource).toMatch(/\.detail-email-value \.editable-readonly > span \{[\s\S]*?font-size: 14px;[\s\S]*?line-height: 1\.35;[\s\S]*?white-space: nowrap;[\s\S]*?\}/);
+  });
+
   it("renames the credentials nav label to Configuración while keeping the subtitle and id", () => {
     expect(appSource).toContain('{ id: "credentials", label: "Configuración", icon: Settings, minRole: "OWNER" }');
     expect(appSource).not.toMatch(/label: "Credenciales", icon: Settings/);
     expect(appSource).toContain('credentials: "Credenciales del Ministerio de Hacienda, Wompi y correo."');
+  });
+
+  it("uses distinct document icons for Contingencia and Auditoría", () => {
+    expect(appSource).toContain("Unplug,");
+    expect(appSource).toContain("ScrollText,");
+    expect(appSource).toContain('{ id: "contingency", label: "Contingencia", icon: Unplug }');
+    expect(appSource).toContain('{ id: "audit", label: "Auditoría", icon: ScrollText }');
+    expect(appSource).not.toContain('{ id: "contingency", label: "Contingencia", icon: FileArchive }');
+    expect(appSource).not.toContain('{ id: "contingency", label: "Contingencia", icon: Clock }');
+    expect(appSource).not.toContain('{ id: "audit", label: "Auditoría", icon: History }');
+  });
+
+  it("sizes the app shell grid row to the viewport so short views keep a full-height sidebar", () => {
+    const shellRule = stylesSource.match(/\.app-shell \{[^}]*\}/)?.[0] ?? "";
+    const stackedShellRule = stylesSource.match(/@media \(max-width: 1020px\) \{[\s\S]*?\.app-shell,[\s\S]*?\.app-shell\.sidebar-collapsed \{[^}]*\}/)?.[0] ?? "";
+
+    expect(shellRule).toContain("grid-template-columns: 272px minmax(0, 1fr);");
+    expect(shellRule).toContain("grid-template-rows: minmax(100vh, auto);");
+    expect(stackedShellRule).toContain("grid-template-rows: auto minmax(0, 1fr);");
+  });
+
+  it("gives the expanded desktop sidebar breathing room without changing mobile", () => {
+    const expandedSidebarRule = stylesSource.match(/\.app-shell:not\(\.sidebar-collapsed\) \.sidebar \{[^}]*\}/)?.[0] ?? "";
+    const mobileExpandedSidebarRule = stylesSource.match(
+      /@media \(max-width: 1020px\) \{[\s\S]*?\.app-shell:not\(\.sidebar-collapsed\) \.sidebar \{[^}]*\}/
+    )?.[0] ?? "";
+
+    expect(expandedSidebarRule).toContain("margin-right: 35px;");
+    expect(mobileExpandedSidebarRule).toContain("margin-right: 0;");
+  });
+
+  it("uses symmetrical fade cues on the mobile sidebar nav overflow", () => {
+    const mobileSidebarNavRule = stylesSource.match(/@media \(max-width: 1020px\) \{[\s\S]*?\.sidebar nav \{[^}]*\}/)?.[0] ?? "";
+
+    expect(mobileSidebarNavRule).toContain("linear-gradient(to right, transparent, black 8%, black 92%, transparent)");
+  });
+
+  it("uses semantic green and yellow accents for shared admin metrics", () => {
+    const okMetricRule = stylesSource.match(/\.metric\.ok \{[^}]*\}/)?.[0] ?? "";
+    const warnMetricRule = stylesSource.match(/\.metric\.warn \{[^}]*\}/)?.[0] ?? "";
+    const warnAnalyticsBarRule = stylesSource.match(/\.analytics-bar-warn \{[^}]*\}/)?.[0] ?? "";
+
+    expect(okMetricRule).toContain("border-left-color: var(--ok);");
+    expect(okMetricRule).not.toContain("var(--accent");
+    expect(warnMetricRule).toContain("border-left-color: var(--warn-accent);");
+    expect(warnAnalyticsBarRule).toContain("fill: var(--warn-accent);");
+  });
+
+  it("keeps the detail-panel status badge compact and visually distinct", () => {
+    const detailStatusRule = stylesSource.match(/\.detail-head \.status \{[^}]*\}/)?.[0] ?? "";
+    const detailStatusDotRule = stylesSource.match(/\.detail-head \.status::before \{[^}]*\}/)?.[0] ?? "";
+    const detailAcceptedRule = stylesSource.match(/\.detail-head \.status\.accepted,[\s\S]*?\.detail-head \.status\.event_accepted \{[^}]*\}/)?.[0] ?? "";
+
+    expect(detailStatusRule).toContain("justify-self: start;");
+    expect(detailStatusRule).toContain("width: fit-content;");
+    expect(detailStatusRule).toContain("border: 1px solid var(--line-strong);");
+    expect(detailStatusRule).toContain("border-radius: 6px;");
+    expect(detailStatusDotRule).toContain('content: ""');
+    expect(detailStatusDotRule).toContain("background: currentColor;");
+    expect(detailAcceptedRule).toContain("border-color: var(--ok-border);");
+  });
+
+  it("keeps Contingencia focused on the current 15-minute retry rule instead of an empty archive", () => {
+    expect(appSource).toContain("<h2>El CDE no usa modo de contingencia</h2>");
+    expect(appSource).toContain("queda");
+    expect(appSource).toContain("«En trámite»");
+    expect(appSource).toContain("Correo transitorio inmediato");
+    expect(appSource).toContain("Reintento cada 15 minutos");
+    expect(appSource).toContain("Sello de Recepción");
+    expect(appSource).toContain("Use <b>Documentos</b> con el filtro <b>En trámite</b>");
+    expect(stylesSource).toContain(".contingency-flow");
+    expect(stylesSource).toContain("repeat(auto-fit, minmax(220px, 1fr))");
+    expect(appSource).not.toContain("/api/contingency");
+    expect(appSource).not.toContain("contingency-stats");
+    expect(appSource).not.toContain("CDE históricos sin sello");
+    expect(appSource).not.toContain("Lotes históricos del Ministerio de Hacienda");
+    expect(appSource).not.toContain("Eventos históricos del Ministerio de Hacienda");
+    expect(appSource).not.toContain("Auditoría histórica");
+    expect(stylesSource).not.toContain(".contingency-stats");
+    expect(stylesSource).not.toContain(".contingency-audit-list");
+    expect(stylesSource).not.toContain(".batch-line-list");
+    expect(appSource).toContain('<option value="CONTINGENCY_PENDING">Histórico sin sello</option>');
+    expect(appSource).not.toContain("bajo el modelo anterior");
+    expect(appSource).not.toContain("No hay CDE pendientes de contingencia.");
+    expect(appSource).not.toContain("periodo activo");
   });
 });

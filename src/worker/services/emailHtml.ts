@@ -205,13 +205,13 @@ function emailDocument(
 // no logo is configured (keeps the historical logo-less header untouched). Email clients block
 // remote images by default, so the name text below stays the reliable identifier and the img
 // carries the organization name as alt. Inline, email-safe sizing only: block + auto margins,
-// max-height ~48px / max-width ~200px so any uploaded logo scales down without overflowing.
+// max-height ~64px / max-width ~240px so wide uploaded logos stay legible without overflowing.
 function headerLogo(logoUrl: string | null | undefined, organizationName: string): string {
   const url = logoUrl?.trim();
   if (!url) {
     return "";
   }
-  return `<img src="${escapeHtml(url)}" alt="${escapeHtml(organizationName)}" style="display:block;margin:0 auto 10px;max-height:48px;max-width:200px;" />`;
+  return `<img src="${escapeHtml(url)}" alt="${escapeHtml(organizationName)}" style="display:block;margin:0 auto 12px;max-height:64px;max-width:240px;" />`;
 }
 
 function statusBanner(record: DteDocumentRecord): string {

@@ -6,6 +6,7 @@ import {
   BRANDING_LOGO_ACCEPT,
   CLIENT_BRANDING_DEFAULTS,
   brandingFieldError,
+  brandingDonorLogoSrc,
   brandingLogoSrc,
   parseBrandingResponse
 } from "../../src/client/branding";
@@ -13,6 +14,8 @@ import {
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
+const indexSource = readFileSync(resolve(import.meta.dirname, "../../index.html"), "utf8");
+const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
 
 describe("parseBrandingResponse", () => {
   it("falls back to defaults for an empty payload", () => {
@@ -20,7 +23,8 @@ describe("parseBrandingResponse", () => {
       displayName: CLIENT_BRANDING_DEFAULTS.displayName,
       accentColor: CLIENT_BRANDING_DEFAULTS.accentColor,
       supportEmail: CLIENT_BRANDING_DEFAULTS.supportEmail,
-      logoVersion: null
+      logoVersion: null,
+      donorLogoVersion: null
     });
   });
 
@@ -30,13 +34,15 @@ describe("parseBrandingResponse", () => {
         displayName: "Iglesia Central",
         accentColor: "#123abc",
         supportEmail: "legacy-email-119@example.com",
-        logoVersion: "v1"
+        logoVersion: "v1",
+        donorLogoVersion: "donor-v1"
       })
     ).toEqual({
       displayName: "Iglesia Central",
       accentColor: "#123abc",
       supportEmail: "legacy-email-119@example.com",
-      logoVersion: "v1"
+      logoVersion: "v1",
+      donorLogoVersion: "donor-v1"
     });
   });
 
@@ -67,6 +73,11 @@ describe("brandingLogoSrc", () => {
 
   it("returns null when there is no logo version", () => {
     expect(brandingLogoSrc(null)).toBeNull();
+  });
+
+  it("references the public donor logo endpoint separately", () => {
+    expect(brandingDonorLogoSrc("donor123")).toBe("/api/branding/donor-logo?v=donor123");
+    expect(brandingDonorLogoSrc(null)).toBeNull();
   });
 });
 
@@ -133,6 +144,36 @@ describe("App boots branding before the session (source contract)", () => {
     expect(appSource).toContain("/api/branding");
     expect(appSource).toContain("applyBranding");
   });
+
+  it("keeps a neutral startup shell visible until branding has resolved", () => {
+    expect(appSource).toContain("brandingReady");
+    expect(appSource).toContain("setBrandingReady(true)");
+    expect(appSource).toContain("return <StartupShell />");
+    expect(appSource.indexOf("if (!brandingReady)")).toBeLessThan(appSource.indexOf("if (!token || !user)"));
+  });
+});
+
+describe("static bootstrap shell", () => {
+  it("renders a neutral route-shaped shell before React loads", () => {
+    expect(indexSource).toContain('id="app-bootstrap"');
+    expect(indexSource).toContain("bootstrap-donor-card");
+    expect(indexSource).toContain("bootstrap-admin-shell");
+    expect(indexSource).toContain("data-bootstrap-route");
+
+    const bootstrapRegion = indexSource.slice(
+      indexSource.indexOf('<style id="bootstrap-shell-styles">'),
+      indexSource.indexOf('<script type="module"')
+    );
+    expect(bootstrapRegion).not.toContain("#0f766e");
+    expect(bootstrapRegion).not.toContain("#007c75");
+    expect(bootstrapRegion).not.toContain("ExamplePerson1");
+  });
+
+  it("removes the static shell only after the React app has mounted", () => {
+    expect(mainSource).toContain("useEffect");
+    expect(mainSource).toContain('document.getElementById("app-bootstrap")?.remove()');
+    expect(mainSource).toContain("<BootstrappedApp />");
+  });
 });
 
 describe("BrandingEditor edits the support email (source contract)", () => {
@@ -147,9 +188,11 @@ describe("BrandingEditor edits the support email (source contract)", () => {
 });
 
 describe("Donor landing uses the uploaded logo when present (source contract)", () => {
-  it("renders the branding logo image and keeps the default vector fallback", () => {
-    expect(donarSource).toContain("brandingLogoSrc");
+  it("renders the donor logo image and keeps the default vector fallback", () => {
+    expect(donarSource).toContain("brandingDonorLogoSrc");
+    expect(donarSource).toContain("donorLogoVersion");
     expect(donarSource).toContain("OrganizationLogo");
+    expect(donarSource).not.toContain("brandingLogoSrc(branding.logoVersion)");
   });
 });
 
@@ -169,7 +212,7 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
   it("drives the preview from the editor's unsaved draft values", () => {
     // The email header mock tints with the draft accent color (colorForPicker) and shows
     // the draft display name; the footer shows the draft support email. The logo comes
-    // from the draft preview object URL or the current logo src.
+    // from the draft admin/email preview object URL or the current admin/email logo src.
     const previewStart = appSource.indexOf("branding-preview");
     const previewRegion = appSource.slice(previewStart, previewStart + 3000);
     expect(previewRegion).toContain("colorForPicker");
@@ -177,6 +220,7 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
     expect(previewRegion).toContain("supportEmail");
     expect(previewRegion).toContain("previewUrl");
     expect(previewRegion).toContain("currentLogoSrc");
+    expect(previewRegion).toContain("currentDonorLogoSrc");
   });
 
   it("keeps the donor-page mock monochrome (never tinted with the accent)", () => {
@@ -187,6 +231,62 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
     const donorMock = appSource.slice(donorMockStart, donorMockStart + 700);
     expect(donorMock).not.toContain("colorForPicker");
     expect(donorMock).toContain("Diezmos y Ofrendas");
+  });
+});
+
+describe("Marca supports separate admin/email and donor logos (source contract)", () => {
+  it("offers independent upload controls for the admin/email logo and donor logo", () => {
+    expect(appSource).toContain("Logo de administración y correos");
+    expect(appSource).toContain("Logo para donantes");
+    expect(appSource).toContain("/api/settings/branding/logo");
+    expect(appSource).toContain("/api/settings/branding/donor-logo");
+  });
+
+  it("uses the donor logo on white authentication surfaces", () => {
+    const authScreenStart = appSource.indexOf("function AuthScreen");
+    const authScreen = appSource.slice(authScreenStart, authScreenStart + 4500);
+
+    expect(authScreen).toContain("brandingDonorLogoSrc(branding.donorLogoVersion) ?? brandingLogoSrc(branding.logoVersion)");
+    expect(authScreen).toContain('src={authLogoSrc}');
+  });
+
+  it("keeps email preview tied to the admin logo and donor preview tied to the donor logo", () => {
+    const emailMockStart = appSource.indexOf("branding-preview-email");
+    const emailMock = appSource.slice(emailMockStart, emailMockStart + 1200);
+    expect(emailMock).toContain("previewUrl");
+    expect(emailMock).toContain("currentLogoSrc");
+    expect(emailMock).not.toContain("currentDonorLogoSrc");
+
+    const donorMockStart = appSource.indexOf("branding-preview-donor");
+    const donorMock = appSource.slice(donorMockStart, donorMockStart + 1000);
+    expect(donorMock).toContain("donorPreviewUrl");
+    expect(donorMock).toContain("currentDonorLogoSrc");
+    expect(donorMock).not.toContain("colorForPicker");
+  });
+
+  it("allocates wide slots instead of square icon slots for uploaded logos", () => {
+    expect(stylesSource).toMatch(/\.brand-logo\s*{[^}]*width:\s*56px;[^}]*height:\s*44px;/s);
+    expect(stylesSource).toMatch(/\.sidebar\.collapsed\s+\.brand-logo\s*{[^}]*width:\s*44px;[^}]*height:\s*36px;/s);
+    expect(stylesSource).toMatch(/\.auth-logo\s*{[^}]*width:\s*min\(240px,\s*76%\);[^}]*max-height:\s*112px;/s);
+    expect(stylesSource).toMatch(/\.branding-logo-preview\s*{[^}]*width:\s*168px;[^}]*height:\s*118px;[^}]*background:\s*var\(--surface\);/s);
+    expect(stylesSource).toMatch(/\.branding-preview-email-logo\s*{[^}]*max-height:\s*44px;[^}]*max-width:\s*184px;/s);
+  });
+
+  it("hides native file inputs in every branded upload control", () => {
+    expect(stylesSource).toMatch(/input\.file-input-hidden\s*{[^}]*position:\s*absolute;[^}]*clip:\s*rect\(0,\s*0,\s*0,\s*0\);/s);
+    expect(stylesSource).toMatch(/\.branding-logo-controls\s*{[^}]*gap:\s*12px;/s);
+  });
+
+  it("centers and spaces the login branding block", () => {
+    expect(stylesSource).toMatch(/\.auth-logo\s*{[^}]*margin-bottom:\s*14px;/s);
+    expect(stylesSource).toMatch(/\.auth-card h1\s*{[^}]*margin-bottom:\s*15px;[^}]*text-align:\s*center;/s);
+  });
+
+  it("stacks the sidebar admin logo above the organization name and product label", () => {
+    expect(appSource).toContain("<span>DiezmosSV</span>");
+    expect(stylesSource).toMatch(/\.brand\s*{[^}]*display:\s*grid;[^}]*justify-items:\s*start;/s);
+    expect(stylesSource).toMatch(/\.brand-text\s*{[^}]*display:\s*grid;[^}]*gap:\s*2px;/s);
+    expect(stylesSource).toMatch(/\.sidebar\.collapsed\s+\.brand\s*{[^}]*justify-items:\s*center;/s);
   });
 });
 
@@ -210,4 +310,3 @@ describe("BrandingEditor preview styles are namespaced and theme-driven (source 
     expect(appSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
   });
 });
-

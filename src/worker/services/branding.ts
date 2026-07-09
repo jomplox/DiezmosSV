@@ -10,6 +10,8 @@ export const BRANDING_ACCENT_COLOR_SETTING_KEY = "branding_accent_color";
 export const BRANDING_SUPPORT_EMAIL_SETTING_KEY = "branding_support_email";
 export const BRANDING_LOGO_SETTING_KEY = "branding_logo";
 export const BRANDING_LOGO_OBJECT_KEY = "branding/logo";
+export const BRANDING_DONOR_LOGO_SETTING_KEY = "branding_donor_logo";
+export const BRANDING_DONOR_LOGO_OBJECT_KEY = "branding/donor-logo";
 
 export const BRANDING_DEFAULTS = {
   displayName: "ExamplePerson1",
@@ -164,6 +166,11 @@ export function brandingOrigin(env: BrandingOriginEnv): string {
 export function brandingLogoUrl(env: BrandingOriginEnv, version: string): string {
   const origin = brandingOrigin(env).replace(/\/+$/, "");
   return `${origin}/api/branding/logo?v=${version}`;
+}
+
+export function brandingDonorLogoUrl(env: BrandingOriginEnv, version: string): string {
+  const origin = brandingOrigin(env).replace(/\/+$/, "");
+  return `${origin}/api/branding/donor-logo?v=${version}`;
 }
 
 export function parseBrandingSettings(

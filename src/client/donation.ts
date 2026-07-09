@@ -115,7 +115,7 @@ export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
 export const DONAR_LANDING_UNIFIER =
-  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador.";
+  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador 🇸🇻.";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
 export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";

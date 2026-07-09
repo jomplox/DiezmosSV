@@ -1098,7 +1098,7 @@ describe("two-door landing copy", () => {
 
   it("pins the unifying line that both doors fund the same church in El Salvador", () => {
     expect(DONAR_LANDING_UNIFIER).toBe(
-      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador."
+      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador 🇸🇻."
     );
   });
 
@@ -1130,6 +1130,17 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_DOOR_EEUU_DESC");
   });
 
+  it("places the unifying mission sentence before the residence chooser prompt", () => {
+    const landingBlock = donarSource.slice(
+      donarSource.indexOf("<h1>{DONAR_LANDING_HEADING}</h1>"),
+      donarSource.indexOf('<div className="donar-doors">')
+    );
+
+    expect(landingBlock.indexOf("DONAR_LANDING_UNIFIER")).toBeLessThan(
+      landingBlock.indexOf("DONAR_LANDING_SUBTITLE")
+    );
+  });
+
   it("draws the SV door as the official flag asset over a globe, US as a circle-flag SVG", () => {
     // The US door keeps its inlined circle-flag SVG (MIT), verbatim.
     expect(landingSource).toContain("<svg");
@@ -1156,6 +1167,35 @@ describe("two-door landing source contract", () => {
   it("reuses the default logo vector paths on the landing", () => {
     // The landing shows the default logo. Its vector paths come from orgLogo.ts.
     expect(donarSource).toContain("ORG_LOGO_PATHS");
+  });
+
+  it("renders uploaded landing logos directly on the clean donor card", () => {
+    expect(donarSource).toContain("brandingDonorLogoSrc");
+    expect(donarSource).not.toContain("donar-logo-frame");
+    expect(stylesSource).toMatch(/\.donar-logo\s*{[^}]*width:\s*min\(300px,\s*76%\);[^}]*max-height:\s*150px;/s);
+  });
+
+  it("keeps the two donation paths side by side on mobile", () => {
+    const doorsRule = stylesSource.match(/\.donar-doors\s*\{[^}]*\}/)?.[0] ?? "";
+    const doorRule = stylesSource.match(/\.donar-door\s*\{[^}]*\}/)?.[0] ?? "";
+    const donorWideMediaStart = stylesSource.indexOf("@media (min-width: 520px)", stylesSource.indexOf(".donar-thanks-amount"));
+    const wideDonorMediaBlock = stylesSource.slice(
+      donorWideMediaStart,
+      stylesSource.indexOf(".toast-region")
+    );
+    const wideDoorsRule = wideDonorMediaBlock.match(/\.donar-doors\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(doorsRule).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(doorsRule).toContain("gap: 10px;");
+    expect(doorRule).toContain("min-height: 176px;");
+    expect(wideDoorsRule).toContain("gap: 14px;");
+    expect(wideDoorsRule).not.toContain("grid-template-columns");
+  });
+
+  it("emphasizes the residence chooser prompt", () => {
+    const subtitleRule = stylesSource.match(/\.donar-landing-subtitle\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(subtitleRule).toContain("font-weight: 900;");
   });
 
   it("routes door 1 to the existing SV fiscal form and door 2 to the Givebutter block", () => {
