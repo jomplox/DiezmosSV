@@ -44,6 +44,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 - [Validation](#-validation)
 - [Deploy to Cloudflare](#-deploy-to-cloudflare)
 - [Configuration reference](#-configuration-reference)
+- [Security](#-security)
 - [Wompi webhook](#-wompi-webhook)
 - [Online donations (/donar)](#-online-donations-donar)
 - [Admin panel & roles](#-admin-panel--roles)
@@ -189,8 +190,10 @@ MH DTE API credentials for the environment you intend to use. Wrangler is instal
 # 1 — Install dependencies
 npm install
 
-# 2 — Create your local env file and fill it in
-cp .dev.vars.example .dev.vars
+# 2 — Create a private out-of-tree env file and fill it in
+PRIVATE_ROOT="$HOME/Library/Application Support/DiezmosSV/private"
+install -d -m 700 "$PRIVATE_ROOT/env"
+install -m 600 .dev.vars.example "$PRIVATE_ROOT/env/local-operator.env"
 
 # 3 — Create the local D1 schema
 npx wrangler d1 migrations apply diezmossv-local-db-example --local
@@ -201,9 +204,10 @@ npm run dev          # Vite UI, proxies /api and /webhooks to the Worker
 ```
 
 Open the Vite URL and use **`Crear owner`** on first run to bootstrap the initial admin account.
-The setup form requires the `BOOTSTRAP_OWNER_TOKEN` value from your local `.dev.vars`.
+The setup form requires the `BOOTSTRAP_OWNER_TOKEN` value from your private local operator env file.
 
-A starter `.dev.vars` looks like this — use **separate** MH credentials for test and production:
+A starter operator env looks like this. Local execution is locked to MH TEST (`ambiente=00`), so do
+not place production API credentials in the local file:
 
 ```bash
 WOMPI_API_SECRET="..."
@@ -217,9 +221,6 @@ MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
 
 MH_USER_TEST="..."
 MH_PASSWORD_TEST="..."
-MH_USER_PROD="..."
-MH_PASSWORD_PROD="..."
-
 # Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
 # EMAIL_API_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="..."
@@ -228,9 +229,11 @@ EMAIL_FROM="dte@example.org"
 EMISOR_CONFIG_JSON="{...}"
 ```
 
-> 🔒 **Never commit real credentials.** `.dev.vars`, `DTE/Credentials/`, MH PDFs, real Wompi webhook
-> samples, build output, and local Wrangler state are all gitignored. Use
-> `examples/wompi-webhook.sample.json` for public testing and keep real payloads private.
+> 🔒 **Never place real credentials or donor artifacts in the checkout, even when gitignored.**
+> `npm run dev:worker` reads `~/Library/Application Support/DiezmosSV/private/env/local-operator.env`.
+> Override it with `DIEZMOSSV_ENV_FILE=/approved/path`. Run
+> `npm run security:check-private-boundary` before sharing the checkout. See
+> [the local-artifact runbook](docs/local-private-artifacts.md).
 
 ---
 
@@ -240,7 +243,8 @@ EMISOR_CONFIG_JSON="{...}"
 npm test          # Vitest unit tests (npx vitest run)
 npm run typecheck # Type-check client + worker
 npm run build     # Vite build + worker type-check
-npx playwright test # End-to-end browser tests (see .dev.vars.ci for the mock env)
+DIEZMOSSV_ENV_FILE=.dev.vars.ci npx playwright test # Non-secret mock env
+npm run security:check-private-boundary
 ```
 
 The unit tests cover, among other areas:
@@ -298,16 +302,15 @@ npm run cf:migrate:staging
 npm run cf:deploy:staging
 
 # 5 - Run the deployed edge smoke test
-STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
-STAGING_EMAIL="owner@example.org" \
-STAGING_PASSWORD="..." \
-STAGING_BOOTSTRAP_TOKEN="..." \
-WOMPI_API_SECRET="..." \
-SMOKE_DONOR_DOCUMENT="..." \
-npm run smoke:staging
+DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
 ```
 
-Staging runs with `MOCK_EXTERNAL_SERVICES = "false"`. Use only MH ambiente `00` data here:
+Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
+default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
+Do not place credentials, Wompi secrets, bootstrap tokens, or donor identity values inline in the
+shell command.
+
+Staging runs with `MOCK_EXTERNAL_SERVICES = "false"` and is structurally locked to MH ambiente `00`:
 test MH API user/password, the matching signer certificate XML/password, and a test Wompi secret.
 See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checklist.
 
@@ -357,8 +360,8 @@ Do one controlled low-value production issuance with live monitoring before enab
 
 ## ⚙️ Configuration reference
 
-**Secrets** - set with `wrangler secret put --env staging` / `--env production` remotely, or in
-`.dev.vars` locally:
+**Secrets** - set with `wrangler secret put --env staging` / `--env production` remotely, or in the
+out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 
 | Variable | Purpose |
 |---|---|
@@ -383,16 +386,16 @@ Do one controlled low-value production issuance with live monitoring before enab
 
 | Variable | Purpose |
 |---|---|
-| `APP_ENV` | Informational environment name (`local` / `staging` / `production`); also the default emission ambiente when no runtime setting is chosen. |
+| `APP_ENV` | Security boundary: `local`/`staging` permit only `00`; `production` permits only `01`; missing or unknown values permit no issuance. |
 | `APP_ORIGIN` | Public base URL of the deployment, used to build absolute links such as password-reset URLs. |
 | `MOCK_EXTERNAL_SERVICES` | Mock mode is **explicit opt-in**: MH + email are stubbed only when this is exactly `"true"`. Local `wrangler.toml` sets `"true"`; staging and production set `"false"`. |
 | `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
 | `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Declared in `wrangler.toml` under `[[send_email]]`. |
 | `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export (`example-worker-archive-*`). |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker after Cloudflare Email Sending is confirmed to send to external donor addresses. |
-| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_CONTINGENCIA_URL_*` · `MH_ANULACION_URL_*` | MH endpoints, per environment. |
+| `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
-| `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in `.dev.vars`; set the real remote value as a Cloudflare secret. |
+| `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
 Remote staging/production email delivery uses Cloudflare Email Service first. The binding is declared
 as `send_email` in `wrangler.toml` and is restricted to the configured `EMAIL_FROM` sender. To send
@@ -431,6 +434,9 @@ ResultadoTransaccion = ExitosaAprobada
 |---|---|
 | `EsProductiva=false` | `00` (test) |
 | `EsProductiva=true` | `01` (production) |
+
+The signed flag is stored as evidence, but it cannot widen a deployment: an incompatible event is
+audited and quarantined without paid marking or queueing.
 
 ---
 
@@ -518,9 +524,10 @@ npx wrangler secret put WOMPI_CLIENT_SECRET --env staging   # or --env productio
 | `COMPLETED` | Payment webhook correlated and the CDE was accepted by MH. Links to the emitted `document_id`. |
 | `EXPIRED` | The donor never paid; the cron sweep expired the unpaid intent. |
 
-**Correlation model** — the intent id doubles as `identificadorEnlaceComercio` on the minted link and
-comes back on the webhook as `IdExterno`. The pipeline looks up the intent by that id (only ids with
-the `di_` prefix are queried, so legacy static-link payments skip the lookup entirely). Money truth
+**Correlation model** — the intent id is sent as `identificadorEnlaceComercio` and must return as
+`EnlacePago.IdentificadorEnlaceComercio`; `EnlacePago.Id` must also exactly match the numeric link id
+stored for that intent. `IdExterno` is never accepted as the selector. Legacy static-link payments
+skip the intent lookup entirely. Money truth
 always comes from Wompi: if the webhook amount differs from the intent amount, the pipeline records a
 `DONATION_INTENT_AMOUNT_MISMATCH` audit entry and still correlates, using the webhook's amount on the
 CDE. A `COMPLETED` intent never correlates twice.
@@ -531,6 +538,17 @@ emitted CDE's `donor_name` (which came from the webhook), so it is shown only fo
 intents — every other status renders "—", since the intent itself carries no name. A CDE produced from
 a completed intent shows a **"Datos del donante verificados en el formulario de donación"** badge in
 its detail panel.
+
+Draft `/datos` completion uses a separate one-time 256-bit capability returned only to the in-memory
+wizard. D1 stores its SHA-256 hash and clears it atomically on the first valid write; the public intent
+id is never write authority.
+
+---
+
+## 🔐 Security
+
+Read [SECURITY.md](SECURITY.md) for supported surfaces, private disclosure, role/audit boundaries,
+the donation capability contract, the staging/production invariant, and forbidden local artifacts.
 
 > The legacy static Wompi payment link keeps working: those payments have no intent, so the CDE is
 > built from the raw webhook's fallback donor data exactly as before.

@@ -42,7 +42,7 @@ export const credentialSettingsSections: CredentialSettingsSection[] = [
     id: "mh",
     label: "Ministerio de Hacienda",
     description: "API, certificado firmador y llave privada.",
-    groupIds: ["mhTest", "mhProduction", "signer"]
+    groupIds: ["signer"]
   },
   {
     id: "wompi",
@@ -87,7 +87,19 @@ export function credentialSectionState(
   if (!section || section.groupIds.length === 0) {
     return "ready";
   }
-  return section.groupIds.every((groupId) => status.groups[groupId]?.ready) ? "ready" : "pending";
+  const groupIds = [...section.groupIds];
+  if (sectionId === "mh") {
+    const mhGroupId = status.target.appEnv === "local" || status.target.appEnv === "staging"
+      ? "mhTest"
+      : status.target.appEnv === "production"
+        ? "mhProduction"
+        : null;
+    if (!mhGroupId) {
+      return "pending";
+    }
+    groupIds.unshift(mhGroupId);
+  }
+  return groupIds.every((groupId) => status.groups[groupId]?.ready) ? "ready" : "pending";
 }
 
 // Firmador status line thresholds: green (>60 días), amarillo (<=60 días),

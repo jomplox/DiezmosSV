@@ -303,6 +303,15 @@ export function App() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const allowed = emissionEnvironment?.allowedEnvironments[0];
+    if (!allowed) return;
+    const credentialEnvironment = allowed === "01" ? "production" : "test";
+    setCredentialInput((current) =>
+      current.environment === credentialEnvironment ? current : emptyCredentialInput(credentialEnvironment)
+    );
+  }, [emissionEnvironment]);
+
   // White-label branding boots BEFORE (and independently of) the session check so the
   // login screen is already branded. A failed fetch keeps the historical defaults.
   useEffect(() => {
@@ -2235,6 +2244,8 @@ function CredentialsPanel({
       : "No se pueden guardar cambios todavía.";
   const activeEnvironmentLabel = input.environment === "test" ? "Pruebas 00" : "Producción 01";
   const runtimeEnvironment = credentialRuntimeEnvironment(emissionEnvironment, status?.target.appEnv);
+  const testEnvironmentAllowed = emissionEnvironment?.allowedEnvironments.includes("00") === true;
+  const productionEnvironmentAllowed = emissionEnvironment?.allowedEnvironments.includes("01") === true;
   const activeSectionMeta = credentialSettingsSections.find((section) => section.id === activeSection) ?? credentialSettingsSections[0];
   const activeSectionDescription = credentialSettingsPanelDescription(activeSection, activeEnvironmentLabel);
   async function handleCertificateFile(file: File | undefined): Promise<void> {
@@ -2292,7 +2303,11 @@ function CredentialsPanel({
     // setting row (a genuinely redundant save). A value that merely matches the deployment
     // default with no setting row yet must still reach the confirm flow so the owner can
     // persist the default explicitly — guarding on runtimeEnvironment.environment blocked that.
-    if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;
+    if (
+      emissionBusy ||
+      !emissionEnvironment?.allowedEnvironments.includes(environment) ||
+      (emissionEnvironment.environment === environment && emissionEnvironment.source === "setting")
+    ) return;
     setPendingEmissionEnvironment(environment);
   }
   async function confirmEmissionEnvironmentChange(): Promise<void> {
@@ -2372,7 +2387,7 @@ function CredentialsPanel({
                         <button
                           type="button"
                           className={runtimeEnvironment.environment === "00" ? "active" : ""}
-                          disabled={emissionBusy}
+                          disabled={emissionBusy || !testEnvironmentAllowed}
                           onClick={() => requestEmissionEnvironmentChange("00")}
                         >
                           Pruebas 00
@@ -2380,7 +2395,7 @@ function CredentialsPanel({
                         <button
                           type="button"
                           className={runtimeEnvironment.environment === "01" ? "active" : ""}
-                          disabled={emissionBusy}
+                          disabled={emissionBusy || !productionEnvironmentAllowed}
                           onClick={() => requestEmissionEnvironmentChange("01")}
                         >
                           Producción 01
@@ -2393,8 +2408,8 @@ function CredentialsPanel({
                       <small>Este selector no cambia el ambiente activo; solo escoge cuál usuario y contraseña del Ministerio de Hacienda desea revisar o rotar.</small>
                     </div>
                     <div className="segmented credential-env">
-                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                      <button type="button" disabled={!testEnvironmentAllowed} className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" disabled={!productionEnvironmentAllowed} className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
@@ -2410,8 +2425,8 @@ function CredentialsPanel({
                       <small>Seleccione el ambiente cuyas credenciales API quiere reemplazar.</small>
                     </div>
                     <div className="segmented credential-env">
-                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                      <button type="button" disabled={!testEnvironmentAllowed} className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" disabled={!productionEnvironmentAllowed} className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
@@ -3445,9 +3460,11 @@ function credentialRuntimeEnvironment(
   return {
     environment,
     label,
-    help: source === "setting"
-      ? `Los próximos CDE se emitirán contra el Ministerio de Hacienda (${label}). Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
-      : `Usando ${label} como valor inicial. Guarde una selección aquí para controlar el ambiente activo desde la UI.`
+    help: state?.locked
+      ? `Este despliegue está bloqueado a ${label}; el ambiente no puede cambiarse desde la aplicación.`
+      : source === "setting"
+        ? `Los próximos CDE se emitirán contra el Ministerio de Hacienda (${label}).`
+        : `Usando ${label} como valor inicial.`
   };
 }
 

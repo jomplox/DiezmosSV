@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildCdeDocument } from "../../src/worker/domain/dteBuilder";
 import { signMhDocument } from "../../src/worker/domain/signer";
@@ -9,6 +11,10 @@ import type { EmisorConfig, Env, WompiWebhook } from "../../src/worker/types";
 const runLive = process.env.RUN_MH_LIVE === "1" ? it : it.skip;
 
 describe("MH live TEST integration", () => {
+  it("declares the live harness as local so the TEST-only deployment policy permits ambiente 00", () => {
+    expect(testEnv({ MH_USER_TEST: "test-user", MH_PASSWORD_TEST: "test-password" }).APP_ENV).toBe("local");
+  });
+
   runLive("signs and transmits a CDE to the TEST environment", async () => {
     const envVars = loadDevVars();
     const referencePath = process.env.MH_REFERENCE_DTE_JSON;
@@ -167,10 +173,18 @@ function mhNow(): { date: string; time: string } {
 
 function loadDevVars(): Record<string, string> {
   const env = { ...process.env } as Record<string, string>;
-  if (!fs.existsSync(".dev.vars")) {
+  const configured = process.env.DIEZMOSSV_ENV_FILE?.trim();
+  const selected = configured
+    ? (path.isAbsolute(configured) ? configured : path.resolve(process.cwd(), configured))
+    : path.join(os.homedir(), "Library", "Application Support", "DiezmosSV", "private", "env", "local-operator.env");
+  if (!fs.existsSync(selected)) {
     return env;
   }
-  const lines = fs.readFileSync(".dev.vars", "utf8").split(/\r?\n/);
+  const stat = fs.lstatSync(selected);
+  if (!stat.isFile() || stat.isSymbolicLink()) {
+    throw new Error("DIEZMOSSV_ENV_FILE must reference a regular non-symlink file");
+  }
+  const lines = fs.readFileSync(selected, "utf8").split(/\r?\n/);
   for (const line of lines) {
     if (!line || line.trimStart().startsWith("#")) {
       continue;
@@ -215,13 +229,13 @@ function testEnv(envVars: Record<string, string>): Env {
     ISSUANCE_QUEUE: {} as Queue,
     ASSETS: {} as Fetcher,
     ARCHIVE: {} as R2Bucket,
+    APP_ENV: "local",
     MOCK_EXTERNAL_SERVICES: "false",
     MH_USER_TEST: required(envVars, "MH_USER_TEST"),
     MH_PASSWORD_TEST: required(envVars, "MH_PASSWORD_TEST"),
     MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
-    MH_AUTH_URL_PROD: "https://api.dtes.mh.gob.sv/seguridad/auth",
+    MH_AUTH_URL_TEST_FALLBACK: "https://api.dtes.mh.gob.sv/seguridad/auth",
     MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte",
-    MH_RECEPCION_URL_PROD: "https://api.dtes.mh.gob.sv/fesv/recepciondte"
   };
 }
 
