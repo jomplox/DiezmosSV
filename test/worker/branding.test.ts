@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
   BRANDING_DEFAULTS,
+  BRANDING_DONOR_LOGO_SETTING_KEY,
   BRANDING_LOGO_MAX_BYTES,
   BRANDING_LOGO_CONTENT_TYPES,
   BrandingValidationError,
+  brandingDonorLogoUrl,
   brandingLogoExtension,
   loadEmailBranding,
   normalizeBrandingAccentColor,
@@ -199,6 +201,20 @@ describe("loadEmailBranding", () => {
     expect(branding.logoUrl).toBe("https://iglesia.example.org/api/branding/logo?v=v9");
   });
 
+  it("keeps email branding tied to the admin/email logo even when a donor logo exists", async () => {
+    const store: Record<string, string> = {
+      branding_logo: JSON.stringify({ contentType: "image/png", size: 1234, version: "admin-v9" }),
+      [BRANDING_DONOR_LOGO_SETTING_KEY]: JSON.stringify({ contentType: "image/png", size: 5678, version: "donor-v9" })
+    };
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => store[key] ?? null
+      },
+      originEnv
+    );
+    expect(branding.logoUrl).toBe("https://iglesia.example.org/api/branding/logo?v=admin-v9");
+  });
+
   it("returns a null logoUrl when no logo meta is stored", async () => {
     const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
     expect(branding.logoUrl).toBeNull();
@@ -215,6 +231,12 @@ describe("loadEmailBranding", () => {
       { APP_ORIGIN: "https://iglesia.example.org/" } as Env
     );
     expect(branding.logoUrl).toBe("https://iglesia.example.org/api/branding/logo?v=abc");
+  });
+
+  it("builds an absolute donor logo URL on its own public path", () => {
+    expect(brandingDonorLogoUrl({ APP_ORIGIN: "https://iglesia.example.org/" }, "donor-v1")).toBe(
+      "https://iglesia.example.org/api/branding/donor-logo?v=donor-v1"
+    );
   });
 });
 

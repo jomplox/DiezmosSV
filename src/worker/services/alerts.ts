@@ -5,6 +5,7 @@ import { operationalAlertHtml } from "./emailHtml";
 import { EmailService } from "./email";
 
 export const ALERT_EMAIL_SETTING_KEY = "alert_email";
+const ALERT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export interface OperationalAlert {
   kind: string;
@@ -14,10 +15,22 @@ export interface OperationalAlert {
   entityId: string;
 }
 
+export function normalizeAlertRecipients(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const raw = value.trim();
+  if (!raw) {
+    return "";
+  }
+  const recipients = parseAlertRecipients(raw);
+  return recipients ? recipients.join(", ") : null;
+}
+
 export async function sendOperationalAlert(env: Env, repo: Repository, alert: OperationalAlert): Promise<void> {
   try {
-    const recipient = (await repo.getSetting(ALERT_EMAIL_SETTING_KEY))?.trim();
-    if (!recipient) {
+    const recipients = parseAlertRecipients(await repo.getSetting(ALERT_EMAIL_SETTING_KEY)) ?? [];
+    if (recipients.length === 0) {
       return;
     }
     const dedupeAction = `ALERT_SENT:${alert.kind}`;
@@ -27,12 +40,15 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
     }
     const branding = await loadEmailBranding(repo, env);
     const html = operationalAlertHtml(alert, originUrl(env), branding);
-    await new EmailService(env, undefined, branding).sendOperationalAlert({
-      to: recipient,
-      subject: alert.title,
-      text: alert.detail,
-      html
-    });
+    const email = new EmailService(env, undefined, branding);
+    for (const recipient of recipients) {
+      await email.sendOperationalAlert({
+        to: recipient,
+        subject: alert.title,
+        text: alert.detail,
+        html
+      });
+    }
     await repo.createAudit({
       action: dedupeAction,
       entityType: alert.entityType,
@@ -58,4 +74,17 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
 // brandingOrigin returns the same origin without one, so re-add it here.
 function originUrl(env: Env): string {
   return `${brandingOrigin(env).replace(/\/+$/, "")}/`;
+}
+
+function parseAlertRecipients(value: string | null | undefined): string[] | null {
+  const raw = value?.trim() ?? "";
+  if (!raw) {
+    return [];
+  }
+  const parts = raw.split(",");
+  const recipients = parts.map((part) => part.trim());
+  if (recipients.some((recipient) => !recipient || !ALERT_EMAIL_PATTERN.test(recipient))) {
+    return null;
+  }
+  return recipients;
 }

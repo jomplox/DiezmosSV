@@ -66,7 +66,7 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
-import { brandingLogoSrc, parseBrandingResponse } from "./branding";
+import { brandingDonorLogoSrc, parseBrandingResponse } from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -397,7 +397,7 @@ export function DonarPage() {
       .then((data) => {
         if (cancelled) return;
         const branding = parseBrandingResponse(data);
-        const src = brandingLogoSrc(branding.logoVersion);
+        const src = brandingDonorLogoSrc(branding.donorLogoVersion);
         setBrandingLogo(src ? { src, name: branding.displayName } : null);
         setSupportEmail(branding.supportEmail);
       })
@@ -728,10 +728,10 @@ export function DonarPage() {
             <OrganizationLogo />
           )}
           <h1>{DONAR_LANDING_HEADING}</h1>
-          <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
               they differ by residence / payment rail / tax receipt, not beneficiary. */}
           <p className="donar-landing-unifier">{DONAR_LANDING_UNIFIER}</p>
+          <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
             <button type="button" className="donar-door" onClick={() => chooseDoor("sv")}>
               <SvWorldIcon />

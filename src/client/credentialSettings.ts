@@ -14,7 +14,6 @@ const CERTIFICATE_EXPIRY_CRITICAL_DAYS = 14;
 export type CredentialSettingsSectionId =
   | "ambiente"
   | "mh"
-  | "firmador"
   | "wompi"
   | "emisor"
   | "correo"
@@ -41,15 +40,9 @@ export const credentialSettingsSections: CredentialSettingsSection[] = [
   },
   {
     id: "mh",
-    label: "API del Ministerio de Hacienda",
-    description: "Usuario y contraseña del Ministerio de Hacienda.",
-    groupIds: ["mhTest", "mhProduction"]
-  },
-  {
-    id: "firmador",
-    label: "Firmador del Ministerio de Hacienda",
-    description: "Certificado y llave privada.",
-    groupIds: ["signer"]
+    label: "Ministerio de Hacienda",
+    description: "API, certificado firmador y llave privada.",
+    groupIds: ["mhTest", "mhProduction", "signer"]
   },
   {
     id: "wompi",

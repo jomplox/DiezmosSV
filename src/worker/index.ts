@@ -2,7 +2,7 @@ import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
-import { ALERT_EMAIL_SETTING_KEY, sendOperationalAlert } from "./services/alerts";
+import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordResetError, requireRole, type AuthUser, type Role } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
@@ -24,6 +24,8 @@ import { EmailService } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import {
   BRANDING_ACCENT_COLOR_SETTING_KEY,
+  BRANDING_DONOR_LOGO_OBJECT_KEY,
+  BRANDING_DONOR_LOGO_SETTING_KEY,
   BRANDING_DISPLAY_NAME_SETTING_KEY,
   BRANDING_LOGO_MAX_BYTES,
   BRANDING_LOGO_OBJECT_KEY,
@@ -77,6 +79,36 @@ const PASSWORD_RESET_LIMIT = 3;
 // invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
 // payloads are a few hundred bytes) so an oversized request is rejected up front.
 const PUBLIC_DONATION_JSON_BODY_LIMIT_BYTES = 16 * 1024;
+
+type BrandingLogoSlot = {
+  settingKey: string;
+  objectKey: string;
+  versionField: "logoVersion" | "donorLogoVersion";
+  updatedAction: "BRANDING_LOGO_UPDATED" | "BRANDING_DONOR_LOGO_UPDATED";
+  removedAction: "BRANDING_LOGO_REMOVED" | "BRANDING_DONOR_LOGO_REMOVED";
+  updatedSummary: string;
+  removedSummary: string;
+};
+
+const ADMIN_EMAIL_LOGO_SLOT: BrandingLogoSlot = {
+  settingKey: BRANDING_LOGO_SETTING_KEY,
+  objectKey: BRANDING_LOGO_OBJECT_KEY,
+  versionField: "logoVersion",
+  updatedAction: "BRANDING_LOGO_UPDATED",
+  removedAction: "BRANDING_LOGO_REMOVED",
+  updatedSummary: "Logo de marca actualizado",
+  removedSummary: "Logo de marca eliminado"
+};
+
+const DONOR_LOGO_SLOT: BrandingLogoSlot = {
+  settingKey: BRANDING_DONOR_LOGO_SETTING_KEY,
+  objectKey: BRANDING_DONOR_LOGO_OBJECT_KEY,
+  versionField: "donorLogoVersion",
+  updatedAction: "BRANDING_DONOR_LOGO_UPDATED",
+  removedAction: "BRANDING_DONOR_LOGO_REMOVED",
+  updatedSummary: "Logo de donantes actualizado",
+  removedSummary: "Logo de donantes eliminado"
+};
 
 class RequestBodyTooLargeError extends Error {
   constructor() {
@@ -469,7 +501,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/branding/logo" && request.method === "GET") {
-    return handleBrandingLogoStream(env, repo);
+    return handleBrandingLogoStream(env, repo, ADMIN_EMAIL_LOGO_SLOT);
+  }
+
+  if (url.pathname === "/api/branding/donor-logo" && request.method === "GET") {
+    return handleBrandingLogoStream(env, repo, DONOR_LOGO_SLOT);
   }
 
   // Public donor checkout: unauthenticated, runs before any role check. A body with
@@ -681,7 +717,11 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/settings/branding/logo") {
-    return handleBrandingLogoRoute(request, env, repo, user);
+    return handleBrandingLogoRoute(request, env, repo, user, ADMIN_EMAIL_LOGO_SLOT);
+  }
+
+  if (url.pathname === "/api/settings/branding/donor-logo") {
+    return handleBrandingLogoRoute(request, env, repo, user, DONOR_LOGO_SLOT);
   }
 
   if (url.pathname === "/api/settings/alert-email") {
@@ -1282,11 +1322,11 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
   }
   const actor = requireRole(user, "OWNER");
   const body = (await request.json().catch(() => ({}))) as { alertEmail?: unknown };
-  const raw = typeof body.alertEmail === "string" ? body.alertEmail.trim() : "";
-  if (raw && !normalizeEmail(raw)) {
-    return jsonResponse({ error: "invalid_alert_email", message: "Ingrese un correo válido." }, { status: 400 });
+  const alertEmail = normalizeAlertRecipients(typeof body.alertEmail === "string" ? body.alertEmail : "");
+  if (alertEmail === null) {
+    return jsonResponse({ error: "invalid_alert_email", message: "Ingrese correos válidos separados por coma." }, { status: 400 });
   }
-  await repo.setSetting(ALERT_EMAIL_SETTING_KEY, raw, actor.id);
+  await repo.setSetting(ALERT_EMAIL_SETTING_KEY, alertEmail, actor.id);
   await repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
@@ -1295,10 +1335,10 @@ async function handleAlertEmailRoute(request: Request, repo: Repository, user: A
     entityId: ALERT_EMAIL_SETTING_KEY,
     // The audit trail is readable by lower roles, so record only THAT the recipient
     // changed — never the OWNER-only address itself.
-    summary: raw ? "Correo de alertas configurado" : "Correo de alertas desactivado",
-    metadata: { enabled: Boolean(raw) }
+    summary: alertEmail ? "Correo de alertas configurado" : "Correo de alertas desactivado",
+    metadata: { enabled: Boolean(alertEmail) }
   });
-  return jsonResponse({ ok: true, alertEmail: raw });
+  return jsonResponse({ ok: true, alertEmail });
 }
 
 // Public branding read (unauthenticated): the login screen consumes this before any
@@ -1311,11 +1351,13 @@ async function handlePublicBrandingRoute(repo: Repository): Promise<Response> {
     await repo.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
   );
   const logo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+  const donorLogo = parseBrandingLogoMeta(await repo.getSetting(BRANDING_DONOR_LOGO_SETTING_KEY));
   return jsonResponse({
     displayName: branding.displayName,
     accentColor: branding.accentColor,
     supportEmail: branding.supportEmail,
-    logoVersion: logo?.version ?? null
+    logoVersion: logo?.version ?? null,
+    donorLogoVersion: donorLogo?.version ?? null
   });
 }
 
@@ -1323,12 +1365,12 @@ async function handlePublicBrandingRoute(repo: Repository): Promise<Response> {
 // scripts, so the response is locked down: a strict CSP that blocks scripts and any
 // subresource fetch, plus nosniff. The short cache keeps the login/header logo snappy
 // while still turning over when the version query changes.
-async function handleBrandingLogoStream(env: Env, repo: Repository): Promise<Response> {
-  const meta = parseBrandingLogoMeta(await repo.getSetting(BRANDING_LOGO_SETTING_KEY));
+async function handleBrandingLogoStream(env: Env, repo: Repository, slot: BrandingLogoSlot): Promise<Response> {
+  const meta = parseBrandingLogoMeta(await repo.getSetting(slot.settingKey));
   if (!meta) {
     return notFound();
   }
-  const object = await env.ARCHIVE.get(BRANDING_LOGO_OBJECT_KEY);
+  const object = await env.ARCHIVE.get(slot.objectKey);
   if (!object) {
     return notFound();
   }
@@ -1383,21 +1425,21 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
 // under BRANDING_LOGO_OBJECT_KEY; its metadata mirrors into app_settings so the public
 // reads stay a single D1 lookup. The audit records the content type and size, never
 // the bytes.
-async function handleBrandingLogoRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
+async function handleBrandingLogoRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null, slot: BrandingLogoSlot): Promise<Response> {
   if (request.method === "DELETE") {
     const actor = requireRole(user, "OWNER");
-    await env.ARCHIVE.delete(BRANDING_LOGO_OBJECT_KEY);
-    await repo.setSetting(BRANDING_LOGO_SETTING_KEY, "", actor.id);
+    await env.ARCHIVE.delete(slot.objectKey);
+    await repo.setSetting(slot.settingKey, "", actor.id);
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
-      action: "BRANDING_LOGO_REMOVED",
+      action: slot.removedAction,
       entityType: "app_setting",
-      entityId: BRANDING_LOGO_SETTING_KEY,
-      summary: "Logo de marca eliminado",
+      entityId: slot.settingKey,
+      summary: slot.removedSummary,
       metadata: {}
     });
-    return jsonResponse({ ok: true, logoVersion: null });
+    return jsonResponse({ ok: true, [slot.versionField]: null });
   }
   if (request.method !== "PUT") {
     return methodNotAllowed();
@@ -1421,22 +1463,22 @@ async function handleBrandingLogoRoute(request: Request, env: Env, repo: Reposit
   }
   // crypto.randomUUID gives a cache-busting version without a wall-clock read.
   const version = crypto.randomUUID();
-  await env.ARCHIVE.put(BRANDING_LOGO_OBJECT_KEY, bytes, { httpMetadata: { contentType } });
+  await env.ARCHIVE.put(slot.objectKey, bytes, { httpMetadata: { contentType } });
   await repo.setSetting(
-    BRANDING_LOGO_SETTING_KEY,
+    slot.settingKey,
     JSON.stringify({ contentType, size: bytes.byteLength, version }),
     actor.id
   );
   await repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
-    action: "BRANDING_LOGO_UPDATED",
+    action: slot.updatedAction,
     entityType: "app_setting",
-    entityId: BRANDING_LOGO_SETTING_KEY,
-    summary: "Logo de marca actualizado",
+    entityId: slot.settingKey,
+    summary: slot.updatedSummary,
     metadata: { contentType, size: bytes.byteLength }
   });
-  return jsonResponse({ ok: true, logoVersion: version });
+  return jsonResponse({ ok: true, [slot.versionField]: version });
 }
 
 async function activeEmissionEnvironment(repo: Repository, env: Env): Promise<"00" | "01"> {

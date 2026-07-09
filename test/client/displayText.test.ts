@@ -23,7 +23,7 @@ describe("client display text", () => {
   it("localizes internal status values for user-facing badges", () => {
     expect(statusLabel("ACCEPTED")).toBe("Aceptado");
     expect(statusLabel("INVALIDATED")).toBe("Invalidado");
-    expect(statusLabel("CONTINGENCY_PENDING")).toBe("Contingencia");
+    expect(statusLabel("CONTINGENCY_PENDING")).toBe("Histórico sin sello");
     // Transmisión diferida: MH no disponible al emitir, reintento automático.
     expect(statusLabel("TRANSMISSION_PENDING")).toBe("En trámite");
     expect(statusLabel("EVENT_ACCEPTED")).toBe("Evento aceptado");
@@ -72,7 +72,7 @@ describe("client display text", () => {
     expect(auditActionLabel("ALERT_SENT:MH_UNAVAILABLE")).toBe("Alerta enviada: Hacienda no disponible");
     expect(auditActionLabel("ALERT_SENT:DTE_FAILED")).toBe("Alerta enviada: DTE fallido");
     expect(auditActionLabel("ALERT_SENT:ADVANCED_CDE_FAILED")).toBe("Alerta enviada: CDE avanzado fallido");
-    expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Contingencia abierta");
+    expect(auditActionLabel("ALERT_SENT:CONTINGENCY_OPENED")).toBe("Alerta enviada: Periodo histórico abierto");
     expect(auditActionLabel("ALERT_SENT:ISSUANCE_DEAD_LETTERED")).toBe("Alerta enviada: Emisión agotó reintentos en cola");
     expect(auditActionLabel("ALERT_SENT:WOMPI_EVENT_STALLED")).toBe("Alerta enviada: Evento Wompi sin procesar — revisar");
     expect(auditActionLabel("ALERT_SENT:CERT_EXPIRING")).toBe("Alerta enviada: Certificado por vencer");
@@ -88,6 +88,16 @@ describe("client display text", () => {
     expect(userFacingErrorMessage("MH auth failed: 401")).toBe("Falló la autenticación con el Ministerio de Hacienda: 401");
     expect(userFacingErrorMessage("MH unavailable: 503")).toBe("El Ministerio de Hacienda no está disponible: 503");
     expect(userFacingErrorMessage("Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled")).toBe("Configure el servicio de correo antes de enviar comprobantes.");
+  });
+
+  it("labels retired CDE contingency records as historical instead of active contingency", () => {
+    expect(statusLabel("CONTINGENCY_PENDING")).toBe("Histórico sin sello");
+    expect(auditActionLabel("DTE_CONTINGENCY_PENDING")).toBe("DTE histórico sin sello");
+    expect(auditActionLabel("CONTINGENCY_BATCH_SUBMITTED")).toBe("Lote histórico enviado");
+    expect(auditActionLabel("CONTINGENCY_DTE_ACCEPTED")).toBe("CDE histórico aceptado");
+    expect(auditActionLabel("CONTINGENCY_DTE_REJECTED")).toBe("CDE histórico rechazado");
+    expect(auditActionLabel("CONTINGENCY_OPENED")).toBe("Periodo histórico abierto");
+    expect(auditActionLabel("CONTINGENCY_OPEN_REUSED")).toBe("Periodo histórico reutilizado");
   });
 
   it("localizes donation-intent status values in Spanish", () => {

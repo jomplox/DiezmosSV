@@ -663,38 +663,50 @@ function Heatmap({ cells }: { cells: ClientAnalytics["heatmap"] }) {
   const byCell = new Map(cells.map((cell) => [`${cell.day}:${cell.hour}`, cell.count]));
   const hours = Array.from({ length: 24 }, (_, hour) => hour);
   return (
-    <div className="analytics-table-scroll">
-      <table className="analytics-heatmap" aria-label="Mapa de calor de donaciones por día de la semana y hora, en hora de El Salvador.">
-        <thead>
-          <tr>
-            <th />
-            {hours.map((hour) => (
-              <th key={hour} className="analytics-heatmap-hour">
-                {hour}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {DAY_LABELS.map((label, day) => (
-            <tr key={label}>
-              <th className="analytics-heatmap-day">{label}</th>
-              {hours.map((hour) => {
-                const count = byCell.get(`${day}:${hour}`) ?? 0;
-                const intensity = max > 0 ? Math.round((count / max) * 100) : 0;
-                return (
-                  <td
-                    key={hour}
-                    className="analytics-heatmap-cell"
-                    style={{ backgroundColor: count > 0 ? `color-mix(in srgb, var(--accent) ${intensity}%, var(--surface))` : undefined }}
-                    title={`${label} ${hour}:00 — ${count} donaciones`}
-                  />
-                );
-              })}
+    <>
+      <p className="analytics-heatmap-help">
+        Cada celda cruza un día con una hora en horario de El Salvador; cuanto más oscuro el color, más donaciones aceptadas hubo en ese bloque.
+        Pase el cursor o toque una celda para ver el total exacto.
+      </p>
+      <div className="analytics-table-scroll">
+        <table className="analytics-heatmap" aria-label="Mapa de calor de donaciones por día de la semana y hora, en hora de El Salvador.">
+          <thead>
+            <tr>
+              <th />
+              {hours.map((hour) => (
+                <th key={hour} className="analytics-heatmap-hour">
+                  {hour}
+                </th>
+              ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {DAY_LABELS.map((label, day) => (
+              <tr key={label}>
+                <th className="analytics-heatmap-day">{label}</th>
+                {hours.map((hour) => {
+                  const count = byCell.get(`${day}:${hour}`) ?? 0;
+                  const intensity = max > 0 ? Math.round((count / max) * 100) : 0;
+                  const heatmapLabel = `${label} ${hour}:00 - ${count} ${count === 1 ? "donación aceptada" : "donaciones aceptadas"}`;
+                  return (
+                    <td
+                      key={hour}
+                      className="analytics-heatmap-cell"
+                      style={{ backgroundColor: count > 0 ? `color-mix(in srgb, var(--accent) ${intensity}%, var(--surface))` : undefined }}
+                    >
+                      <button type="button" className="analytics-heatmap-button" aria-label={heatmapLabel} title={heatmapLabel}>
+                        <span className="analytics-heatmap-value" aria-hidden="true">
+                          {count}
+                        </span>
+                      </button>
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </>
   );
 }

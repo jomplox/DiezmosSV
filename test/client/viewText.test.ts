@@ -14,8 +14,12 @@ describe("viewSubtitle", () => {
     expect(viewSubtitle("users")).toBe("Cree cuentas y asigne roles de acceso al panel.");
   });
 
+  it("describes Contingencia as automatic retry behavior, not an archive", () => {
+    expect(viewSubtitle("contingency")).toBe("El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.");
+  });
+
   it("keeps distinct, non-empty subtitles for the remaining views", () => {
-    const views = ["documents", "contingency", "credentials", "exports"] as const;
+    const views = ["documents", "credentials", "exports"] as const;
     const subtitles = views.map((view) => viewSubtitle(view));
     for (const subtitle of subtitles) {
       expect(subtitle.length).toBeGreaterThan(0);

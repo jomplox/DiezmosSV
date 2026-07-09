@@ -6233,6 +6233,41 @@ describe("alert email setting", () => {
     await expect(getResponse.json()).resolves.toMatchObject({ alertEmail: "owner@example.org" });
   });
 
+  it("lets owners configure multiple operational alert recipients separated by commas", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "owner@example.org, admin@example.org" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, alertEmail: "owner@example.org, admin@example.org" });
+    expect(db.settings).toContainEqual(expect.objectContaining({ key: "alert_email", value: "owner@example.org, admin@example.org", updated_by: "user_owner" }));
+  });
+
+  it("rejects malformed operational alert recipient lists", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "owner@example.org, correo-invalido" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_alert_email" });
+  });
+
   it("redacts a legacy alert-email address from the audit trail for lower roles", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -6957,7 +6992,8 @@ describe("branding", () => {
       displayName: "ExamplePerson1",
       accentColor: "#0f766e",
       supportEmail: "legacy-contact-1@example.com",
-      logoVersion: null
+      logoVersion: null,
+      donorLogoVersion: null
     });
   });
 
@@ -6985,7 +7021,8 @@ describe("branding", () => {
       displayName: "Iglesia Central",
       accentColor: "#123abc",
       supportEmail: "legacy-email-119@example.com",
-      logoVersion: null
+      logoVersion: null,
+      donorLogoVersion: null
     });
   });
 
@@ -7151,6 +7188,62 @@ describe("branding", () => {
     });
   }
 
+  it("stores and serves the donor logo separately from the admin/email logo", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const adminBytes = new Uint8Array([1, 2, 3]);
+    const donorBytes = new Uint8Array([7, 8, 9]);
+
+    const adminPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: adminBytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const adminBody = (await adminPut.json()) as { logoVersion: string };
+
+    const donorPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: donorBytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(donorPut.status).toBe(200);
+    const donorBody = (await donorPut.json()) as { ok: boolean; donorLogoVersion: string };
+    expect(donorBody.ok).toBe(true);
+    expect(donorBody.donorLogoVersion).toBeTruthy();
+    expect(archive.putCalls.map((call) => call.key)).toContain("branding/logo");
+    expect(archive.putCalls.map((call) => call.key)).toContain("branding/donor-logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_DONOR_LOGO_UPDATED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({
+      logoVersion: adminBody.logoVersion,
+      donorLogoVersion: donorBody.donorLogoVersion
+    });
+
+    const donorLogo = await worker.fetch(
+      new Request("https://example.org/api/branding/donor-logo"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(donorLogo.status).toBe(200);
+    expect(donorLogo.headers.get("Content-Type")).toBe("image/png");
+    await expect(donorLogo.arrayBuffer()).resolves.toEqual(donorBytes.buffer);
+
+    const adminLogo = await worker.fetch(
+      new Request("https://example.org/api/branding/logo"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(adminLogo.arrayBuffer()).resolves.toEqual(adminBytes.buffer);
+  });
+
   it("rejects a logo upload with an unsupported content type", async () => {
     const db = ownerDb();
     const archive = new FakeArchiveBucket();
@@ -7220,6 +7313,48 @@ describe("branding", () => {
       env(db, { ARCHIVE: archive as unknown as R2Bucket })
     );
     await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: null });
+  });
+
+  it("removes a stored donor logo without removing the admin/email logo", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([1, 1, 1])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const donorPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([2, 2, 2])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const donorBody = (await donorPut.json()) as { donorLogoVersion: string };
+
+    const remove = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(remove.status).toBe(200);
+    await expect(remove.json()).resolves.toMatchObject({ ok: true, donorLogoVersion: null });
+    expect(donorBody.donorLogoVersion).toBeTruthy();
+    expect(archive.deleteCalls).toContain("branding/donor-logo");
+    expect(archive.deleteCalls).not.toContain("branding/logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_DONOR_LOGO_REMOVED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: expect.any(String), donorLogoVersion: null });
   });
 
   it("forbids a non-owner from uploading a logo", async () => {
