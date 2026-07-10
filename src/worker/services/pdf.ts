@@ -4,7 +4,7 @@ import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import type { DteDocumentRecord } from "../types";
 
-export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v2";
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v3";
 
 type PdfColor = ReturnType<typeof rgb>;
 
@@ -477,14 +477,18 @@ function formatNrc(value: string | null | undefined): string {
 }
 
 function formatDocument(value: string | null | undefined): string {
-  const digits = onlyDigits(value);
+  const source = value ?? "";
+  if (/\p{L}/u.test(source)) {
+    return source;
+  }
+  const digits = onlyDigits(source);
   if (digits.length === 14) {
     return `${digits.slice(0, 4)}-${digits.slice(4, 10)}-${digits.slice(10, 13)}-${digits.slice(13)}`;
   }
   if (digits.length === 9) {
     return `${digits.slice(0, 8)}-${digits.slice(8)}`;
   }
-  return value ?? "";
+  return source;
 }
 
 function onlyDigits(value: string | null | undefined): string {

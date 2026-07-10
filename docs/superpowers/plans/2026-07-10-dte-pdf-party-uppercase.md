@@ -46,7 +46,7 @@ it("uppercases party values except emails and hides the internal establishment c
   plain.receptor.nombre = "José Pérez";
   plain.receptor.descActividad = "Servicios profesionales";
   plain.receptor.tipoDocumento = "03";
-  plain.receptor.numDocumento = "pa-123x";
+  plain.receptor.numDocumento = "ab123456789";
   plain.receptor.direccion.complemento = "Colonia Escalón";
   plain.receptor.correo = "Donor.Mixed@Example.Org";
   record.plain_json = JSON.stringify(plain);
@@ -59,14 +59,15 @@ it("uppercases party values except emails and hides the internal establishment c
   expect(text).toContain("AVENIDA EJEMPLO 100");
   expect(text).toContain("JOSÉ PÉREZ");
   expect(text).toContain("SERVICIOS PROFESIONALES");
-  expect(text).toContain("PA-123X");
+  expect(text).toContain("AB123456789");
   expect(text).toContain("COLONIA ESCALÓN");
   expect(text).toContain("SAN SALVADOR");
   expect(text).toContain("legacy-email-107@example.com");
   expect(text).toContain("Donor.Mixed@Example.Org");
   expect(text).not.toContain("Misión ExampleOrganization");
   expect(text).not.toContain("José Pérez");
-  expect(text).not.toContain("pa-123x");
+  expect(text).not.toContain("ab123456789");
+  expect(text).not.toContain("12345678-9");
   expect(text).not.toContain("LEGACY-EMAIL-107@EXAMPLE.COM");
   expect(text).not.toContain("DONOR.MIXED@EXAMPLE.ORG");
   expect(text).not.toContain("(0002)");
@@ -93,6 +94,15 @@ drawKeyValue(page, options.nameLabel, safeUpper(options.name), ...);
 drawKeyValue(page, "Actividad económica:", safeUpper(options.activity), ...);
 drawKeyValue(page, "NRC:", safeUpper(options.nrc), ...);
 drawKeyValue(page, options.documentLabel, safeUpper(options.documentNumber), ...);
+```
+
+Bump `DTE_PDF_RENDERER_VERSION` to `cde-pdf:v3`, and keep alphabetic identifiers intact before `safeUpper` renders them:
+
+```ts
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v3";
+
+const source = value ?? "";
+if (/\p{L}/u.test(source)) return source;
 ```
 
 Pass the receptor name without pre-normalizing it, because the shared box now owns scalar-value presentation:
@@ -141,7 +151,7 @@ Expected: 1 test passes.
 
 - [x] **Step 5: Update existing PDF expectations for the presentation rule**
 
-Change existing mixed-case PDF assertions to their uppercase display forms, including `San Salvador`, foreign addresses/countries, and preserved lowercase fixture emails. Do not loosen assertions with case-insensitive matching.
+Change existing mixed-case PDF assertions to their uppercase display forms, including `San Salvador`, foreign addresses/countries, and preserved lowercase fixture emails. Pin email-delivery evidence to `pdf_renderer_version: "cde-pdf:v3"`. Do not loosen assertions with case-insensitive matching.
 
 - [x] **Step 6: Run the complete PDF suite**
 
