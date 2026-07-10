@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildDteQrPayload, renderDtePdf } from "../../src/worker/services/pdf";
+import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 describe("DTE PDF rendering", () => {
@@ -33,16 +33,60 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("Total de la Donación");
   });
 
+  it("uppercases party values except emails and hides the internal establishment code", async () => {
+    const record = testDocument();
+    const plain = JSON.parse(record.plain_json) as Record<string, any>;
+    plain.emisor.nombre = "Misión ExampleOrganization";
+    plain.emisor.nombreComercial = "Misión ExampleOrganization";
+    plain.emisor.descActividad = "Actividades de organizaciones religiosas";
+    plain.emisor.direccion.complemento = "Avenida Ejemplo 100";
+    plain.emisor.correo = "legacy-email-107@example.com";
+    plain.emisor.codEstable = "0002";
+    plain.receptor.nombre = "José Pérez";
+    plain.receptor.descActividad = "Servicios profesionales";
+    plain.receptor.tipoDocumento = "03";
+    plain.receptor.numDocumento = "ab123456789";
+    plain.receptor.direccion.complemento = "Colonia Escalón";
+    plain.receptor.correo = "Donor.Mixed@Example.Org";
+    record.plain_json = JSON.stringify(plain);
+    const originalJson = record.plain_json;
+
+    const text = await renderToText(record);
+
+    expect(text).toContain("MISIÓN EXAMPLEORGANIZATION");
+    expect(text).toContain("ACTIVIDADES DE ORGANIZACIONES RELIGIOSAS");
+    expect(text).toContain("AVENIDA EJEMPLO 100");
+    expect(text).toContain("JOSÉ PÉREZ");
+    expect(text).toContain("SERVICIOS PROFESIONALES");
+    expect(text).toContain("AB123456789");
+    expect(text).toContain("COLONIA ESCALÓN");
+    expect(text).toContain("SAN SALVADOR");
+    expect(text).toContain("legacy-email-107@example.com");
+    expect(text).toContain("Donor.Mixed@Example.Org");
+    expect(text).not.toContain("Misión ExampleOrganization");
+    expect(text).not.toContain("José Pérez");
+    expect(text).not.toContain("ab123456789");
+    expect(text).not.toContain("12345678-9");
+    expect(text).not.toContain("LEGACY-EMAIL-107@EXAMPLE.COM");
+    expect(text).not.toContain("DONOR.MIXED@EXAMPLE.ORG");
+    expect(text).not.toContain("(0002)");
+    expect(record.plain_json).toBe(originalJson);
+  });
+
+  it("versions the uppercase party renderer as PDF evidence v3", () => {
+    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v3");
+  });
+
   it("labels the receptor document by CAT-022 type and renders the full geographic address", async () => {
     const text = await renderToText(testDocument());
 
     expect(text).toMatch(/DUI:\s+10000002-7/);
     expect(text).not.toMatch(/NIT:\s+10000002-7/);
     // Receptor address: complemento + distrito/municipio/departamento NAMES (dept 06 / muni 23 / distrito 03).
-    expect(text).toContain("Ayutux");
+    expect(text).toContain("AYUTUX");
     expect(text).toContain("AYUTUXTEPEQUE");
     expect(text).toContain("SAN SALVADOR CENTRO");
-    expect(text).toContain("San Salvador");
+    expect(text).toContain("SAN SALVADOR");
   });
 
   it("renders the emisor geographic address labels", async () => {
@@ -57,7 +101,7 @@ describe("DTE PDF rendering", () => {
     const text = await renderToText(testDocument());
     const lines = text.split("\n");
 
-    // The emisor address (complemento + AGUILARES, SAN SALVADOR ESTE, San Salvador + phone)
+    // The emisor address (complemento + AGUILARES, SAN SALVADOR ESTE, SAN SALVADOR + phone)
     // is far too wide for the 294pt box, so it must wrap onto multiple rendered lines: the head
     // ("SOYAPANGO.") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
     const head = lines.findIndex((line) => line.includes("SOYAPANGO."));
@@ -100,7 +144,7 @@ describe("DTE PDF rendering", () => {
 
     // A short receptor address fits in one line: complemento + geography all together.
     const receptorLine = lines.filter(
-      (line) => line.includes("Col 1") && line.includes("AYUTUXTEPEQUE") && line.includes("San Salvador")
+      (line) => line.includes("COL 1") && line.includes("AYUTUXTEPEQUE") && line.includes("SAN SALVADOR")
     );
     expect(receptorLine.length).toBeGreaterThan(0);
   });
@@ -115,11 +159,11 @@ describe("DTE PDF rendering", () => {
     const text = await renderToText(document);
 
     // The donor's foreign address plus their CAT-020 country label...
-    expect(text).toContain("742 Evergreen Tce");
-    expect(text).toContain("Estados Unidos");
+    expect(text).toContain("742 EVERGREEN TCE");
+    expect(text).toContain("ESTADOS UNIDOS");
     // ...and never the "Otro (Para extranjeros)" placeholder printed three times
     // (the 00 code's label in CAT-008/012/013).
-    expect(text).not.toContain("Otro (Para extranjeros)");
+    expect(text).not.toContain("OTRO (PARA EXTRANJEROS)");
   });
 
   it("labels a NIT receptor with the NIT: prefix", async () => {
@@ -273,7 +317,7 @@ describe("renderDtePdf unicode sanitization", () => {
     execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
     const text = readFileSync(txtPath, "utf8");
     expect(text).toContain("JOSE ? VEGA");
-    expect(text).toContain("Casa ? azul ??");
+    expect(text).toContain("CASA ? AZUL ??");
   });
 });
 
@@ -301,7 +345,7 @@ describe("renderDtePdf foreign receptor", () => {
     const text = readFileSync(txtPath, "utf8");
 
     // The receptor box shows the donor's real country + typed address (from the apéndice).
-    expect(text).toContain("Anguila: 742 Evergreen Terrace");
+    expect(text).toContain("ANGUILA: 742 EVERGREEN TERRACE");
     // No overlap: with the fixed label width, "Documento:" and its number extract as
     // intact tokens instead of interleaved characters (the reported glitch).
     expect(text).toContain("Documento:");

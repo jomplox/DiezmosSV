@@ -6,6 +6,7 @@ dist/
 # .dev.vars.ci holds committed NON-SECRET demo values used by the CI Playwright
 # smoke test; keep it tracked even though the glob above ignores .dev.vars.*.
 !.dev.vars.ci
+!.dev.vars.example
 .DS_Store
 
 # Playwright e2e artifacts.

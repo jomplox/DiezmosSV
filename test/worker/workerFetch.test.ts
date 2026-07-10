@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { hashPassword } from "../../src/worker/services/auth";
 import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
+import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -26,6 +27,137 @@ describe("Worker fetch error handling", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ error: "auth_error" });
+  });
+});
+
+describe("request body limits", () => {
+  it("rejects an oversized login body before authentication or throttling", async () => {
+    const db = new InMemoryD1();
+    const body = JSON.stringify({ email: `${"a".repeat(16 * 1024)}@example.org`, password: "Password#2026" });
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": String(body.length) },
+        body
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "request_body_too_large" });
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects an oversized Wompi body before HMAC verification", async () => {
+    const db = new InMemoryD1();
+    const body = JSON.stringify({ padding: "x".repeat(64 * 1024) });
+    const response = await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": String(body.length) },
+        body
+      }),
+      env(db, { WOMPI_API_SECRET: "test-secret" })
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "request_body_too_large" });
+    expect(db.wompiEvents).toHaveLength(0);
+  });
+
+  it("maps malformed JSON on strict public routes to invalid_json_body", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{"
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_json_body" });
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("preserves tolerant malformed-JSON behavior on donation intent creation", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      new Request("https://example.org/api/donations/intent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{"
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_amount" });
+    expect(db.donationIntents).toHaveLength(0);
+  });
+
+  it("rejects an oversized authenticated admin body before changing credentials", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    const body = JSON.stringify({ password: "x".repeat(257 * 1024) });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator/password", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json",
+          "Content-Length": String(body.length)
+        },
+        body
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "request_body_too_large" });
+    expect(db.users[0]).toMatchObject({ password_hash: "old-hash", password_salt: "old-salt" });
+    expect(db.audits).toHaveLength(0);
+  });
+});
+
+describe("document route authorization order", () => {
+  it("returns 401 without looking up either an existing or missing document", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ id: "doc_existing" }));
+
+    const existing = await worker.fetch(new Request("https://example.org/api/documents/doc_existing"), env(db));
+    const missing = await worker.fetch(new Request("https://example.org/api/documents/doc_missing"), env(db));
+
+    expect(existing.status).toBe(401);
+    expect(missing.status).toBe(401);
+    expect(db.documentLookupCount).toBe(0);
+  });
+
+  it("returns 403 to a VIEWER mutation without looking up either document", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(testDocument({ id: "doc_existing" }));
+    const init = { method: "POST", headers: { Authorization: "Bearer test-token" } };
+
+    const existing = await worker.fetch(new Request("https://example.org/api/documents/doc_existing/resend", init), env(db));
+    const missing = await worker.fetch(new Request("https://example.org/api/documents/doc_missing/resend", init), env(db));
+
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(db.documentLookupCount).toBe(0);
   });
 });
 
@@ -347,10 +479,11 @@ describe("donation intents", () => {
     const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
 
     expect(response.status).toBe(201);
-    const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string };
+    const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string; datosToken?: string };
     expect(payload.intentId).toMatch(/^di_/);
     expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
     expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
+    expect(payload.datosToken).toBeUndefined();
 
     expect(db.donationIntents).toHaveLength(1);
     const intent = db.donationIntents[0];
@@ -892,12 +1025,13 @@ describe("donation intents", () => {
       const response = await worker.fetch(draftRequest({ amount: "25.50", giftType: "DIEZMO" }), env(db));
 
       expect(response.status).toBe(201);
-      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string };
+      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string; datosToken?: string };
       // Response shape is unchanged from the full create, and the link is minted with
       // identificadorEnlaceComercio = intent id (mock echoes the id into the URL).
       expect(payload.intentId).toMatch(/^di_/);
       expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
       expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
+      expect(payload.datosToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
 
       expect(db.donationIntents).toHaveLength(1);
       const intent = db.donationIntents[0];
@@ -910,6 +1044,8 @@ describe("donation intents", () => {
       expect(intent.direccion_complemento).toBeNull();
       expect(intent.donor_name).toBeNull();
       expect(intent.client_ip).toBe("203.0.113.7");
+      expect(String(intent.datos_token_hash)).toMatch(/^[a-f0-9]{64}$/);
+      expect(intent.datos_token_hash).not.toBe(payload.datosToken);
     });
 
     it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
@@ -967,7 +1103,17 @@ describe("donation intents", () => {
   // Attaches the donor's fiscal data to a minted draft with the same validation the
   // full create runs; NO Wompi call, and it must never touch amount or gift type.
   describe("datos completion", () => {
-    function seedDraft(db: InMemoryD1, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const DATOS_TOKEN = "datos-capability-test-token";
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:30:00.000Z") });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    async function seedDraft(db: InMemoryD1, overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
       const draft = {
         id: "di_draft_1",
         status: "LINK_CREATED",
@@ -988,6 +1134,8 @@ describe("donation intents", () => {
         wompi_url_enlace_largo: "https://mock.wompi.sv/enlace-largo/di_draft_1",
         document_id: null,
         client_ip: "203.0.113.7",
+        datos_token_hash: await sha256Hex(utf8Bytes(DATOS_TOKEN)),
+        paid_at: null,
         created_at: "2026-07-04T12:00:00.000Z",
         updated_at: "2026-07-04T12:00:00.000Z",
         expires_at: "2026-07-04T13:00:00.000Z",
@@ -997,7 +1145,11 @@ describe("donation intents", () => {
       return draft;
     }
 
-    function datosRequest(id: string, body: Record<string, unknown>, headers: Record<string, string> = {}): Request {
+    function datosRequest(
+      id: string,
+      body: Record<string, unknown>,
+      headers: Record<string, string> = { "X-Donation-Datos-Token": DATOS_TOKEN }
+    ): Request {
       return new Request(`https://example.org/api/donations/intent/${id}/datos`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "cf-connecting-ip": "203.0.113.7", ...headers },
@@ -1017,7 +1169,7 @@ describe("donation intents", () => {
 
     it("attaches donor data to a minted draft without a Wompi call or an amount/gift change", async () => {
       const db = new InMemoryD1();
-      seedDraft(db);
+      await seedDraft(db);
       const fetchSpy = vi.spyOn(globalThis, "fetch");
 
       const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
@@ -1039,11 +1191,12 @@ describe("donation intents", () => {
       // Still LINK_CREATED and pointing at the same minted link.
       expect(intent.status).toBe("LINK_CREATED");
       expect(intent.wompi_id_enlace).toBe(123456);
+      expect(intent.datos_token_hash).toBeNull();
     });
 
     it("rejects an oversized public datos body with 413 before mutating the draft", async () => {
       const db = new InMemoryD1();
-      seedDraft(db);
+      await seedDraft(db);
       const response = await worker.fetch(
         datosRequest("di_draft_1", { ...validDatos, filler: "x".repeat(17 * 1024) }),
         env(db)
@@ -1060,7 +1213,7 @@ describe("donation intents", () => {
 
     it("mirrors the full-create validation messages (invalid DUI)", async () => {
       const db = new InMemoryD1();
-      seedDraft(db);
+      await seedDraft(db);
       const response = await worker.fetch(datosRequest("di_draft_1", { ...validDatos, donorDocument: "01234567-0" }), env(db));
 
       expect(response.status).toBe(400);
@@ -1074,7 +1227,7 @@ describe("donation intents", () => {
 
     it("requires the razón social for a NIT (36) datos completion", async () => {
       const db = new InMemoryD1();
-      seedDraft(db);
+      await seedDraft(db);
       const response = await worker.fetch(
         datosRequest("di_draft_1", { ...validDatos, donorDocumentType: "36", donorDocument: "06142803901121" }),
         env(db)
@@ -1097,30 +1250,111 @@ describe("donation intents", () => {
 
     it("returns 409 for a COMPLETED intent", async () => {
       const db = new InMemoryD1();
-      seedDraft(db, { status: "COMPLETED", document_id: "dte_prev" });
+      await seedDraft(db, { status: "COMPLETED", document_id: "dte_prev" });
       const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
 
       expect(response.status).toBe(409);
-      await expect(response.json()).resolves.toMatchObject({ error: "intent_already_completed" });
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
       // The completed intent is not mutated.
       expect(db.donationIntents.find((row) => row.id === "di_draft_1")?.donor_document).toBeNull();
     });
 
-    it("allows datos on an EXPIRED intent (donor finishing in the link's last minute)", async () => {
+    it("rejects datos on an EXPIRED intent", async () => {
       const db = new InMemoryD1();
-      seedDraft(db, { status: "EXPIRED" });
+      await seedDraft(db, { status: "EXPIRED" });
       const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
       const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
-      expect(intent.donor_document).toBe("10000001-9");
-      // Status is left as-is (correlateIntent already accepts EXPIRED).
+      expect(intent.donor_document).toBeNull();
       expect(intent.status).toBe("EXPIRED");
+    });
+
+    it("rejects datos after expires_at even before the cron sweep marks the intent EXPIRED", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db, { status: "LINK_CREATED", expires_at: "2026-07-04T12:59:59.000Z" });
+      vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T13:00:00.000Z") });
+      try {
+        const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+
+        expect(response.status).toBe(409);
+        await expect(response.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+        expect(db.donationIntents[0].donor_document).toBeNull();
+        expect(db.donationIntents[0].datos_token_hash).not.toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("rejects a missing or incorrect datos capability without mutating the draft", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+
+      const missing = await worker.fetch(datosRequest("di_draft_1", validDatos, {}), env(db));
+      const incorrect = await worker.fetch(
+        datosRequest("di_draft_1", validDatos, { "X-Donation-Datos-Token": "wrong-capability" }),
+        env(db)
+      );
+
+      expect(missing.status).toBe(409);
+      expect(incorrect.status).toBe(409);
+      await expect(missing.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+      await expect(incorrect.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+      expect(db.donationIntents[0].donor_document).toBeNull();
+    });
+
+    it("rejects replay after the datos capability has been consumed", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+
+      const first = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
+      const replay = await worker.fetch(datosRequest("di_draft_1", { ...validDatos, complemento: "Ataque de replay" }), env(db));
+
+      expect(first.status).toBe(200);
+      expect(replay.status).toBe(409);
+      await expect(replay.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+      expect(db.donationIntents[0].direccion_complemento).toBe("Colonia Escalón, San Salvador");
+    });
+
+    it("allows exactly one of two concurrent datos capability requests", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+
+      const responses = await Promise.all([
+        worker.fetch(datosRequest("di_draft_1", validDatos), env(db)),
+        worker.fetch(datosRequest("di_draft_1", { ...validDatos, complemento: "Segundo escritor" }), env(db))
+      ]);
+
+      expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+      expect(db.donationIntents[0].datos_token_hash).toBeNull();
+      expect(["Colonia Escalón, San Salvador", "Segundo escritor"]).toContain(db.donationIntents[0].direccion_complemento);
+    });
+
+    it("rejects datos after payment and on full-create intents without a capability", async () => {
+      const paidDb = new InMemoryD1();
+      await seedDraft(paidDb, { paid_at: "2026-07-04T12:30:00.000Z" });
+      const paid = await worker.fetch(datosRequest("di_draft_1", validDatos), env(paidDb));
+
+      const fullDb = new InMemoryD1();
+      await seedDraft(fullDb, {
+        donor_document: "10000001-9",
+        direccion_complemento: "Colonia Escalón, San Salvador",
+        datos_token_hash: null
+      });
+      const full = await worker.fetch(datosRequest("di_draft_1", { ...validDatos, complemento: "Sobrescritura" }), env(fullDb));
+
+      expect(paid.status).toBe(409);
+      expect(full.status).toBe(409);
+      await expect(paid.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+      await expect(full.json()).resolves.toMatchObject({ error: "intent_datos_unavailable" });
+      expect(paidDb.donationIntents[0].donor_document).toBeNull();
+      expect(fullDb.donationIntents[0].direccion_complemento).toBe("Colonia Escalón, San Salvador");
     });
 
     it("applies the per-IP throttle to the public datos endpoint", async () => {
       const db = new InMemoryD1();
-      seedDraft(db);
+      await seedDraft(db);
       for (let i = 0; i < 5; i += 1) {
         db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
       }
@@ -1281,6 +1515,137 @@ describe("password reset", () => {
     expect(db.sessions[0].revoked_at).toBeTruthy();
     expect(db.resetTokens[0].used_at).toBeTruthy();
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_COMPLETED", entity_id: "user_operator" }));
+  });
+
+  it("invalidates every sibling password reset token after one succeeds", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "session-hash", revoked_at: null });
+    db.resetTokens.push(
+      {
+        id: "reset_1",
+        user_id: "user_operator",
+        token_hash: await sha256Hex(utf8Bytes("first-token")),
+        expires_at: "2026-07-04T23:00:00.000Z",
+        used_at: null
+      },
+      {
+        id: "reset_2",
+        user_id: "user_operator",
+        token_hash: await sha256Hex(utf8Bytes("sibling-token")),
+        expires_at: "2026-07-04T23:00:00.000Z",
+        used_at: null
+      }
+    );
+
+    const confirm = (token: string, password: string) =>
+      worker.fetch(
+        new Request("https://example.org/api/auth/password-reset/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, password })
+        }),
+        env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+      );
+
+    const first = await confirm("first-token", "First#Pass2026");
+    const sibling = await confirm("sibling-token", "Second#Pass2026");
+
+    expect(first.status).toBe(200);
+    expect(sibling.status).toBe(400);
+    await expect(sibling.json()).resolves.toMatchObject({ error: "invalid_reset_token" });
+    expect(db.resetTokens.every((token) => Boolean(token.used_at))).toBe(true);
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(db.passwordResetBatchCount).toBe(1);
+  });
+
+  it("does not change the password when a reset token loses the atomic race", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "session-hash", revoked_at: null });
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("racing-token")),
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+    db.beforePasswordResetBatch = () => {
+      db.resetTokens[0].used_at = "2026-07-04T12:00:00.000Z";
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "racing-token", password: "Fresh#Pass2026" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_reset_token" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+    expect(db.sessions[0].revoked_at).toBeNull();
+    expect(db.passwordResetBatchCount).toBe(1);
+  });
+
+  it("allows exactly one of two concurrent confirmations to consume a reset token", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "session-hash", revoked_at: null });
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("shared-token")),
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+
+    const confirm = (password: string) =>
+      worker.fetch(
+        new Request("https://example.org/api/auth/password-reset/confirm", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: "shared-token", password })
+        }),
+        env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+      );
+
+    const responses = await Promise.all([confirm("First#Pass2026"), confirm("Second#Pass2026")]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 400]);
+    expect(db.resetTokens[0].used_at).toBeTruthy();
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(db.passwordResetBatchCount).toBe(2);
+  });
+
+  it("rolls back password, sessions, and tokens when the reset batch fails", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "session-hash", revoked_at: null });
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: await sha256Hex(utf8Bytes("rollback-token")),
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+    db.failPasswordResetBatchAfterStatement = 1;
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "rollback-token", password: "Fresh#Pass2026" })
+      }),
+      env(db, { MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(500);
+    expect(db.users[0].password_hash).toBe("old-hash");
+    expect(db.sessions[0].revoked_at).toBeNull();
+    expect(db.resetTokens[0].used_at).toBeNull();
   });
 
   it("rejects expired tokens", async () => {
@@ -1564,6 +1929,8 @@ describe("document detail donor-data-verified flag", () => {
       wompi_url_enlace_largo: null,
       document_id: "doc_paid",
       client_ip: "203.0.113.9",
+      datos_token_hash: null,
+      paid_at: null,
       created_at: "2026-07-05T12:00:00.000Z",
       updated_at: "2026-07-05T12:05:00.000Z",
       expires_at: "2026-07-05T13:00:00.000Z"
@@ -1872,6 +2239,22 @@ describe("user administration", () => {
       updated_at: "2026-06-26T01:46:47.015Z"
     });
     db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "token-hash", revoked_at: null });
+    db.resetTokens.push(
+      {
+        id: "reset_1",
+        user_id: "user_operator",
+        token_hash: "first-reset-hash",
+        expires_at: "2026-07-04T23:00:00.000Z",
+        used_at: null
+      },
+      {
+        id: "reset_2",
+        user_id: "user_operator",
+        token_hash: "second-reset-hash",
+        expires_at: "2026-07-04T23:00:00.000Z",
+        used_at: null
+      }
+    );
 
     const response = await worker.fetch(
       new Request("https://example.org/api/users/user_operator/password", {
@@ -1890,11 +2273,58 @@ describe("user administration", () => {
     expect(db.users[0].password_hash).not.toBe("old-hash");
     expect(db.users[0].password_salt).not.toBe("old-salt");
     expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(db.resetTokens.every((token) => Boolean(token.used_at))).toBe(true);
+    expect(db.passwordResetBatchCount).toBe(1);
     expect(db.audits.at(-1)).toMatchObject({
       action: "USER_PASSWORD_RESET",
       entity_type: "user",
       entity_id: "user_operator"
     });
+  });
+
+  it("rolls back an administrator password change, session revocation, and reset-token invalidation together", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.sessions.push({ id: "session_1", user_id: "user_operator", token_hash: "token-hash", revoked_at: null });
+    db.resetTokens.push({
+      id: "reset_1",
+      user_id: "user_operator",
+      token_hash: "reset-hash",
+      expires_at: "2026-07-04T23:00:00.000Z",
+      used_at: null
+    });
+    db.failPasswordResetBatchAfterStatement = 1;
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_operator/password", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ password: "New-long-password1!" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({ error: "internal_error" });
+    expect(db.users[0].password_hash).toBe("old-hash");
+    expect(db.users[0].password_salt).toBe("old-salt");
+    expect(db.sessions[0].revoked_at).toBeNull();
+    expect(db.resetTokens[0].used_at).toBeNull();
+    expect(db.audits).toHaveLength(0);
   });
 
   it("rejects weak password resets without changing the user or sessions", async () => {
@@ -2000,7 +2430,7 @@ describe("document email resend", () => {
       email_type: "dteReceipt",
       document_status_at_send: "ACCEPTED",
       template_version: expect.stringMatching(/^dteReceipt:sha256:[a-f0-9]{64}$/),
-      pdf_renderer_version: expect.stringMatching(/^cde-pdf:/),
+      pdf_renderer_version: "cde-pdf:v3",
       pdf_sha256: pdfSha256,
       dte_json_sha256: await sha256Hex(dteJsonBytes),
       provider_delivery_id: "cf-email-1",
@@ -2303,6 +2733,32 @@ describe("document retry", () => {
     });
   });
 
+  it("rejects a production DTE retry from staging before queueing or auditing", async () => {
+    const db = new InMemoryD1();
+    const send = vi.fn();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      status: "FAILED",
+      environment: "01",
+      signed_jws: null,
+      sello_recibido: null,
+      accepted_at: null
+    }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { APP_ENV: "staging", ISSUANCE_QUEUE: { send } as unknown as Queue })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "environment_not_allowed" });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.audits).toHaveLength(0);
+  });
+
   it("rebuilds a rejected Wompi CDE from the original webhook before retransmitting", async () => {
     const certPassword = "correct horse battery staple";
     const db = new InMemoryD1();
@@ -2569,6 +3025,32 @@ describe("document invalidation", () => {
     vi.useRealTimers();
   });
 
+  it("rejects production invalidation from staging before signing or transmission", async () => {
+    const db = new InMemoryD1();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({ environment: "01" }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "No debe transmitirse" })
+      }),
+      env(db, { APP_ENV: "staging", MOCK_EXTERNAL_SERVICES: "false" })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "environment_not_allowed" });
+    expect(db.dteEvents).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.audits).toHaveLength(0);
+  });
+
   it("blocks invalidation after the tenth business day of the following month", async () => {
     vi.setSystemTime(new Date("2026-07-15T06:00:00.000Z"));
     const db = new InMemoryD1();
@@ -2706,7 +3188,7 @@ describe("document invalidation", () => {
       email_type: "dteInvalidation",
       document_status_at_send: "INVALIDATED",
       template_version: expect.stringMatching(/^dteInvalidation:sha256:[a-f0-9]{64}$/),
-      pdf_renderer_version: expect.stringMatching(/^cde-pdf:/),
+      pdf_renderer_version: "cde-pdf:v3",
       pdf_sha256: invalidationPdfSha256,
       dte_json_sha256: await sha256Hex(invalidationJsonBytes),
       provider_delivery_id: "cf-email-invalidated",
@@ -3533,7 +4015,65 @@ describe("annual donor certificates", () => {
 });
 
 describe("advanced CDE generation", () => {
-  it("creates quick DTE records directly without a synthetic Wompi event", async () => {
+  it.each([
+    ["production", "/api/test/dte"],
+    ["production", "/api/test/dte/advanced-template"],
+    ["production", "/api/test/dte/advanced"],
+    ["preview", "/api/test/dte"],
+    ["preview", "/api/test/dte/advanced-template"],
+    ["preview", "/api/test/dte/advanced"]
+  ])("blocks direct generation in %s at %s before creating or queueing a DTE", async (appEnv, path) => {
+    const db = new InMemoryD1();
+    const send = vi.fn();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+    const response = await worker.fetch(
+      new Request(`https://example.org${path}`, {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: "{}"
+      }),
+      env(db, { APP_ENV: appEnv, ISSUANCE_QUEUE: { send } as unknown as Queue })
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({ error: "test_generation_disabled_in_production" });
+    expect(db.documents).toHaveLength(0);
+    expect(send).not.toHaveBeenCalled();
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("locks emission settings to the deployment's allowed ambiente", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const request = (method: "GET" | "PUT", environment?: "00" | "01") =>
+      new Request("https://example.org/api/settings/emission-environment", {
+        method,
+        headers: { Authorization: "Bearer test-token", ...(environment ? { "Content-Type": "application/json" } : {}) },
+        body: environment ? JSON.stringify({ environment }) : undefined
+      });
+
+    const state = await worker.fetch(request("GET"), env(db, { APP_ENV: "staging" }));
+    const stagingRejected = await worker.fetch(request("PUT", "01"), env(db, { APP_ENV: "staging" }));
+    const productionRejected = await worker.fetch(request("PUT", "00"), env(db, { APP_ENV: "production" }));
+
+    expect(state.status).toBe(200);
+    await expect(state.json()).resolves.toEqual({
+      emissionEnvironment: {
+        environment: "00",
+        source: "deployment_default",
+        appEnv: "staging",
+        locked: true,
+        allowedEnvironments: ["00"]
+      }
+    });
+    expect(stagingRejected.status).toBe(409);
+    expect(productionRejected.status).toBe(409);
+    expect(db.settings.find((row) => row.key === "emission_environment")).toBeUndefined();
+    expect(db.audits.find((row) => row.action === "EMISSION_ENVIRONMENT_UPDATED")).toBeUndefined();
+  });
+
+  it("creates a staging quick DTE in 00 despite a stale incompatible setting", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -3547,10 +4087,11 @@ describe("advanced CDE generation", () => {
         },
         body: JSON.stringify({ environment: "01" })
       }),
-      env(db)
+      env(db, { APP_ENV: "staging" })
     );
 
-    expect(settingsResponse.status).toBe(200);
+    expect(settingsResponse.status).toBe(409);
+    db.settings.push({ key: "emission_environment", value: "01", updated_by: "legacy", updated_at: "2026-07-01T00:00:00.000Z" });
 
     const response = await worker.fetch(
       new Request("https://example.org/api/test/dte", {
@@ -3579,7 +4120,7 @@ describe("advanced CDE generation", () => {
     expect(db.wompiEvents).toHaveLength(0);
     expect(db.documents).toHaveLength(1);
     const generated = JSON.parse(db.documents[0].plain_json);
-    expect(generated.identificacion).toMatchObject({ ambiente: "01", tipoDte: "15" });
+    expect(generated.identificacion).toMatchObject({ ambiente: "00", tipoDte: "15" });
     expect(generated.receptor.nombre).toBe("Example Person");
     expect(generated.otrosDocumentos[0]).toMatchObject({
       descDocumento: "Generación directa",
@@ -3922,7 +4463,7 @@ describe("Wompi webhook integration", () => {
     expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
   });
 
-  it("stores the environment from the signed payload (EsProductiva=false) and audits a mismatch against the active setting", async () => {
+  it("stores but quarantines a signed webhook whose ambiente is incompatible with the deployment", async () => {
     const db = new InMemoryD1();
     // Owner has the app set to PRODUCTION emission, but a TEST-mode payment arrives.
     db.settings.push({ key: "emission_environment", value: "01" });
@@ -3951,13 +4492,47 @@ describe("Wompi webhook integration", () => {
     );
 
     expect(response.status).toBe(202);
-    // The signed test-mode flag wins: the event is stored (and later emitted) as 00,
-    // never as a production DTE, even though the active emission setting is 01.
+    await expect(response.clone().json()).resolves.toMatchObject({ queued: false });
     expect(db.wompiEvents[0]).toMatchObject({ transaction_id: "wompi_env_tx_mismatch", environment: "00" });
     const mismatch = db.audits.find((row) => row.action === "WOMPI_ENVIRONMENT_MISMATCH");
     expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: db.wompiEvents[0].id });
     const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadEnvironment: string; activeEnvironment: string };
     expect(metadata).toMatchObject({ payloadEnvironment: "00", activeEnvironment: "01" });
+    expect(queued).toEqual([]);
+  });
+
+  it("rejects a manually injected incompatible Wompi queue event before any issuance side effect", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push({
+      id: "wompi_injected_prod",
+      transaction_id: "wompi_injected_prod_tx",
+      environment: "01",
+      result: "ExitosaAprobada",
+      amount_cents: 2500,
+      donor_email: null,
+      donor_name: null,
+      raw_body: JSON.stringify({
+        IdCuenta: "acct_1",
+        FechaTransaccion: "2026-07-09T12:00:00-06:00",
+        Monto: "25.00",
+        IdTransaccion: "wompi_injected_prod_tx",
+        ResultadoTransaccion: "ExitosaAprobada",
+        EsProductiva: true
+      }),
+      headers_json: "{}",
+      received_at: "2026-07-09T18:00:00.000Z",
+      processed_at: null,
+      created_document_id: null
+    });
+
+    const error = await new IssuancePipeline(env(db, { APP_ENV: "staging" }))
+      .processWompiEvent("wompi_injected_prod")
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(EnvironmentNotAllowedError);
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+    expect(db.wompiEvents[0].processed_at).toBeNull();
   });
 
   it("does not audit a mismatch when the signed payload agrees with the active emission setting", async () => {
@@ -4076,7 +4651,7 @@ describe("Wompi webhook integration", () => {
     expect(queued).toHaveLength(0);
   });
 
-  it("marks the correlated intent paid_at when an approved di_ webhook arrives", async () => {
+  it("does not mark paid_at from an IdExterno-only app identifier", async () => {
     const db = new InMemoryD1();
     const secret = "wompi-secret";
     db.donationIntents.push({
@@ -4108,13 +4683,11 @@ describe("Wompi webhook integration", () => {
     );
 
     expect(response.status).toBe(202);
-    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.paid_at).toBeTruthy();
-    // The payment marker never advances the intent status — COMPLETED still means MH
-    // accepted the CDE, which only the pipeline sets.
+    expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.paid_at ?? null).toBeNull();
     expect(db.donationIntents.find((row) => row.id === "di_paidmark")?.status).toBe("LINK_CREATED");
   });
 
-  it("also correlates paid_at from EnlacePago.IdentificadorEnlaceComercio when IdExterno is absent", async () => {
+  it("marks paid_at only from an exact canonical commerce id and numeric link id", async () => {
     const db = new InMemoryD1();
     const secret = "wompi-secret";
     db.donationIntents.push({
@@ -4122,6 +4695,7 @@ describe("Wompi webhook integration", () => {
       status: "LINK_CREATED",
       amount_cents: 2500,
       donor_document: "10000001-9",
+      wompi_id_enlace: 987654,
       expires_at: "2026-07-04T13:00:00.000Z",
       created_at: "2026-07-04T12:00:00.000Z",
       paid_at: null
@@ -4133,7 +4707,7 @@ describe("Wompi webhook integration", () => {
       IdTransaccion: "wompi_enlace_tx_1",
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
-      enlacePago: { IdentificadorEnlaceComercio: "di_enlacepaid" }
+      enlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_enlacepaid" }
     });
 
     const response = await worker.fetch(
@@ -4149,6 +4723,41 @@ describe("Wompi webhook integration", () => {
     expect(db.donationIntents.find((row) => row.id === "di_enlacepaid")?.paid_at).toBeTruthy();
   });
 
+  it("does not mark paid_at when the canonical commerce id lacks the numeric link id", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_missing_link",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      wompi_id_enlace: 987654,
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      paid_at: null
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_missing_link_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      enlacePago: { IdentificadorEnlaceComercio: "di_missing_link" }
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(db.donationIntents[0].paid_at ?? null).toBeNull();
+  });
+
   it("does not change paid_at on a replayed webhook for an already-paid intent", async () => {
     const db = new InMemoryD1();
     const secret = "wompi-secret";
@@ -4157,6 +4766,7 @@ describe("Wompi webhook integration", () => {
       status: "LINK_CREATED",
       amount_cents: 2500,
       donor_document: "10000001-9",
+      wompi_id_enlace: 987654,
       expires_at: "2026-07-04T13:00:00.000Z",
       created_at: "2026-07-04T12:00:00.000Z",
       paid_at: "2026-07-04T12:30:00.000Z"
@@ -4168,7 +4778,8 @@ describe("Wompi webhook integration", () => {
       IdTransaccion: "wompi_replay_tx_1",
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
-      IdExterno: "di_replay"
+      IdExterno: "di_replay",
+      EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_replay" }
     });
 
     await worker.fetch(
@@ -4313,6 +4924,8 @@ describe("donation intent correlation", () => {
       wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
       document_id: null,
       client_ip: "203.0.113.9",
+      datos_token_hash: null,
+      paid_at: null,
       created_at: "2026-06-26T01:00:00.000Z",
       updated_at: "2026-06-26T01:00:00.000Z",
       expires_at: "2026-06-26T02:00:00.000Z",
@@ -4349,6 +4962,7 @@ describe("donation intent correlation", () => {
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
       IdExterno: "di_corr_1",
+      EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_corr_1" },
       // Fallback donor data that MUST be overridden by the intent when correlated.
       // Non-DUI document so the uncorrelated fallback CDE still validates.
       cliente: {
@@ -4556,7 +5170,11 @@ describe("donation intent correlation", () => {
   it("leaves legacy payloads (no intent id) unchanged: fallback receptor, no intent lookup", async () => {
     const db = new InMemoryD1();
     // A static-link payload whose IdentificadorEnlaceComercio is not a "di_" intent id.
-    const webhook = correlationWebhook({ IdExterno: undefined, enlacePago: { IdentificadorEnlaceComercio: "DONACION-legacy" } });
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      EnlacePago: undefined,
+      enlacePago: { Id: 123, IdentificadorEnlaceComercio: "DONACION-legacy" }
+    });
     const eventId = seedWompiEvent(db, webhook);
 
     const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
@@ -4572,7 +5190,10 @@ describe("donation intent correlation", () => {
     seedIntentRow(db); // wompi_id_enlace: 987654
     // A donor-influenced IdExterno points at di_corr_1, but the payment was made on a
     // DIFFERENT Wompi link than the one minted for that intent.
-    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 111111 } }));
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({ EnlacePago: { Id: 111111, IdentificadorEnlaceComercio: "di_corr_1" } })
+    );
 
     const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
 
@@ -4583,23 +5204,30 @@ describe("donation intent correlation", () => {
     expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH");
-    expect(mismatch).toMatchObject({ entity_type: "donation_intent", entity_id: "di_corr_1" });
-    const metadata = JSON.parse(String(mismatch!.metadata_json)) as { payloadLinkId: number; intentLinkId: number };
-    expect(metadata).toMatchObject({ payloadLinkId: 111111, intentLinkId: 987654 });
+    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED");
+    expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: eventId });
+    const metadata = JSON.parse(String(mismatch!.metadata_json)) as {
+      payloadLinkId: number;
+      expectedLinkId: number;
+      reason: string;
+    };
+    expect(metadata).toMatchObject({ payloadLinkId: 111111, expectedLinkId: 987654, reason: "link_id_mismatch" });
   });
 
   it("correlates when the webhook link id matches the intent's minted link", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
-    const eventId = seedWompiEvent(db, correlationWebhook({ EnlacePago: { Id: 987654 } }));
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({ EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_corr_1" } })
+    );
 
     const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
 
     const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
     expect(cde.receptor).toMatchObject({ numDocumento: "10000002-7", direccion: INTENT_ADDRESS });
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
-    expect(db.audits.find((row) => row.action === "DONATION_INTENT_LINK_MISMATCH")).toBeUndefined();
+    expect(db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED")).toBeUndefined();
   });
 
   it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
@@ -4891,6 +5519,7 @@ describe("deferred transmission when MH is unavailable", () => {
       ResultadoTransaccion: "ExitosaAprobada",
       EsProductiva: false,
       IdExterno: "di_defer_1",
+      EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_defer_1" },
       cliente: {
         DocumentoIdentidad: "P-A123456",
         Nombre: "Fallback",
@@ -6044,6 +6673,35 @@ describe("credential administration", () => {
     expect(JSON.stringify(data)).not.toContain("wompi-secret");
   });
 
+  it.each([
+    ["staging", "production"],
+    ["production", "test"]
+  ] as const)("rejects %s credential writes for the %s-incompatible environment", async (appEnv, environment) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/credentials", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ environment, mhUser: "replacement-user" })
+      }),
+      env(db, {
+        APP_ENV: appEnv,
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_API_TOKEN: "writer-token",
+        CLOUDFLARE_SCRIPT_NAME: `example-worker-${appEnv}`
+      })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "environment_not_allowed" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.audits.find((row) => row.action === "CREDENTIALS_UPDATED")).toBeUndefined();
+  });
+
   it("returns a clear error when credential update is not configured", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -6231,6 +6889,41 @@ describe("alert email setting", () => {
 
     expect(getResponse.status).toBe(200);
     await expect(getResponse.json()).resolves.toMatchObject({ alertEmail: "owner@example.org" });
+  });
+
+  it("lets owners configure multiple operational alert recipients separated by commas", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "owner@example.org, admin@example.org" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({ ok: true, alertEmail: "owner@example.org, admin@example.org" });
+    expect(db.settings).toContainEqual(expect.objectContaining({ key: "alert_email", value: "owner@example.org, admin@example.org", updated_by: "user_owner" }));
+  });
+
+  it("rejects malformed operational alert recipient lists", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/alert-email", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ alertEmail: "owner@example.org, correo-invalido" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_alert_email" });
   });
 
   it("redacts a legacy alert-email address from the audit trail for lower roles", async () => {
@@ -6830,9 +7523,9 @@ describe("audit actor context", () => {
     expect(audit?.actor_context ?? null).toBeNull();
   });
 
-  it("nulls sensitive audit actor fields for VIEWER users", async () => {
+  it.each(["VIEWER", "OPERATOR"] as const)("projects account audit rows safely for %s users", async (role) => {
     const db = new InMemoryD1();
-    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.sessionUser = { id: `user_${role.toLowerCase()}`, email: `${role.toLowerCase()}@example.org`, name: role, role };
     db.users.push({
       id: "user_admin",
       email: "admin@example.org",
@@ -6881,14 +7574,118 @@ describe("audit actor context", () => {
     const userRow = body.audit.find((row) => row.id === "audit_user_1");
     const systemRow = body.audit.find((row) => row.id === "audit_system_1");
 
-    // The non-sensitive display name still resolves; the operator telemetry is nulled.
-    expect(userRow?.actor_name).toBe("Ada Admin");
+    // Account rows hide both the actor and target identity from lower audit audiences.
+    expect(userRow?.actor_id ?? null).toBeNull();
+    expect(userRow?.actor_name ?? null).toBeNull();
     expect(userRow?.actor_email ?? null).toBeNull();
     expect(userRow?.actor_ip ?? null).toBeNull();
     expect(userRow?.actor_context ?? null).toBeNull();
+    expect(userRow?.entity_id ?? null).toBeNull();
+    expect(userRow?.summary).toBe("Usuario actualizado");
+    expect(userRow?.metadata_json).toBe("{}");
     // SYSTEM rows have no resolvable user and no captured context.
     expect(systemRow?.actor_name ?? null).toBeNull();
     expect(systemRow?.actor_ip ?? null).toBeNull();
+  });
+
+  it("applies the lower-role audit projection on scoped, document-detail, and contingency responses", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Ada Admin",
+      role: "ADMIN",
+      password_hash: "h",
+      password_salt: "s",
+      disabled_at: "",
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.documents.push(testDocument({ id: "doc_projection" }));
+    db.contingencies.push({
+      id: "cont_projection",
+      environment: "00",
+      status: "OPEN",
+      reason: "MH TEST no disponible",
+      tipo_contingencia: 2,
+      started_at: "2026-06-26T01:00:00.000Z",
+      ended_at: null,
+      created_at: "2026-06-26T01:00:00.000Z"
+    });
+    const sensitiveContext = JSON.stringify({ city: "San Salvador", country: "SV" });
+    db.audits.push(
+      {
+        id: "audit_scoped_user",
+        actor_type: "USER",
+        actor_id: "user_admin",
+        action: "USER_UPDATED",
+        entity_type: "user",
+        entity_id: "user_operator",
+        summary: "operator@example.org ascendido",
+        metadata_json: JSON.stringify({ email: "operator@example.org" }),
+        actor_ip: "190.86.1.2",
+        actor_context: sensitiveContext,
+        created_at: "2026-06-26T01:46:49.015Z"
+      },
+      {
+        id: "audit_document_projection",
+        actor_type: "USER",
+        actor_id: "user_admin",
+        action: "DTE_RETRIED",
+        entity_type: "dte_document",
+        entity_id: "doc_projection",
+        summary: "Documento reintentado",
+        metadata_json: "{}",
+        actor_ip: "190.86.1.2",
+        actor_context: sensitiveContext,
+        created_at: "2026-06-26T01:46:48.015Z"
+      },
+      {
+        id: "audit_contingency_projection",
+        actor_type: "USER",
+        actor_id: "user_admin",
+        action: "CONTINGENCY_OPENED",
+        entity_type: "contingency_period",
+        entity_id: "cont_projection",
+        summary: "Contingencia abierta",
+        metadata_json: "{}",
+        actor_ip: "190.86.1.2",
+        actor_context: sensitiveContext,
+        created_at: "2026-06-26T01:46:47.015Z"
+      }
+    );
+
+    const headers = { Authorization: "Bearer test-token" };
+    const [scopedResponse, documentResponse, contingencyResponse] = await Promise.all([
+      worker.fetch(
+        new Request("https://example.org/api/audit?entityType=user&entityId=user_operator", { headers }),
+        env(db)
+      ),
+      worker.fetch(new Request("https://example.org/api/documents/doc_projection", { headers }), env(db)),
+      worker.fetch(new Request("https://example.org/api/contingency", { headers }), env(db))
+    ]);
+
+    expect(scopedResponse.status).toBe(200);
+    expect(documentResponse.status).toBe(200);
+    expect(contingencyResponse.status).toBe(200);
+    const scoped = (await scopedResponse.json()) as { audit: Array<Record<string, unknown>> };
+    const document = (await documentResponse.json()) as { audit: Array<Record<string, unknown>> };
+    const contingency = (await contingencyResponse.json()) as { contingency: { audit: Array<Record<string, unknown>> } };
+
+    expect(scoped.audit[0]).toMatchObject({
+      actor_id: null,
+      actor_name: null,
+      actor_email: null,
+      actor_ip: null,
+      actor_context: null,
+      entity_id: null,
+      summary: "Usuario actualizado",
+      metadata_json: "{}"
+    });
+    for (const row of [document.audit[0], contingency.contingency.audit[0]]) {
+      expect(row).toMatchObject({ actor_email: null, actor_ip: null, actor_context: null });
+    }
   });
 
   it("returns sensitive audit actor fields for ADMIN users", async () => {
@@ -6957,7 +7754,8 @@ describe("branding", () => {
       displayName: "ExamplePerson1",
       accentColor: "#0f766e",
       supportEmail: "legacy-contact-1@example.com",
-      logoVersion: null
+      logoVersion: null,
+      donorLogoVersion: null
     });
   });
 
@@ -6985,7 +7783,8 @@ describe("branding", () => {
       displayName: "Iglesia Central",
       accentColor: "#123abc",
       supportEmail: "legacy-email-119@example.com",
-      logoVersion: null
+      logoVersion: null,
+      donorLogoVersion: null
     });
   });
 
@@ -7151,6 +7950,62 @@ describe("branding", () => {
     });
   }
 
+  it("stores and serves the donor logo separately from the admin/email logo", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    const adminBytes = new Uint8Array([1, 2, 3]);
+    const donorBytes = new Uint8Array([7, 8, 9]);
+
+    const adminPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: adminBytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const adminBody = (await adminPut.json()) as { logoVersion: string };
+
+    const donorPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: donorBytes
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(donorPut.status).toBe(200);
+    const donorBody = (await donorPut.json()) as { ok: boolean; donorLogoVersion: string };
+    expect(donorBody.ok).toBe(true);
+    expect(donorBody.donorLogoVersion).toBeTruthy();
+    expect(archive.putCalls.map((call) => call.key)).toContain("branding/logo");
+    expect(archive.putCalls.map((call) => call.key)).toContain("branding/donor-logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_DONOR_LOGO_UPDATED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({
+      logoVersion: adminBody.logoVersion,
+      donorLogoVersion: donorBody.donorLogoVersion
+    });
+
+    const donorLogo = await worker.fetch(
+      new Request("https://example.org/api/branding/donor-logo"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(donorLogo.status).toBe(200);
+    expect(donorLogo.headers.get("Content-Type")).toBe("image/png");
+    await expect(donorLogo.arrayBuffer()).resolves.toEqual(donorBytes.buffer);
+
+    const adminLogo = await worker.fetch(
+      new Request("https://example.org/api/branding/logo"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(adminLogo.arrayBuffer()).resolves.toEqual(adminBytes.buffer);
+  });
+
   it("rejects a logo upload with an unsupported content type", async () => {
     const db = ownerDb();
     const archive = new FakeArchiveBucket();
@@ -7180,8 +8035,8 @@ describe("branding", () => {
       }),
       env(db, { ARCHIVE: archive as unknown as R2Bucket })
     );
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "invalid_branding_logo" });
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({ error: "request_body_too_large" });
     expect(archive.putCalls).toHaveLength(0);
   });
 
@@ -7220,6 +8075,48 @@ describe("branding", () => {
       env(db, { ARCHIVE: archive as unknown as R2Bucket })
     );
     await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: null });
+  });
+
+  it("removes a stored donor logo without removing the admin/email logo", async () => {
+    const db = ownerDb();
+    const archive = new FakeArchiveBucket();
+    await worker.fetch(
+      new Request("https://example.org/api/settings/branding/logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([1, 1, 1])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const donorPut = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "PUT",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "image/png" },
+        body: new Uint8Array([2, 2, 2])
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    const donorBody = (await donorPut.json()) as { donorLogoVersion: string };
+
+    const remove = await worker.fetch(
+      new Request("https://example.org/api/settings/branding/donor-logo", {
+        method: "DELETE",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    expect(remove.status).toBe(200);
+    await expect(remove.json()).resolves.toMatchObject({ ok: true, donorLogoVersion: null });
+    expect(donorBody.donorLogoVersion).toBeTruthy();
+    expect(archive.deleteCalls).toContain("branding/donor-logo");
+    expect(archive.deleteCalls).not.toContain("branding/logo");
+    expect(db.audits.at(-1)).toMatchObject({ action: "BRANDING_DONOR_LOGO_REMOVED" });
+
+    const publicBranding = await worker.fetch(
+      new Request("https://example.org/api/branding"),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+    await expect(publicBranding.json()).resolves.toMatchObject({ logoVersion: expect.any(String), donorLogoVersion: null });
   });
 
   it("forbids a non-owner from uploading a logo", async () => {
@@ -7374,6 +8271,7 @@ function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
     ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
     ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
     ARCHIVE: new FakeArchiveBucket() as unknown as R2Bucket,
+    APP_ENV: "local",
     // Default to mocked external services so tests that never touch email/MH stay
     // offline under the explicit-opt-in rule (isMockMode only mocks when "true").
     // Tests exercising real dispatch override this with "false".
@@ -7457,14 +8355,59 @@ class InMemoryD1 {
   readonly settings: Array<Record<string, unknown>> = [];
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
+  documentLookupCount = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
+  beforePasswordResetBatch: (() => void) | null = null;
+  failPasswordResetBatchAfterStatement: number | null = null;
+  passwordResetBatchCount = 0;
+  private passwordResetBatchTail: Promise<void> = Promise.resolve();
 
   prepare(sql: string): Statement {
     this.preparedSql.push(sql);
     return new Statement(this, sql);
   }
+
+  async batch(statements: Statement[]): Promise<StatementRunResult[]> {
+    const previous = this.passwordResetBatchTail;
+    let release!: () => void;
+    this.passwordResetBatchTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+
+    const usersBefore = structuredClone(this.users);
+    const sessionsBefore = structuredClone(this.sessions);
+    const tokensBefore = structuredClone(this.resetTokens);
+    try {
+      this.passwordResetBatchCount += 1;
+      this.beforePasswordResetBatch?.();
+      this.beforePasswordResetBatch = null;
+      const results: StatementRunResult[] = [];
+      for (const [index, statement] of statements.entries()) {
+        results.push(await statement.run());
+        if (this.failPasswordResetBatchAfterStatement === index + 1) {
+          throw new Error("injected password-reset batch failure");
+        }
+      }
+      return results;
+    } catch (error) {
+      this.users.splice(0, this.users.length, ...usersBefore);
+      this.sessions.splice(0, this.sessions.length, ...sessionsBefore);
+      this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
+      throw error;
+    } finally {
+      this.failPasswordResetBatchAfterStatement = null;
+      release();
+    }
+  }
+}
+
+interface StatementRunResult {
+  success: true;
+  meta: { changes: number };
+  results: never[];
 }
 
 class Statement {
@@ -7580,10 +8523,54 @@ class Statement {
       return { earliest: earliest ?? null } as T;
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
+      this.db.documentLookupCount += 1;
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
       return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("UPDATE donation_intents") &&
+      this.sql.includes("datos_token_hash = NULL") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [
+        donorDocumentType,
+        donorDocument,
+        donorName,
+        donorPhone,
+        direccionDepartamento,
+        direccionMunicipio,
+        direccionDistrito,
+        direccionComplemento,
+        donorPais,
+        updatedAt,
+        id,
+        datosTokenHash,
+        expiresAfter
+      ] = this.args;
+      const intent = this.db.donationIntents.find(
+        (row) =>
+          row.id === id &&
+          row.datos_token_hash === datosTokenHash &&
+          row.status === "LINK_CREATED" &&
+          row.paid_at == null &&
+          row.donor_document == null &&
+          String(row.expires_at) > String(expiresAfter)
+      );
+      if (!intent) return null;
+      intent.donor_document_type = String(donorDocumentType);
+      intent.donor_document = String(donorDocument);
+      intent.donor_name = donorName == null ? null : String(donorName);
+      intent.donor_phone = donorPhone == null ? null : String(donorPhone);
+      intent.direccion_departamento = String(direccionDepartamento);
+      intent.direccion_municipio = String(direccionMunicipio);
+      intent.direccion_distrito = String(direccionDistrito);
+      intent.direccion_complemento = String(direccionComplemento);
+      intent.donor_pais = donorPais == null ? null : String(donorPais);
+      intent.datos_token_hash = null;
+      intent.updated_at = String(updatedAt);
+      return { id: String(id) } as T;
     }
     if (this.sql.includes("FROM donation_intents WHERE document_id = ?") && this.sql.includes("status = 'COMPLETED'")) {
       const documentId = String(this.args[0]);
@@ -8027,7 +9014,8 @@ class Statement {
     return { results: [] };
   }
 
-  async run(): Promise<Record<string, never>> {
+  async run(): Promise<StatementRunResult> {
+    let changes = 0;
     if (this.sql.includes("INSERT INTO users")) {
       const [id, email, name, role, passwordHash, passwordSalt] = this.args.map(String);
       this.db.users.push({
@@ -8044,10 +9032,30 @@ class Statement {
       const [id, userId, tokenHash, expiresAt] = this.args.map(String);
       this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
     }
-    if (this.sql.includes("UPDATE password_reset_tokens SET used_at")) {
-      const [usedAt, id] = this.args.map(String);
-      const token = this.db.resetTokens.find((row) => row.id === id);
-      if (token) token.used_at = usedAt;
+    if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
+      if (this.sql.includes("WHERE user_id = ?")) {
+        const [usedAt, userId, markerUserId, passwordHash, passwordSalt, updatedAt] = this.args.map(String);
+        const marker = this.db.users.some(
+          (row) =>
+            row.id === markerUserId &&
+            row.password_hash === passwordHash &&
+            row.password_salt === passwordSalt &&
+            row.updated_at === updatedAt
+        );
+        if (marker) {
+          for (const token of this.db.resetTokens.filter((row) => row.user_id === userId && !row.used_at)) {
+            token.used_at = usedAt;
+            changes += 1;
+          }
+        }
+      } else {
+        const [usedAt, id] = this.args.map(String);
+        const token = this.db.resetTokens.find((row) => row.id === id);
+        if (token) {
+          token.used_at = usedAt;
+          changes += 1;
+        }
+      }
     }
     if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
@@ -8141,7 +9149,8 @@ class Statement {
         donorPais,
         clientIp,
         expiresAt,
-        giftType
+        giftType,
+        datosTokenHash
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -8165,6 +9174,7 @@ class Statement {
         wompi_url_enlace_largo: null,
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
+        datos_token_hash: datosTokenHash == null ? null : String(datosTokenHash),
         // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
         // never on create — a fresh intent has not been paid.
         paid_at: null,
@@ -8222,15 +9232,17 @@ class Statement {
         intent.updated_at = String(updatedAt);
       }
     }
-    if (this.sql.includes("UPDATE donation_intents SET paid_at = ?")) {
-      // markIntentPaid: SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL.
-      // Idempotent (the IS NULL guard) — the first stamp stands, so a webhook replay never
-      // overwrites it. An unknown or already-paid id simply matches nothing.
-      const [paidAt, updatedAt, id] = this.args.map((value) => (value == null ? null : String(value)));
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("SET paid_at = ?")) {
+      const [paidAt, updatedAt, id, expectedLinkId] = this.args;
       const intent = this.db.donationIntents.find((row) => row.id === id);
-      if (intent && (intent.paid_at == null || intent.paid_at === "")) {
-        intent.paid_at = paidAt;
-        intent.updated_at = updatedAt;
+      if (
+        intent &&
+        intent.wompi_id_enlace === expectedLinkId &&
+        (intent.status === "LINK_CREATED" || intent.status === "EXPIRED") &&
+        (intent.paid_at == null || intent.paid_at === "")
+      ) {
+        intent.paid_at = paidAt == null ? null : String(paidAt);
+        intent.updated_at = String(updatedAt);
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
@@ -8434,19 +9446,55 @@ class Statement {
         user.updated_at = updatedAt;
       }
     }
-    if (this.sql.includes("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")) {
+    if (
+      this.sql.includes("UPDATE users") &&
+      this.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?") &&
+      !this.sql.includes("RETURNING id")
+    ) {
       const [passwordHash, passwordSalt, updatedAt, userId] = this.args;
       const user = this.db.users.find((row) => row.id === userId);
-      if (user) {
+      if (this.sql.includes("FROM password_reset_tokens")) {
+        const [, , , , tokenUserId, tokenHash, expiresAfter] = this.args;
+        const activeToken = this.db.resetTokens.some(
+          (row) =>
+            row.user_id === tokenUserId &&
+            row.token_hash === tokenHash &&
+            !row.used_at &&
+            String(row.expires_at) > String(expiresAfter)
+        );
+        if (user && !user.disabled_at && activeToken) {
+          user.password_hash = passwordHash;
+          user.password_salt = passwordSalt;
+          user.updated_at = updatedAt;
+          changes = 1;
+        }
+      } else if (user) {
         user.password_hash = passwordHash;
         user.password_salt = passwordSalt;
         user.updated_at = updatedAt;
+        changes = 1;
       }
     }
-    if (this.sql.includes("UPDATE sessions SET revoked_at = ? WHERE user_id = ?")) {
+    if (
+      this.sql.includes("UPDATE sessions") &&
+      this.sql.includes("SET revoked_at = ?") &&
+      this.sql.includes("WHERE user_id = ?")
+    ) {
       const [revokedAt, userId] = this.args;
-      for (const session of this.db.sessions.filter((row) => row.user_id === userId && !row.revoked_at)) {
-        session.revoked_at = revokedAt;
+      const marker = this.sql.includes("SELECT 1")
+        ? this.db.users.some(
+            (row) =>
+              row.id === this.args[2] &&
+              row.password_hash === this.args[3] &&
+              row.password_salt === this.args[4] &&
+              row.updated_at === this.args[5]
+          )
+        : true;
+      if (marker) {
+        for (const session of this.db.sessions.filter((row) => row.user_id === userId && !row.revoked_at)) {
+          session.revoked_at = revokedAt;
+          changes += 1;
+        }
       }
     }
     if (this.sql.includes("UPDATE dte_events")) {
@@ -8582,7 +9630,7 @@ class Statement {
         document.updated_at = String(updatedAt);
       }
     }
-    return {};
+    return { success: true, meta: { changes }, results: [] };
   }
 }
 

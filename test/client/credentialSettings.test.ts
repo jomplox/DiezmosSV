@@ -48,21 +48,19 @@ const status: CredentialStatus = {
 };
 
 describe("credentialSectionState", () => {
-  test("spells out the tax authority in credential navigation labels", () => {
+  test("combines Ministerio de Hacienda API and signer credentials into one navigation section", () => {
     expect(credentialSettingsSections.find((section) => section.id === "mh")).toMatchObject({
-      label: "API del Ministerio de Hacienda",
-      description: "Usuario y contraseña del Ministerio de Hacienda."
+      label: "Ministerio de Hacienda",
+      description: "API, certificado firmador y llave privada.",
+      groupIds: ["signer"]
     });
-    expect(credentialSettingsSections.find((section) => section.id === "firmador")).toMatchObject({
-      label: "Firmador del Ministerio de Hacienda"
-    });
+    expect(credentialSettingsSections.find((section) => section.label.includes("Firmador"))).toBeUndefined();
   });
 
   test("returns unknown (no badge) before the status has loaded", () => {
     // On first load the credential status is still in flight; PENDIENTE flashing to
     // LISTO reads as the UI being wrong. No status -> no badge, for every section.
     expect(credentialSectionState("mh", null)).toBe("unknown");
-    expect(credentialSectionState("firmador", null)).toBe("unknown");
     // Even neutral sections show nothing until the panel has data to stand on.
     expect(credentialSectionState("ambiente", null)).toBe("unknown");
     expect(credentialSectionState("marca", null)).toBe("unknown");
@@ -80,13 +78,31 @@ describe("credentialSectionState", () => {
     });
   });
 
-  test("marks a section pending when any mapped secret group is not ready", () => {
-    expect(credentialSectionState("mh", status)).toBe("pending");
+  test("uses only the deployment-compatible MH lane for readiness", () => {
+    expect(credentialSectionState("mh", status)).toBe("ready");
+    expect(credentialSectionState("mh", {
+      ...status,
+      target: { ...status.target, appEnv: "production" },
+      groups: {
+        ...status.groups,
+        mhTest: { ...status.groups.mhTest, ready: false },
+        mhProduction: { ...status.groups.mhProduction, ready: true }
+      }
+    })).toBe("ready");
+  });
+
+  test("keeps MH readiness pending for a missing or unknown deployment lane", () => {
+    expect(credentialSectionState("mh", {
+      ...status,
+      target: { ...status.target, appEnv: "preview" }
+    })).toBe("pending");
+  });
+
+  test("marks a section pending when a mapped compatible secret group is not ready", () => {
     expect(credentialSectionState("correo", status)).toBe("pending");
   });
 
   test("marks a section ready when all mapped secret groups are ready", () => {
-    expect(credentialSectionState("firmador", status)).toBe("ready");
     expect(credentialSectionState("wompi", status)).toBe("ready");
     expect(credentialSectionState("emisor", status)).toBe("ready");
   });
@@ -140,23 +156,40 @@ describe("certificateExpiryStatus", () => {
 });
 
 describe("Firmador panel certificate expiry wiring (source contract)", () => {
-  test("computes the certificate expiry status from the credentials status field and renders it in the Firmador section", () => {
+  test("computes the certificate expiry status from the credentials status field and renders it inside the Ministerio de Hacienda section", () => {
     expect(appSource).toContain("certificateExpiryStatus(status?.certificateExpiresAt ?? null)");
     expect(appSource).toContain("<h3>Firmador del Ministerio de Hacienda</h3>");
+    expect(appSource).toContain("<h3>Credenciales API del Ministerio de Hacienda ({activeEnvironmentLabel})</h3>");
     expect(appSource).toContain("className={`legal-box ${certificateExpiry.tone} span-2`}");
     expect(appSource).toContain("<strong>{certificateExpiry.label}</strong>");
   });
 });
 
+describe("Emisor code field helper text (source contract)", () => {
+  test("explains each similar establishment and point-of-sale code field", () => {
+    expect(appSource).toContain("Identificador oficial del establecimiento autorizado por el Ministerio de Hacienda.");
+    expect(appSource).toContain("Identificador oficial del punto de venta o terminal reconocido por el Ministerio de Hacienda.");
+    expect(appSource).toContain("Código propio del emisor para agrupar documentos por sede interna; puede coincidir con el código MH si no manejan otro.");
+    expect(appSource).toContain("Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.");
+    expect(appSource).toContain("Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.");
+  });
+});
+
+describe("Correo alert recipients (source contract)", () => {
+  test("allows multiple operational alert recipients separated by commas", () => {
+    expect(appSource).toContain("Correos para avisos operativos");
+    expect(appSource).toContain('placeholder="admin@example.org, soporte@example.org"');
+    expect(appSource).toContain('type="email"');
+    expect(appSource).toContain("multiple");
+    expect(appSource).toContain("Separe varios correos con una sola coma (,).");
+    expect(appSource).toContain("Guardar correos de alertas");
+  });
+});
+
 describe("Ambiente emission-environment save guard (source contract)", () => {
-  test("blocks a redundant save only when the value is already persisted as a setting, not when it merely matches the deployment default", () => {
-    // The Ambiente pre-check must let the owner persist the deployment default explicitly:
-    // it may short-circuit only while busy or when the SELECTED value is already stored as
-    // a setting row (emissionEnvironment.source === "setting"). Guarding on the runtime
-    // environment instead blocked saving the default when no setting row existed yet.
-    expect(appSource).toContain(
-      'if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;'
-    );
+  test("rejects deployment-incompatible choices and only short-circuits a matching persisted setting", () => {
+    expect(appSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");
+    expect(appSource).toContain('emissionEnvironment.environment === environment && emissionEnvironment.source === "setting"');
     expect(appSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
   });
 });

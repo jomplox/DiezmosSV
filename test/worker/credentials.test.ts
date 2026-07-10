@@ -32,10 +32,9 @@ describe("credential status", () => {
       writerMissing: []
     });
     expect(status.groups.mhTest.ready).toBe(true);
-    expect(status.groups.mhProduction.ready).toBe(true);
+    expect(status.groups.mhProduction).toBeUndefined();
     expect(status.groups.signer.ready).toBe(true);
     expect(status.groups.mhTest.label).toBe("Ministerio de Hacienda ambiente de pruebas");
-    expect(status.groups.mhProduction.label).toBe("Ministerio de Hacienda ambiente producción");
     expect(status.groups.signer.label).toBe("Certificado firmador del Ministerio de Hacienda");
     expect(status.groups.issuer.ready).toBe(true);
     expect(status.groups.email.ready).toBe(true);
@@ -69,6 +68,29 @@ describe("credential status", () => {
     expect(JSON.stringify(status)).not.toContain("<CertificadoMH>");
     expect(JSON.stringify(status)).not.toContain("wompi-secret");
     expect(JSON.stringify(status)).not.toContain("email-key");
+  });
+
+  it("exposes only the production MH credential lane on a production deployment", () => {
+    const status = credentialStatus(env({
+      APP_ENV: "production",
+      MH_USER_TEST: "test-user-must-not-be-visible",
+      MH_PASSWORD_TEST: "test-password-must-not-be-visible",
+      MH_USER_PROD: "prod-user",
+      MH_PASSWORD_PROD: "prod-password"
+    }));
+
+    expect(status.groups.mhTest).toBeUndefined();
+    expect(status.groups.mhProduction).toMatchObject({ ready: true });
+    expect(JSON.stringify(status)).not.toContain("test-user-must-not-be-visible");
+  });
+
+  it("exposes no MH credential lane when APP_ENV is missing or unknown", () => {
+    for (const appEnv of [undefined, "preview"] as const) {
+      const status = credentialStatus(env({ APP_ENV: appEnv, MH_USER_TEST: "test-user", MH_USER_PROD: "prod-user" }));
+
+      expect(status.groups.mhTest).toBeUndefined();
+      expect(status.groups.mhProduction).toBeUndefined();
+    }
   });
 
   it("exposes the signer certificate expiry when the certificate carries a validity block", () => {

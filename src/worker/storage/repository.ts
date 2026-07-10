@@ -165,15 +165,17 @@ export class Repository {
     giftType: DonationGiftType | null;
     clientIp: string | null;
     expiresAt: string;
+    datosTokenHash: string | null;
   }): Promise<DonationIntentRecord> {
-    // gift_type is appended LAST (after expires_at) to preserve the positional bind
-    // indices the donationIntents unit tests assert (donor_pais at 12, etc.).
+    // Capability hash is appended after gift_type so the established donor-field
+    // bindings remain stable. Full creates pass NULL; only drafts receive a hash.
     await this.db
       .prepare(
         `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
-          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type
-        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type,
+          datos_token_hash
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.id,
@@ -190,7 +192,8 @@ export class Repository {
         input.donorPais,
         input.clientIp,
         input.expiresAt,
-        input.giftType
+        input.giftType,
+        input.datosTokenHash
       )
       .run();
     const record = await this.getDonationIntent(input.id);
@@ -218,8 +221,9 @@ export class Repository {
   // Attaches the donor's fiscal data to a minted draft (the /datos completion). Amount,
   // gift type, status, and the Wompi link are deliberately NOT in the SET clause: those
   // were locked when the link was minted, and datos must never move them.
-  async updateIntentDatos(
+  async applyIntentDatosWithCapability(
     id: string,
+    datosTokenHash: string,
     data: {
       donorDocumentType: DonationIntentDocumentType;
       donorDocument: string;
@@ -231,14 +235,21 @@ export class Repository {
       direccionComplemento: string;
       donorPais: string | null;
     }
-  ): Promise<void> {
-    await this.db
+  ): Promise<boolean> {
+    const changedAt = nowIso();
+    const updated = await this.db
       .prepare(
         `UPDATE donation_intents
          SET donor_document_type = ?, donor_document = ?, donor_name = ?, donor_phone = ?,
              direccion_departamento = ?, direccion_municipio = ?, direccion_distrito = ?,
-             direccion_complemento = ?, donor_pais = ?, updated_at = ?
-         WHERE id = ?`
+             direccion_complemento = ?, donor_pais = ?, datos_token_hash = NULL, updated_at = ?
+         WHERE id = ?
+           AND datos_token_hash = ?
+           AND status = 'LINK_CREATED'
+           AND paid_at IS NULL
+           AND donor_document IS NULL
+           AND expires_at > ?
+         RETURNING id`
       )
       .bind(
         data.donorDocumentType,
@@ -250,10 +261,13 @@ export class Repository {
         data.direccionDistrito,
         data.direccionComplemento,
         data.donorPais,
-        nowIso(),
-        id
+        changedAt,
+        id,
+        datosTokenHash,
+        changedAt
       )
-      .run();
+      .first<{ id: string }>();
+    return updated?.id === id;
   }
 
   async markIntentCompleted(id: string, documentId: string): Promise<void> {
@@ -268,10 +282,17 @@ export class Repository {
   // COMPLETED stays reserved for MH acceptance of the CDE. The `paid_at IS NULL` guard
   // makes it idempotent — a webhook replay never moves the timestamp, and an unknown or
   // already-paid intent simply matches nothing (no-op, no error).
-  async markIntentPaid(id: string): Promise<void> {
+  async markIntentPaid(id: string, expectedLinkId: number): Promise<void> {
     await this.db
-      .prepare("UPDATE donation_intents SET paid_at = ?, updated_at = ? WHERE id = ? AND paid_at IS NULL")
-      .bind(nowIso(), nowIso(), id)
+      .prepare(
+        `UPDATE donation_intents
+            SET paid_at = ?, updated_at = ?
+          WHERE id = ?
+            AND wompi_id_enlace = ?
+            AND status IN ('LINK_CREATED', 'EXPIRED')
+            AND paid_at IS NULL`
+      )
+      .bind(nowIso(), nowIso(), id, expectedLinkId)
       .run();
   }
 
@@ -1178,7 +1199,7 @@ export class Repository {
     // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
     const rows = await this.db
       .prepare(
-        `SELECT id, transaction_id, received_at FROM wompi_events
+        `SELECT id, transaction_id, environment, received_at FROM wompi_events
          WHERE created_document_id IS NULL
            AND processed_at IS NULL
            AND result = 'ExitosaAprobada'
@@ -1287,20 +1308,106 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
-  async markPasswordResetTokenUsed(id: string): Promise<void> {
-    await this.db.prepare("UPDATE password_reset_tokens SET used_at = ? WHERE id = ?").bind(nowIso(), id).run();
+  async resetPasswordWithToken(
+    userId: string,
+    tokenHash: string,
+    passwordHash: string,
+    passwordSalt: string
+  ): Promise<boolean> {
+    const changedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE users
+              SET password_hash = ?, password_salt = ?, updated_at = ?
+            WHERE id = ?
+              AND disabled_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM password_reset_tokens
+                 WHERE user_id = ?
+                   AND token_hash = ?
+                   AND used_at IS NULL
+                   AND expires_at > ?
+              )`
+        )
+        .bind(passwordHash, passwordSalt, changedAt, userId, userId, tokenHash, changedAt),
+      this.db
+        .prepare(
+          `UPDATE sessions
+              SET revoked_at = ?
+            WHERE user_id = ?
+              AND revoked_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM users
+                 WHERE id = ?
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND updated_at = ?
+              )`
+        )
+        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt),
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+              SET used_at = ?
+            WHERE user_id = ?
+              AND used_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM users
+                 WHERE id = ?
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND updated_at = ?
+              )`
+        )
+        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
-  async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<void> {
-    const existing = await this.db.prepare("SELECT id FROM users WHERE id = ?").bind(userId).first<Record<string, unknown>>();
-    if (!existing) {
-      throw new Error("Usuario no encontrado");
-    }
-    await this.db
-      .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
-      .bind(passwordHash, passwordSalt, nowIso(), userId)
-      .run();
-    await this.db.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(nowIso(), userId).run();
+  async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<boolean> {
+    const changedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
+        .bind(passwordHash, passwordSalt, changedAt, userId),
+      this.db
+        .prepare(
+          `UPDATE sessions
+              SET revoked_at = ?
+            WHERE user_id = ?
+              AND revoked_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM users
+                 WHERE id = ?
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND updated_at = ?
+              )`
+        )
+        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt),
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+              SET used_at = ?
+            WHERE user_id = ?
+              AND used_at IS NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM users
+                 WHERE id = ?
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND updated_at = ?
+              )`
+        )
+        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
   // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does

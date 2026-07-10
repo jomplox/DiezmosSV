@@ -75,34 +75,22 @@ Capture the Worker URL from Wrangler after deploy.
 The quickest repeatable smoke pass is:
 
 ```bash
-STAGING_URL="https://YOUR_STAGING_WORKER_URL" \
-STAGING_EMAIL="owner@example.org" \
-STAGING_PASSWORD="..." \
-STAGING_BOOTSTRAP_TOKEN="..." \
-WOMPI_API_SECRET="..." \
-SMOKE_DONOR_DOCUMENT="..." \
-SMOKE_DONOR_EMAIL="smoke@example.org" \
-npm run smoke:staging
+DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
 ```
+
+Store the Worker URL, login, Wompi secret, bootstrap token, and donor test identity in that `0600`
+regular non-symlink file. The path above is the runner's default, so `npm run smoke:staging` is
+normally sufficient. Never place those values inline in the shell command or task transcript.
 
 Useful flags:
 
 ```bash
-# Bootstrap the first owner if the staging D1 database is empty.
-STAGING_BOOTSTRAP=1 STAGING_BOOTSTRAP_TOKEN="..." npm run smoke:staging
-
-# Also create a disposable VIEWER user.
-SMOKE_CREATE_USER=1 npm run smoke:staging
-
-# Consume the accepted TEST DTE by sending an invalidation event.
-SMOKE_INVALIDATE=1 npm run smoke:staging
-
-# Exercise retry against a known failed/rejected staging document.
-SMOKE_RETRY_DOCUMENT_ID="dte_..." npm run smoke:staging
-
 # Check configuration and signed-webhook shape without network calls.
 npm run smoke:staging -- --dry-run
 ```
+
+Set `STAGING_BOOTSTRAP`, `SMOKE_CREATE_USER`, `SMOKE_INVALIDATE`, or
+`SMOKE_RETRY_DOCUMENT_ID` inside the selected env file when those optional paths are needed.
 
 By default, the script verifies the deployed admin shell, `/api/health`, login, signed Wompi webhook
 ingress, Queue-driven CDE issuance to MH `ambiente=00`, admin-generated TEST DTE issuance, PDF/JSON
@@ -129,7 +117,7 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
 7. Run a contingency sweep from the UI and verify the button returns visibly instead of hanging.
 8. Open **Credenciales** as an OWNER and verify that:
    - The staging Worker name and app environment are visible.
-   - MH test, MH production, signer, issuer, Wompi, and email statuses show configured or pending.
+   - Only the MH TEST lane is available; signer, issuer, Wompi, and email statuses show configured or pending.
    - Correo shows the Cloudflare `EMAIL` binding and `EMAIL_FROM` as configured.
    - If Cloudflare Email Service is still destination-limited, Correo shows the fallback email
      provider as configured.

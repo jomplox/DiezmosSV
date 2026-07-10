@@ -43,16 +43,17 @@ describe("semantic palette stays independent of the accent", () => {
   });
 
   it("promotes danger and warning to accent-independent variables", () => {
-    for (const name of ["--danger", "--danger-tint", "--danger-border", "--warn", "--warn-tint", "--warn-border"]) {
+    for (const name of ["--danger", "--danger-tint", "--danger-border", "--warn", "--warn-accent", "--warn-tint", "--warn-border"]) {
       const decl = stylesSource.match(new RegExp(`${name}:\\s*([^;]*);`));
       expect(decl, `${name} must be defined`).not.toBeNull();
       expect(decl?.[1] ?? "", `${name} must not reference the accent`).not.toContain("var(--accent");
     }
   });
 
-  it("keeps the historical danger red and amber warning hues", () => {
+  it("keeps the historical danger red, readable warning text, and yellow warning accent", () => {
     expect(stylesSource).toMatch(/--danger:\s*#a93530/);
     expect(stylesSource).toMatch(/--warn:\s*#855900/);
+    expect(stylesSource).toMatch(/--warn-accent:\s*#f2c94c/);
   });
 });
 
