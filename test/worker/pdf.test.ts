@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildDteQrPayload, renderDtePdf } from "../../src/worker/services/pdf";
+import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 describe("DTE PDF rendering", () => {
@@ -45,7 +45,7 @@ describe("DTE PDF rendering", () => {
     plain.receptor.nombre = "José Pérez";
     plain.receptor.descActividad = "Servicios profesionales";
     plain.receptor.tipoDocumento = "03";
-    plain.receptor.numDocumento = "pa-123x";
+    plain.receptor.numDocumento = "ab123456789";
     plain.receptor.direccion.complemento = "Colonia Escalón";
     plain.receptor.correo = "Donor.Mixed@Example.Org";
     record.plain_json = JSON.stringify(plain);
@@ -58,18 +58,23 @@ describe("DTE PDF rendering", () => {
     expect(text).toContain("AVENIDA EJEMPLO 100");
     expect(text).toContain("JOSÉ PÉREZ");
     expect(text).toContain("SERVICIOS PROFESIONALES");
-    expect(text).toContain("PA-123X");
+    expect(text).toContain("AB123456789");
     expect(text).toContain("COLONIA ESCALÓN");
     expect(text).toContain("SAN SALVADOR");
     expect(text).toContain("legacy-email-107@example.com");
     expect(text).toContain("Donor.Mixed@Example.Org");
     expect(text).not.toContain("Misión ExampleOrganization");
     expect(text).not.toContain("José Pérez");
-    expect(text).not.toContain("pa-123x");
+    expect(text).not.toContain("ab123456789");
+    expect(text).not.toContain("12345678-9");
     expect(text).not.toContain("LEGACY-EMAIL-107@EXAMPLE.COM");
     expect(text).not.toContain("DONOR.MIXED@EXAMPLE.ORG");
     expect(text).not.toContain("(0002)");
     expect(record.plain_json).toBe(originalJson);
+  });
+
+  it("versions the uppercase party renderer as PDF evidence v3", () => {
+    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v3");
   });
 
   it("labels the receptor document by CAT-022 type and renders the full geographic address", async () => {
