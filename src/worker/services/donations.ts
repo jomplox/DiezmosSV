@@ -9,6 +9,7 @@ import { formatDui, isValidDui } from "../../shared/dui";
 import { formatNit, isValidNitFormat } from "../../shared/nit";
 import type { DonationGiftType, DonationIntentDocumentType, DonationIntentRecord, Env } from "../types";
 import { addHours, nowIso } from "../utils/dates";
+import { base64UrlFromBytes, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { Repository } from "../storage/repository";
 import { WompiApiError, WompiApiService } from "./wompiApi";
@@ -293,6 +294,7 @@ export interface CreatedIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
+  datosToken?: string;
 }
 
 // Signals that the Wompi API rejected link creation; the route maps this to a 502
@@ -317,7 +319,7 @@ const DRAFT_DOCUMENT_TYPE: DonationIntentDocumentType = "13";
 // document number. Throws IntentLinkError if Wompi fails, after the PENDING row is
 // already persisted so it can expire on the cron sweep. Shared by the full create and
 // the background draft create so both mint links identically.
-async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
+async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord, datosToken?: string): Promise<CreatedIntent> {
   let link;
   try {
     link = await new WompiApiService(env).createPaymentLink(intent);
@@ -337,7 +339,12 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
     metadata: { amountCents: intent.amount_cents, donorDocumentType: intent.donor_document_type }
   });
 
-  return { intentId: intent.id, urlEnlace: link.urlEnlace, urlEnlaceLargo: link.urlEnlaceLargo };
+  return {
+    intentId: intent.id,
+    urlEnlace: link.urlEnlace,
+    urlEnlaceLargo: link.urlEnlaceLargo,
+    ...(datosToken ? { datosToken } : {})
+  };
 }
 
 // Orchestrates one full intent: persist PENDING with the donor's fiscal data, mint the
@@ -362,7 +369,8 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
     donorPais: input.donorPais,
     giftType: input.giftType,
     clientIp,
-    expiresAt: addHours(start, INTENT_VALIDITY_HOURS)
+    expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
+    datosTokenHash: null
   });
 
   return mintLinkForIntent(env, repo, intent);
@@ -375,6 +383,8 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
 // donor's Paso 2 submit.
 export async function createDraftDonationIntent(env: Env, repo: Repository, input: ValidatedDraftIntentInput, clientIp: string): Promise<CreatedIntent> {
   const start = nowIso();
+  const datosToken = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
+  const datosTokenHash = await sha256Hex(utf8Bytes(datosToken));
   const intent = await repo.createDonationIntent({
     id: newId("di"),
     amountCents: input.amountCents,
@@ -391,18 +401,19 @@ export async function createDraftDonationIntent(env: Env, repo: Repository, inpu
     donorPais: null,
     giftType: input.giftType,
     clientIp,
-    expiresAt: addHours(start, INTENT_VALIDITY_HOURS)
+    expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
+    datosTokenHash
   });
 
-  return mintLinkForIntent(env, repo, intent);
+  return mintLinkForIntent(env, repo, intent, datosToken);
 }
 
-// Signals the /datos endpoint that the target intent cannot accept donor data: either
-// it does not exist (404) or it is already COMPLETED (409). The route maps `code` to
-// the matching HTTP status.
+// Signals that /datos either targets an unknown id (404) or failed the generic
+// capability/state CAS (409). The generic result avoids distinguishing wrong,
+// consumed, paid, expired, completed, and already-populated intents.
 export class IntentDatosError extends Error {
   constructor(
-    readonly code: "intent_not_found" | "intent_already_completed",
+    readonly code: "intent_not_found" | "intent_datos_unavailable",
     readonly httpStatus: 404 | 409,
     message: string
   ) {
@@ -413,17 +424,17 @@ export class IntentDatosError extends Error {
 
 // Attaches the donor's fiscal data to a minted draft (fast D1-only, no Wompi call). It
 // NEVER changes amount or gift type — those were locked when the link was minted.
-// Rejects an unknown id (404) or a COMPLETED intent (409). LINK_CREATED and EXPIRED are
-// both allowed: a donor may finish in the link's last minute after the sweep expired it.
-export async function applyIntentDatos(repo: Repository, intentId: string, data: ValidatedDonorData): Promise<void> {
-  const intent = await repo.getDonationIntent(intentId);
-  if (!intent) {
-    throw new IntentDatosError("intent_not_found", 404, "No se encontró la intención de donación.");
+// Only an unpaid, unpopulated LINK_CREATED row with the one-time capability can change.
+export async function applyIntentDatos(repo: Repository, intentId: string, datosToken: string, data: ValidatedDonorData): Promise<void> {
+  const datosTokenHash = await sha256Hex(utf8Bytes(datosToken.trim()));
+  const updated = await repo.applyIntentDatosWithCapability(intentId, datosTokenHash, data);
+  if (!updated) {
+    const intent = await repo.getDonationIntent(intentId);
+    if (!intent) {
+      throw new IntentDatosError("intent_not_found", 404, "No se encontró la intención de donación.");
+    }
+    throw new IntentDatosError("intent_datos_unavailable", 409, "La intención ya no puede aceptar datos fiscales.");
   }
-  if (intent.status === "COMPLETED") {
-    throw new IntentDatosError("intent_already_completed", 409, "La intención de donación ya fue completada.");
-  }
-  await repo.updateIntentDatos(intentId, data);
   await repo.createAudit({
     action: "DONATION_INTENT_DATOS_ATTACHED",
     entityType: "donation_intent",

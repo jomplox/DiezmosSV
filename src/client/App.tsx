@@ -5,7 +5,6 @@ import {
   ChevronLeft,
   ChevronRight,
   Cloud,
-  Clock,
   CircleHelp,
   Copy,
   Download,
@@ -15,7 +14,6 @@ import {
   FlaskConical,
   LineChart,
   Braces,
-  History,
   KeyRound,
   Lock,
   LogOut,
@@ -25,19 +23,21 @@ import {
   PanelLeftOpen,
   Pencil,
   Settings,
+  Unplug,
   Upload,
   UserPlus,
   RefreshCw,
   RotateCcw,
+  ScrollText,
   Search,
   ShieldCheck,
   X,
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, ContingencyState, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
-import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
+import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
@@ -98,8 +98,8 @@ export const FAILURE_VIEW_STATUSES = "FAILED,REJECTED";
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
-  { id: "contingency", label: "Contingencia", icon: Clock },
-  { id: "audit", label: "Auditoría", icon: History },
+  { id: "contingency", label: "Contingencia", icon: Unplug },
+  { id: "audit", label: "Auditoría", icon: ScrollText },
   { id: "analytics", label: "Analítica", icon: LineChart },
   { id: "users", label: "Usuarios", icon: Users },
   { id: "exports", label: "Exportar", icon: FileSpreadsheet, minRole: "ADMIN" },
@@ -109,7 +109,6 @@ const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?
 const credentialSettingsSectionIcons: Record<CredentialSettingsSectionId, typeof FileText> = {
   ambiente: Settings,
   mh: KeyRound,
-  firmador: ShieldCheck,
   wompi: Cloud,
   emisor: FileText,
   correo: Mail,
@@ -170,6 +169,29 @@ function useDialogDismiss(ref: RefObject<HTMLElement | null>, onDismiss: () => v
   }, [ref, onDismiss, disabled]);
 }
 
+function StartupShell() {
+  return (
+    <div className="startup-shell" aria-hidden="true">
+      <aside className="startup-rail">
+        <div className="startup-rail-mark" />
+        {Array.from({ length: 6 }).map((_, index) => (
+          <div key={index} className="startup-rail-dot" />
+        ))}
+      </aside>
+      <main className="startup-workspace">
+        <div className="startup-heading" />
+        <div className="startup-subheading" />
+        <section className="startup-card">
+          <div className="startup-control" />
+          <div className="startup-row" />
+          <div className="startup-row" />
+          <div className="startup-row" />
+        </section>
+      </main>
+    </div>
+  );
+}
+
 export function App() {
   // Public donor-checkout routes render as standalone pages WITHOUT a session and
   // never trigger the auth bootstrap/login flow. Branch on pathname before any of
@@ -201,7 +223,6 @@ export function App() {
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings | null>(null);
   const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
   const [alertEmailDraft, setAlertEmailDraft] = useState("");
-  const [contingency, setContingency] = useState<ContingencyState | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -256,7 +277,8 @@ export function App() {
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettingsInput>(emptyUserSettings());
   const [credentialInput, setCredentialInput] = useState<CredentialFormInput>(emptyCredentialInput("test"));
-  const [branding, setBranding] = useState<Branding>({ ...CLIENT_BRANDING_DEFAULTS, logoVersion: null });
+  const [branding, setBranding] = useState<Branding>({ ...CLIENT_BRANDING_DEFAULTS, logoVersion: null, donorLogoVersion: null });
+  const [brandingReady, setBrandingReady] = useState(false);
   // Analítica (carril Wompi): the view defaults its ambiente selector to the ACTIVE
   // emission environment, loaded lazily the first time the view is opened. Presets are
   // computed against `now` so "Este mes" tracks the calendar; the custom range seeds
@@ -281,6 +303,15 @@ export function App() {
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    const allowed = emissionEnvironment?.allowedEnvironments[0];
+    if (!allowed) return;
+    const credentialEnvironment = allowed === "01" ? "production" : "test";
+    setCredentialInput((current) =>
+      current.environment === credentialEnvironment ? current : emptyCredentialInput(credentialEnvironment)
+    );
+  }, [emissionEnvironment]);
+
   // White-label branding boots BEFORE (and independently of) the session check so the
   // login screen is already branded. A failed fetch keeps the historical defaults.
   useEffect(() => {
@@ -295,6 +326,9 @@ export function App() {
       })
       .catch(() => {
         // Keep the defaults already applied via the initial state.
+      })
+      .finally(() => {
+        if (!cancelled) setBrandingReady(true);
       });
     return () => {
       cancelled = true;
@@ -455,8 +489,6 @@ export function App() {
 
   async function refresh() {
     await fetchDocumentPage();
-    const contingencyResult = await api<{ contingency: ContingencyState }>("/api/contingency", token);
-    setContingency(contingencyResult.contingency);
     if (view === "audit") {
       const auditPage = await api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50", token);
       setAudit(auditPage.audit);
@@ -945,7 +977,7 @@ export function App() {
         body: { alertEmail: alertEmailDraft.trim() }
       });
       applyAlertEmail(result.alertEmail);
-      setToast(result.alertEmail ? "Correo de alertas actualizado" : "Alertas operativas desactivadas");
+      setToast(result.alertEmail ? "Correos de alertas actualizados" : "Alertas operativas desactivadas");
     });
   }
 
@@ -978,10 +1010,6 @@ export function App() {
     }
   }
 
-  async function refreshContingency() {
-    await runAction("contingency-refresh", refresh);
-  }
-
   async function runAction(name: string, action: () => Promise<void>) {
     setBusy(name);
     try {
@@ -1012,6 +1040,10 @@ export function App() {
     } finally {
       setAuditLoadingMore(false);
     }
+  }
+
+  if (!brandingReady) {
+    return <StartupShell />;
   }
 
   if (!token || !user) {
@@ -1069,7 +1101,7 @@ export function App() {
             )}
             <div className="brand-text">
               <strong>{branding.displayName}</strong>
-              <span>Comprobantes de donación</span>
+              <span>DiezmosSV</span>
             </div>
           </div>
           <button
@@ -1141,7 +1173,7 @@ export function App() {
                     <option value="">Todos</option>
                     <option value="ACCEPTED">Aceptados</option>
                     <option value="TRANSMISSION_PENDING">En trámite</option>
-                    <option value="CONTINGENCY_PENDING">Contingencia</option>
+                    <option value="CONTINGENCY_PENDING">Histórico sin sello</option>
                     <option value="REJECTED">Rechazados</option>
                     <option value="FAILED">Fallidos</option>
                     <option value="INVALIDATED">Invalidados</option>
@@ -1190,11 +1222,7 @@ export function App() {
         )}
 
         {view === "contingency" && (
-          <ContingencyPanel
-            state={contingency}
-            busy={busy}
-            onRefresh={refreshContingency}
-          />
+          <ContingencyPanel />
         )}
 
         {view === "audit" && (
@@ -1429,253 +1457,59 @@ export function App() {
   );
 }
 
-function ContingencyPanel({
-  state,
-  busy,
-  onRefresh
-}: {
-  state: ContingencyState | null;
-  busy: string;
-  onRefresh: () => Promise<void>;
-}) {
-  const pendingDocuments = state?.pendingDocuments ?? [];
-  const batches = state?.batches ?? [];
-  const batchLines = state?.batchLines ?? [];
-  const periods = state?.periods ?? [];
-  const events = state?.events ?? [];
-  const audit = state?.audit ?? [];
-  const summary = state?.summary ?? {
-    pending: 0,
-    open: 0,
-    eventAccepted: 0,
-    closed: 0,
-    failed: 0,
-    eventsAccepted: 0,
-    eventsRejected: 0,
-    batches: 0,
-    batchAccepted: 0,
-    batchPending: 0,
-    batchRejected: 0
-  };
-
+function ContingencyPanel() {
   return (
     <section className="contingency-dashboard">
-      <div className="contingency-panel">
+      <div className="contingency-panel contingency-summary-panel">
         <div className="panel-head">
           <div>
-            <h2>Historial de contingencias (solo lectura)</h2>
+            <h2>El CDE no usa modo de contingencia</h2>
             <p>
               La normativa no contempla contingencia para el CDE: la tabla de validaciones del
               evento de contingencia (campo 35) excluye el tipo 15. Cuando el Ministerio de
               Hacienda no está disponible, el CDE se emite con forma normal, queda
               «En trámite», el donante recibe de inmediato su comprobante transitorio y el
               sistema reintenta la transmisión cada 15 minutos hasta obtener el Sello de
-              Recepción. Esta sección conserva los periodos históricos.
+              Recepción.
             </p>
           </div>
-          <button className="icon-button" onClick={() => void onRefresh()} disabled={busy === "contingency-refresh"} title="Actualizar">
-            <RefreshCw size={17} />
-          </button>
         </div>
       </div>
-
-      <div className="stats contingency-stats">
-        <Metric label="Pendientes" value={summary.pending} tone="warn" />
-        <Metric label="Lotes del Ministerio de Hacienda" value={summary.batches} tone="neutral" />
-        <Metric label="CDE aceptados" value={summary.batchAccepted} tone="ok" />
-        <Metric label="CDE en lote" value={summary.batchPending} tone="warn" />
-        <Metric label="CDE rechazados" value={summary.batchRejected} tone="bad" />
+      <div className="contingency-flow" aria-label="Flujo de reintento automático">
+        <article className="contingency-panel contingency-rule-panel warn">
+          <Unplug size={18} />
+          <span>Hacienda no responde</span>
+          <strong>Queda «En trámite»</strong>
+          <p>El CDE se conserva con forma normal; no se abre contingencia ni se cambia el tipo.</p>
+        </article>
+        <article className="contingency-panel contingency-rule-panel neutral">
+          <Mail size={18} />
+          <span>Donante informado</span>
+          <strong>Correo transitorio inmediato</strong>
+          <p>El donante recibe su comprobante provisional para sus registros sin esperar al sello.</p>
+        </article>
+        <article className="contingency-panel contingency-rule-panel retry">
+          <RefreshCw size={18} />
+          <span>Cron automático</span>
+          <strong>Reintento cada 15 minutos</strong>
+          <p>El sistema vuelve a transmitir los CDE pendientes hasta que Hacienda confirme.</p>
+        </article>
+        <article className="contingency-panel contingency-rule-panel ok">
+          <CheckCircle2 size={18} />
+          <span>Cierre normal</span>
+          <strong>Sello de Recepción</strong>
+          <p>Cuando llega el sello, el CDE pasa a aceptado y se envía el comprobante definitivo.</p>
+        </article>
       </div>
-
-      <section className="contingency-panel">
-        <div className="panel-head">
-          <div>
-            <h2>CDE pendientes (histórico)</h2>
-            <p>Comprobantes que quedaron en estado de contingencia bajo el modelo anterior; requieren reemisión manual si aún no tienen sello.</p>
-          </div>
-          <FileText size={20} />
-        </div>
-        {pendingDocuments.length > 0 ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Estado</th>
-                  <th>Código</th>
-                  <th>Donante</th>
-                  <th className="numeric">Monto</th>
-                  <th>Fecha</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pendingDocuments.map((document) => (
-                  <tr key={document.id}>
-                    <td><StatusPill status={document.status} /></td>
-                    <td className="mono">{shortCode(document.codigo_generacion)}</td>
-                    <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
-                    <td className="numeric">{formatMoneyCents(document.amount_cents)}</td>
-                    <td className="numeric">{formatDateTime(document.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState icon={<CheckCircle2 size={18} />} text="No hay CDE pendientes de contingencia." />
-        )}
-      </section>
-
-      <section className="contingency-panel">
-        <div className="panel-head">
-          <div>
-              <h2>Lotes del Ministerio de Hacienda (histórico)</h2>
-            <p>Lotes de CDE enviados bajo el modelo anterior de contingencia y el resultado de cada consulta.</p>
-          </div>
-          <FileText size={20} />
-        </div>
-        {batches.length > 0 ? (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th>Estado</th>
-                  <th>Código lote</th>
-                  <th>ID envío</th>
-                  <th>CDE</th>
-                  <th>Consulta</th>
-                </tr>
-              </thead>
-              <tbody>
-                {batches.map((batch) => (
-                  <tr key={batch.id}>
-                    <td><StatusPill status={batch.status} /></td>
-                    <td className="mono">{batch.codigo_lote ? shortCode(batch.codigo_lote) : "Pendiente"}</td>
-                    <td className="mono">{shortCode(batch.id_envio)}</td>
-                    <td>
-                      <StackedCell
-                        primary={`${batch.accepted_count}/${batch.line_count} aceptados`}
-                        secondary={`${batch.pending_count} pendientes, ${batch.rejected_count} rechazados`}
-                      />
-                    </td>
-                    <td className="numeric">{formatDateTime(batch.last_polled_at ?? batch.submitted_at ?? batch.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState icon={<Clock size={18} />} text="Sin lotes enviados para el periodo activo." />
-        )}
-        {batchLines.length > 0 && (
-          <div className="batch-line-list">
-            {batchLines.slice(0, 12).map((line) => (
-              <div key={line.id} className="batch-line-row">
-                <StatusPill status={line.status} />
-                <span className="mono">{shortCode(line.codigo_generacion)}</span>
-                <span className="mono">{line.sello_recibido ? shortCode(line.sello_recibido) : "Sin sello DTE"}</span>
-                    <span>{line.last_error ? userFacingErrorMessage(line.last_error) : line.mh_estado ?? "Pendiente de consulta"}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <div className="contingency-grid">
-        <section className="contingency-panel">
-          <div className="panel-head">
-            <div>
-              <h2>Eventos del Ministerio de Hacienda</h2>
-              <p>Eventos de contingencia firmados y transmitidos al Ministerio de Hacienda.</p>
-            </div>
-            <History size={20} />
-          </div>
-          {events.length > 0 ? (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Estado</th>
-                    <th>Código</th>
-                    <th>Sello</th>
-                    <th>Fecha</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {events.map((event) => (
-                    <tr key={event.id}>
-                      <td><StatusPill status={event.status} /></td>
-                      <td className="mono">{shortCode(event.codigo_generacion)}</td>
-                      <td className="mono">{event.sello_recibido ? shortCode(event.sello_recibido) : "Pendiente"}</td>
-                      <td className="numeric">{formatDateTime(event.created_at)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <EmptyState icon={<Clock size={18} />} text="Sin eventos de contingencia transmitidos." />
-          )}
-        </section>
-
-        <section className="contingency-panel">
-          <div className="panel-head">
-            <div>
-              <h2>Periodos</h2>
-              <p>Ventanas abiertas, selladas, cerradas o fallidas.</p>
-            </div>
-            <Clock size={20} />
-          </div>
-          {periods.length > 0 ? (
-            <div className="contingency-periods">
-              {periods.map((period) => (
-                <div key={period.id} className="contingency-period-row">
-                  <StatusPill status={period.status} />
-                  <div>
-                    <strong>{contingencyTypeLabel(period.tipo_contingencia)}</strong>
-                    <span>{period.reason}</span>
-                  </div>
-                  <span className="numeric">{formatDateTime(period.started_at)}</span>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <EmptyState icon={<Clock size={18} />} text="Sin periodos registrados." />
-          )}
-        </section>
+      <div className="contingency-panel contingency-operator-panel">
+        <strong>Qué revisar en operación</strong>
+        <p>
+          Use <b>Documentos</b> con el filtro <b>En trámite</b> para ver CDE esperando respuesta de
+          Hacienda. Use <b>Fallos</b> solo cuando el sistema marque errores o rechazos que sí requieren
+          intervención manual.
+        </p>
       </div>
-
-      <section className="contingency-panel">
-        <div className="panel-head">
-          <div>
-            <h2>Auditoría del periodo</h2>
-            <p>Acciones registradas para los periodos históricos de contingencia.</p>
-          </div>
-          <History size={20} />
-        </div>
-        {audit.length > 0 ? (
-          <div className="contingency-audit-list">
-            {audit.slice(0, 8).map((row) => (
-              <div key={row.id}>
-                <strong>{auditActionLabel(row.action)}</strong>
-                <span>{auditSummaryLabel(row.summary)}</span>
-                <time>{formatDateTime(row.created_at)}</time>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <EmptyState icon={<AlertTriangle size={18} />} text="Sin auditoría para el periodo activo." />
-        )}
-      </section>
     </section>
-  );
-}
-
-function EmptyState({ icon, text }: { icon: ReactNode; text: string }) {
-  return (
-    <div className="empty-state">
-      {icon}
-      <span>{text}</span>
-    </div>
   );
 }
 
@@ -2410,6 +2244,8 @@ function CredentialsPanel({
       : "No se pueden guardar cambios todavía.";
   const activeEnvironmentLabel = input.environment === "test" ? "Pruebas 00" : "Producción 01";
   const runtimeEnvironment = credentialRuntimeEnvironment(emissionEnvironment, status?.target.appEnv);
+  const testEnvironmentAllowed = emissionEnvironment?.allowedEnvironments.includes("00") === true;
+  const productionEnvironmentAllowed = emissionEnvironment?.allowedEnvironments.includes("01") === true;
   const activeSectionMeta = credentialSettingsSections.find((section) => section.id === activeSection) ?? credentialSettingsSections[0];
   const activeSectionDescription = credentialSettingsPanelDescription(activeSection, activeEnvironmentLabel);
   async function handleCertificateFile(file: File | undefined): Promise<void> {
@@ -2467,7 +2303,11 @@ function CredentialsPanel({
     // setting row (a genuinely redundant save). A value that merely matches the deployment
     // default with no setting row yet must still reach the confirm flow so the owner can
     // persist the default explicitly — guarding on runtimeEnvironment.environment blocked that.
-    if (emissionBusy || (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting")) return;
+    if (
+      emissionBusy ||
+      !emissionEnvironment?.allowedEnvironments.includes(environment) ||
+      (emissionEnvironment.environment === environment && emissionEnvironment.source === "setting")
+    ) return;
     setPendingEmissionEnvironment(environment);
   }
   async function confirmEmissionEnvironmentChange(): Promise<void> {
@@ -2547,7 +2387,7 @@ function CredentialsPanel({
                         <button
                           type="button"
                           className={runtimeEnvironment.environment === "00" ? "active" : ""}
-                          disabled={emissionBusy}
+                          disabled={emissionBusy || !testEnvironmentAllowed}
                           onClick={() => requestEmissionEnvironmentChange("00")}
                         >
                           Pruebas 00
@@ -2555,7 +2395,7 @@ function CredentialsPanel({
                         <button
                           type="button"
                           className={runtimeEnvironment.environment === "01" ? "active" : ""}
-                          disabled={emissionBusy}
+                          disabled={emissionBusy || !productionEnvironmentAllowed}
                           onClick={() => requestEmissionEnvironmentChange("01")}
                         >
                           Producción 01
@@ -2568,8 +2408,8 @@ function CredentialsPanel({
                       <small>Este selector no cambia el ambiente activo; solo escoge cuál usuario y contraseña del Ministerio de Hacienda desea revisar o rotar.</small>
                     </div>
                     <div className="segmented credential-env">
-                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                      <button type="button" disabled={!testEnvironmentAllowed} className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" disabled={!productionEnvironmentAllowed} className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
@@ -2585,8 +2425,8 @@ function CredentialsPanel({
                       <small>Seleccione el ambiente cuyas credenciales API quiere reemplazar.</small>
                     </div>
                     <div className="segmented credential-env">
-                      <button type="button" className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
-                      <button type="button" className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
+                      <button type="button" disabled={!testEnvironmentAllowed} className={input.environment === "test" ? "active" : ""} onClick={() => onChange({ ...input, environment: "test" })}>Pruebas 00</button>
+                      <button type="button" disabled={!productionEnvironmentAllowed} className={input.environment === "production" ? "active" : ""} onClick={() => onChange({ ...input, environment: "production" })}>Producción 01</button>
                     </div>
                     <div className={activeMhGroup?.ready ? "credential-form-state ready" : "credential-form-state"}>
                       {activeMhGroup?.ready ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
@@ -2607,49 +2447,45 @@ function CredentialsPanel({
                         <CredentialActiveValue status={status} name={mhPasswordSecret} />
                         <input value={input.mhPassword} onChange={(event) => onChange({ ...input, mhPassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, mhPasswordSecret, "Nueva contraseña API del Ministerio de Hacienda")} type="password" autoComplete="new-password" />
                       </label>
-                    </div>
-                  </div>
-                )}
-
-                {activeSection === "firmador" && (
-                  <div className="credential-fields">
-                    <div className="credential-section-title span-2">
-                      <h3>Firmador del Ministerio de Hacienda</h3>
-                      <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
-                    </div>
-                    <div className={`legal-box ${certificateExpiry.tone} span-2`}>
-                      <ShieldCheck size={17} />
-                      <div>
-                        <strong>{certificateExpiry.label}</strong>
+                      <div className="credential-section-title span-2">
+                        <h3>Firmador del Ministerio de Hacienda</h3>
+                        <p>Certificado y contraseña usados para firmar los DTE antes de transmitirlos.</p>
                       </div>
-                    </div>
-                    <div className="credential-field-block span-2">
-                      <CredentialFieldLabel label="Certificado firmador del Ministerio de Hacienda (.crt/.xml)" configured={signerConfigured} />
-                      <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
-                      <div className="credential-file-row">
-                        <label className="file-upload-button">
-                          <Upload size={16} />
-                          Reemplazar certificado
-                          <input
-                            className="file-input-hidden"
-                            type="file"
-                            accept=".crt,.xml,text/xml,application/xml,text/plain"
-                            onChange={(event) => void handleCertificateFile(event.currentTarget.files?.[0])}
-                          />
-                        </label>
-                        <span className="credential-file-status">
-                          {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
-                        </span>
+                      <div className={`legal-box ${certificateExpiry.tone} span-2`}>
+                        <ShieldCheck size={17} />
+                        <div>
+                          <strong>{certificateExpiry.label}</strong>
+                        </div>
                       </div>
-                      <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml del Ministerio de Hacienda o cargue el archivo")} spellCheck={false} />
-                      <small>Este campo es para reemplazar el certificado que el Ministerio de Hacienda entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
-                      {certificateFileError && <small className="field-error">{certificateFileError}</small>}
+                      <div className="credential-field-block span-2">
+                        <CredentialFieldLabel label="Certificado firmador del Ministerio de Hacienda (.crt/.xml)" configured={signerConfigured} />
+                        <CredentialActiveValue status={status} name="MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2" />
+                        <div className="credential-file-row">
+                          <label className="file-upload-button">
+                            <Upload size={16} />
+                            Reemplazar certificado
+                            <input
+                              className="file-input-hidden"
+                              type="file"
+                              accept=".crt,.xml,text/xml,application/xml,text/plain"
+                              onChange={(event) => void handleCertificateFile(event.currentTarget.files?.[0])}
+                            />
+                          </label>
+                          <span className="credential-file-status">
+                            {input.certificateFileName || (signerConfigured ? "Certificado ya configurado; cargue otro archivo solo para rotarlo." : "Sin archivo seleccionado.")}
+                          </span>
+                        </div>
+                        <textarea value={input.certificateXml} onChange={(event) => onChange({ ...input, certificateXml: event.target.value, certificateFileName: "" })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_XML_PART_1 + MH_CERT_XML_PART_2", "Pegue aquí el nuevo certificado .crt/.xml del Ministerio de Hacienda o cargue el archivo")} spellCheck={false} />
+                        <small>Este campo es para reemplazar el certificado que el Ministerio de Hacienda entrega para firmar DTE. No se muestra el certificado activo porque contiene material privado de firma.</small>
+                        {certificateFileError && <small className="field-error">{certificateFileError}</small>}
+                      </div>
+                      <label>
+                        <CredentialFieldLabel label="Contraseña de llave privada" configured={credentialConfigured(status, "MH_CERT_PASSWORD")} />
+                        <CredentialActiveValue status={status} name="MH_CERT_PASSWORD" />
+                        <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_PASSWORD", "Nueva contraseña de llave privada")} type="password" autoComplete="new-password" />
+                        <small>Contraseña del archivo de firma; es distinta de la contraseña API usada para autenticarse contra Hacienda.</small>
+                      </label>
                     </div>
-                    <label>
-                      <CredentialFieldLabel label="Contraseña de llave privada" configured={credentialConfigured(status, "MH_CERT_PASSWORD")} />
-                      <CredentialActiveValue status={status} name="MH_CERT_PASSWORD" />
-                      <input value={input.certificatePassword} onChange={(event) => onChange({ ...input, certificatePassword: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "MH_CERT_PASSWORD", "Nueva contraseña de llave privada")} type="password" autoComplete="new-password" />
-                    </label>
                   </div>
                 )}
 
@@ -2718,14 +2554,15 @@ function CredentialsPanel({
                         <h3>Alertas operativas</h3>
                       </div>
                       <label>
-                        <span className="plain-field-label">Correo para avisos operativos</span>
+                        <span className="plain-field-label">Correos para avisos operativos</span>
                         <input
                           value={alertEmailDraft}
                           onChange={(event) => onAlertEmailChange(event.target.value)}
-                          placeholder="admin@example.org"
+                          placeholder="admin@example.org, soporte@example.org"
                           type="email"
+                          multiple
                         />
-                        <small>Recibirá avisos de fallos de emisión, contingencias y eventos estancados.</small>
+                        <small>Recibirá avisos de fallos de emisión, contingencias y eventos estancados. Separe varios correos con una sola coma (,).</small>
                       </label>
                       <button
                         className="primary"
@@ -2733,7 +2570,7 @@ function CredentialsPanel({
                         disabled={alertEmailBusy}
                         onClick={() => void onAlertEmailSubmit()}
                       >
-                        {alertEmailBusy ? "Guardando" : "Guardar correo de alertas"}
+                        {alertEmailBusy ? "Guardando" : "Guardar correos de alertas"}
                       </button>
                     </div>
                   </div>
@@ -2878,18 +2715,35 @@ function BrandingEditor({
   const [accentColor, setAccentColor] = useState(branding.accentColor);
   const [supportEmail, setSupportEmail] = useState(branding.supportEmail);
   const [logoVersion, setLogoVersion] = useState(branding.logoVersion);
+  const [donorLogoVersion, setDonorLogoVersion] = useState(branding.donorLogoVersion);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [savingText, setSavingText] = useState(false);
   const [logoBusy, setLogoBusy] = useState(false);
   const [logoError, setLogoError] = useState("");
+  const [donorLogoBusy, setDonorLogoBusy] = useState(false);
+  const [donorLogoError, setDonorLogoError] = useState("");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [donorPreviewUrl, setDonorPreviewUrl] = useState<string | null>(null);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
+  const donorLogoInputRef = useRef<HTMLInputElement | null>(null);
 
   // Keep the local color hex normalized for the native color input (which only accepts
   // #rrggbb). A partial/invalid value keeps the picker on the last valid color.
   const colorForPicker = /^#[0-9a-fA-F]{6}$/.test(accentColor.trim()) ? accentColor.trim().toLowerCase() : branding.accentColor;
   const currentLogoSrc = brandingLogoSrc(logoVersion);
+  const currentDonorLogoSrc = brandingDonorLogoSrc(donorLogoVersion);
+
+  function draftBranding(overrides: Partial<Branding> = {}): Branding {
+    return {
+      displayName,
+      accentColor,
+      supportEmail,
+      logoVersion,
+      donorLogoVersion,
+      ...overrides
+    };
+  }
 
   async function saveNameAndColor() {
     const validation = brandingFieldError(displayName, accentColor, supportEmail);
@@ -2908,7 +2762,11 @@ function BrandingEditor({
       setDisplayName(result.displayName);
       setAccentColor(result.accentColor);
       setSupportEmail(result.supportEmail);
-      const next: Branding = { displayName: result.displayName, accentColor: result.accentColor, supportEmail: result.supportEmail, logoVersion };
+      const next = draftBranding({
+        displayName: result.displayName,
+        accentColor: result.accentColor,
+        supportEmail: result.supportEmail
+      });
       onSave(next);
       setNotice("Marca actualizada.");
     } catch (err) {
@@ -2938,8 +2796,8 @@ function BrandingEditor({
       const nextVersion = data.logoVersion ?? null;
       setLogoVersion(nextVersion);
       setPreviewUrl(null);
-      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: nextVersion });
-      setNotice("Logo actualizado.");
+      onSave(draftBranding({ logoVersion: nextVersion }));
+      setNotice("Logo de administración y correos actualizado.");
     } catch (err) {
       setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
     } finally {
@@ -2957,8 +2815,8 @@ function BrandingEditor({
       await api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" });
       setLogoVersion(null);
       setPreviewUrl(null);
-      onSave({ displayName: branding.displayName, accentColor: branding.accentColor, supportEmail: branding.supportEmail, logoVersion: null });
-      setNotice("Logo eliminado.");
+      onSave(draftBranding({ logoVersion: null }));
+      setNotice("Logo de administración y correos eliminado.");
     } catch (err) {
       setLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
     } finally {
@@ -2974,6 +2832,63 @@ function BrandingEditor({
       return URL.createObjectURL(file);
     });
     void uploadLogo(file);
+  }
+
+  async function uploadDonorLogo(file: File) {
+    setDonorLogoError("");
+    if (file.size > BRANDING_LOGO_MAX_BYTES) {
+      setDonorLogoError("El logo no puede superar los 512 KB.");
+      return;
+    }
+    setDonorLogoBusy(true);
+    try {
+      const response = await fetch("/api/settings/branding/donor-logo", {
+        method: "PUT",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
+        body: file
+      });
+      const data = (await response.json().catch(() => ({}))) as { donorLogoVersion?: string; message?: string; error?: string };
+      if (!response.ok) {
+        throw new Error(String(data.message ?? data.error ?? `HTTP ${response.status}`));
+      }
+      const nextVersion = data.donorLogoVersion ?? null;
+      setDonorLogoVersion(nextVersion);
+      setDonorPreviewUrl(null);
+      onSave(draftBranding({ donorLogoVersion: nextVersion }));
+      setNotice("Logo para donantes actualizado.");
+    } catch (err) {
+      setDonorLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setDonorLogoBusy(false);
+      if (donorLogoInputRef.current) {
+        donorLogoInputRef.current.value = "";
+      }
+    }
+  }
+
+  async function removeDonorLogo() {
+    setDonorLogoError("");
+    setDonorLogoBusy(true);
+    try {
+      await api<{ ok: true }>("/api/settings/branding/donor-logo", token, { method: "DELETE" });
+      setDonorLogoVersion(null);
+      setDonorPreviewUrl(null);
+      onSave(draftBranding({ donorLogoVersion: null }));
+      setNotice("Logo para donantes eliminado.");
+    } catch (err) {
+      setDonorLogoError(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+    } finally {
+      setDonorLogoBusy(false);
+    }
+  }
+
+  function onPickDonorFile(file: File | undefined) {
+    if (!file) return;
+    setDonorPreviewUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return URL.createObjectURL(file);
+    });
+    void uploadDonorLogo(file);
   }
 
   return (
@@ -3047,8 +2962,8 @@ function BrandingEditor({
 
       <div className="credential-field-block branding-logo-block">
         <div className="credential-section-title">
-          <h3>Logo</h3>
-          <p>Se muestra en el inicio de sesión, el encabezado del panel y la página de donación. SVG, PNG o JPG, hasta 512 KB.</p>
+          <h3>Logo de administración y correos</h3>
+          <p>Se muestra en el inicio de sesión, el panel administrativo y el encabezado de los correos. SVG, PNG o JPG, hasta 512 KB.</p>
         </div>
         <div className="branding-logo-row">
           <div className="branding-logo-preview" aria-hidden={!previewUrl && !currentLogoSrc}>
@@ -3083,6 +2998,44 @@ function BrandingEditor({
         {logoError && <p className="field-error">{logoError}</p>}
       </div>
 
+      <div className="credential-field-block branding-logo-block">
+        <div className="credential-section-title">
+          <h3>Logo para donantes</h3>
+          <p>Se muestra solo en la página pública de donación. Use una versión pensada para fondo blanco. SVG, PNG o JPG, hasta 512 KB.</p>
+        </div>
+        <div className="branding-logo-row">
+          <div className="branding-logo-preview" aria-hidden={!donorPreviewUrl && !currentDonorLogoSrc}>
+            {donorPreviewUrl ? (
+              <img src={donorPreviewUrl} alt="Vista previa del logo para donantes" />
+            ) : currentDonorLogoSrc ? (
+              <img src={currentDonorLogoSrc} alt={displayName} />
+            ) : (
+              <span className="branding-logo-empty">Sin logo</span>
+            )}
+          </div>
+          <div className="branding-logo-controls">
+            <label className="file-upload-button">
+              <Upload size={16} />
+              {donorLogoBusy ? "Subiendo" : currentDonorLogoSrc ? "Reemplazar logo" : "Subir logo"}
+              <input
+                ref={donorLogoInputRef}
+                className="file-input-hidden"
+                type="file"
+                accept={BRANDING_LOGO_ACCEPT}
+                disabled={donorLogoBusy}
+                onChange={(event) => onPickDonorFile(event.target.files?.[0])}
+              />
+            </label>
+            {currentDonorLogoSrc && (
+              <button type="button" className="danger" disabled={donorLogoBusy} onClick={() => void removeDonorLogo()}>
+                Quitar logo
+              </button>
+            )}
+          </div>
+        </div>
+        {donorLogoError && <p className="field-error">{donorLogoError}</p>}
+      </div>
+
       <div className="credential-field-block branding-preview-block">
         <div className="credential-section-title">
           <h3>Vista previa</h3>
@@ -3113,8 +3066,8 @@ function BrandingEditor({
               page is never tinted with the accent, so this mock must not use colorForPicker. */}
           <figure className="branding-preview-card branding-preview-donor">
             <div className="branding-preview-frame branding-preview-donor-card">
-              {(previewUrl ?? currentLogoSrc) ? (
-                <img className="branding-preview-donor-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+              {(donorPreviewUrl ?? currentDonorLogoSrc) ? (
+                <img className="branding-preview-donor-logo" src={(donorPreviewUrl ?? currentDonorLogoSrc) ?? undefined} alt={displayName} />
               ) : (
                 <span className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}</span>
               )}
@@ -3336,7 +3289,7 @@ function IssuerConfigEditor({
 
         <div className="credential-subsection span-2">
           <h4>Contacto y control</h4>
-          <p>Códigos de establecimiento, punto de venta y numeración CDE.</p>
+          <p>Códigos de establecimiento, punto de venta y numeración CDE. Hacienda y el emisor usan campos parecidos, pero cada uno alimenta una parte distinta del DTE.</p>
         </div>
         <label>
           <span>Teléfono</span>
@@ -3349,22 +3302,27 @@ function IssuerConfigEditor({
         <label>
           <span>Código establecimiento del Ministerio de Hacienda</span>
           <input value={form.codEstableMH} onChange={(event) => update({ codEstableMH: event.target.value })} placeholder="M001" />
+          <small>Identificador oficial del establecimiento autorizado por el Ministerio de Hacienda.</small>
         </label>
         <label>
           <span>Código punto de venta del Ministerio de Hacienda</span>
           <input value={form.codPuntoVentaMH} onChange={(event) => update({ codPuntoVentaMH: event.target.value })} placeholder="P004" />
+          <small>Identificador oficial del punto de venta o terminal reconocido por el Ministerio de Hacienda.</small>
         </label>
         <label>
           <span>Código establecimiento interno</span>
           <input value={form.codEstable} onChange={(event) => update({ codEstable: event.target.value })} placeholder="Opcional" />
+          <small>Código propio del emisor para agrupar documentos por sede interna; puede coincidir con el código MH si no manejan otro.</small>
         </label>
         <label>
-          <span>Código punto venta interno</span>
+          <span>Código punto de venta interno</span>
           <input value={form.codPuntoVenta} onChange={(event) => update({ codPuntoVenta: event.target.value })} placeholder="Opcional" />
+          <small>Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.</small>
         </label>
         <label className="span-2">
           <span>Prefijo número de control</span>
           <input value={form.controlPrefix} onChange={(event) => update({ controlPrefix: event.target.value })} placeholder="M001P004" />
+          <small>Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.</small>
         </label>
 
         <div className="credential-subsection span-2">
@@ -3502,17 +3460,18 @@ function credentialRuntimeEnvironment(
   return {
     environment,
     label,
-    help: source === "setting"
-      ? `Los próximos CDE se emitirán contra el Ministerio de Hacienda (${label}). Cambie este valor antes de generar o recibir pagos si necesita otro ambiente.`
-      : `Usando ${label} como valor inicial. Guarde una selección aquí para controlar el ambiente activo desde la UI.`
+    help: state?.locked
+      ? `Este despliegue está bloqueado a ${label}; el ambiente no puede cambiarse desde la aplicación.`
+      : source === "setting"
+        ? `Los próximos CDE se emitirán contra el Ministerio de Hacienda (${label}).`
+        : `Usando ${label} como valor inicial.`
   };
 }
 
 function credentialSettingsPanelDescription(section: CredentialSettingsSectionId, activeEnvironmentLabel: string): string {
   const descriptions: Record<CredentialSettingsSectionId, string> = {
     ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales del Ministerio de Hacienda que desea revisar.",
-    mh: `Reemplace el usuario y contraseña API del Ministerio de Hacienda para ${activeEnvironmentLabel}.`,
-    firmador: "Rote el certificado firmador y la contraseña de la llave privada cuando el Ministerio de Hacienda entregue nuevos archivos.",
+    mh: `Administre el usuario API de ${activeEnvironmentLabel} y el certificado firmador usado para firmar DTE antes de transmitirlos.`,
     wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
@@ -3974,6 +3933,7 @@ function AuthScreen({
   const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState("");
   const [localNotice, setLocalNotice] = useState("");
+  const authLogoSrc = brandingDonorLogoSrc(branding.donorLogoVersion) ?? brandingLogoSrc(branding.logoVersion);
 
   useEffect(() => {
     if (!bootstrapAvailable && mode === "bootstrap") {
@@ -4020,8 +3980,8 @@ function AuthScreen({
           }
         }}
       >
-        {brandingLogoSrc(branding.logoVersion) ? (
-          <img className="auth-logo" src={brandingLogoSrc(branding.logoVersion) ?? undefined} alt={branding.displayName} />
+        {authLogoSrc ? (
+          <img className="auth-logo" src={authLogoSrc} alt={branding.displayName} />
         ) : (
           <ShieldCheck size={32} />
         )}
@@ -4239,8 +4199,8 @@ function DetailPanel({
         <dd className="mono">{selected.sello_recibido ?? "Pendiente"}</dd>
         <dt>Donante</dt>
         <dd>{selected.donor_name ?? "—"}</dd>
-        <dt>Correo de envío</dt>
-        <dd>
+        <dt className="detail-email-label">Correo de envío</dt>
+        <dd className="detail-email-value">
           {emailEditing ? (
             <form className="inline-edit" onSubmit={(event) => {
               event.preventDefault();
@@ -4770,7 +4730,7 @@ function delay(ms: number): Promise<void> {
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
   failures: "CDE con errores o rechazos que requieren su atención.",
-  contingency: "Historial de contingencias (solo lectura): la normativa no contempla contingencia para el CDE.",
+  contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",
   audit: "Historial de todas las acciones realizadas en el panel.",
   analytics: "Tendencias de las donaciones en línea (carril Wompi).",
   users: "Cree cuentas y asigne roles de acceso al panel.",
@@ -4785,11 +4745,6 @@ export function viewSubtitle(view: View): string {
 export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
   if (view === "failures" && query.trim() === "") return "Sin fallos pendientes. Todo en orden.";
   return "No hay CDE que coincidan con la búsqueda o el filtro.";
-}
-
-function contingencyTypeLabel(value: number | string): string {
-  const option = contingencyTypeOptions.find((item) => item.value === String(value));
-  return option?.label ?? `${value}`;
 }
 
 function formatDateTime(value?: string | null): string {
@@ -4861,14 +4816,6 @@ const advancedCdeSteps = [
   { id: "pago", label: "Pago y anexos", description: "Referencia, documento asociado y apéndice." },
   { id: "revision", label: "Revisión", description: "Resumen final antes de generar el CDE." }
 ] as const;
-
-const contingencyTypeOptions = [
-  { value: "1", label: "1 - Internet del emisor" },
-  { value: "2", label: "2 - Servicios del Ministerio de Hacienda no disponibles" },
-  { value: "3", label: "3 - Sistema del emisor" },
-  { value: "4", label: "4 - Firmador no disponible" },
-  { value: "5", label: "5 - Otro" }
-];
 
 interface AdvancedCdeFormInput {
   donorName: string;

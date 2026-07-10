@@ -2,11 +2,13 @@ import { isMockMode, mhEndpoint, requireSecret } from "../config";
 import type { Ambiente, Env, MhResponse } from "../types";
 import { nowIso } from "../utils/dates";
 import { generationCode } from "../utils/ids";
+import { assertDeploymentAllowsAmbiente } from "./environmentPolicy";
 
 export class MhClient {
   constructor(private readonly env: Env) {}
 
   async transmitDte(input: { ambiente: Ambiente; version: number; tipoDte: string; codigoGeneracion: string; signedJws: string }): Promise<MhResponse> {
+    assertDeploymentAllowsAmbiente(this.env, input.ambiente);
     if (isMockMode(this.env)) {
       return mockAccepted(input.codigoGeneracion);
     }
@@ -27,6 +29,7 @@ export class MhClient {
   }
 
   async transmitInvalidacion(input: { ambiente: Ambiente; version: number; signedJws: string }): Promise<MhResponse> {
+    assertDeploymentAllowsAmbiente(this.env, input.ambiente);
     if (isMockMode(this.env)) {
       return mockAccepted(generationCode());
     }
@@ -63,8 +66,8 @@ export class MhClient {
 
     // Some Ministerio de Hacienda test accounts are provisioned through the central auth service while still transmitting to TEST endpoints.
     if (!token && ambiente === "00" && isInvalidCredentials(data)) {
-      const centralAuthUrl = mhEndpoint(this.env, "auth", "01");
-      if (centralAuthUrl !== primaryAuthUrl) {
+      const centralAuthUrl = this.env.MH_AUTH_URL_TEST_FALLBACK?.trim();
+      if (centralAuthUrl && centralAuthUrl !== primaryAuthUrl) {
         data = await this.authenticate(centralAuthUrl, credentials);
         token = data.body?.token;
       }
@@ -115,13 +118,13 @@ export class MhClient {
   private credentials(ambiente: Ambiente): { user: string; password: string } {
     if (ambiente === "01") {
       return {
-        user: this.env.MH_USER_PROD ?? requireSecret(this.env, "MH_USER"),
-        password: this.env.MH_PASSWORD_PROD ?? requireSecret(this.env, "MH_PASSWORD")
+        user: requireSecret(this.env, "MH_USER_PROD"),
+        password: requireSecret(this.env, "MH_PASSWORD_PROD")
       };
     }
     return {
-      user: this.env.MH_USER_TEST ?? requireSecret(this.env, "MH_USER"),
-      password: this.env.MH_PASSWORD_TEST ?? requireSecret(this.env, "MH_PASSWORD")
+      user: requireSecret(this.env, "MH_USER_TEST"),
+      password: requireSecret(this.env, "MH_PASSWORD_TEST")
     };
   }
 }

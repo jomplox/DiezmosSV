@@ -67,6 +67,15 @@ describe("Analítica view contract (usted-form Spanish, Wompi lane)", () => {
     expect(viewSource).toContain("no es un pronóstico");
   });
 
+  it("explains and exposes the heatmap cell values for hover, tap, and keyboard use", () => {
+    expect(viewSource).toContain("analytics-heatmap-help");
+    expect(viewSource).toContain("Cada celda cruza un día con una hora");
+    expect(viewSource).toContain('className="analytics-heatmap-button"');
+    expect(viewSource).toContain('className="analytics-heatmap-value"');
+    expect(viewSource).toContain("aria-label={heatmapLabel}");
+    expect(viewSource).toContain("title={heatmapLabel}");
+  });
+
   it("shows the Spanish empty state per section", () => {
     expect(viewSource).toContain("Sin donaciones en este período.");
   });
@@ -90,6 +99,9 @@ describe("Analítica styles", () => {
     expect(stylesSource).toContain(".analytics-view");
     expect(stylesSource).toContain(".analytics-line");
     expect(stylesSource).toContain(".analytics-heatmap-cell");
+    expect(stylesSource).toContain("text-align: center;");
+    expect(stylesSource).toContain(".analytics-heatmap-button:hover .analytics-heatmap-value");
+    expect(stylesSource).toContain(".analytics-heatmap-button:focus-visible .analytics-heatmap-value");
     // Accent-tinted chart fills reuse the theme variables.
     expect(stylesSource).toContain("var(--accent)");
   });

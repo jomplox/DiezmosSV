@@ -31,6 +31,8 @@ const PASSWORD_HASH_SCHEME = "pbkdf2";
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
 export class PasswordResetError extends Error {}
+export class PasswordPolicyError extends Error {}
+export class UserNotFoundError extends Error {}
 
 export class AuthService {
   private readonly repo: Repository;
@@ -69,7 +71,9 @@ export class AuthService {
 
   async resetUserPassword(userId: string, password: string): Promise<void> {
     const hashed = await hashForStorage(password);
-    await this.repo.setUserPassword(userId, hashed.hash, hashed.salt);
+    if (!(await this.repo.setUserPassword(userId, hashed.hash, hashed.salt))) {
+      throw new UserNotFoundError("Usuario no encontrado");
+    }
   }
 
   async login(email: string, password: string): Promise<{ user: AuthUser; token: string; expiresAt: string }> {
@@ -118,13 +122,16 @@ export class AuthService {
 
   async confirmPasswordReset(token: string, password: string): Promise<AuthUser> {
     const trimmed = token.trim();
-    const row = trimmed ? await this.repo.getActivePasswordResetUser(await sha256Hex(trimmed)) : null;
+    const tokenHash = trimmed ? await sha256Hex(trimmed) : "";
+    const row = tokenHash ? await this.repo.getActivePasswordResetUser(tokenHash) : null;
     if (!row) {
       throw new PasswordResetError("El enlace de restablecimiento no es válido o ya expiró. Solicite uno nuevo.");
     }
     const hashed = await hashForStorage(password);
-    await this.repo.setUserPassword(String(row.user_id), hashed.hash, hashed.salt);
-    await this.repo.markPasswordResetTokenUsed(String(row.token_id));
+    const changed = await this.repo.resetPasswordWithToken(String(row.user_id), tokenHash, hashed.hash, hashed.salt);
+    if (!changed) {
+      throw new PasswordResetError("El enlace de restablecimiento no es válido o ya expiró. Solicite uno nuevo.");
+    }
     return publicUser(row);
   }
 
@@ -163,7 +170,7 @@ export async function hashPassword(
   if (options.enforcePolicy ?? true) {
     const policyError = passwordPolicyError(password);
     if (policyError) {
-      throw new Error(policyError);
+      throw new PasswordPolicyError(policyError);
     }
   }
   const effectiveSalt = salt ?? base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(16)));

@@ -28,6 +28,9 @@ export interface Env {
   MH_USER_PROD?: string;
   MH_PASSWORD_PROD?: string;
   MH_AUTH_URL_TEST?: string;
+  // Narrow TEST-account fallback to MH's central auth host after codigoMsg 106.
+  // This is not a production transmission capability.
+  MH_AUTH_URL_TEST_FALLBACK?: string;
   MH_AUTH_URL_PROD?: string;
   MH_RECEPCION_URL_TEST?: string;
   MH_RECEPCION_URL_PROD?: string;
@@ -226,6 +229,9 @@ export interface DonationIntentRecord {
   wompi_url_enlace_largo: string | null;
   document_id: string | null;
   client_ip: string | null;
+  // SHA-256 of the one-time draft /datos capability (migration 0017). The raw
+  // capability is never stored and this column is cleared by the successful CAS.
+  datos_token_hash: string | null;
   // Wompi payment marker (migration 0016): stamped by the webhook the moment an
   // approved payment for this intent arrives — independent of status. COMPLETED still
   // means the CDE was accepted by MH; paid_at means the donor paid. The donor-facing

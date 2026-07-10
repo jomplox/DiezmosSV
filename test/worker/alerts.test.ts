@@ -40,6 +40,37 @@ describe("operational alert dispatch", () => {
     );
   });
 
+  it("sends operational alerts to every comma-separated recipient", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org, admin@example.org" });
+    const sent: Array<{ to: string; subject: string }> = [];
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sent.push(message as { to: string; subject: string });
+          return { messageId: `alert-${sent.length}` };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+
+    await sendOperationalAlert(env, repo, {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "El documento dte_multi falló",
+      entityType: "dte_document",
+      entityId: "dte_multi"
+    });
+
+    expect(sent.map((message) => message.to)).toEqual(["owner@example.org", "admin@example.org"]);
+    expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:DTE_FAILED")).toHaveLength(1);
+  });
+
   it("uses the configured APP_ORIGIN in the alert email body", async () => {
     const db = new InMemoryAlertD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });

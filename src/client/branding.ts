@@ -53,6 +53,7 @@ export interface Branding {
   accentColor: string;
   supportEmail: string;
   logoVersion: string | null;
+  donorLogoVersion: string | null;
 }
 
 // Normalize the raw /api/branding payload, tolerating anything malformed by falling
@@ -72,13 +73,18 @@ export function parseBrandingResponse(data: unknown): Branding {
       ? record.supportEmail.trim().toLowerCase()
       : CLIENT_BRANDING_DEFAULTS.supportEmail;
   const logoVersion = typeof record.logoVersion === "string" && record.logoVersion ? record.logoVersion : null;
-  return { displayName, accentColor, supportEmail, logoVersion };
+  const donorLogoVersion = typeof record.donorLogoVersion === "string" && record.donorLogoVersion ? record.donorLogoVersion : null;
+  return { displayName, accentColor, supportEmail, logoVersion, donorLogoVersion };
 }
 
 // The cache-busting logo URL. Always version-qualified so a re-upload invalidates the
 // short public cache. null when no logo is stored (caller renders the built-in mark).
 export function brandingLogoSrc(logoVersion: string | null): string | null {
   return logoVersion ? `/api/branding/logo?v=${logoVersion}` : null;
+}
+
+export function brandingDonorLogoSrc(donorLogoVersion: string | null): string | null {
+  return donorLogoVersion ? `/api/branding/donor-logo?v=${donorLogoVersion}` : null;
 }
 
 // Apply branding to the live document: accent CSS variable + tab title. Safe to call
@@ -91,7 +97,7 @@ export function applyBranding(branding: Branding, doc: Document = document): voi
 // Fetch + apply in one call for the admin boot path. Never throws: a failed fetch
 // leaves the defaults in place so the login screen still renders.
 export async function loadAndApplyBranding(doc: Document = document): Promise<Branding> {
-  let branding: Branding = { ...CLIENT_BRANDING_DEFAULTS, logoVersion: null };
+  let branding: Branding = { ...CLIENT_BRANDING_DEFAULTS, logoVersion: null, donorLogoVersion: null };
   try {
     const response = await fetch("/api/branding");
     if (response.ok) {

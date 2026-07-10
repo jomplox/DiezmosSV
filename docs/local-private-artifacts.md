@@ -1,0 +1,61 @@
+# Local private artifacts
+
+## Approved location
+
+Use this out-of-tree root on macOS:
+
+```text
+~/Library/Application Support/DiezmosSV/private/
+├── env/
+│   ├── local-operator.env
+│   └── staging-smoke.env
+├── mh/live/signing/
+├── mh/test/signing/
+├── wompi/live/captures/
+├── tax/live/imports/
+├── dte/live/
+├── dte/reference/
+└── quarantine/
+```
+
+Every directory is `0700`; every file is `0600`. Do not use symlinks. `npm run dev:worker` reads `env/local-operator.env` by default, while `npm run smoke:staging` reads `env/staging-smoke.env`. Override either with `DIEZMOSSV_ENV_FILE=/absolute/path/to/file`; a relative override is resolved from the checkout.
+
+## Safe relocation
+
+For each artifact:
+
+1. Classify it as live credential, test credential, PII/tax data, private provider capture, public reference, or disposable cache.
+2. Refuse a destination collision unless the existing file is byte-identical and intentionally retained.
+3. Copy to the approved destination, set the destination file to `0600`, and keep every parent directory at `0700`.
+4. Verify source and destination with `cmp -s` without displaying content.
+5. Only after a successful comparison, remove the checkout copy.
+6. Run `npm run security:check-private-boundary` and inspect path/mode metadata only.
+
+If verification fails, keep both copies, place the new copy under a collision-safe `quarantine/` name, and resolve it manually. Removing a source file on APFS does not prove secure erasure: snapshots, backups, synchronized copies, filesystem history, and task/terminal logs may retain data.
+
+## Rotation and containment
+
+Credential rotation is required after a commit/push, log or task-transcript disclosure, chat/email transfer, unintended synchronization, or custody by an untrusted party. Verify the provider-specific revocation/reissue procedure and rollback path before changing a live credential. Local presence alone, in a protected file that never left approved custody, is not evidence that rotation is needed.
+
+PII and tax exports follow containment instead: restrict access, record where copies may exist, apply the legal retention schedule, remove unauthorized working copies, and review backup/transcript retention. Do not describe PII as rotatable.
+
+### MH signing-certificate rotation
+
+For a lost or potentially exposed DTE signing key, the official May 2026 MH procedure requires an authorized operator in the authenticated [Sitio de Emisores DTE](https://admin.factura.gob.sv/login):
+
+1. Select the production environment and open **Certificado → Cancelar Certificado**. Use the vulnerability-risk reason; cancellation disables the exposed identity.
+2. Generate a replacement through **Generar Certificado**, download it through **Descarga de Certificado**, and preserve the new private material only in the approved out-of-tree location.
+3. Complete **Carga de Certificado**. MH requires this after each generation so its database uses the replacement.
+4. Replace the production signer certificate/keys through the normal secret-management path, verify the new identity, and only then resume issuance. Never paste the material into a shell command, ticket, chat, or task transcript.
+
+This procedure requires the taxpayer's authenticated DGII account and, for a legal entity, an authorized representative recorded in the RUC. It cannot be performed by an unauthenticated repository maintainer. If access is unavailable, use the official [Facturación Electrónica support channel](https://factura.gob.sv/contactenos/). Certificate replacement does not by itself prove that the DTE API password was rotated; handle that as a separate credential if it crossed an unintended boundary.
+
+## 2026-07-09 containment record
+
+- Local operator/staging env files, MH live/test signing material, a private Wompi capture, F960 data, DTE outputs, and bulky MH references were copied out of the checkout, byte-verified, permission-restricted, and then removed from their old paths.
+- Disposable Wrangler account caches were removed. Ordinary `.wrangler/state` D1/R2 development state was not touched.
+- No matching private-artifact filenames were found in reachable Git history during triage.
+- The repository owner confirmed on 2026-07-09 that the active MH production certificate has remained private and directed that no provider-side certificate action be taken. The previously observed live-looking local fragment did not establish exposure of the active production identity, so rotation is not required on current evidence. If later custody evidence contradicts that confirmation, use the official cancel/generate/download/upload procedure above.
+- One F960 row crossed the same transcript boundary. It is a PII containment/retention incident, not a credential-rotation event.
+- At the 2026-07-09 containment check, FileVault was enabled and Time Machine had no configured destination. The private root was not excluded, so re-check backup custody if a destination is configured later.
+- No values from the env files or private Wompi capture were printed during relocation; absent other custody evidence, no additional rotation is indicated solely by their former local location.

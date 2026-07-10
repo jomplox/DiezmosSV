@@ -217,6 +217,8 @@ export interface EmissionEnvironmentState {
   environment: "00" | "01";
   source: "setting" | "deployment_default";
   appEnv: string;
+  locked: true;
+  allowedEnvironments: Array<"00" | "01">;
 }
 
 export interface EmailTemplateValue {

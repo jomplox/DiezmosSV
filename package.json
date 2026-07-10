@@ -5,7 +5,8 @@
   "scripts": {
     "build": "vite build && tsc -p tsconfig.worker.json --noEmit",
     "dev": "vite --host 127.0.0.1",
-    "dev:worker": "wrangler dev",
+    "dev:worker": "node scripts/run-worker-dev.mjs",
+    "security:check-private-boundary": "node scripts/check-private-boundary.mjs",
     "cf:whoami": "wrangler whoami",
     "cf:migrate:staging": "wrangler d1 migrations apply diezmossv-staging-resource-example --env staging --remote",
     "cf:deploy:staging": "npm run build && wrangler deploy --env staging --keep-vars",

@@ -95,8 +95,8 @@ describe("HTML email header logo", () => {
     // The name text stays as the reliable identifier below the (blockable) image.
     expect(html).toContain("Misión ExampleOrganization");
     // Email-safe inline sizing: block + auto margins, capped dimensions.
-    expect(html).toMatch(/max-height:\s*48px/);
-    expect(html).toMatch(/max-width:\s*200px/);
+    expect(html).toMatch(/max-height:\s*64px/);
+    expect(html).toMatch(/max-width:\s*240px/);
     expect(html).toMatch(/display:\s*block/);
     // The logo sits before the name in the header markup.
     expect(html.indexOf(`src="${LOGO_URL}"`)).toBeLessThan(html.indexOf("Misión ExampleOrganization"));

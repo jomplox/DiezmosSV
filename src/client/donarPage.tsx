@@ -66,7 +66,7 @@ import {
   type DonorDocumentType
 } from "./donation";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
-import { brandingLogoSrc, parseBrandingResponse } from "./branding";
+import { brandingDonorLogoSrc, parseBrandingResponse } from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
 import { getCat008Districts, getCat013Municipalities, type CatalogOption } from "../shared/catalogs";
 import { formatDui, isValidDui } from "../shared/dui";
@@ -88,10 +88,10 @@ import { formatNit, isValidNitFormat } from "../shared/nit";
 // Unauthenticated fetch for the two public donation endpoints. Mirrors App's
 // api() helper with an empty token (no Authorization header) and the same
 // user-facing error mapping.
-async function donarApi<T>(path: string, options: { method?: string; body?: unknown } = {}): Promise<T> {
+async function donarApi<T>(path: string, options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
   const response = await fetch(path, {
     method: options.method ?? "GET",
-    headers: options.body ? { "Content-Type": "application/json" } : {},
+    headers: { ...(options.body ? { "Content-Type": "application/json" } : {}), ...(options.headers ?? {}) },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const data = (await response.json().catch(() => ({}))) as { message?: unknown; error?: unknown };
@@ -151,6 +151,7 @@ interface DonarIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
+  datosToken?: string;
 }
 
 // A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
@@ -397,7 +398,7 @@ export function DonarPage() {
       .then((data) => {
         if (cancelled) return;
         const branding = parseBrandingResponse(data);
-        const src = brandingLogoSrc(branding.logoVersion);
+        const src = brandingDonorLogoSrc(branding.donorLogoVersion);
         setBrandingLogo(src ? { src, name: branding.displayName } : null);
         setSupportEmail(branding.supportEmail);
       })
@@ -628,6 +629,9 @@ export function DonarPage() {
         if (draftGenerationRef.current !== generation) {
           return;
         }
+        if (!created.datosToken) {
+          return;
+        }
         setDraftIntent({ intent: created, amount, giftType, mintedAt: Date.now() });
       })
       .catch(() => {
@@ -655,6 +659,7 @@ export function DonarPage() {
         // Fast path: the draft link is valid; only attach the donor data (no Wompi call).
         await donarApi<{ ok: true }>(donarDatosPath(draftIntent.intent.intentId), {
           method: "POST",
+          headers: { "X-Donation-Datos-Token": draftIntent.intent.datosToken ?? "" },
           body: donationDatosBody(form)
         });
         created = draftIntent.intent;
@@ -728,10 +733,10 @@ export function DonarPage() {
             <OrganizationLogo />
           )}
           <h1>{DONAR_LANDING_HEADING}</h1>
-          <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
               they differ by residence / payment rail / tax receipt, not beneficiary. */}
           <p className="donar-landing-unifier">{DONAR_LANDING_UNIFIER}</p>
+          <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
             <button type="button" className="donar-door" onClick={() => chooseDoor("sv")}>
               <SvWorldIcon />

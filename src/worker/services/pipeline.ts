@@ -11,7 +11,9 @@ import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
+import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import { MhClient, MhUnavailableError } from "./mhClient";
+import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
 
 // Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
 // (otro reintento concurrente ya lo reclamó). El handler HTTP lo traduce a un 409.
@@ -56,6 +58,14 @@ export class IssuancePipeline {
     const stalled = await this.repo.listStalledApprovedWompiEvents(cutoff);
     for (const event of stalled) {
       const eventId = String(event.id);
+      try {
+        assertDeploymentAllowsAmbiente(this.env, String(event.environment) as "00" | "01");
+      } catch (error) {
+        if (error instanceof EnvironmentNotAllowedError) {
+          continue;
+        }
+        throw error;
+      }
       const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
@@ -95,6 +105,7 @@ export class IssuancePipeline {
     if (!event) {
       throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
+    assertDeploymentAllowsAmbiente(this.env, event.environment);
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
       return existing;
@@ -112,7 +123,7 @@ export class IssuancePipeline {
 
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
-    const intent = await this.correlateIntent(payload);
+    const intent = await this.correlateIntent(payload, wompiEventId);
     const donorOverride = intent ? donorOverrideFromIntent(intent, payload) : undefined;
     // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
     // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
@@ -224,12 +235,14 @@ export class IssuancePipeline {
     if (!event) {
       throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
+    assertDeploymentAllowsAmbiente(this.env, record.environment);
+    assertDeploymentAllowsAmbiente(this.env, event.environment);
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     const config = getEmisorConfig(this.env);
     // Re-apply the same intent correlation as processWompiEvent: without it, an
     // operator retry would silently downgrade a rejected intent-backed CDE to the
     // raw-webhook fallback donor data.
-    const intent = await this.correlateIntent(payload);
+    const intent = await this.correlateIntent(payload, wompiEventId);
     const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
     const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
@@ -297,6 +310,7 @@ export class IssuancePipeline {
     if (!record) {
       throw new Error(`Documento DTE ${documentId} no encontrado`);
     }
+    assertDeploymentAllowsAmbiente(this.env, record.environment);
     // Idempotencia ante reentregas de cola: un documento ya sellado por MH
     // (ACCEPTED/REJECTED) o invalidado es TERMINAL. No se re-firma ni se re-transmite,
     // y su veredicto no se sobrescribe. Los diferidos (SIGNED + marcador) NO son
@@ -306,6 +320,7 @@ export class IssuancePipeline {
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
+    assertDeploymentAllowsAmbiente(this.env, summary.environment);
     try {
       const signedJws = record.signed_jws ?? await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
       if (!record.signed_jws) {
@@ -391,6 +406,7 @@ export class IssuancePipeline {
     for (const record of docs) {
       // Cada documento se reintenta aislado: un fallo no debe abortar el barrido.
       try {
+        assertDeploymentAllowsAmbiente(this.env, record.environment);
         let signedJws = record.signed_jws;
         if (!signedJws) {
           // Defensivo: todos los caminos que difieren firman antes. RS512/PKCS1 es
@@ -507,46 +523,38 @@ export class IssuancePipeline {
       return null;
     }
     try {
-      return await this.correlateIntent(normalizeWompiWebhook(JSON.parse(event.raw_body)));
+      return await this.correlateIntent(normalizeWompiWebhook(JSON.parse(event.raw_body)), event.id);
     } catch {
       return null;
     }
   }
 
-  // Resolve the donation intent this payment fulfills, or null for legacy/static-link
-  // payments. The intent id doubles as identificadorEnlaceComercio on the minted link
-  // (payload.IdExterno), with the raw enlace identifier as a fallback source. Only ids
-  // that look like an intent id ("di_" prefix) are looked up, so legacy static-link
-  // payloads skip the query entirely. LINK_CREATED and EXPIRED both correlate — a donor
-  // can pay in the link's final minute after our sweep expired the intent — but a
-  // COMPLETED intent must NOT correlate twice (a replayed webhook falls back to
-  // non-intent behavior; processWompiEvent is already idempotent per event).
-  private async correlateIntent(payload: WompiWebhook): Promise<DonationIntentRecord | null> {
-    const intentId = payload.IdExterno ?? payload.EnlacePago?.IdentificadorEnlaceComercio;
-    if (!intentId || !intentId.startsWith("di_")) {
+  // The shared resolver is the only authority for both the synchronous paid marker
+  // and fiscal correlation. It requires the canonical Wompi commerce id plus the exact
+  // numeric link id; legacy static links remain on the raw-webhook path.
+  private async correlateIntent(payload: WompiWebhook, wompiEventId: string): Promise<DonationIntentRecord | null> {
+    const binding = await resolveDonationIntentBinding(this.repo, payload);
+    if (binding.kind === "legacy") {
       return null;
     }
-    const intent = await this.repo.getDonationIntent(intentId);
-    if (!intent || (intent.status !== "LINK_CREATED" && intent.status !== "EXPIRED")) {
+    if (binding.kind === "unbound") {
+      if ((await this.repo.countAuditEntries("DONATION_INTENT_BINDING_REJECTED", wompiEventId)) === 0) {
+        await this.repo.createAudit({
+          action: "DONATION_INTENT_BINDING_REJECTED",
+          entityType: "wompi_event",
+          entityId: wompiEventId,
+          summary: `La vinculación con la intención ${binding.intentId} fue rechazada`,
+          metadata: {
+            intentId: binding.intentId,
+            reason: binding.reason,
+            expectedLinkId: binding.expectedLinkId,
+            payloadLinkId: binding.payloadLinkId
+          }
+        });
+      }
       return null;
     }
-    // Defense-in-depth behind the HMAC check: bind the approved payment to the specific
-    // Wompi link minted for this intent. IdExterno alone is donor-influenced, so when the
-    // webhook also carries EnlacePago.Id and the intent has a stored wompi_id_enlace, the
-    // two must match — otherwise a donor-controlled IdExterno could bind a payment to an
-    // unrelated intent and leak that intent's signed CDE + PII to a payer-controlled
-    // address. On mismatch we audit and skip correlation (the webhook then falls back to
-    // non-intent behavior); when either id is absent the check is a no-op.
-    if (payload.EnlacePago?.Id != null && intent.wompi_id_enlace != null && payload.EnlacePago.Id !== intent.wompi_id_enlace) {
-      await this.repo.createAudit({
-        action: "DONATION_INTENT_LINK_MISMATCH",
-        entityType: "donation_intent",
-        entityId: intent.id,
-        summary: `El enlace del webhook ${payload.EnlacePago.Id} no coincide con el enlace de la intención ${intent.wompi_id_enlace}; no se correlaciona`,
-        metadata: { payloadLinkId: payload.EnlacePago.Id, intentLinkId: intent.wompi_id_enlace }
-      });
-      return null;
-    }
+    const intent = binding.intent;
     // Premint draft that the donor never completed: the link was minted but the fiscal
     // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
     // would build a receptor with an empty numDocumento that fails CDE schema validation.
@@ -700,4 +708,3 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
     numeroControl: identificacion.numeroControl
   };
 }
-

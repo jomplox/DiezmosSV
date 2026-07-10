@@ -1,6 +1,7 @@
 import { certificateExpiry } from "../domain/signer";
 import { getMhCertificateXml } from "../config";
 import type { Env } from "../types";
+import { deploymentEnvironmentPolicy } from "./environmentPolicy";
 
 type CredentialEnvironment = "test" | "production";
 
@@ -38,14 +39,7 @@ export interface CredentialStatus {
     writerConfigured: boolean;
     writerMissing: string[];
   };
-  groups: {
-    mhTest: SecretStatusGroup;
-    mhProduction: SecretStatusGroup;
-    signer: SecretStatusGroup;
-    issuer: SecretStatusGroup;
-    wompi: SecretStatusGroup;
-    email: SecretStatusGroup;
-  };
+  groups: Record<string, SecretStatusGroup>;
   certificateExpiresAt: string | null;
 }
 
@@ -98,6 +92,12 @@ export function credentialStatus(env: Env): CredentialStatus {
       emailFrom
     ]
   };
+  const allowedAmbiente = deploymentEnvironmentPolicy(env).allowedAmbiente;
+  const mhGroups: Record<string, SecretStatusGroup> = allowedAmbiente === "00"
+    ? { mhTest }
+    : allowedAmbiente === "01"
+      ? { mhProduction }
+      : {};
 
   return {
     target: {
@@ -106,7 +106,7 @@ export function credentialStatus(env: Env): CredentialStatus {
       writerConfigured: writerMissing.length === 0,
       writerMissing
     },
-    groups: { mhTest, mhProduction, signer, issuer, wompi, email },
+    groups: { ...mhGroups, signer, issuer, wompi, email },
     certificateExpiresAt: readCertificateExpiresAt(env)
   };
 }
