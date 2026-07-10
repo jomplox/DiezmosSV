@@ -68,7 +68,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
     regular,
     bold,
     nameLabel: "Cliente:",
-    name: safeUpper(receptor.nombre),
+    name: receptor.nombre,
     activity: receptor.descActividad ?? "Empleados",
     nrc: formatNrc(receptor.nrc),
     documentLabel: documentLabelFor(receptor.tipoDocumento),
@@ -157,13 +157,13 @@ function drawPartyBox(
   const left = options.x + 6;
   const valueX = options.x + (options.width > 285 ? 91 : 82);
   const docX = options.x + (options.width > 285 ? 106 : 86);
-  drawKeyValue(page, options.nameLabel, clean(options.name), left, options.y + options.height - 16, valueX - left, options.regular, options.bold, 7.2, black);
-  drawKeyValue(page, "Actividad económica:", clean(options.activity), left, options.y + options.height - 38, valueX - left, options.regular, options.bold, 7.2, black);
-  drawKeyValue(page, "NRC:", options.nrc ?? "", left, options.y + options.height - 60, 26, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, options.nameLabel, safeUpper(options.name), left, options.y + options.height - 16, valueX - left, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, "Actividad económica:", safeUpper(options.activity), left, options.y + options.height - 38, valueX - left, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, "NRC:", safeUpper(options.nrc), left, options.y + options.height - 60, 26, options.regular, options.bold, 7.2, black);
   // Ancho de etiqueta dinámico: "Documento:"/"Pasaporte:" son más anchas que los 22pt
   // fijos pensados para "DUI:"/"NIT:", y el número se imprimía ENCIMA de la etiqueta.
   const documentLabelWidth = Math.max(22, options.bold.widthOfTextAtSize(options.documentLabel, 7.2) + 3);
-  drawKeyValue(page, options.documentLabel, options.documentNumber ?? "", docX, options.y + options.height - 60, documentLabelWidth, options.regular, options.bold, 7.2, black);
+  drawKeyValue(page, options.documentLabel, safeUpper(options.documentNumber), docX, options.y + options.height - 60, documentLabelWidth, options.regular, options.bold, 7.2, black);
   const addressFontSize = 7.1;
   const innerWidth = options.width - 12;
   const wrapped = clampLines(
@@ -366,17 +366,22 @@ export function buildDteQrPayload(record: DteDocumentRecord): string {
 }
 
 function emisorLines(emisor: Party): string[] {
-  const establishment = emisor.nombreComercial || emisor.nombre ? `• ${clean(emisor.nombreComercial ?? emisor.nombre)}${emisor.codEstable ? ` (${emisor.codEstable})` : ""}` : "";
-  const address = [addressText(emisor.direccion), emisor.telefono ? `/ Tel.: ${emisor.telefono}` : ""].filter(Boolean).join(" ");
+  const establishmentName = emisor.nombreComercial ?? emisor.nombre;
+  const establishment = establishmentName ? `• ${safeUpper(establishmentName)}` : "";
+  const address = [safeUpper(addressText(emisor.direccion)), emisor.telefono ? `/ Tel.: ${safeUpper(emisor.telefono)}` : ""].filter(Boolean).join(" ");
   // The box clamps at 3 rendered lines and a full geographic address wraps onto
   // two of them, so the correo rides on the (short) establishment line — a fourth
   // logical line would be clamped away.
-  const correo = emisor.correo ? `Correo: ${emisor.correo}` : "";
+  const correo = emisor.correo ? `Correo: ${clean(emisor.correo)}` : "";
   return [[establishment, correo].filter(Boolean).join(" / "), `• ${address} /`].filter(Boolean);
 }
 
 function receptorContactLine(receptor: Party, foreignAddress: string | null): string {
-  return [receptorAddressText(receptor, foreignAddress), receptor.telefono ? `Tel.: ${receptor.telefono}` : "", receptor.correo ? `Correo: ${receptor.correo}` : ""]
+  return [
+    safeUpper(receptorAddressText(receptor, foreignAddress)),
+    receptor.telefono ? `Tel.: ${safeUpper(receptor.telefono)}` : "",
+    receptor.correo ? `Correo: ${clean(receptor.correo)}` : ""
+  ]
     .filter(Boolean)
     .join(" / ");
 }

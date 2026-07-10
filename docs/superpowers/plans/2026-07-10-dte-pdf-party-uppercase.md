@@ -29,7 +29,7 @@
 - Consumes: `renderDtePdf(record: DteDocumentRecord): Promise<Uint8Array>` and the existing `safeUpper`, `emisorLines`, `receptorContactLine`, and `renderToText` helpers.
 - Produces: PDF text where non-email party values are uppercase and `emisor.codEstable` is not displayed; no public TypeScript interface changes.
 
-- [ ] **Step 1: Write the failing PDF regression**
+- [x] **Step 1: Write the failing PDF regression**
 
 Add this focused case to `describe("DTE PDF rendering")` in `test/worker/pdf.test.ts`:
 
@@ -74,7 +74,7 @@ it("uppercases party values except emails and hides the internal establishment c
 });
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run:
 
@@ -84,7 +84,7 @@ rtk npx vitest run test/worker/pdf.test.ts -t "uppercases party values"
 
 Expected: FAIL because issuer/name/activity/address and receptor activity/address retain mixed case and the issuer line still contains `(0002)`.
 
-- [ ] **Step 3: Implement the minimal PDF-only rule**
+- [x] **Step 3: Implement the minimal PDF-only rule**
 
 In `drawPartyBox`, apply `safeUpper` to the scalar values:
 
@@ -129,7 +129,7 @@ function receptorContactLine(receptor: Party, foreignAddress: string | null): st
 }
 ```
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run:
 
@@ -139,11 +139,11 @@ rtk npx vitest run test/worker/pdf.test.ts -t "uppercases party values"
 
 Expected: 1 test passes.
 
-- [ ] **Step 5: Update existing PDF expectations for the presentation rule**
+- [x] **Step 5: Update existing PDF expectations for the presentation rule**
 
 Change existing mixed-case PDF assertions to their uppercase display forms, including `San Salvador`, foreign addresses/countries, and preserved lowercase fixture emails. Do not loosen assertions with case-insensitive matching.
 
-- [ ] **Step 6: Run the complete PDF suite**
+- [x] **Step 6: Run the complete PDF suite**
 
 Run:
 
@@ -165,7 +165,7 @@ Expected: all tests in `test/worker/pdf.test.ts` pass.
 - Consumes: the updated `renderDtePdf` behavior from Task 1.
 - Produces: visual evidence that uppercase wrapping remains inside both party boxes and repository-wide verification evidence.
 
-- [ ] **Step 1: Generate and render a representative PDF**
+- [x] **Step 1: Generate and render a representative PDF**
 
 Run the PDF suite to generate its temporary `cde.pdf`, copy the newest fixture into `tmp/pdfs/`, and render page 1:
 
@@ -178,7 +178,7 @@ rtk pdftoppm -f 1 -singlefile -png tmp/pdfs/dte-party-uppercase.pdf tmp/pdfs/dte
 
 Inspect `tmp/pdfs/dte-party-uppercase.png` and require: no `(0002)`, no clipping or overlap, readable uppercase address wrapping, and unchanged email presentation.
 
-- [ ] **Step 2: Run full verification**
+- [x] **Step 2: Run full verification**
 
 Run:
 
@@ -191,7 +191,7 @@ rtk git diff --check
 
 Expected: every command exits 0; Vitest reports zero failed tests.
 
-- [ ] **Step 3: Review the surgical delta**
+- [x] **Step 3: Review the surgical delta**
 
 Run:
 
@@ -203,7 +203,7 @@ rtk git status --short --branch
 
 Expected: only the plan, PDF renderer, and PDF tests are changed after the already-committed design specification.
 
-- [ ] **Step 4: Commit the implementation**
+- [x] **Step 4: Commit the implementation**
 
 ```bash
 rtk git add docs/superpowers/plans/2026-07-10-dte-pdf-party-uppercase.md src/worker/services/pdf.ts test/worker/pdf.test.ts
