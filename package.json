@@ -17,6 +17,8 @@
     "smoke:staging": "node scripts/staging-smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
+    "types:generate": "wrangler types --env-interface CloudflareBindings --strict-vars false",
+    "types:check": "wrangler types --check --env-interface CloudflareBindings --strict-vars false",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.worker.json --noEmit"
   },
   "keywords": [
@@ -41,14 +43,13 @@
     "react-dom": "^19.2.7"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260602.1",
     "@playwright/test": "^1.61.1",
     "@types/node": "^26.1.0",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
-    "typescript": "^6.0.3",
+    "typescript": "^7.0.2",
     "vite": "^8.1.3",
     "vitest": "^4.1.8",
     "wrangler": "^4.107.0"
