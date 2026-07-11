@@ -2917,6 +2917,51 @@ dd {
   min-width: 0;
 }
 
+.rejection-detail {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 12px;
+  color: var(--danger);
+  background: var(--danger-tint);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.rejection-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rejection-detail-head svg {
+  flex: 0 0 auto;
+}
+
+.rejection-detail dl {
+  grid-template-columns: 78px minmax(0, 1fr);
+  gap: 6px 10px;
+  margin: 0;
+}
+
+.rejection-detail dt {
+  color: var(--danger);
+}
+
+.rejection-detail dd {
+  min-width: 0;
+  color: var(--ink);
+}
+
+.rejection-detail ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 16px;
+}
+
 .json-preview-head {
   display: grid;
   gap: 2px;

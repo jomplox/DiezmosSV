@@ -50,6 +50,7 @@ import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter }
 import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
+import { rejectionDetailForDocument } from "./rejectionDetail";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import {
   CAT012_DEPARTMENTS,
@@ -267,6 +268,7 @@ export function App() {
   const [backups, setBackups] = useState<BackupMonth[]>([]);
   const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
   const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
+  const [selectedDocumentAudit, setSelectedDocumentAudit] = useState<AuditRow[]>([]);
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
@@ -429,17 +431,24 @@ export function App() {
     const documentId = selected?.id;
     if (!token || !documentId) {
       setDonorVerifiedDocId(null);
+      setSelectedDocumentAudit([]);
       return;
     }
+    setDonorVerifiedDocId(null);
+    setSelectedDocumentAudit([]);
     let cancelled = false;
-    void api<{ donorDataVerified?: boolean }>(`/api/documents/${documentId}`, token)
+    void api<{ donorDataVerified?: boolean; audit?: AuditRow[] }>(`/api/documents/${documentId}`, token)
       .then((detail) => {
         if (!cancelled) {
           setDonorVerifiedDocId(detail.donorDataVerified ? documentId : null);
+          setSelectedDocumentAudit(Array.isArray(detail.audit) ? detail.audit : []);
         }
       })
       .catch(() => {
-        if (!cancelled) setDonorVerifiedDocId(null);
+        if (!cancelled) {
+          setDonorVerifiedDocId(null);
+          setSelectedDocumentAudit([]);
+        }
       });
     return () => {
       cancelled = true;
@@ -1196,6 +1205,7 @@ export function App() {
             </div>
               <DetailPanel
                 selected={selected}
+                audit={selectedDocumentAudit}
                 donorDataVerified={selected?.id === donorVerifiedDocId}
                 busy={busy}
                 now={now}
@@ -4146,6 +4156,7 @@ function StackedCell({ primary, secondary }: { primary: string; secondary?: stri
 
 function DetailPanel({
   selected,
+  audit,
   donorDataVerified,
   busy,
   now,
@@ -4160,6 +4171,7 @@ function DetailPanel({
   onSaveEmail
 }: {
   selected?: DteDocument;
+  audit: AuditRow[];
   donorDataVerified?: boolean;
   busy: string;
   now: Date;
@@ -4178,6 +4190,7 @@ function DetailPanel({
   }
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
+  const rejectionDetail = rejectionDetailForDocument(selected, audit);
   const emailEditing = emailEditingId === selected.id;
   const canRetry = isRetryableDocument(selected);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
@@ -4238,6 +4251,30 @@ function DetailPanel({
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
+      {rejectionDetail && (
+        <section className="rejection-detail" aria-label="Detalle del rechazo">
+          <div className="rejection-detail-head">
+            <AlertTriangle size={16} />
+            <strong>Detalle del rechazo</strong>
+          </div>
+          <dl>
+            <dt>Motivo</dt>
+            <dd>
+              <ul>
+                {rejectionDetail.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+              </ul>
+            </dd>
+            <dt>Fecha y hora</dt>
+            <dd>
+              {rejectionDetail.rejectedAt ? (
+                <time dateTime={rejectionDetail.rejectedAt}>
+                  {formatElSalvadorDateTime(rejectionDetail.rejectedAt)} hora El Salvador
+                </time>
+              ) : "Fecha no disponible"}
+            </dd>
+          </dl>
+        </section>
+      )}
       <details className="json-details">
         <summary>Ver JSON completo</summary>
         <div className="json-preview-head">
