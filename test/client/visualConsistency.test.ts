@@ -54,6 +54,18 @@ describe("visual consistency pack", () => {
     expect(detailsBlock).toContain("<pre>{JSON.stringify(plain, null, 2)}</pre>");
   });
 
+  it("places readable rejection evidence immediately above the JSON disclosure", () => {
+    expect(appSource).toContain('import { rejectionDetailForDocument } from "./rejectionDetail";');
+    expect(appSource).toContain('className="rejection-detail"');
+    expect(appSource).toContain("Detalle del rechazo");
+    expect(appSource).toContain("Motivo");
+    expect(appSource).toContain("Fecha y hora");
+    expect(appSource.indexOf('className="rejection-detail"')).toBeLessThan(appSource.indexOf('<details className="json-details">'));
+    expect(stylesSource).toMatch(/\.rejection-detail \{[\s\S]*?overflow-wrap: anywhere;[\s\S]*?\}/);
+    expect(stylesSource).toContain("background: var(--danger-tint);");
+    expect(stylesSource).toContain("border: 1px solid var(--danger-border);");
+  });
+
   it("keeps the document detail email row compact and aligned", () => {
     expect(appSource).toContain('<dt className="detail-email-label">Correo de envío</dt>');
     expect(appSource).toContain('<dd className="detail-email-value">');
