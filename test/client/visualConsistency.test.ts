@@ -27,11 +27,14 @@ describe("visual consistency pack", () => {
     expect(thRule).toContain("color: var(--ink-muted);");
   });
 
-  it("uses short stat labels with one shared caption line in both Stats branches", () => {
+  it("makes the combined failure and rejection total explicit and filterable", () => {
     expect(appSource).not.toContain("en esta vista");
     expect(appSource).toContain('<p className="stats-caption">Totales de la vista actual.</p>');
     expect(appSource).toContain('<Metric label="Aceptados"');
-    expect(appSource).toContain('<Metric label="Fallidos"');
+    expect(appSource).toContain('<Metric label="Fallos y rechazos"');
+    expect(appSource).toContain('<option value={FAILURE_VIEW_STATUSES}>Fallos/rechazos</option>');
+    expect(appSource).toContain('<option value="REJECTED">Rechazados</option>');
+    expect(appSource).toContain('<option value="FAILED">Fallidos</option>');
     // "En trámite" = transmisión diferida (TRANSMISSION_PENDING), replacing the
     // removed contingency metric; matches the status badge wording.
     expect(appSource).toContain('<Metric label="En trámite"');

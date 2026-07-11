@@ -1174,6 +1174,7 @@ export function App() {
                     <option value="ACCEPTED">Aceptados</option>
                     <option value="TRANSMISSION_PENDING">En trámite</option>
                     <option value="CONTINGENCY_PENDING">Histórico sin sello</option>
+                    <option value={FAILURE_VIEW_STATUSES}>Fallos/rechazos</option>
                     <option value="REJECTED">Rechazados</option>
                     <option value="FAILED">Fallidos</option>
                     <option value="INVALIDATED">Invalidados</option>
@@ -4046,7 +4047,7 @@ function AuthScreen({
 
 function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed?: boolean }) {
   const counts = countByStatus(documents);
-  const fallidos = <Metric label="Fallidos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />;
+  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />;
   if (onlyFailed) {
     return (
       <>
