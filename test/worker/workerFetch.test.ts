@@ -790,6 +790,28 @@ describe("donation intents", () => {
     });
   }
 
+  it.each([
+    [undefined, validIntentBody()],
+    ["preview", validIntentBody()],
+    [undefined, { amount: "25.00", giftType: "DIEZMO" }],
+    ["preview", { amount: "25.00", giftType: "DIEZMO" }]
+  ] as const)("rejects payment creation in APP_ENV %s before DB or Wompi work", async (appEnv, body) => {
+    const db = new InMemoryD1();
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const response = await worker.fetch(
+      intentRequest(body as Record<string, unknown>),
+      env(db, { APP_ENV: appEnv })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "payment_collection_disabled"
+    });
+    expect(db.preparedSql).toHaveLength(0);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("creates a PENDING intent, attaches a mock Wompi link, and returns all three link fields", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
