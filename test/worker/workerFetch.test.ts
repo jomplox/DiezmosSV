@@ -5706,6 +5706,144 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
+  it("creates one binding-rejected audit when two pipelines quarantine the same event concurrently", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    let countArrivals = 0;
+    let releaseCounts!: () => void;
+    const bothCountsReached = new Promise<void>((resolve) => {
+      releaseCounts = resolve;
+    });
+    db.beforeBindingAuditCount = async () => {
+      countArrivals += 1;
+      if (countArrivals === 2) {
+        releaseCounts();
+      }
+      await bothCountsReached;
+    };
+    const runtime = await pipelineEnv(db);
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).processWompiEvent(eventId),
+      new IssuancePipeline(runtime).processWompiEvent(eventId)
+    ]);
+
+    expect(results).toEqual([null, null]);
+    const audits = db.audits.filter(
+      (row) =>
+        row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+        row.entity_id === eventId
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].metadata_json))).toMatchObject({
+      intentId: "di_corr_1",
+      reason: "link_id_mismatch",
+      expectedLinkId: 987654,
+      payloadLinkId: 111111
+    });
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeTruthy();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("SELECT COUNT(*) AS count FROM audit_logs")
+      )
+    ).toBe(false);
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("UPDATE dte_documents SET signed_jws")
+      )
+    ).toBe(false);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it("does not add a binding-rejected audit to an already processed application event", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    const event = db.wompiEvents.find((row) => row.id === eventId)!;
+    event.processed_at = "2026-07-13T10:00:00.000Z";
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId)
+    ).resolves.toBeNull();
+
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(0);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBe("2026-07-13T10:00:00.000Z");
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the binding audit when the quarantine batch fails before processed marking", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    db.failBindingQuarantineBatchAfterStatement = 1;
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId)
+    ).rejects.toThrow("injected binding-quarantine batch failure");
+
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(0);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeNull();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("correlates when the webhook link id matches the intent's minted link", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -8977,7 +9115,9 @@ class InMemoryD1 {
   beforePasswordRehashCas: (() => void) | null = null;
   beforePasswordResetBatch: (() => void | Promise<void>) | null = null;
   beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
+  beforeBindingAuditCount: (() => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
+  failBindingQuarantineBatchAfterStatement: number | null = null;
   passwordResetBatchCount = 0;
   maxCommittedSessionRows = 0;
   private batchTail: Promise<void> = Promise.resolve();
@@ -8998,6 +9138,12 @@ class InMemoryD1 {
       (statement) =>
         statement.sql.includes("UPDATE users") &&
         statement.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?")
+    );
+    const bindingQuarantine = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO audit_logs") &&
+        statement.sql.includes("DONATION_INTENT_BINDING_REJECTED") &&
+        statement.sql.includes("processed_at IS NULL")
     );
     if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
       const beforeBatch = this.beforeCredentialGuardedSessionBatch;
@@ -9020,6 +9166,8 @@ class InMemoryD1 {
     const usersBefore = structuredClone(this.users);
     const sessionsBefore = structuredClone(this.sessions);
     const tokensBefore = structuredClone(this.resetTokens);
+    const auditsBefore = structuredClone(this.audits);
+    const wompiEventsBefore = structuredClone(this.wompiEvents);
     try {
       if (passwordReset) {
         this.passwordResetBatchCount += 1;
@@ -9028,16 +9176,26 @@ class InMemoryD1 {
       transaction.users.push(...structuredClone(this.users));
       transaction.sessions.push(...structuredClone(this.sessions));
       transaction.resetTokens.push(...structuredClone(this.resetTokens));
+      transaction.audits.push(...structuredClone(this.audits));
+      transaction.wompiEvents.push(...structuredClone(this.wompiEvents));
       const results: StatementRunResult[] = [];
       for (const [index, statement] of statements.entries()) {
         results.push(await statement.withDatabase(transaction).run());
         if (passwordReset && this.failPasswordResetBatchAfterStatement === index + 1) {
           throw new Error("injected password-reset batch failure");
         }
+        if (
+          bindingQuarantine &&
+          this.failBindingQuarantineBatchAfterStatement === index + 1
+        ) {
+          throw new Error("injected binding-quarantine batch failure");
+        }
       }
       this.users.splice(0, this.users.length, ...transaction.users);
       this.sessions.splice(0, this.sessions.length, ...transaction.sessions);
       this.resetTokens.splice(0, this.resetTokens.length, ...transaction.resetTokens);
+      this.audits.splice(0, this.audits.length, ...transaction.audits);
+      this.wompiEvents.splice(0, this.wompiEvents.length, ...transaction.wompiEvents);
       if (credentialGuarded) {
         this.maxCommittedSessionRows = Math.max(this.maxCommittedSessionRows, this.sessions.length);
       }
@@ -9046,10 +9204,15 @@ class InMemoryD1 {
       this.users.splice(0, this.users.length, ...usersBefore);
       this.sessions.splice(0, this.sessions.length, ...sessionsBefore);
       this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
+      this.audits.splice(0, this.audits.length, ...auditsBefore);
+      this.wompiEvents.splice(0, this.wompiEvents.length, ...wompiEventsBefore);
       throw error;
     } finally {
       if (passwordReset) {
         this.failPasswordResetBatchAfterStatement = null;
+      }
+      if (bindingQuarantine) {
+        this.failBindingQuarantineBatchAfterStatement = null;
       }
       release();
     }
@@ -9202,6 +9365,12 @@ class Statement {
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
+      if (
+        action === "DONATION_INTENT_BINDING_REJECTED" &&
+        this.db.beforeBindingAuditCount
+      ) {
+        await this.db.beforeBindingAuditCount();
+      }
       return { count: this.db.audits.filter((audit) => audit.action === action && audit.entity_id === entityId).length } as T;
     }
     if (this.sql.includes("FROM password_reset_tokens") && this.sql.includes("JOIN users")) {
@@ -9860,7 +10029,38 @@ class Statement {
         }
       }
     }
-    if (this.sql.includes("INSERT INTO audit_logs")) {
+    if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("DONATION_INTENT_BINDING_REJECTED") &&
+      this.sql.includes("processed_at IS NULL")
+    ) {
+      const [id, entityId, summary, metadataJson, eventGuardId, auditGuardEntityId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === eventGuardId && row.processed_at == null
+      );
+      const existingAudit = this.db.audits.some(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === auditGuardEntityId
+      );
+      const idConflict = this.db.audits.some((row) => row.id === id);
+      if (event && !existingAudit && !idConflict) {
+        this.db.audits.push({
+          id,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "DONATION_INTENT_BINDING_REJECTED",
+          entity_type: "wompi_event",
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
       this.db.audits.push({
         id,
@@ -10170,11 +10370,25 @@ class Statement {
         updated_at: "2026-06-26T01:46:47.015Z"
       });
     }
-    if (this.sql.includes("UPDATE wompi_events SET processed_at = ?")) {
-      const [processedAt, wompiEventId] = this.args;
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET processed_at = ?")
+    ) {
+      const [processedAt, wompiEventId, auditEntityId] = this.args;
       const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
-      if (event && !event.processed_at) {
+      const auditRequired = this.sql.includes("DONATION_INTENT_BINDING_REJECTED");
+      const auditExists = this.db.audits.some(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === auditEntityId
+      );
+      if (
+        event &&
+        event.processed_at == null &&
+        (!auditRequired || auditExists)
+      ) {
         event.processed_at = processedAt;
+        changes = 1;
       }
     }
     if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {

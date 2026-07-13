@@ -445,6 +445,71 @@ export class Repository {
     await this.db.prepare("UPDATE wompi_events SET processed_at = ? WHERE id = ? AND processed_at IS NULL").bind(nowIso(), id).run();
   }
 
+  async quarantineWompiIntentBinding(input: {
+    wompiEventId: string;
+    intentId: string;
+    reason: string;
+    expectedLinkId: number | null;
+    payloadLinkId: number | null;
+  }): Promise<void> {
+    const auditId = `audit_binding_rejected_${input.wompiEventId}`;
+    const summary = `La vinculación con la intención ${input.intentId} fue rechazada`;
+    const metadataJson = JSON.stringify({
+      intentId: input.intentId,
+      reason: input.reason,
+      expectedLinkId: input.expectedLinkId,
+      payloadLinkId: input.payloadLinkId
+    });
+    const processedAt = nowIso();
+
+    // D1 batch is transactional. The deterministic audit PK closes concurrent insert
+    // races, while NOT EXISTS also preserves any audit written by the older random-ID
+    // path. Both statements are guarded so an already-processed event gains no late
+    // audit, and processed_at advances only when the binding-rejected audit exists.
+    await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'SYSTEM', NULL, 'DONATION_INTENT_BINDING_REJECTED',
+                  'wompi_event', ?, ?, ?, NULL, NULL
+            WHERE EXISTS (
+              SELECT 1 FROM wompi_events
+               WHERE id = ? AND processed_at IS NULL
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM audit_logs
+                 WHERE action = 'DONATION_INTENT_BINDING_REJECTED'
+                   AND entity_id = ?
+              )
+           ON CONFLICT(id) DO NOTHING`
+        )
+        .bind(
+          auditId,
+          input.wompiEventId,
+          summary,
+          metadataJson,
+          input.wompiEventId,
+          input.wompiEventId
+        ),
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+              SET processed_at = ?
+            WHERE id = ?
+              AND processed_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM audit_logs
+                 WHERE action = 'DONATION_INTENT_BINDING_REJECTED'
+                   AND entity_id = ?
+              )`
+        )
+        .bind(processedAt, input.wompiEventId, input.wompiEventId)
+    ]);
+  }
+
   async getDteDocument(id: string): Promise<DteDocumentRecord | null> {
     return this.db.prepare("SELECT * FROM dte_documents WHERE id = ?").bind(id).first<DteDocumentRecord>();
   }

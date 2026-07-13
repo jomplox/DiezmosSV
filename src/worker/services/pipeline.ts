@@ -621,27 +621,13 @@ export class IssuancePipeline {
     wompiEventId: string,
     correlation: Extract<IntentCorrelation, { kind: "quarantined" }>
   ): Promise<void> {
-    if (
-      (await this.repo.countAuditEntries(
-        "DONATION_INTENT_BINDING_REJECTED",
-        wompiEventId
-      )) === 0
-    ) {
-      await this.repo.createAudit({
-        action: "DONATION_INTENT_BINDING_REJECTED",
-        entityType: "wompi_event",
-        entityId: wompiEventId,
-        summary:
-          `La vinculación con la intención ${correlation.intentId} fue rechazada`,
-        metadata: {
-          intentId: correlation.intentId,
-          reason: correlation.reason,
-          expectedLinkId: correlation.expectedLinkId,
-          payloadLinkId: correlation.payloadLinkId
-        }
-      });
-    }
-    await this.repo.markWompiEventProcessed(wompiEventId);
+    await this.repo.quarantineWompiIntentBinding({
+      wompiEventId,
+      intentId: correlation.intentId,
+      reason: correlation.reason,
+      expectedLinkId: correlation.expectedLinkId,
+      payloadLinkId: correlation.payloadLinkId
+    });
   }
 
   private async completeIntent(intent: DonationIntentRecord, documentId: string): Promise<void> {
