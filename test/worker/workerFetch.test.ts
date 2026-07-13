@@ -644,6 +644,51 @@ describe("credential-current session issuance", () => {
     ]);
   });
 
+  it("does not issue or prune sessions when user is disabled after password verification", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    const passwordHash = `pbkdf2$100000$${stored.hash}`;
+    db.users.push({
+      id: "user_disabled_race",
+      email: "disabled-race@example.org",
+      name: "Disabled Race",
+      role: "OPERATOR",
+      password_hash: passwordHash,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `disabled_session_${index}`,
+        user_id: "user_disabled_race",
+        token_hash: `disabled_existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+    const sessionsBefore = structuredClone(db.sessions);
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      db.users[0].disabled_at = "2026-07-04T12:00:00.000Z";
+    };
+
+    await expect(
+      new AuthService(runtime).login(
+        "disabled-race@example.org",
+        "Valid#Password2026"
+      )
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.users[0]).toMatchObject({
+      password_hash: passwordHash,
+      password_salt: stored.salt,
+      disabled_at: "2026-07-04T12:00:00.000Z"
+    });
+    expect(db.sessions).toStrictEqual(sessionsBefore);
+  });
+
   it("keeps at most eight active session rows and evicts the oldest bearer", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
