@@ -24,9 +24,11 @@ import { EmailService } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import {
+  assertDeploymentCanCollectPayments,
   assertDeploymentAllowsAmbiente,
   deploymentEnvironmentPolicy,
-  EnvironmentNotAllowedError
+  EnvironmentNotAllowedError,
+  PaymentCollectionDisabledError
 } from "./services/environmentPolicy";
 import {
   BRANDING_ACCENT_COLOR_SETTING_KEY,
@@ -199,6 +201,9 @@ export default {
       }
       if (error instanceof EnvironmentNotAllowedError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
+      }
+      if (error instanceof PaymentCollectionDisabledError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
       }
       return jsonResponse({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, { status: 500 });
     }
@@ -461,6 +466,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // background on Paso 1→2); a body carrying donor data is a full create (the fallback
   // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
+    assertDeploymentCanCollectPayments(env);
     const clientIp = clientIpFrom(request);
     const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
     if (recentIntents >= INTENT_THROTTLE_LIMIT) {

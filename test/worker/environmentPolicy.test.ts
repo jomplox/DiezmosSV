@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  assertDeploymentCanCollectPayments,
   assertDeploymentAllowsAmbiente,
   deploymentEnvironmentPolicy,
-  EnvironmentNotAllowedError
+  EnvironmentNotAllowedError,
+  PaymentCollectionDisabledError
 } from "../../src/worker/services/environmentPolicy";
 import type { Env } from "../../src/worker/types";
 
@@ -31,6 +33,21 @@ describe("deployment environment policy", () => {
     expect(() => assertDeploymentAllowsAmbiente({ APP_ENV: "staging" } as Env, "01")).toThrow(EnvironmentNotAllowedError);
     expect(() => assertDeploymentAllowsAmbiente({ APP_ENV: "production" } as Env, "00")).toThrow(EnvironmentNotAllowedError);
     expect(() => assertDeploymentAllowsAmbiente({} as Env, "00")).toThrow(EnvironmentNotAllowedError);
+  });
+
+  it.each(["local", "staging", "production"] as const)(
+    "allows payment collection in recognized %s deployments",
+    (appEnv) => {
+      expect(assertDeploymentCanCollectPayments({ APP_ENV: appEnv } as Env)).toBe(
+        appEnv === "production" ? "01" : "00"
+      );
+    }
+  );
+
+  it.each([undefined, "", "preview"] as const)("rejects payment collection for %s", (appEnv) => {
+    expect(() => assertDeploymentCanCollectPayments({ APP_ENV: appEnv } as Env)).toThrow(
+      PaymentCollectionDisabledError
+    );
   });
 });
 
