@@ -7891,6 +7891,72 @@ describe("audit actor context", () => {
     });
   });
 
+  it("bounds oversized actor fields on a failed login audit", async () => {
+    const db = new InMemoryD1();
+    const request = withCf(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "cf-connecting-ip": "2".repeat(200),
+          "user-agent": "Browser".repeat(200)
+        },
+        body: JSON.stringify({ email: "nobody@example.org", password: "whatever" })
+      }),
+      {
+        ...SV_CF,
+        country: "S".repeat(20),
+        city: "á".repeat(1_000),
+        asOrganization: "Org".repeat(1_000),
+        ignored: "x".repeat(100_000)
+      }
+    );
+
+    const response = await worker.fetch(request, env(db));
+
+    expect(response.status).toBe(500);
+    const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
+    expect(failure).toBeTruthy();
+    expect(utf8Bytes(String(failure?.actor_ip)).byteLength).toBeLessThanOrEqual(64);
+    const actorContext = String(failure?.actor_context);
+    expect(utf8Bytes(actorContext).byteLength).toBeLessThanOrEqual(4096);
+    expect(JSON.parse(actorContext)).toMatchObject({
+      _truncated: expect.arrayContaining(["country", "city", "asOrganization", "userAgent"])
+    });
+    expect(JSON.parse(actorContext)).not.toHaveProperty("ignored");
+  });
+
+  it("bounds actor fields when createAudit is called directly", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(env(db).DB);
+
+    await repo.createAudit({
+      action: "DIRECT_AUDIT_TEST",
+      entityType: "test",
+      entityId: "direct",
+      summary: "Direct audit boundary",
+      actorIp: "🧪".repeat(100),
+      actorContext: {
+        city: "á".repeat(1_000),
+        userAgent: "🧪".repeat(10_000),
+        asn: 27773,
+        ignored: "x".repeat(100_000)
+      }
+    });
+
+    const audit = db.audits.find((row) => row.action === "DIRECT_AUDIT_TEST");
+    expect(audit).toBeTruthy();
+    expect(utf8Bytes(String(audit?.actor_ip)).byteLength).toBeLessThanOrEqual(64);
+    expect(String(audit?.actor_ip)).not.toContain("�");
+    const actorContext = String(audit?.actor_context);
+    expect(utf8Bytes(actorContext).byteLength).toBeLessThanOrEqual(4096);
+    expect(JSON.parse(actorContext)).toMatchObject({
+      asn: 27773,
+      _truncated: expect.arrayContaining(["city", "userAgent"])
+    });
+    expect(JSON.parse(actorContext)).not.toHaveProperty("ignored");
+  });
+
   it("records the client IP and cf context on an admin user update audit", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };

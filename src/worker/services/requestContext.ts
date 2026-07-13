@@ -6,6 +6,23 @@
 
 // The subset of IncomingRequestCfProperties we surface in the audit trail. These are
 // plan-included (bot-management scores are enterprise-only and deliberately omitted).
+const AUDIT_CONTEXT_MAX_BYTES = 4096;
+const AUDIT_IP_MAX_BYTES = 64;
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+const AUDIT_STRING_LIMITS = {
+  country: 8,
+  city: 128,
+  region: 128,
+  timezone: 128,
+  asOrganization: 128,
+  colo: 8,
+  httpProtocol: 32,
+  tlsVersion: 32,
+  userAgent: 512
+} as const;
+
 export interface AuditActorContext {
   country?: string;
   city?: string;
@@ -17,6 +34,7 @@ export interface AuditActorContext {
   httpProtocol?: string;
   tlsVersion?: string;
   userAgent?: string;
+  _truncated?: string[];
 }
 
 export interface AuditRequestContext {
@@ -38,43 +56,94 @@ type CfLike = Partial<{
   tlsVersion: unknown;
 }>;
 
-function cleanString(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function boundedString(
+  value: unknown,
+  maxBytes: number
+): { value?: string; truncated: boolean } {
+  if (typeof value !== "string") return { truncated: false };
   const trimmed = value.trim();
-  // Cloudflare uses "T1" for the Tor pseudo-country and other sentinels; keep them,
-  // but drop the empty string so absent fields never bloat the stored blob.
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function cleanNumber(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  return undefined;
-}
-
-// Assigns only defined values so the resulting object (and its JSON) omits every
-// field Cloudflare did not provide.
-function assignDefined<T extends object, K extends keyof T>(target: T, key: K, value: T[K] | undefined): void {
-  if (value !== undefined) {
-    target[key] = value;
+  if (!trimmed) return { truncated: false };
+  const bytes = encoder.encode(trimmed);
+  if (bytes.byteLength <= maxBytes) {
+    return { value: trimmed, truncated: false };
   }
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return {
+    value: decoder.decode(bytes.subarray(0, end)),
+    truncated: true
+  };
+}
+
+export function normalizeAuditIp(input: unknown): string | null {
+  return boundedString(input, AUDIT_IP_MAX_BYTES).value ?? null;
+}
+
+export function normalizeAuditContext(input: unknown): AuditActorContext {
+  if (!isRecord(input)) return {};
+  const normalized: AuditActorContext = {};
+  const inherited = Array.isArray(input._truncated)
+    ? input._truncated.filter(
+        (field): field is string =>
+          typeof field === "string" &&
+          Object.prototype.hasOwnProperty.call(
+            AUDIT_STRING_LIMITS,
+            field
+          )
+      )
+    : [];
+  const truncated = new Set(inherited);
+
+  for (const field of Object.keys(AUDIT_STRING_LIMITS) as Array<
+    keyof typeof AUDIT_STRING_LIMITS
+  >) {
+    const result = boundedString(input[field], AUDIT_STRING_LIMITS[field]);
+    if (result.value !== undefined) normalized[field] = result.value;
+    if (result.truncated) truncated.add(field);
+  }
+  if (typeof input.asn === "number" && Number.isFinite(input.asn)) {
+    normalized.asn = Math.trunc(input.asn);
+  }
+  if (truncated.size > 0) {
+    normalized._truncated = [...truncated].slice(
+      0,
+      Object.keys(AUDIT_STRING_LIMITS).length
+    );
+  }
+  return normalized;
+}
+
+export function serializeAuditContext(input: unknown): string | null {
+  const normalized = normalizeAuditContext(input);
+  if (Object.keys(normalized).length === 0) return null;
+  const serialized = JSON.stringify(normalized);
+  if (encoder.encode(serialized).byteLength <= AUDIT_CONTEXT_MAX_BYTES) {
+    return serialized;
+  }
+  return JSON.stringify({ _truncated: ["actor_context"] });
 }
 
 export function auditContextFrom(request: Request): AuditRequestContext {
-  const ip = cleanString(request.headers.get("cf-connecting-ip")) ?? null;
   const cf = ((request as unknown as { cf?: CfLike }).cf ?? {}) as CfLike;
-  const userAgent = cleanString(request.headers.get("user-agent"));
-
-  const context: AuditActorContext = {};
-  assignDefined(context, "country", cleanString(cf.country));
-  assignDefined(context, "city", cleanString(cf.city));
-  assignDefined(context, "region", cleanString(cf.region));
-  assignDefined(context, "timezone", cleanString(cf.timezone));
-  assignDefined(context, "asn", cleanNumber(cf.asn));
-  assignDefined(context, "asOrganization", cleanString(cf.asOrganization));
-  assignDefined(context, "colo", cleanString(cf.colo));
-  assignDefined(context, "httpProtocol", cleanString(cf.httpProtocol));
-  assignDefined(context, "tlsVersion", cleanString(cf.tlsVersion));
-  assignDefined(context, "userAgent", userAgent);
-
-  return { ip, context };
+  return {
+    ip: normalizeAuditIp(request.headers.get("cf-connecting-ip")),
+    context: normalizeAuditContext({
+      country: cf.country,
+      city: cf.city,
+      region: cf.region,
+      timezone: cf.timezone,
+      asn: cf.asn,
+      asOrganization: cf.asOrganization,
+      colo: cf.colo,
+      httpProtocol: cf.httpProtocol,
+      tlsVersion: cf.tlsVersion,
+      userAgent: request.headers.get("user-agent")
+    })
+  };
 }
