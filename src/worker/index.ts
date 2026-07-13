@@ -54,7 +54,11 @@ import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shar
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient } from "./services/mhClient";
-import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
+import {
+  IssuancePipeline,
+  RejectedWompiRetryConflictError,
+  WompiIntentQuarantinedError
+} from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
@@ -1850,6 +1854,12 @@ async function handleDocumentRoute(
       try {
         result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
       } catch (error) {
+        if (error instanceof WompiIntentQuarantinedError) {
+          return jsonResponse(
+            { error: error.code, message: error.message },
+            { status: 409 }
+          );
+        }
         if (error instanceof RejectedWompiRetryConflictError) {
           // A concurrent retry already claimed the rebuild: refuse cleanly so we never
           // transmit a second distinct legal DTE for the same Wompi event.

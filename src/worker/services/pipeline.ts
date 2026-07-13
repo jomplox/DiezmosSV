@@ -12,6 +12,7 @@ import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
+import type { DonationIntentBinding } from "./donationIntentBinding";
 import { MhClient, MhUnavailableError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
 
@@ -21,6 +22,30 @@ export class RejectedWompiRetryConflictError extends Error {
   constructor(message = "Ya hay un reintento en curso para este documento.") {
     super(message);
     this.name = "RejectedWompiRetryConflictError";
+  }
+}
+
+type IntentCorrelation =
+  | { kind: "legacy" }
+  | { kind: "ready"; intent: DonationIntentRecord }
+  | {
+      kind: "quarantined";
+      intentId: string;
+      reason:
+        | Extract<DonationIntentBinding, { kind: "unbound" }>["reason"]
+        | "incomplete_donor_data";
+      expectedLinkId: number | null;
+      payloadLinkId: number | null;
+    };
+
+export class WompiIntentQuarantinedError extends Error {
+  readonly code = "wompi_intent_quarantined";
+
+  constructor() {
+    super(
+      "El evento Wompi está en cuarentena porque no coincide con una intención lista."
+    );
+    this.name = "WompiIntentQuarantinedError";
   }
 }
 
@@ -123,8 +148,15 @@ export class IssuancePipeline {
 
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
-    const intent = await this.correlateIntent(payload, wompiEventId);
-    const donorOverride = intent ? donorOverrideFromIntent(intent, payload) : undefined;
+    const correlation = await this.correlateIntent(payload);
+    if (correlation.kind === "quarantined") {
+      await this.quarantineWompiEvent(wompiEventId, correlation);
+      return null;
+    }
+    const intent = correlation.kind === "ready" ? correlation.intent : null;
+    const donorOverride = intent
+      ? donorOverrideFromIntent(intent, payload)
+      : undefined;
     // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
     // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
     // burns a control number on every queue retry, opening a permanent fiscal gap. Reject
@@ -242,7 +274,18 @@ export class IssuancePipeline {
     // Re-apply the same intent correlation as processWompiEvent: without it, an
     // operator retry would silently downgrade a rejected intent-backed CDE to the
     // raw-webhook fallback donor data.
-    const intent = await this.correlateIntent(payload, wompiEventId);
+    const correlation = await this.correlateIntent(payload);
+    if (correlation.kind === "quarantined") {
+      // Preserve the existing CAS-loser result for a caller holding a stale REJECTED
+      // snapshot after another retry already claimed and completed this document.
+      const current = await this.repo.getDteDocument(record.id);
+      if (!current || current.status !== "REJECTED") {
+        throw new RejectedWompiRetryConflictError();
+      }
+      await this.quarantineWompiEvent(wompiEventId, correlation);
+      throw new WompiIntentQuarantinedError();
+    }
+    const intent = correlation.kind === "ready" ? correlation.intent : null;
     const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
     const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
@@ -523,7 +566,10 @@ export class IssuancePipeline {
       return null;
     }
     try {
-      return await this.correlateIntent(normalizeWompiWebhook(JSON.parse(event.raw_body)), event.id);
+      const correlation = await this.correlateIntent(
+        normalizeWompiWebhook(JSON.parse(event.raw_body))
+      );
+      return correlation.kind === "ready" ? correlation.intent : null;
     } catch {
       return null;
     }
@@ -532,36 +578,29 @@ export class IssuancePipeline {
   // The shared resolver is the only authority for both the synchronous paid marker
   // and fiscal correlation. It requires the canonical Wompi commerce id plus the exact
   // numeric link id; legacy static links remain on the raw-webhook path.
-  private async correlateIntent(payload: WompiWebhook, wompiEventId: string): Promise<DonationIntentRecord | null> {
+  private async correlateIntent(payload: WompiWebhook): Promise<IntentCorrelation> {
     const binding = await resolveDonationIntentBinding(this.repo, payload);
     if (binding.kind === "legacy") {
-      return null;
+      return { kind: "legacy" };
     }
     if (binding.kind === "unbound") {
-      if ((await this.repo.countAuditEntries("DONATION_INTENT_BINDING_REJECTED", wompiEventId)) === 0) {
-        await this.repo.createAudit({
-          action: "DONATION_INTENT_BINDING_REJECTED",
-          entityType: "wompi_event",
-          entityId: wompiEventId,
-          summary: `La vinculación con la intención ${binding.intentId} fue rechazada`,
-          metadata: {
-            intentId: binding.intentId,
-            reason: binding.reason,
-            expectedLinkId: binding.expectedLinkId,
-            payloadLinkId: binding.payloadLinkId
-          }
-        });
-      }
-      return null;
+      return {
+        kind: "quarantined",
+        intentId: binding.intentId,
+        reason: binding.reason,
+        expectedLinkId: binding.expectedLinkId,
+        payloadLinkId: binding.payloadLinkId
+      };
     }
     const intent = binding.intent;
-    // Premint draft that the donor never completed: the link was minted but the fiscal
-    // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
-    // would build a receptor with an empty numDocumento that fails CDE schema validation.
-    // Treat it as non-correlating → the legacy/static-link webhook fallback builds the CDE
-    // from webhook data. Defensive only: the UI cannot show the link before datos are set.
     if (!intent.donor_document || intent.donor_document.trim() === "") {
-      return null;
+      return {
+        kind: "quarantined",
+        intentId: intent.id,
+        reason: "incomplete_donor_data",
+        expectedLinkId: intent.wompi_id_enlace,
+        payloadLinkId: payload.EnlacePago?.Id ?? null
+      };
     }
     // Money truth comes from Wompi: on a mismatch we audit and still correlate, but the
     // CDE amount is left as the webhook's (buildCdeDocument derives it from the payload).
@@ -575,7 +614,34 @@ export class IssuancePipeline {
         metadata: { intentAmountCents: intent.amount_cents, eventAmountCents }
       });
     }
-    return intent;
+    return { kind: "ready", intent };
+  }
+
+  private async quarantineWompiEvent(
+    wompiEventId: string,
+    correlation: Extract<IntentCorrelation, { kind: "quarantined" }>
+  ): Promise<void> {
+    if (
+      (await this.repo.countAuditEntries(
+        "DONATION_INTENT_BINDING_REJECTED",
+        wompiEventId
+      )) === 0
+    ) {
+      await this.repo.createAudit({
+        action: "DONATION_INTENT_BINDING_REJECTED",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary:
+          `La vinculación con la intención ${correlation.intentId} fue rechazada`,
+        metadata: {
+          intentId: correlation.intentId,
+          reason: correlation.reason,
+          expectedLinkId: correlation.expectedLinkId,
+          payloadLinkId: correlation.payloadLinkId
+        }
+      });
+    }
+    await this.repo.markWompiEventProcessed(wompiEventId);
   }
 
   private async completeIntent(intent: DonationIntentRecord, documentId: string): Promise<void> {
