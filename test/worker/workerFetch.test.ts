@@ -6793,6 +6793,53 @@ describe("pipeline failure alerts", () => {
 });
 
 describe("advanced DTE queue idempotency", () => {
+  it("rejects persisted issuer drift before signing an advanced CDE", async () => {
+    const db = new InMemoryD1();
+    const document = advancedCdeDraft();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_issuer_drift",
+      wompi_event_id: null,
+      status: "PENDING",
+      plain_json: JSON.stringify(document),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const persisted = JSON.parse(db.documents[0].plain_json) as Record<string, any>;
+    persisted.emisor.numDocumento = "06142803901122";
+    db.documents[0].plain_json = JSON.stringify(persisted);
+    const mhFetch = vi.fn(async () => new Response("MH must not be called", { status: 500 }));
+    vi.stubGlobal("fetch", mhFetch);
+
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password",
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_issuer_drift")
+    ).rejects.toThrow(/emisor/i);
+
+    expect(db.documents[0].signed_jws).toBeNull();
+    expect(mhFetch).not.toHaveBeenCalled();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({
+        action: "ADVANCED_CDE_FAILED",
+        entity_type: "dte_document",
+        entity_id: "doc_advanced_issuer_drift"
+      })
+    );
+  });
+
   it("does not re-transmit an already ACCEPTED advanced CDE on queue redelivery", async () => {
     const db = new InMemoryD1();
     db.documents.push({
@@ -10706,7 +10753,7 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
     status: "PENDING",
     signed_jws: null,
     plain_json: JSON.stringify({
-      emisor: { nombre: "ExamplePerson1" },
+      emisor: advancedCdeDraft().emisor,
       receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
       resumen: { valorTotal: 100 },
       identificacion: {

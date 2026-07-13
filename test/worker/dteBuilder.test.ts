@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { buildAdvancedCdeDocument, buildCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent } from "../../src/worker/domain/dteBuilder";
+import {
+  assertCdeIssuerMatchesConfig,
+  buildAdvancedCdeDocument,
+  buildCdeDocument,
+  buildDirectCdeDocument,
+  buildInvalidacionEvent,
+  cdeEmisorFromConfig
+} from "../../src/worker/domain/dteBuilder";
 import type { DteDocumentRecord, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
@@ -153,6 +160,49 @@ describe("DTE builders", () => {
         issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
       })
     ).toThrow(/DUI.*digito verificador/i);
+  });
+
+  it("replaces every advanced-draft issuer field from trusted configuration", () => {
+    const draft = buildCdeDocument(
+      wompiSample as WompiWebhook,
+      emisorConfig,
+      { sequence: 1 }
+    ) as Record<string, any>;
+    draft.emisor = {
+      ...draft.emisor,
+      numDocumento: "06142803901122",
+      nombre: "Attacker",
+      correo: "attacker@example.org"
+    };
+
+    const generated = buildAdvancedCdeDocument(draft, emisorConfig, {
+      sequence: 2,
+      environment: "00"
+    });
+
+    expect(generated.emisor).toEqual(cdeEmisorFromConfig(emisorConfig));
+    expect(() =>
+      assertCdeIssuerMatchesConfig(generated, emisorConfig)
+    ).not.toThrow();
+  });
+
+  it("rejects any persisted issuer drift before signing", () => {
+    const draft = buildCdeDocument(
+      wompiSample as WompiWebhook,
+      emisorConfig,
+      { sequence: 1 }
+    );
+    const trusted = buildAdvancedCdeDocument(
+      draft,
+      emisorConfig,
+      { sequence: 2, environment: "00" }
+    );
+    (trusted.emisor as Record<string, unknown>).correo =
+      "changed@example.org";
+
+    expect(() =>
+      assertCdeIssuerMatchesConfig(trusted, emisorConfig)
+    ).toThrow(/emisor/i);
   });
 
   it("rejects country codes outside CAT-020 before building a CDE for MH", () => {
