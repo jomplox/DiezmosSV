@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, credentialStatus } from "../../src/worker/services/credentials";
+import type { CredentialUpdateInput } from "../../src/worker/services/credentials";
 import type { Env } from "../../src/worker/types";
 
 describe("credential status", () => {
@@ -19,8 +20,7 @@ describe("credential status", () => {
       EMISOR_CONFIG_JSON: "{\"nombre\":\"Iglesia Ejemplo\"}",
       WOMPI_API_SECRET: "wompi-secret",
       EMAIL: { send: async () => ({ messageId: "message-1" }) } as SendEmail,
-      EMAIL_ARBITRARY_RECIPIENTS: "true",
-      EMAIL_API_URL: "https://mail.example/send",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
       EMAIL_API_KEY: "email-key",
       EMAIL_FROM: "dte@example.org"
     }));
@@ -51,8 +51,8 @@ describe("credential status", () => {
       displayValue: "{\"nombre\":\"Iglesia Ejemplo\"}"
     });
     expect(status.groups.email.items).toContainEqual({
-      name: "EMAIL_API_URL",
-      label: "Endpoint POST JSON de respaldo",
+      name: "EMAIL_PROVIDER_URL",
+      label: "Endpoint POST JSON de respaldo administrado por el despliegue",
       configured: true,
       displayValue: "https://mail.example/send"
     });
@@ -68,6 +68,20 @@ describe("credential status", () => {
     expect(JSON.stringify(status)).not.toContain("<CertificadoMH>");
     expect(JSON.stringify(status)).not.toContain("wompi-secret");
     expect(JSON.stringify(status)).not.toContain("email-key");
+  });
+
+  it.each([
+    "http://mail.example/send",
+    "https://user:password@mail.example/send",
+    "not-a-url"
+  ])("reports an unsafe email provider destination as not ready: %s", (providerUrl) => {
+    const status = credentialStatus(env({
+      EMAIL_PROVIDER_URL: providerUrl,
+      EMAIL_API_KEY: "email-key",
+      EMAIL_FROM: "dte@example.org"
+    }));
+
+    expect(status.groups.email.ready).toBe(false);
   });
 
   it("exposes only the production MH credential lane on a production deployment", () => {
@@ -146,7 +160,6 @@ describe("credential secret patch", () => {
       certificateXml: "   ",
       certificatePassword: "",
       emisorConfigJson: "",
-      emailApiUrl: "https://mail.example/send",
       emailApiKey: "email-key",
       emailFrom: "dte@example.org"
     });
@@ -154,10 +167,33 @@ describe("credential secret patch", () => {
     expect(patch).toEqual({
       MH_USER_PROD: { type: "secret_text", name: "MH_USER_PROD", text: "06140707001011" },
       MH_PASSWORD_PROD: { type: "secret_text", name: "MH_PASSWORD_PROD", text: "prod-password" },
-      EMAIL_API_URL: { type: "secret_text", name: "EMAIL_API_URL", text: "https://mail.example/send" },
       EMAIL_API_KEY: { type: "secret_text", name: "EMAIL_API_KEY", text: "email-key" },
       EMAIL_FROM: { type: "secret_text", name: "EMAIL_FROM", text: "dte@example.org" }
     });
+  });
+
+  it("never writes an email provider destination from application input", () => {
+    const patch = buildCredentialSecretPatch({
+      environment: "production",
+      emailApiKey: "new-key",
+      emailFrom: "dte@example.org",
+      emailApiUrl: "https://owner.example/send"
+    } as CredentialUpdateInput & { emailApiUrl: string });
+
+    expect(patch).toEqual({
+      EMAIL_API_KEY: {
+        type: "secret_text",
+        name: "EMAIL_API_KEY",
+        text: "new-key"
+      },
+      EMAIL_FROM: {
+        type: "secret_text",
+        name: "EMAIL_FROM",
+        text: "dte@example.org"
+      }
+    });
+    expect(patch).not.toHaveProperty("EMAIL_API_URL");
+    expect(patch).not.toHaveProperty("EMAIL_PROVIDER_URL");
   });
 });
 

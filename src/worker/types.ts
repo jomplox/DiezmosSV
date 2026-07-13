@@ -39,7 +39,7 @@ export interface Env {
   MH_ANULACION_URL_TEST?: string;
   MH_ANULACION_URL_PROD?: string;
   MH_USER_AGENT?: string;
-  EMAIL_API_URL?: string;
+  EMAIL_PROVIDER_URL?: string;
   EMAIL_API_KEY?: string;
   EMAIL_ARBITRARY_RECIPIENTS?: string;
   EMAIL_FROM?: string;

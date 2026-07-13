@@ -41,7 +41,7 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npx wrangler secret put MH_USER_TEST --env staging
    npx wrangler secret put MH_PASSWORD_TEST --env staging
    npx wrangler secret put EMAIL_FROM --env staging
-   npx wrangler secret put EMAIL_API_URL --env staging   # optional fallback
+   npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned fallback
    npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
    npx wrangler secret put EMISOR_CONFIG_JSON --env staging
    ```
@@ -58,8 +58,14 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    `EMAIL_FROM` to an address on that domain. If Cloudflare returns `destination address is not a
    verified address`, the Worker is reaching Email Service but the account/domain is still limited to
    verified destination addresses rather than arbitrary donor recipients. Configure
-   `EMAIL_API_URL` / `EMAIL_API_KEY` for a transactional fallback provider if donor delivery must work
+   `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` for a transactional fallback provider if donor delivery must work
    before Cloudflare Email Sending is enabled for arbitrary recipients.
+
+   `EMAIL_PROVIDER_URL` is deployment-owned. It must be an absolute HTTPS URL without embedded
+   credentials. Set it with Wrangler or the Cloudflare deployment configuration, not from the
+   application credentials panel. After the release is deployed and the new binding is verified,
+   delete the superseded email-endpoint secret left by earlier releases from the deployment. This
+   repository change does not modify staging or production configuration.
 
 6. Apply the schema and deploy:
 

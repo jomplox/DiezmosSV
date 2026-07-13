@@ -186,6 +186,15 @@ describe("Correo alert recipients (source contract)", () => {
   });
 });
 
+describe("Correo provider destination authority (source contract)", () => {
+  test("shows the provider destination as deployment-managed and not editable", () => {
+    expect(appSource).toContain("EMAIL_PROVIDER_URL");
+    expect(appSource).toContain("Administrado por el despliegue");
+    expect(appSource).not.toContain("input.emailApiUrl");
+    expect(appSource).not.toContain("EMAIL_API_URL");
+  });
+});
+
 describe("Ambiente emission-environment save guard (source contract)", () => {
   test("rejects deployment-incompatible choices and only short-circuits a matching persisted setting", () => {
     expect(appSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");

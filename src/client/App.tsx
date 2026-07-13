@@ -2542,12 +2542,20 @@ function CredentialsPanel({
                         Authorization: Bearer; se usa solo si Cloudflare Email no puede entregar el comprobante.
                       </p>
                     </div>
-                    <label>
-                      <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
-                      <CredentialActiveValue status={status} name="EMAIL_API_URL" />
-                      <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
-                      <small>Recibe un POST JSON con remitente, destinatario, asunto, texto, HTML y adjuntos PDF/JSON en base64.</small>
-                    </label>
+                    <div className="credential-field-block">
+                      <CredentialFieldLabel
+                        label="Endpoint HTTPS de respaldo (POST JSON)"
+                        configured={credentialConfigured(status, "EMAIL_PROVIDER_URL")}
+                      />
+                      <CredentialActiveValue
+                        status={status}
+                        name="EMAIL_PROVIDER_URL"
+                      />
+                      <small>
+                        Administrado por el despliegue. Los propietarios pueden rotar el token
+                        bearer y el remitente, pero no cambiar el destino.
+                      </small>
+                    </div>
                     <label>
                       <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
                       <CredentialActiveValue status={status} name="EMAIL_API_KEY" />
@@ -5375,7 +5383,6 @@ interface CredentialFormInput {
   certificatePassword: string;
   emisorConfigJson: string;
   wompiSecret: string;
-  emailApiUrl: string;
   emailApiKey: string;
   emailFrom: string;
 }
@@ -5439,7 +5446,6 @@ function emptyCredentialInput(environment: CredentialFormInput["environment"]): 
     certificatePassword: "",
     emisorConfigJson: "",
     wompiSecret: "",
-    emailApiUrl: "",
     emailApiKey: "",
     emailFrom: ""
   };
