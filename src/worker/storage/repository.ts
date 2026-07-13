@@ -1145,6 +1145,50 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
+  async claimLoginAttempt(
+    keyHash: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `INSERT INTO login_rate_limits (
+           key_hash, window_started_at, attempt_count, expires_at
+         ) VALUES (?, ?, 1, ?)
+         ON CONFLICT(key_hash) DO UPDATE SET
+           window_started_at = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN excluded.window_started_at
+             ELSE login_rate_limits.window_started_at
+           END,
+           attempt_count = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN 1
+             ELSE login_rate_limits.attempt_count + 1
+           END,
+           expires_at = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN excluded.expires_at
+             ELSE login_rate_limits.expires_at
+           END
+         WHERE login_rate_limits.window_started_at <= ?
+            OR login_rate_limits.attempt_count < ?
+         RETURNING attempt_count`
+      )
+      .bind(keyHash, now, expiresAt, cutoff, cutoff, cutoff, cutoff, limit)
+      .first<{ attempt_count: number }>();
+    return row !== null;
+  }
+
+  async deleteExpiredLoginRateLimits(now: string): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM login_rate_limits WHERE expires_at <= ?")
+      .bind(now)
+      .run();
+  }
+
   async createSession(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
     const id = newId("session");
     await this.db

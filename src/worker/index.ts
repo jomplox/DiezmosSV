@@ -64,7 +64,7 @@ import { formatElSalvadorDate } from "../shared/legalWindows";
 import { Repository } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
-import { timingSafeEqual } from "./utils/encoding";
+import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
 import {
   InvalidJsonBodyError,
   jsonResponse,
@@ -88,6 +88,7 @@ const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 // while real brute-force from a single IP is still capped.
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
+const LOGIN_IP_ATTEMPT_LIMIT = 60;
 const PASSWORD_RESET_LIMIT = 3;
 
 // The public donation endpoints parse untrusted JSON before any validation or
@@ -145,6 +146,14 @@ function backupArchiveTooLargeResponse(): Response {
 
 function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+function authThrottleExpiresIso(): string {
+  return new Date(Date.now() + AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+async function loginAttemptKey(callerIp: string | null): Promise<string> {
+  return sha256Hex(utf8Bytes(callerIp?.trim() || "unknown"));
 }
 
 async function listAuditForUser(
@@ -227,6 +236,9 @@ export default {
       }
       return;
     }
+    const repo = new Repository(env.DB);
+    const now = nowIso();
+    await repo.deleteExpiredLoginRateLimits(now);
     const pipeline = new IssuancePipeline(env);
     try {
       await pipeline.retryDeferredTransmissions();
@@ -239,8 +251,6 @@ export default {
       console.error("Stalled Wompi event sweep failed", error);
     }
     try {
-      const repo = new Repository(env.DB);
-      const now = nowIso();
       // Process a bounded page per tick: snapshot the capped set of expiring intents,
       // then expire exactly that page by id, so public intent creation cannot force one
       // cron invocation to snapshot or deactivate an unbounded row set. The remainder
@@ -550,6 +560,23 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
     const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
     const { ip: callerIp } = auditContextFrom(request);
+    const claimNow = nowIso();
+    const accepted = await repo.claimLoginAttempt(
+      await loginAttemptKey(callerIp),
+      claimNow,
+      authThrottleSinceIso(),
+      authThrottleExpiresIso(),
+      LOGIN_IP_ATTEMPT_LIMIT
+    );
+    if (!accepted) {
+      return jsonResponse(
+        {
+          error: "too_many_attempts",
+          message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+        },
+        { status: 429 }
+      );
+    }
     const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
     if (recentFailures >= LOGIN_FAILED_LIMIT) {
       // Short-circuit before authenticating so a throttled attempt costs the same as

@@ -271,6 +271,104 @@ describe("auth rate limiting", () => {
     });
   }
 
+  describe("aggregate login attempts", () => {
+    it("blocks the sixty-first login attempt from one IP across distinct account names", async () => {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 60; index += 1) {
+        const response = await worker.fetch(
+          new Request("https://example.org/api/auth/login", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "CF-Connecting-IP": "203.0.113.70"
+            },
+            body: JSON.stringify({ email: `user-${index}@example.org`, password: "invalid" })
+          }),
+          env(db)
+        );
+        expect(response.status).toBe(500);
+      }
+
+      const auditsBeforeDenial = db.audits.length;
+      const readsBeforeDenial = db.loginCredentialReads;
+      const denied = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "203.0.113.70"
+          },
+          body: JSON.stringify({ email: "sixty-first@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(denied.status).toBe(429);
+      await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+      expect(db.loginCredentialReads).toBe(readsBeforeDenial);
+      expect(db.audits).toHaveLength(auditsBeforeDenial);
+      expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+      expect([...db.loginRateLimits.keys()][0]).toMatch(/^[a-f0-9]{64}$/);
+      expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.70");
+    });
+
+    it("keeps aggregate login buckets independent and resets an expired bucket", async () => {
+      const db = new InMemoryD1();
+      db.loginRateLimits.set("expired-hash", {
+        window_started_at: "2026-07-04T11:00:00.000Z",
+        attempt_count: 60,
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+
+      const otherIp = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.9"
+          },
+          body: JSON.stringify({ email: "other@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(otherIp.status).toBe(500);
+      await worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        env(db)
+      );
+      expect(db.loginRateLimits.has("expired-hash")).toBe(false);
+    });
+
+    it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 60; index += 1) {
+        const response = await worker.fetch(
+          new Request("https://example.org/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: `unknown-${index}@example.org`, password: "invalid" })
+          }),
+          env(db)
+        );
+        expect(response.status).toBe(500);
+      }
+
+      const denied = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "unknown-sixty-first@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(denied.status).toBe(429);
+      await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+      expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+    });
+  });
+
   it("blocks the sixth failed login within 15 minutes without attempting authentication", async () => {
     const db = new InMemoryD1();
     // Five recent failures inside the window, keyed on the normalized (lowercase) email.
@@ -8340,10 +8438,17 @@ class FakeArchiveBucket {
   }
 }
 
+interface LoginRateLimitRow {
+  window_started_at: string;
+  attempt_count: number;
+  expires_at: string;
+}
+
 class InMemoryD1 {
   readonly users: Array<Record<string, unknown>> = [];
   readonly sessions: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
+  readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
@@ -8356,6 +8461,7 @@ class InMemoryD1 {
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
+  loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
@@ -8424,6 +8530,24 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes("INSERT INTO login_rate_limits")) {
+      const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
+      const key = String(keyHash);
+      const current = this.db.loginRateLimits.get(key);
+      const limit = Number(limitValue);
+      if (!current || current.window_started_at <= String(cutoff)) {
+        const next = {
+          window_started_at: String(now),
+          attempt_count: 1,
+          expires_at: String(expiresAt)
+        };
+        this.db.loginRateLimits.set(key, next);
+        return { attempt_count: 1 } as T;
+      }
+      if (current.attempt_count >= limit) return null;
+      current.attempt_count += 1;
+      return { attempt_count: current.attempt_count } as T;
+    }
     if (
       this.sql.includes("UPDATE users") &&
       this.sql.includes("password_hash = ?") &&
@@ -8479,6 +8603,7 @@ class Statement {
       return (this.db.users.find((user) => user.id === this.args[0]) ?? null) as T | null;
     }
     if (this.sql.includes("FROM users WHERE email = ?")) {
+      this.db.loginCredentialReads += 1;
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("actor_ip IS ?")) {
@@ -9016,6 +9141,15 @@ class Statement {
 
   async run(): Promise<StatementRunResult> {
     let changes = 0;
+    if (this.sql.includes("DELETE FROM login_rate_limits")) {
+      const [now] = this.args.map(String);
+      for (const [key, row] of this.db.loginRateLimits) {
+        if (row.expires_at <= now) {
+          this.db.loginRateLimits.delete(key);
+          changes += 1;
+        }
+      }
+    }
     if (this.sql.includes("INSERT INTO users")) {
       const [id, email, name, role, passwordHash, passwordSalt] = this.args.map(String);
       this.db.users.push({
