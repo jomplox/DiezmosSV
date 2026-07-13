@@ -134,4 +134,51 @@ describe("auditContextFrom", () => {
       _truncated: expect.arrayContaining(["city", "userAgent"])
     });
   });
+
+  it("reduces JSON-escaped control characters without losing all recognized context", () => {
+    const input = {
+      country: "\0".repeat(8),
+      city: "\0".repeat(128),
+      region: "\0".repeat(128),
+      timezone: "\0".repeat(128),
+      asOrganization: "\0".repeat(128),
+      colo: "\0".repeat(8),
+      httpProtocol: "\0".repeat(32),
+      tlsVersion: "\0".repeat(32),
+      userAgent: "\0".repeat(512),
+      asn: 27773
+    };
+    const recognizedStringFields = [
+      "country",
+      "city",
+      "region",
+      "timezone",
+      "asOrganization",
+      "colo",
+      "httpProtocol",
+      "tlsVersion",
+      "userAgent"
+    ] as const;
+    const normalized = normalizeAuditContext(input);
+
+    expect(normalized).not.toHaveProperty("_truncated");
+    expect(utf8Length(JSON.stringify(normalized))).toBeGreaterThan(4096);
+
+    const serialized = serializeAuditContext(input);
+    expect(serialized).not.toBeNull();
+    expect(utf8Length(serialized!)).toBeLessThanOrEqual(4096);
+    const parsed = JSON.parse(serialized!) as Record<string, unknown>;
+    expect(JSON.stringify(parsed)).toBe(serialized);
+    expect(serialized).not.toContain("�");
+    expect(parsed).not.toEqual({ _truncated: ["actor_context"] });
+    expect(recognizedStringFields.some((field) => field in parsed)).toBe(true);
+    expect(parsed.asn).toBe(27773);
+
+    const changedFields = recognizedStringFields.filter(
+      (field) => parsed[field] !== input[field]
+    );
+    expect([...(parsed._truncated as string[])].sort()).toEqual(
+      [...changedFields].sort()
+    );
+  });
 });
