@@ -221,8 +221,9 @@ MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
 
 MH_USER_TEST="..."
 MH_PASSWORD_TEST="..."
-# Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
-# EMAIL_API_URL="https://email-provider.example/send"
+# Optional deployment-owned fallback when Cloudflare Email Service is limited to verified destination addresses.
+# Must be an absolute HTTPS URL without embedded credentials; never set it from the credentials panel.
+# EMAIL_PROVIDER_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="..."
 EMAIL_FROM="dte@example.org"
 
@@ -292,7 +293,7 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
-npx wrangler secret put EMAIL_API_URL --env staging   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned fallback
 npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
@@ -342,7 +343,7 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
-npx wrangler secret put EMAIL_API_URL --env production   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned fallback
 npx wrangler secret put EMAIL_API_KEY --env production   # optional fallback
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
@@ -374,7 +375,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
-| `EMAIL_API_URL` / `EMAIL_API_KEY` | Optional fallback transactional provider used when Cloudflare Email Service rejects arbitrary donor recipients. Receives a `POST` JSON body with an `Authorization: Bearer` header. |
+| `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional fallback transactional provider used when Cloudflare Email Service rejects arbitrary donor recipients. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
 | `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service and the HTTP fallback. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml`. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
@@ -402,11 +403,17 @@ as `send_email` in `wrangler.toml` and is restricted to the configured `EMAIL_FR
 receipts to arbitrary donor addresses, the Cloudflare account must have Email Sending enabled for the
 sender domain; otherwise Cloudflare may only permit delivery to verified destination addresses. If
 Cloudflare returns `destination address is not a verified address`, the Worker can fall back to
-`EMAIL_API_URL` / `EMAIL_API_KEY` so donors do not need to be pre-verified in Cloudflare.
+`EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` so donors do not need to be pre-verified in Cloudflare.
+
+`EMAIL_PROVIDER_URL` is deployment-owned. Set it with Wrangler or the Cloudflare deployment
+configuration, not from the application credentials panel. After the release is deployed and the
+new binding is verified, delete the superseded email-endpoint secret left by earlier releases from
+each deployment. This repository change does not modify staging or production configuration.
 
 The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
 credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
-sender/fallback settings. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
+sender/fallback token. It shows the deployment-owned fallback destination as read-only status.
+Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
 `CLOUDFLARE_API_TOKEN` is missing, the screen remains read-only and tells the owner that the

@@ -16,8 +16,11 @@ MH_USER_TEST="replace-with-mh-test-api-user"
 MH_PASSWORD_TEST="replace-with-mh-test-api-password"
 MH_USER_PROD="replace-with-mh-production-api-user"
 MH_PASSWORD_PROD="replace-with-mh-production-api-password"
-# Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
-# EMAIL_API_URL="https://email-provider.example/send"
+# Optional deployment-owned fallback when Cloudflare Email Service is limited to verified destinations.
+# Must be an absolute HTTPS URL without embedded credentials; never set it from the credentials panel.
+# After the new binding is deployed and verified, delete the superseded endpoint secret from that deployment.
+# This repository example does not modify staging or production configuration.
+# EMAIL_PROVIDER_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="replace-with-email-provider-api-key"
 EMAIL_FROM="dte@example.org"
 # Use single quotes so wrangler keeps the inner double quotes intact (no backslash escapes).

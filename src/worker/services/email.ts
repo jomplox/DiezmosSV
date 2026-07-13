@@ -248,8 +248,13 @@ interface EmailMessage {
 }
 
 async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareError?: unknown): Promise<unknown> {
-  const response = await fetch(env.EMAIL_API_URL!, {
+  const providerUrl = emailProviderUrl(env);
+  if (!providerUrl || !env.EMAIL_API_KEY?.trim()) {
+    throw new Error("Configure un endpoint HTTPS de correo administrado por el despliegue.");
+  }
+  const response = await fetch(providerUrl.toString(), {
     method: "POST",
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${env.EMAIL_API_KEY}`,
       "Content-Type": "application/json"
@@ -293,7 +298,21 @@ function organizationName(env: Env): string {
 }
 
 function hasHttpProvider(env: Env): boolean {
-  return Boolean(env.EMAIL_API_URL?.trim() && env.EMAIL_API_KEY?.trim());
+  return Boolean(emailProviderUrl(env) && env.EMAIL_API_KEY?.trim());
+}
+
+function emailProviderUrl(env: Env): URL | null {
+  const raw = env.EMAIL_PROVIDER_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function errorMessage(error: unknown): string {

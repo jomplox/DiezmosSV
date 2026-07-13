@@ -13,7 +13,6 @@ export interface CredentialUpdateInput {
   certificatePassword?: string;
   emisorConfigJson?: string;
   wompiSecret?: string;
-  emailApiUrl?: string;
   emailApiKey?: string;
   emailFrom?: string;
 }
@@ -78,7 +77,7 @@ export function credentialStatus(env: Env): CredentialStatus {
   const wompi = group("Webhook entrante de Wompi", [
     protectedItem(env, "WOMPI_API_SECRET", "Firma del webhook entrante")
   ]);
-  const emailApiUrl = visibleItem(env, "EMAIL_API_URL", "Endpoint POST JSON de respaldo");
+  const emailProviderUrl = visibleItem(env, "EMAIL_PROVIDER_URL", "Endpoint POST JSON de respaldo administrado por el despliegue");
   const emailApiKey = protectedItem(env, "EMAIL_API_KEY", "Token bearer de respaldo");
   const emailFrom = visibleItem(env, "EMAIL_FROM", "Remitente");
   const email = {
@@ -87,7 +86,7 @@ export function credentialStatus(env: Env): CredentialStatus {
     items: [
       { name: "EMAIL", label: "Vinculación de correo Cloudflare", configured: Boolean(env.EMAIL) },
       { name: "EMAIL_ARBITRARY_RECIPIENTS", label: "Cloudflare a donantes externos", configured: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS), displayValue: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) ? "true" : undefined },
-      emailApiUrl,
+      emailProviderUrl,
       emailApiKey,
       emailFrom
     ]
@@ -131,7 +130,6 @@ export function buildCredentialSecretPatch(input: CredentialUpdateInput): Secret
   putIfPresent(patch, "MH_CERT_PASSWORD", input.certificatePassword);
   putIfPresent(patch, "EMISOR_CONFIG_JSON", input.emisorConfigJson);
   putIfPresent(patch, "WOMPI_API_SECRET", input.wompiSecret);
-  putIfPresent(patch, "EMAIL_API_URL", input.emailApiUrl);
   putIfPresent(patch, "EMAIL_API_KEY", input.emailApiKey);
   putIfPresent(patch, "EMAIL_FROM", input.emailFrom);
 
@@ -230,7 +228,14 @@ function cloudflareWriterTargetMissing(env: Env): string[] {
 }
 
 function hasHttpProvider(env: Env): boolean {
-  return nonEmpty(env.EMAIL_API_URL) && nonEmpty(env.EMAIL_API_KEY);
+  const raw = env.EMAIL_PROVIDER_URL?.trim();
+  if (!raw || !nonEmpty(env.EMAIL_API_KEY)) return false;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
 }
 
 function isTrue(value: unknown): boolean {
