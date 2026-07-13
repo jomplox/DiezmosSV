@@ -11,6 +11,12 @@ import { utf8Bytes } from "../utils/encoding";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 const MAX_ANALYTICS_ROWS = 10_000;
 const MAX_ANALYTICS_BYTES = 8 * 1024 * 1024;
+// An authenticated document-email amendment can fill its 256 KiB request body.
+// With the remaining selected fields at their enforced maxima, one normalized
+// document row is conservatively at most 264,156 serialized bytes (256 KiB email,
+// 1,500 escaped-name bytes, 512 fixed/framing bytes); 31 rows are 8,188,836
+// bytes, below the shared 8 MiB boundary (32 would exceed it).
+const MAX_ANALYTICS_DOCUMENT_PAGE_SIZE = 31;
 
 export class AnalyticsCapacityError extends Error {
   readonly code = "analytics_range_too_large";
@@ -26,6 +32,10 @@ export class AnalyticsCapacityError extends Error {
 class AnalyticsBudget {
   private rows = 0;
   private bytes = 0;
+
+  nextQueryLimit(pageSize: number): number {
+    return Math.min(pageSize, MAX_ANALYTICS_ROWS - this.rows + 1);
+  }
 
   accept(row: unknown): void {
     const serializedBytes =
@@ -755,12 +765,13 @@ async function readAnalyticsDocuments(
   const rows: AnalyticsDocumentRow[] = [];
   let cursor: { issuedAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listWompiLaneDocumentsForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
+    const limit = budget.nextQueryLimit(MAX_ANALYTICS_DOCUMENT_PAGE_SIZE);
+    const page = await repo.listWompiLaneDocumentsForAnalytics(window, environment, cursor, limit);
     // gift_type comes back as a raw string from D1; the CHECK constraint guarantees it
     // is DIEZMO/OFRENDA/null, so the narrowing cast is safe.
     const normalized = page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) }));
     appendAnalyticsRows(rows, normalized, budget);
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { issuedAt: last.issued_at, id: last.id };
   }
@@ -776,10 +787,11 @@ async function readAnalyticsIntents(
   const rows: AnalyticsIntentRow[] = [];
   let cursor: { createdAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listDonationIntentsForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
+    const limit = budget.nextQueryLimit(RETENTION_PAGE_SIZE);
+    const page = await repo.listDonationIntentsForAnalytics(window, environment, cursor, limit);
     const normalized = page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) }));
     appendAnalyticsRows(rows, normalized, budget);
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { createdAt: last.created_at, id: last.id };
   }
@@ -795,9 +807,10 @@ async function readAnalyticsEmails(
   const rows: AnalyticsEmailRow[] = [];
   let cursor: { createdAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listEmailDeliveriesForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
+    const limit = budget.nextQueryLimit(RETENTION_PAGE_SIZE);
+    const page = await repo.listEmailDeliveriesForAnalytics(window, environment, cursor, limit);
     appendAnalyticsRows(rows, page, budget);
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { createdAt: last.created_at, id: last.id };
   }

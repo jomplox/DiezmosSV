@@ -9033,6 +9033,12 @@ describe("branding", () => {
   });
 });
 
+const ANALYTICS_MAX_BYTES = 8 * 1024 * 1024;
+const ANALYTICS_CAPACITY_RESPONSE = {
+  error: "analytics_range_too_large",
+  message: "El rango solicitado contiene demasiados datos. Reduzca las fechas."
+};
+
 describe("analytics endpoint (Wompi lane)", () => {
   it("requires a session (401 without a token)", async () => {
     const db = new InMemoryD1();
@@ -9155,9 +9161,7 @@ describe("analytics endpoint (Wompi lane)", () => {
     );
 
     expect(response.status).toBe(422);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "analytics_range_too_large"
-    });
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
     expect(
       db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
     ).toBe(false);
@@ -9192,9 +9196,232 @@ describe("analytics endpoint (Wompi lane)", () => {
       env(db)
     );
     expect(response.status).toBe(422);
-    await expect(response.json()).resolves.toMatchObject({
-      error: "analytics_range_too_large"
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+  });
+
+  it("shares remaining row capacity across document and intent readers", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 9_999; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_shared_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_shared_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+    db.donationIntents.push(
+      testAnalyticsIntent({ id: "di_shared_budget_1" }),
+      testAnalyticsIntent({ id: "di_shared_budget_2" })
+    );
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    expect(
+      db.analyticsQueryLimits.find((query) => query.reader === "intents")?.limit
+    ).toBe(2);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("accepts exactly ten thousand analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 10_000; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_exact_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_exact_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { analytics: { giving: { monthly: Array<{ count: number }> } } };
+    expect(body.analytics.giving.monthly[0]?.count).toBe(10_000);
+    expect(
+      db.analyticsQueryLimits.find((query) => query.reader === "intents")?.limit
+    ).toBe(1);
+  });
+
+  it("bounds document query pages for realistically amended donor emails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const amendedEmail = `${"a".repeat(262_000)}@x.co`;
+    expect(
+      utf8Bytes(JSON.stringify({ email: amendedEmail })).byteLength
+    ).toBeLessThanOrEqual(256 * 1024);
+    for (let index = 0; index < 32; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_amended_email_${String(index).padStart(2, "0")}`,
+          wompi_event_id: `wompi_amended_email_${index}`,
+          environment: "00",
+          donor_email: amendedEmail,
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+    const serializedRowBytes =
+      utf8Bytes(
+        JSON.stringify(analyticsDocumentRow(db.documents[0], []))
+      ).byteLength + 1;
+    expect(serializedRowBytes * 31).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(serializedRowBytes * 32).toBeGreaterThan(ANALYTICS_MAX_BYTES);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    const documentQueryLimits = db.analyticsQueryLimits
+      .filter((query) => query.reader === "documents")
+      .map((query) => query.limit);
+    expect(documentQueryLimits[0]).toBe(31);
+    expect(documentQueryLimits.every((limit) => limit <= 31)).toBe(true);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(false);
+  });
+
+  it("shares serialized UTF-8 capacity across document and intent readers", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const document = testDocument({
+      id: "doc_combined_bytes",
+      wompi_event_id: "wompi_combined_bytes",
+      environment: "00",
+      donor_name: "🧪".repeat(1_050_000),
+      issued_at: "2026-06-10T18:00:00.000Z"
     });
+    const intent = testAnalyticsIntent({
+      id: "di_combined_bytes",
+      donor_document: "🧪".repeat(1_050_000)
+    });
+    db.documents.push(document);
+    db.donationIntents.push(intent);
+
+    const documentBytes = utf8Bytes(
+      JSON.stringify(analyticsDocumentRow(document, db.donationIntents))
+    ).byteLength + 1;
+    const intentBytes = utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1;
+    expect(documentBytes).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(intentBytes).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(documentBytes + intentBytes).toBeGreaterThan(ANALYTICS_MAX_BYTES);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(true);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("accepts exactly eight MiB of serialized analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const intent = analyticsIntentWithSerializedBytes(ANALYTICS_MAX_BYTES);
+    expect(
+      utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1
+    ).toBe(ANALYTICS_MAX_BYTES);
+    db.donationIntents.push(intent);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects one byte beyond eight MiB with the exact capacity response", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const intent = analyticsIntentWithSerializedBytes(ANALYTICS_MAX_BYTES + 1);
+    expect(
+      utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1
+    ).toBe(ANALYTICS_MAX_BYTES + 1);
+    db.donationIntents.push(intent);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
   });
 
   it("scopes every metric to the requested ambiente", async () => {
@@ -9321,6 +9548,10 @@ class InMemoryD1 {
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
+  readonly analyticsQueryLimits: Array<{
+    reader: "documents" | "intents" | "emails";
+    limit: number;
+  }> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly contingencies: Array<Record<string, unknown>> = [];
@@ -9732,24 +9963,10 @@ class Statement {
       }
       documents.sort((left, right) => String(left.issued_at).localeCompare(String(right.issued_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
-      const rows = documents.slice(0, limit).map((document) => {
-        const intent = this.db.donationIntents.find((candidate) => candidate.document_id === document.id);
-        return {
-          id: document.id,
-          wompi_event_id: document.wompi_event_id,
-          environment: document.environment,
-          status: document.status,
-          donor_email: document.donor_email ?? null,
-          donor_name: document.donor_name ?? null,
-          amount_cents: document.amount_cents,
-          issued_at: document.issued_at,
-          accepted_at: document.accepted_at ?? null,
-          transmission_deferred_at: document.transmission_deferred_at ?? null,
-          direccion_departamento: intent?.direccion_departamento ?? null,
-          donor_pais: intent?.donor_pais ?? null,
-          gift_type: intent?.gift_type ?? null
-        };
-      });
+      this.db.analyticsQueryLimits.push({ reader: "documents", limit });
+      const rows = documents
+        .slice(0, limit)
+        .map((document) => analyticsDocumentRow(document, this.db.donationIntents));
       return { results: rows as T[] };
     }
     // Intents: donation_intents LEFT JOIN dte_documents, filtrado por ventana created_at
@@ -9770,17 +9987,8 @@ class Statement {
       }
       intents.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
-      const rows = intents.slice(0, limit).map((intent) => ({
-        id: intent.id,
-        status: intent.status,
-        document_id: intent.document_id ?? null,
-        donor_document: intent.donor_document ?? null,
-        gift_type: intent.gift_type ?? null,
-        created_at: intent.created_at,
-        paid_at: intent.paid_at ?? null,
-        direccion_departamento: intent.direccion_departamento ?? null,
-        donor_pais: intent.donor_pais ?? null
-      }));
+      this.db.analyticsQueryLimits.push({ reader: "intents", limit });
+      const rows = intents.slice(0, limit).map(analyticsIntentRow);
       return { results: rows as T[] };
     }
     // Emails: email_deliveries JOIN dte_documents (carril Wompi + environment), ventana created_at.
@@ -9804,6 +10012,7 @@ class Statement {
       }
       deliveries.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
+      this.db.analyticsQueryLimits.push({ reader: "emails", limit });
       const rows = deliveries.slice(0, limit).map((delivery) => ({
         id: delivery.id,
         document_id: delivery.document_id,
@@ -10939,6 +11148,79 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
         numeroControl: "DTE-15-M001P004-000000000000999"
       }
     })
+  };
+}
+
+function testAnalyticsIntent(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: "di_analytics",
+    status: "COMPLETED",
+    document_id: null,
+    donor_document: "10000000-1",
+    gift_type: "DIEZMO",
+    created_at: "2026-06-10T17:50:00.000Z",
+    paid_at: "2026-06-10T17:55:00.000Z",
+    direccion_departamento: "06",
+    donor_pais: null,
+    ...overrides
+  };
+}
+
+function analyticsDocumentRow(
+  document: DteDocumentRecord,
+  intents: Array<Record<string, unknown>>
+): Record<string, unknown> {
+  const intent = intents.find(
+    (candidate) => candidate.document_id === document.id
+  );
+  return {
+    id: document.id,
+    wompi_event_id: document.wompi_event_id,
+    environment: document.environment,
+    status: document.status,
+    donor_email: document.donor_email ?? null,
+    donor_name: document.donor_name ?? null,
+    amount_cents: document.amount_cents,
+    issued_at: document.issued_at,
+    accepted_at: document.accepted_at ?? null,
+    transmission_deferred_at: document.transmission_deferred_at ?? null,
+    direccion_departamento: intent?.direccion_departamento ?? null,
+    donor_pais: intent?.donor_pais ?? null,
+    gift_type: intent?.gift_type ?? null
+  };
+}
+
+function analyticsIntentRow(intent: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: intent.id,
+    status: intent.status,
+    document_id: intent.document_id ?? null,
+    donor_document: intent.donor_document ?? null,
+    gift_type: intent.gift_type ?? null,
+    created_at: intent.created_at,
+    paid_at: intent.paid_at ?? null,
+    direccion_departamento: intent.direccion_departamento ?? null,
+    donor_pais: intent.donor_pais ?? null
+  };
+}
+
+function analyticsIntentWithSerializedBytes(
+  serializedBytes: number
+): Record<string, unknown> {
+  const intent = testAnalyticsIntent({
+    id: "di_exact_byte_budget",
+    donor_document: ""
+  });
+  const baseBytes =
+    utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1;
+  if (serializedBytes < baseBytes) {
+    throw new Error("El presupuesto de prueba no alcanza para la fila base");
+  }
+  return {
+    ...intent,
+    donor_document: "a".repeat(serializedBytes - baseBytes)
   };
 }
 
