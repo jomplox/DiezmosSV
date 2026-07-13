@@ -122,11 +122,34 @@ export function normalizeAuditContext(input: unknown): AuditActorContext {
 export function serializeAuditContext(input: unknown): string | null {
   const normalized = normalizeAuditContext(input);
   if (Object.keys(normalized).length === 0) return null;
-  const serialized = JSON.stringify(normalized);
+  let serialized = JSON.stringify(normalized);
   if (encoder.encode(serialized).byteLength <= AUDIT_CONTEXT_MAX_BYTES) {
     return serialized;
   }
-  return JSON.stringify({ _truncated: ["actor_context"] });
+
+  const reduced: AuditActorContext = { ...normalized };
+  const truncated = new Set(normalized._truncated ?? []);
+  delete reduced._truncated;
+  const fields = Object.keys(AUDIT_STRING_LIMITS) as Array<
+    keyof typeof AUDIT_STRING_LIMITS
+  >;
+
+  // Remove fields from the end of the fixed allowlist only until the escaped JSON
+  // fits. Every omitted field is visible through the bounded, recognized marker list.
+  for (const field of fields.reverse()) {
+    if (reduced[field] === undefined) continue;
+    delete reduced[field];
+    truncated.add(field);
+    reduced._truncated = [...truncated].slice(0, fields.length);
+    serialized = JSON.stringify(reduced);
+    if (encoder.encode(serialized).byteLength <= AUDIT_CONTEXT_MAX_BYTES) {
+      return serialized;
+    }
+  }
+
+  // With every capped string removed, only a finite ASN and known field markers
+  // remain, which is necessarily below the aggregate byte ceiling.
+  return serialized;
 }
 
 export function auditContextFrom(request: Request): AuditRequestContext {
