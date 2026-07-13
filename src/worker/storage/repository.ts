@@ -190,6 +190,92 @@ export class Repository {
     return reserved;
   }
 
+  async markWompiIssuanceProcessing(wompiEventId: string): Promise<void> {
+    const attemptedAt = nowIso();
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'PROCESSING', issuance_last_attempt_at = ?
+         WHERE id = ? AND created_document_id IS NULL`
+      )
+      .bind(attemptedAt, wompiEventId)
+      .run();
+  }
+
+  async recordWompiIssuanceFailure(
+    wompiEventId: string,
+    evidence: { code: string; message: string }
+  ): Promise<void> {
+    const failedAt = nowIso();
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'FAILED',
+               issuance_attempt_count = issuance_attempt_count + 1,
+               issuance_error_code = ?,
+               issuance_error_message = ?,
+               issuance_last_attempt_at = ?,
+               issuance_failed_at = ?
+           WHERE id = ? AND created_document_id IS NULL`
+        )
+        .bind(
+          evidence.code,
+          evidence.message,
+          failedAt,
+          failedAt,
+          wompiEventId
+        ),
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'SYSTEM', NULL, 'WOMPI_ISSUANCE_FAILED',
+                  'wompi_event', id, ?, ?, NULL, NULL
+           FROM wompi_events
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_failed_at = ?`
+        )
+        .bind(
+          newId("audit"),
+          evidence.message,
+          JSON.stringify({ code: evidence.code }),
+          wompiEventId,
+          failedAt
+        )
+    ]);
+  }
+
+  async markWompiIssuanceDeadLettered(wompiEventId: string): Promise<void> {
+    const deadLetteredAt = nowIso();
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'DEAD_LETTERED',
+             issuance_dead_lettered_at = ?,
+             processed_at = COALESCE(processed_at, ?)
+         WHERE id = ? AND created_document_id IS NULL`
+      )
+      .bind(deadLetteredAt, deadLetteredAt, wompiEventId)
+      .run();
+  }
+
+  async markWompiIssuanceIgnored(wompiEventId: string): Promise<void> {
+    const processedAt = nowIso();
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'IGNORED',
+             processed_at = COALESCE(processed_at, ?)
+         WHERE id = ? AND created_document_id IS NULL`
+      )
+      .bind(processedAt, wompiEventId)
+      .run();
+  }
+
   async createDonationIntent(input: {
     id: string;
     amountCents: number;
@@ -456,7 +542,7 @@ export class Repository {
     contingencyPeriodId?: string | null;
   }): Promise<DteDocumentRecord> {
     const id = newId("dte");
-    await this.db
+    const insert = this.db
       .prepare(
         `INSERT INTO dte_documents (
           id, wompi_event_id, environment, codigo_generacion, numero_control, status, plain_json,
@@ -476,10 +562,14 @@ export class Repository {
         input.amountCents,
         input.issuedAt,
         input.contingencyPeriodId ?? null
-      )
-      .run();
+      );
     if (input.wompiEventId) {
-      await this.db.prepare("UPDATE wompi_events SET created_document_id = ?, processed_at = ? WHERE id = ?").bind(id, nowIso(), input.wompiEventId).run();
+      await this.db.batch([
+        insert,
+        this.wompiDocumentCreatedStatement(input.wompiEventId, id, nowIso())
+      ]);
+    } else {
+      await insert.run();
     }
     const record = await this.getDteDocument(id);
     if (!record) {
@@ -487,6 +577,26 @@ export class Repository {
     }
     await this.indexDteDocument(record);
     return record;
+  }
+
+  async markWompiDocumentCreated(wompiEventId: string, documentId: string): Promise<void> {
+    await this.wompiDocumentCreatedStatement(wompiEventId, documentId, nowIso()).run();
+  }
+
+  private wompiDocumentCreatedStatement(
+    wompiEventId: string,
+    documentId: string,
+    processedAt: string
+  ) {
+    return this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET created_document_id = ?,
+             processed_at = ?,
+             issuance_status = 'DOCUMENT_CREATED'
+         WHERE id = ?`
+      )
+      .bind(documentId, processedAt, wompiEventId);
   }
 
   async markWompiEventProcessed(id: string): Promise<void> {
