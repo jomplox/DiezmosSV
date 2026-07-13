@@ -607,23 +607,32 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       if (account && !account.disabled_at) {
         const recentRequests = await repo.countAuditEntriesSince("PASSWORD_RESET_REQUESTED", account.id, authThrottleSinceIso());
         if (recentRequests >= PASSWORD_RESET_LIMIT) {
-          await repo.createAudit({ action: "PASSWORD_RESET_THROTTLED", entityType: "user", entityId: account.id, summary: account.email });
-        } else {
-          const created = await auth.createPasswordResetToken(email);
-          if (created) {
-            const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
-            try {
-              const resetBranding = await loadEmailBranding(repo, env);
-              await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
-              await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
-            } catch (error) {
-              await repo.createAudit({
-                action: "PASSWORD_RESET_EMAIL_FAILED",
-                entityType: "user",
-                entityId: created.user.id,
-                summary: error instanceof Error ? error.message : String(error)
-              });
-            }
+          return jsonResponse({ ok: true });
+        }
+
+        const created = await auth.createPasswordResetToken(email);
+        if (created) {
+          const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
+          try {
+            const resetBranding = await loadEmailBranding(repo, env);
+            await new EmailService(
+              env,
+              DEFAULT_EMAIL_TEMPLATES,
+              resetBranding
+            ).sendPasswordReset(
+              created.user.email,
+              created.user.name,
+              link,
+              PASSWORD_RESET_TTL_MINUTES
+            );
+            await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
+          } catch (error) {
+            await repo.createAudit({
+              action: "PASSWORD_RESET_EMAIL_FAILED",
+              entityType: "user",
+              entityId: created.user.id,
+              summary: error instanceof Error ? error.message : String(error)
+            });
           }
         }
       }

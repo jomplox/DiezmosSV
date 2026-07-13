@@ -514,31 +514,32 @@ describe("auth rate limiting", () => {
       seedAudit(db, "PASSWORD_RESET_REQUESTED", "user_operator", `2026-07-04T11:5${i}:00.000Z`);
     }
 
+    const auditCountBefore = db.audits.length;
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: "cf-email-reset" };
+        }
+      } as SendEmail
+    });
     const response = await worker.fetch(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: "operator@example.org" })
       }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMAIL_FROM: "legacy-contact-6@example.com",
-        EMAIL: {
-          send: async (message: unknown) => {
-            sentMessages.push(message);
-            return { messageId: "cf-email-reset" };
-          }
-        } as SendEmail
-      })
+      runtime
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
     expect(db.resetTokens).toHaveLength(0);
     expect(sentMessages).toHaveLength(0);
-    expect(db.audits).toContainEqual(
-      expect.objectContaining({ action: "PASSWORD_RESET_THROTTLED", entity_type: "user", entity_id: "user_operator" })
-    );
+    expect(db.audits).toHaveLength(auditCountBefore);
+    expect(db.audits.some((row) => row.action === "PASSWORD_RESET_THROTTLED")).toBe(false);
   });
 });
 
