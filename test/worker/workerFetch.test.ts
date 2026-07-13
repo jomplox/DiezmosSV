@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
@@ -398,6 +399,53 @@ describe("auth rate limiting", () => {
         attempt_count: 1,
         expires_at: "2026-07-04T12:15:00.000Z"
       });
+    });
+
+    it("resets an expired aggregate login bucket with SQLite UPSERT semantics", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE login_rate_limits (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL CHECK (attempt_count >= 1),
+          expires_at TEXT NOT NULL
+        )`);
+        const callerIp = "198.51.100.9";
+        const keyHash = await sha256Hex(utf8Bytes(callerIp));
+        sqlite
+          .prepare(
+            `INSERT INTO login_rate_limits (
+               key_hash, window_started_at, attempt_count, expires_at
+             ) VALUES (?, ?, ?, ?)`
+          )
+          .run(keyHash, "2026-07-04T11:00:00.000Z", 60, "2026-07-04T11:15:00.000Z");
+
+        const repo = new Repository(sqliteD1(sqlite));
+        const accepted = await repo.claimLoginAttempt(
+          keyHash,
+          "2026-07-04T12:00:00.000Z",
+          "2026-07-04T11:45:00.000Z",
+          "2026-07-04T12:15:00.000Z",
+          60
+        );
+
+        expect(accepted).toBe(true);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT window_started_at, attempt_count, expires_at
+               FROM login_rate_limits
+               WHERE key_hash = ?`
+            )
+            .get(keyHash)
+        ).toEqual({
+          window_started_at: "2026-07-04T12:00:00.000Z",
+          attempt_count: 1,
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
+      } finally {
+        sqlite.close();
+      }
     });
 
     it("keeps aggregate login buckets independent and deletes expired buckets during scheduled cleanup", async () => {
@@ -9631,6 +9679,28 @@ interface LoginRateLimitRow {
   expires_at: string;
 }
 
+function sqliteD1(database: DatabaseSync): D1Database {
+  return {
+    prepare(query: string) {
+      let boundValues: unknown[] = [];
+      const statement = {
+        bind(...values: unknown[]) {
+          boundValues = values;
+          return statement;
+        },
+        async first<T>(): Promise<T | null> {
+          const sqliteValues = boundValues.map((value) => {
+            if (typeof value === "string" || typeof value === "number") return value;
+            throw new TypeError("SQLite D1 test adapter only supports string and number binds");
+          });
+          return (database.prepare(query).get(...sqliteValues) ?? null) as T | null;
+        }
+      };
+      return statement;
+    }
+  } as unknown as D1Database;
+}
+
 class InMemoryD1 {
   readonly users: Array<Record<string, unknown>> = [];
   readonly sessions: Array<Record<string, unknown>> = [];
@@ -9791,10 +9861,7 @@ class Statement {
       const key = String(keyHash);
       const current = this.db.loginRateLimits.get(key);
       const limit = Number(limitValue);
-      const resetsExpiredRows =
-        (this.sql.match(/WHEN login_rate_limits\.window_started_at <= \?/g)?.length ?? 0) === 3 &&
-        this.sql.includes("WHERE login_rate_limits.window_started_at <= ?");
-      if (!current || (resetsExpiredRows && current.window_started_at <= String(cutoff))) {
+      if (!current || current.window_started_at <= String(cutoff)) {
         const next = {
           window_started_at: String(now),
           attempt_count: 1,
