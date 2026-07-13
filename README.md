@@ -12,7 +12,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
-[![Node](https://img.shields.io/badge/Node.js-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node.js-%E2%89%A522.13.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Status](https://img.shields.io/badge/status-early%20release-orange)](#-project-status)
@@ -183,7 +183,7 @@ DiezmosSV/
 
 ## 🚀 Quick start (local)
 
-**Requirements:** Node.js 22+, npm, a Cloudflare account, a Wompi account with webhook access, and
+**Requirements:** Node.js 22.13+, npm, a Cloudflare account, a Wompi account with webhook access, and
 MH DTE API credentials for the environment you intend to use. Wrangler is installed with the project.
 
 ```bash
