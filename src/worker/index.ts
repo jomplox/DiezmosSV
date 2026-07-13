@@ -23,6 +23,7 @@ import {
 import { EmailService } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
+import { issuanceFailureEvidence } from "./services/issuanceFailure";
 import {
   assertDeploymentCanCollectPayments,
   assertDeploymentAllowsAmbiente,
@@ -219,11 +220,13 @@ export default {
       return;
     }
     const pipeline = new IssuancePipeline(env);
+    const repo = new Repository(env.DB);
     for (const message of batch.messages) {
       try {
         if (message.body.advancedDocumentId) {
           await pipeline.processDteDocument(message.body.advancedDocumentId);
         } else if (message.body.wompiEventId) {
+          await repo.markWompiIssuanceProcessing(message.body.wompiEventId);
           await pipeline.processWompiEvent(message.body.wompiEventId);
         } else {
           throw new Error("Issuance message did not include a target id");
@@ -231,6 +234,12 @@ export default {
         message.ack();
       } catch (error) {
         console.error("Issuance message failed", error);
+        if (message.body.wompiEventId) {
+          await repo.recordWompiIssuanceFailure(
+            message.body.wompiEventId,
+            issuanceFailureEvidence(error)
+          );
+        }
         message.retry();
       }
     }
@@ -300,6 +309,9 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
     const entityType = documentId ? "dte_document" : "wompi_event";
     const entityId = documentId ?? wompiEventId ?? "desconocido";
     const summary = "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión";
+    if (wompiEventId) {
+      await repo.markWompiIssuanceDeadLettered(wompiEventId);
+    }
     await repo.createAudit({
       action: "ISSUANCE_DEAD_LETTERED",
       entityType,

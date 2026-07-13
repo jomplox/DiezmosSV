@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import wompiSample from "../../examples/wompi-webhook.sample.json";
+import { buildCdeDocument } from "../../src/worker/domain/dteBuilder";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import {
@@ -15,7 +17,7 @@ import { EnvironmentNotAllowedError } from "../../src/worker/services/environmen
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
-import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
+import type { DteDocumentRecord, Env, IssuanceMessage, WompiWebhook } from "../../src/worker/types";
 
 const nativeCrypto = crypto;
 
@@ -5733,6 +5735,12 @@ describe("donation intent correlation", () => {
     expect(
       db.wompiEvents.find((row) => row.id === eventId)?.processed_at
     ).toBeTruthy();
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_attempt_count: 1,
+      issuance_error_code: "WOMPI_INTENT_QUARANTINED",
+      issuance_error_message: expect.stringContaining("intención")
+    });
     const audits = db.audits.filter(
       (row) =>
         row.action === "DONATION_INTENT_BINDING_REJECTED" &&
@@ -5751,6 +5759,26 @@ describe("donation intent correlation", () => {
     ).toHaveLength(1);
     expect(db.documents).toHaveLength(0);
   }
+
+  it("marks a non-approved Wompi event as ignored", async () => {
+    const db = new InMemoryD1();
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_not_approved_tx",
+      ResultadoTransaccion: "Fallida"
+    });
+    const eventId = seedWompiEvent(db, webhook, "wompi_not_approved");
+
+    const result = await new IssuancePipeline(env(db)).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      issuance_status: "IGNORED",
+      issuance_attempt_count: 0,
+      processed_at: expect.any(String)
+    });
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+  });
 
   it("correlates a LINK_CREATED intent: identity + address from the intent, nombre/correo from the webhook", async () => {
     const db = new InMemoryD1();
@@ -6355,7 +6383,15 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
     );
-    expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+    expect(db.wompiEvents.find((event) => event.id === eventId)).toMatchObject({
+      processed_at: expect.any(String),
+      issuance_status: "FAILED",
+      issuance_attempt_count: 1,
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: expect.stringContaining("DUI")
+    });
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.issuance_error_message)
+      .not.toContain("12345678-9");
   });
 
   it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
@@ -7226,6 +7262,129 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       ...overrides
     };
   }
+
+  it("persists four pre-CDE failures before dead-lettering the reserved identifiers", async () => {
+    const db = new InMemoryD1();
+    db.nextSequence = 31;
+    const eventId = "wompi_bad_country";
+    const webhook = {
+      ...wompiSample,
+      IdTransaccion: "wompi_bad_country_tx",
+      Cliente: {
+        ...wompiSample.Cliente,
+        CodigoPais: "ZZ"
+      }
+    };
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: webhook.IdTransaccion,
+      raw_body: JSON.stringify(webhook)
+    }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const { batch, ack, retry } = deadLetterBatch(
+        { wompiEventId: eventId },
+        "diezmossv-staging-issuance-example"
+      );
+
+      await worker.queue(batch, runtime);
+
+      expect(ack).not.toHaveBeenCalled();
+      expect(retry).toHaveBeenCalledTimes(1);
+    }
+
+    const { batch: deadLetter, ack } = deadLetterBatch(
+      { wompiEventId: eventId },
+      "diezmossv-staging-issuance-example-dlq"
+    );
+    await worker.queue(deadLetter, runtime);
+
+    const event = db.wompiEvents.find((row) => row.id === eventId);
+    expect(event).toMatchObject({
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_count: 4,
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: expect.stringContaining("CAT-020 País")
+    });
+    expect(event?.control_sequence).toBe(31);
+    expect(db.nextSequence).toBe(32);
+    expect(db.audits.filter((row) => row.action === "WOMPI_ISSUANCE_FAILED" && row.entity_id === eventId)).toHaveLength(4);
+    expect(ack).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes a stored nonterminal Wompi document without changing its identifiers or JSON", async () => {
+    const db = new InMemoryD1();
+    db.nextSequence = 32;
+    const eventId = "wompi_resume_stored";
+    const codigoGeneracion = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const numeroControl = "DTE-15-M001P004-000000000000031";
+    const webhook = {
+      ...wompiSample,
+      IdTransaccion: "wompi_resume_stored_tx",
+      IdExterno: undefined,
+      EnlacePago: undefined
+    } as WompiWebhook;
+    const plainDocument = buildCdeDocument(webhook, emisorConfig(), {
+      sequence: 31,
+      codigoGeneracion,
+      environment: "00",
+      issuedAt: new Date("2026-07-13T10:00:00-06:00")
+    });
+    const plainJson = JSON.stringify(plainDocument);
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: webhook.IdTransaccion,
+      raw_body: JSON.stringify(webhook),
+      issuance_status: "FAILED",
+      control_prefix: "M001P004",
+      control_sequence: 31,
+      reserved_numero_control: numeroControl,
+      reserved_codigo_generacion: codigoGeneracion
+    }));
+    db.documents.push(testDocument({
+      id: "dte_resume_stored",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: numeroControl,
+      status: "SIGNED",
+      plain_json: plainJson,
+      signed_jws: "stored-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      donor_email: null,
+      accepted_at: null
+    }));
+
+    const record = await new IssuancePipeline(env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    })).processWompiEvent(eventId);
+
+    expect(record).toMatchObject({
+      id: "dte_resume_stored",
+      status: "ACCEPTED",
+      numero_control: numeroControl,
+      codigo_generacion: codigoGeneracion,
+      plain_json: plainJson
+    });
+    expect(db.documents).toHaveLength(1);
+    expect(db.nextSequence).toBe(32);
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      created_document_id: "dte_resume_stored",
+      issuance_status: "DOCUMENT_CREATED"
+    });
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED", entity_id: "dte_resume_stored" })
+    );
+    expect(db.audits).not.toContainEqual(
+      expect.objectContaining({ action: "ADVANCED_CDE_ACCEPTED", entity_id: "dte_resume_stored" })
+    );
+  });
 
   it("audits and acks dead-lettered issuance messages", async () => {
     const db = new InMemoryD1();
@@ -9763,6 +9922,24 @@ function wompiEventForReservation(overrides: Record<string, unknown> = {}): Reco
   };
 }
 
+function withWompiIssuanceDefaults(
+  event: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!event) return undefined;
+  event.issuance_status ??= null;
+  event.control_prefix ??= null;
+  event.control_sequence ??= null;
+  event.reserved_numero_control ??= null;
+  event.reserved_codigo_generacion ??= null;
+  event.issuance_attempt_count ??= 0;
+  event.issuance_error_code ??= null;
+  event.issuance_error_message ??= null;
+  event.issuance_last_attempt_at ??= null;
+  event.issuance_failed_at ??= null;
+  event.issuance_dead_lettered_at ??= null;
+  return event;
+}
+
 function sqliteD1(database: DatabaseSync): D1Database {
   return {
     prepare(query: string) {
@@ -9865,6 +10042,7 @@ class InMemoryD1 {
     const tokensBefore = structuredClone(this.resetTokens);
     const auditsBefore = structuredClone(this.audits);
     const wompiEventsBefore = structuredClone(this.wompiEvents);
+    const documentsBefore = structuredClone(this.documents);
     try {
       if (passwordReset) {
         this.passwordResetBatchCount += 1;
@@ -9875,6 +10053,7 @@ class InMemoryD1 {
       transaction.resetTokens.push(...structuredClone(this.resetTokens));
       transaction.audits.push(...structuredClone(this.audits));
       transaction.wompiEvents.push(...structuredClone(this.wompiEvents));
+      transaction.documents.push(...structuredClone(this.documents));
       const results: StatementRunResult[] = [];
       for (const [index, statement] of statements.entries()) {
         results.push(await statement.withDatabase(transaction).run());
@@ -9893,6 +10072,7 @@ class InMemoryD1 {
       this.resetTokens.splice(0, this.resetTokens.length, ...transaction.resetTokens);
       this.audits.splice(0, this.audits.length, ...transaction.audits);
       this.wompiEvents.splice(0, this.wompiEvents.length, ...transaction.wompiEvents);
+      this.documents.splice(0, this.documents.length, ...transaction.documents);
       if (credentialGuarded) {
         this.maxCommittedSessionRows = Math.max(this.maxCommittedSessionRows, this.sessions.length);
       }
@@ -9903,6 +10083,7 @@ class InMemoryD1 {
       this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
       this.audits.splice(0, this.audits.length, ...auditsBefore);
       this.wompiEvents.splice(0, this.wompiEvents.length, ...wompiEventsBefore);
+      this.documents.splice(0, this.documents.length, ...documentsBefore);
       throw error;
     } finally {
       if (passwordReset) {
@@ -10091,6 +10272,9 @@ class Statement {
       this.db.documentLookupCount += 1;
       return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT * FROM dte_documents WHERE wompi_event_id = ?")) {
+      return (this.db.documents.find((document) => document.wompi_event_id === this.args[0]) ?? null) as T | null;
+    }
     if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
       return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
     }
@@ -10150,10 +10334,14 @@ class Statement {
       } as T;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
-      return (this.db.wompiEvents.find((event) => event.id === this.args[0]) ?? null) as T | null;
+      return (withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((event) => event.id === this.args[0])
+      ) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE transaction_id = ?")) {
-      return (this.db.wompiEvents.find((event) => event.transaction_id === this.args[0]) ?? null) as T | null;
+      return (withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((event) => event.transaction_id === this.args[0])
+      ) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
@@ -10735,6 +10923,33 @@ class Statement {
         });
         changes = 1;
       }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("WOMPI_ISSUANCE_FAILED")
+    ) {
+      const [id, summary, metadataJson, eventId, failedAt] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.created_document_id == null &&
+          row.issuance_failed_at === failedAt
+      );
+      if (event) {
+        this.db.audits.push({
+          id,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "WOMPI_ISSUANCE_FAILED",
+          entity_type: "wompi_event",
+          entity_id: event.id,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
     } else if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
       this.db.audits.push({
@@ -11071,6 +11286,69 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'PROCESSING'")
+    ) {
+      const [attemptedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === wompiEventId && row.created_document_id == null
+      );
+      if (event) {
+        event.issuance_status = "PROCESSING";
+        event.issuance_last_attempt_at = attemptedAt;
+        event.issuance_attempt_count ??= 0;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'FAILED'")
+    ) {
+      const [code, message, lastAttemptAt, failedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === wompiEventId && row.created_document_id == null
+      );
+      if (event) {
+        event.issuance_status = "FAILED";
+        event.issuance_attempt_count = Number(event.issuance_attempt_count ?? 0) + 1;
+        event.issuance_error_code = code;
+        event.issuance_error_message = message;
+        event.issuance_last_attempt_at = lastAttemptAt;
+        event.issuance_failed_at = failedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'DEAD_LETTERED'")
+    ) {
+      const [deadLetteredAt, processedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === wompiEventId && row.created_document_id == null
+      );
+      if (event) {
+        event.issuance_status = "DEAD_LETTERED";
+        event.issuance_dead_lettered_at = deadLetteredAt;
+        event.processed_at ??= processedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'IGNORED'")
+    ) {
+      const [processedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === wompiEventId && row.created_document_id == null
+      );
+      if (event) {
+        event.issuance_status = "IGNORED";
+        event.issuance_attempt_count ??= 0;
+        event.processed_at ??= processedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
       this.sql.includes("SET processed_at = ?")
     ) {
       const [processedAt, wompiEventId, auditEntityId] = this.args;
@@ -11090,12 +11368,19 @@ class Statement {
         changes = 1;
       }
     }
-    if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("created_document_id = ?")
+    ) {
       const [documentId, processedAt, wompiEventId] = this.args;
       const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+        if (this.sql.includes("issuance_status = 'DOCUMENT_CREATED'")) {
+          event.issuance_status = "DOCUMENT_CREATED";
+        }
+        changes = 1;
       }
     }
     if (this.sql.includes("transmission_deferred_at = ?")) {

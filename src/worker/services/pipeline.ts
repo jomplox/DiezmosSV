@@ -42,12 +42,15 @@ export class WompiIntentQuarantinedError extends Error {
   readonly code = "wompi_intent_quarantined";
 
   constructor() {
-    super(
-      "El evento Wompi está en cuarentena porque no coincide con una intención lista."
-    );
+    super(WOMPI_INTENT_QUARANTINED_MESSAGE);
     this.name = "WompiIntentQuarantinedError";
   }
 }
+
+const WOMPI_INTENT_QUARANTINED_MESSAGE =
+  "El evento Wompi está en cuarentena porque no coincide con una intención lista.";
+const WOMPI_INVALID_DONOR_DUI_MESSAGE =
+  "Los datos del donante contienen un DUI inválido.";
 
 // Estados TERMINALES de un CDE: un veredicto de MH ya sellado (ACCEPTED/REJECTED) o una
 // invalidación. Una reentrega de cola NUNCA debe re-firmar/re-transmitir un documento en
@@ -133,10 +136,12 @@ export class IssuancePipeline {
     assertDeploymentAllowsAmbiente(this.env, event.environment);
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
-      return existing;
+      await this.repo.markWompiDocumentCreated(wompiEventId, existing.id);
+      return this.processDteDocument(existing.id);
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     if (!isApprovedDonation(payload)) {
+      await this.repo.markWompiIssuanceIgnored(wompiEventId);
       await this.repo.createAudit({
         action: "WOMPI_IGNORED",
         entityType: "wompi_event",
@@ -151,6 +156,10 @@ export class IssuancePipeline {
     const correlation = await this.correlateIntent(payload);
     if (correlation.kind === "quarantined") {
       await this.quarantineWompiEvent(wompiEventId, correlation);
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, {
+        code: "WOMPI_INTENT_QUARANTINED",
+        message: WOMPI_INTENT_QUARANTINED_MESSAGE
+      });
       return null;
     }
     const intent = correlation.kind === "ready" ? correlation.intent : null;
@@ -169,18 +178,31 @@ export class IssuancePipeline {
         entityId: wompiEventId,
         summary: duiReason
       });
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, {
+        code: "WOMPI_INVALID_DONOR_DUI",
+        message: WOMPI_INVALID_DONOR_DUI_MESSAGE
+      });
       await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
     }
-    const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
+    const reserved = await this.repo.reserveWompiDocumentIdentifiers(
+      wompiEventId,
+      environment,
+      config.controlPrefix
+    );
+    const normalDocument = buildCdeDocument(payload, config, {
+      sequence: reserved.sequence,
+      codigoGeneracion: reserved.codigoGeneracion,
+      environment,
+      donorOverride
+    });
     const identifiers = extractCdeIdentifiers(normalDocument);
     // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook: for
     // an empresa (NIT 36) intent the receptor nombre is the razón social, so storing the
     // webhook cardholder name here would diverge from the signed document. For a natural
     // person the receptor nombre/correo are the webhook values, so this is unchanged.
     const summary = cdeDocumentSummary(normalDocument);
-    let record = await this.repo.createDteDocument({
+    const record = await this.repo.createDteDocument({
       wompiEventId,
       environment,
       codigoGeneracion: identifiers.codigoGeneracion,
@@ -191,68 +213,7 @@ export class IssuancePipeline {
       amountCents: amountCents(payload),
       issuedAt: nowIso()
     });
-
-    try {
-      assertCdeIssuerMatchesConfig(normalDocument, config);
-      const signedJws = await signMhDocument(normalDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      await this.repo.updateDocumentSigned(record.id, signedJws);
-      const mhResult = await this.mh.transmitDte({
-        ambiente: environment,
-        version: 2,
-        tipoDte: "15",
-        codigoGeneracion: identifiers.codigoGeneracion,
-        signedJws
-      });
-      await this.repo.updateDocumentMhResult(record.id, {
-        status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-        sello: mhResult.selloRecibido,
-        mhEstado: mhResult.estado,
-        observaciones: mhResult.observaciones,
-        acceptedAt: mhResult.accepted ? nowIso() : null
-      });
-      record = (await this.repo.getDteDocument(record.id)) ?? record;
-      await this.repo.createAudit({
-        action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `${record.numero_control} ${mhResult.estado}`,
-        metadata: mhResult.raw
-      });
-      if (mhResult.accepted) {
-        if (intent) {
-          await this.completeIntent(intent, record.id);
-        }
-        await this.emailReceipt(record);
-      }
-      return record;
-    } catch (error) {
-      if (error instanceof MhUnavailableError) {
-        // El documento ya quedó firmado con forma NORMAL antes del intento de
-        // transmisión: se difiere tal cual (nunca se reconstruye en contingencia).
-        return this.deferTransmission(record.id, String(error.message));
-      }
-      await this.repo.updateDocumentMhResult(record.id, {
-        status: "FAILED",
-        sello: null,
-        mhEstado: "PIPELINE_ERROR",
-        observaciones: [error instanceof Error ? error.message : String(error)]
-      });
-      const failureMessage = error instanceof Error ? error.message : String(error);
-      await this.repo.createAudit({
-        action: "DTE_FAILED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: failureMessage
-      });
-      await sendOperationalAlert(this.env, this.repo, {
-        kind: "DTE_FAILED",
-        title: "Fallo al emitir DTE",
-        detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
-        entityType: "dte_document",
-        entityId: record.id
-      });
-      throw error;
-    }
+    return this.processDteDocument(record.id);
   }
 
   // A REJECTED verdict is MH's judgment on the document CONTENT: retransmitting
@@ -365,6 +326,7 @@ export class IssuancePipeline {
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
+    const wompiBacked = Boolean(record.wompi_event_id);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
     try {
       let signedJws = record.signed_jws;
@@ -389,14 +351,24 @@ export class IssuancePipeline {
       });
       record = (await this.repo.getDteDocument(record.id)) ?? record;
       await this.repo.createAudit({
-        action: mhResult.accepted ? "ADVANCED_CDE_ACCEPTED" : "ADVANCED_CDE_REJECTED",
+        action: mhResult.accepted
+          ? wompiBacked ? "DTE_ACCEPTED" : "ADVANCED_CDE_ACCEPTED"
+          : wompiBacked ? "DTE_REJECTED" : "ADVANCED_CDE_REJECTED",
         entityType: "dte_document",
         entityId: record.id,
         summary: `${record.numero_control} ${mhResult.estado}`,
         metadata: mhResult.raw
       });
       if (mhResult.accepted) {
-        await this.emailReceipt(record);
+        if (wompiBacked) {
+          const intent = await this.correlateIntentForDocument(record);
+          if (intent) {
+            await this.completeIntent(intent, record.id);
+          }
+        }
+        if (!(await this.repo.hasSentEmail(record.id, "dteReceipt"))) {
+          await this.emailReceipt(record);
+        }
       }
       return record;
     } catch (error) {
@@ -415,19 +387,19 @@ export class IssuancePipeline {
       await this.repo.updateDocumentMhResult(record.id, {
         status: "FAILED",
         sello: null,
-        mhEstado: "ADVANCED_PIPELINE_ERROR",
+        mhEstado: wompiBacked ? "PIPELINE_ERROR" : "ADVANCED_PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
       const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
-        action: "ADVANCED_CDE_FAILED",
+        action: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
         summary: failureMessage
       });
       await sendOperationalAlert(this.env, this.repo, {
-        kind: "ADVANCED_CDE_FAILED",
-        title: "Fallo al emitir CDE avanzado",
+        kind: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
+        title: wompiBacked ? "Fallo al emitir DTE" : "Fallo al emitir CDE avanzado",
         detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
         entityType: "dte_document",
         entityId: record.id
