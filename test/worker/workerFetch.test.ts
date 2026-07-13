@@ -5,7 +5,11 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
-import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
+import {
+  IssuancePipeline,
+  RejectedWompiRetryConflictError,
+  WompiIntentQuarantinedError
+} from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
@@ -5456,6 +5460,43 @@ describe("donation intent correlation", () => {
     });
   }
 
+  async function expectQuarantined(
+    db: InMemoryD1,
+    eventId: string,
+    runtime: Env,
+    reason: string
+  ): Promise<void> {
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+    const result = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeTruthy();
+    const audits = db.audits.filter(
+      (row) =>
+        row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+        row.entity_id === eventId
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].metadata_json))).toMatchObject({ reason });
+
+    await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(1);
+    expect(db.documents).toHaveLength(0);
+  }
+
   it("correlates a LINK_CREATED intent: identity + address from the intent, nombre/correo from the webhook", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -5601,19 +5642,13 @@ describe("donation intent correlation", () => {
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
   });
 
-  it("does not correlate a COMPLETED intent: falls back to the webhook donor data", async () => {
+  it("quarantines a COMPLETED application intent", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, { status: "COMPLETED", document_id: "dte_prev" });
     const eventId = seedWompiEvent(db, correlationWebhook());
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "ineligible_status");
 
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    // Fallback receptor derived from the webhook, not the intent.
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
-    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-    // The already-completed intent keeps its original document link.
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_prev");
   });
 
@@ -5655,7 +5690,7 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
-  it("refuses to correlate when the webhook link id does not match the intent's minted link", async () => {
+  it("quarantines when the webhook link id does not match the intent's minted link", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db); // wompi_id_enlace: 987654
     // A donor-influenced IdExterno points at di_corr_1, but the payment was made on a
@@ -5665,23 +5700,10 @@ describe("donation intent correlation", () => {
       correlationWebhook({ EnlacePago: { Id: 111111, IdentificadorEnlaceComercio: "di_corr_1" } })
     );
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "link_id_mismatch");
 
-    // No correlation: the CDE falls back to the webhook donor data, and the intent is
-    // left uncompleted so no signed CDE/PII binds to an unrelated intent.
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED");
-    expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: eventId });
-    const metadata = JSON.parse(String(mismatch!.metadata_json)) as {
-      payloadLinkId: number;
-      expectedLinkId: number;
-      reason: string;
-    };
-    expect(metadata).toMatchObject({ payloadLinkId: 111111, expectedLinkId: 987654, reason: "link_id_mismatch" });
   });
 
   it("correlates when the webhook link id matches the intent's minted link", async () => {
@@ -5700,25 +5722,73 @@ describe("donation intent correlation", () => {
     expect(db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED")).toBeUndefined();
   });
 
-  it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
+  it("quarantines a draft intent whose donor document is missing", async () => {
     const db = new InMemoryD1();
-    // A premint draft: link minted, but the donor never attached fiscal data, so the
-    // document is still NULL. Correlating it would build a receptor with an empty
-    // numDocumento that fails CDE schema validation — so the guard must skip it and
-    // let the legacy/static-link webhook fallback build the CDE from webhook data.
     seedIntentRow(db, { donor_document: null, direccion_departamento: null, direccion_municipio: null, direccion_distrito: null, direccion_complemento: null });
     const eventId = seedWompiEvent(db, correlationWebhook());
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "incomplete_donor_data");
 
-    expect(record?.status).toBe("ACCEPTED");
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    // Receptor comes from the webhook, not the (incomplete) draft.
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
-    // The draft is NOT completed by this webhook.
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+  });
+
+  it("blocks a rejected-document rebuild when its app binding is quarantined", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    db.documents.push({
+      ...testDocument({
+        id: "dte_quarantine_rebuild",
+        wompi_event_id: eventId,
+        status: "REJECTED",
+        signed_jws: null
+      })
+    });
+    const record = db.documents[0];
+    const before = { ...record };
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db))
+        .rebuildRejectedWompiDocument(record)
+    ).rejects.toBeInstanceOf(WompiIntentQuarantinedError);
+
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents[0].plain_json).toBe(before.plain_json);
+    expect(db.documents[0].signed_jws).toBe(before.signed_jws);
+    expect(outbound).not.toHaveBeenCalled();
+
+    db.sessionUser = {
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR"
+    };
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/documents/dte_quarantine_rebuild/retry",
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token" }
+        }
+      ),
+      await pipelineEnv(db)
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "wompi_intent_quarantined"
+    });
+    expect(outbound).not.toHaveBeenCalled();
   });
 
   it("keeps the intent receptor when an operator rebuilds a REJECTED intent-backed CDE", async () => {
@@ -5877,6 +5947,7 @@ describe("donation intent correlation", () => {
     // control number on every attempt — the guard must reject it BEFORE allocation.
     const webhook = correlationWebhook({
       IdExterno: undefined,
+      EnlacePago: undefined,
       IdTransaccion: "wompi_bad_dui_tx",
       cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
     });
@@ -5899,6 +5970,7 @@ describe("donation intent correlation", () => {
     const queued: IssuanceMessage[] = [];
     const webhook = correlationWebhook({
       IdExterno: undefined,
+      EnlacePago: undefined,
       IdTransaccion: "wompi_bad_dui_sweep_tx",
       cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
     });
