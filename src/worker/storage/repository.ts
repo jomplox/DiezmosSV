@@ -1189,13 +1189,76 @@ export class Repository {
       .run();
   }
 
-  async createSession(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
+  async createSessionIfCredentialsCurrent(input: {
+    userId: string;
+    expectedPasswordHash: string;
+    expectedPasswordSalt: string;
+    tokenHash: string;
+    expiresAt: string;
+  }): Promise<boolean> {
     const id = newId("session");
-    await this.db
-      .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-      .bind(id, userId, tokenHash, expiresAt)
-      .run();
-    return id;
+    const createdAt = nowIso();
+    const guard = [
+      input.userId,
+      input.expectedPasswordHash,
+      input.expectedPasswordSalt
+    ] as const;
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `DELETE FROM sessions
+            WHERE user_id = ?
+              AND (revoked_at IS NOT NULL OR expires_at <= ?)
+              AND EXISTS (
+                SELECT 1 FROM users
+                 WHERE id = ?
+                   AND disabled_at IS NULL
+                   AND password_hash = ?
+                   AND password_salt = ?
+              )`
+        )
+        .bind(input.userId, createdAt, ...guard),
+      this.db
+        .prepare(
+          `DELETE FROM sessions
+            WHERE id IN (
+              SELECT id FROM sessions
+               WHERE user_id = ?
+                 AND revoked_at IS NULL
+                 AND expires_at > ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT -1 OFFSET 7
+            )
+              AND EXISTS (
+                SELECT 1 FROM users
+                 WHERE id = ?
+                   AND disabled_at IS NULL
+                   AND password_hash = ?
+                   AND password_salt = ?
+              )`
+        )
+        .bind(input.userId, createdAt, ...guard),
+      this.db
+        .prepare(
+          `INSERT INTO sessions (
+             id, user_id, token_hash, expires_at, created_at
+           )
+           SELECT ?, id, ?, ?, ?
+             FROM users
+            WHERE id = ?
+              AND disabled_at IS NULL
+              AND password_hash = ?
+              AND password_salt = ?`
+        )
+        .bind(
+          id,
+          input.tokenHash,
+          input.expiresAt,
+          createdAt,
+          ...guard
+        )
+    ]);
+    return Number(results[2]?.meta?.changes ?? 0) === 1;
   }
 
   async getSessionUser(tokenHash: string): Promise<Record<string, string> | null> {

@@ -85,6 +85,8 @@ export class AuthService {
     if (!verified.valid) {
       throw new Error("Credenciales inválidas");
     }
+    let expectedPasswordHash = row.password_hash;
+    let expectedPasswordSalt = row.password_salt;
     if (verified.needsRehash) {
       // Verify-then-upgrade: rehash the just-proven password into the current versioned
       // format. No policy check — an existing password may predate the current policy.
@@ -102,10 +104,21 @@ export class AuthService {
         // current.
         throw new Error("Credenciales inválidas");
       }
+      expectedPasswordHash = upgraded.hash;
+      expectedPasswordSalt = upgraded.salt;
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = addDays(new Date().toISOString(), 1);
-    await this.repo.createSession(row.id, await sha256Hex(token), expiresAt);
+    const created = await this.repo.createSessionIfCredentialsCurrent({
+      userId: row.id,
+      expectedPasswordHash,
+      expectedPasswordSalt,
+      tokenHash: await sha256Hex(token),
+      expiresAt
+    });
+    if (!created) {
+      throw new Error("Credenciales inválidas");
+    }
     return { user: publicUser(row), token, expiresAt };
   }
 

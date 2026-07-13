@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { hashPassword } from "../../src/worker/services/auth";
+import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
@@ -539,6 +539,178 @@ describe("auth rate limiting", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "PASSWORD_RESET_THROTTLED", entity_type: "user", entity_id: "user_operator" })
     );
+  });
+});
+
+describe("credential-current session issuance", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(["self-reset", "admin-reset"] as const)(
+    "does not issue a session when %s wins after password verification",
+    async (mutation) => {
+      const db = new InMemoryD1();
+      const runtime = env(db);
+      const old = await hashPassword("Old#Password2026", "old-salt", {
+        enforcePolicy: false
+      });
+      db.users.push({
+        id: "user_race",
+        email: "race@example.org",
+        name: "Race",
+        role: "OPERATOR",
+        password_hash: old.hash,
+        password_salt: old.salt,
+        disabled_at: null
+      });
+
+      if (mutation === "self-reset") {
+        const resetToken = "self-reset-token";
+        db.resetTokens.push({
+          id: "reset_race",
+          user_id: "user_race",
+          token_hash: await sha256Hex(utf8Bytes(resetToken)),
+          expires_at: "2026-07-04T13:00:00.000Z",
+          used_at: null
+        });
+        db.beforeCredentialGuardedSessionBatch = async () => {
+          db.beforeCredentialGuardedSessionBatch = null;
+          await new AuthService(runtime).confirmPasswordReset(resetToken, "New#Password2026");
+        };
+      } else {
+        db.beforeCredentialGuardedSessionBatch = async () => {
+          db.beforeCredentialGuardedSessionBatch = null;
+          await new AuthService(runtime).resetUserPassword("user_race", "Admin#Password2026");
+        };
+      }
+
+      await expect(
+        new AuthService(runtime).login("race@example.org", "Old#Password2026")
+      ).rejects.toThrow("Credenciales inválidas");
+      expect(db.sessions).toHaveLength(0);
+    }
+  );
+
+  it("does not prune valid sessions when a stale credential guard loses", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const old = await hashPassword("Old#Password2026", "old-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_stale",
+      email: "stale@example.org",
+      name: "Stale",
+      role: "OPERATOR",
+      password_hash: old.hash,
+      password_salt: old.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `session_${index}`,
+        user_id: "user_stale",
+        token_hash: `existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      db.beforeCredentialGuardedSessionBatch = null;
+      await new AuthService(runtime).resetUserPassword(
+        "user_stale",
+        "Changed#Password2026"
+      );
+    };
+
+    await expect(
+      new AuthService(runtime).login("stale@example.org", "Old#Password2026")
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.sessions.map((row) => row.id)).toEqual([
+      "session_0",
+      "session_1",
+      "session_2",
+      "session_3",
+      "session_4",
+      "session_5",
+      "session_6",
+      "session_7"
+    ]);
+  });
+
+  it("keeps at most eight active session rows and evicts the oldest bearer", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_cap",
+      email: "cap@example.org",
+      name: "Cap",
+      role: "VIEWER",
+      password_hash: stored.hash,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `session_${index}`,
+        user_id: "user_cap",
+        token_hash: `existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+
+    const newest = await new AuthService(runtime).login(
+      "cap@example.org",
+      "Valid#Password2026"
+    );
+
+    expect(db.sessions).toHaveLength(8);
+    expect(db.sessions.some((row) => row.id === "session_0")).toBe(false);
+    const newestTokenHash = await sha256Hex(utf8Bytes(newest.token));
+    expect(
+      db.sessions.some((row) => row.token_hash === newestTokenHash)
+    ).toBe(true);
+  });
+
+  it("keeps concurrent committed session rows at or below eight", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_concurrent_cap",
+      email: "concurrent-cap@example.org",
+      name: "Concurrent Cap",
+      role: "VIEWER",
+      password_hash: `pbkdf2$100000$${stored.hash}`,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+
+    const logins = await Promise.all(
+      Array.from({ length: 9 }, () =>
+        new AuthService(runtime).login(
+          "concurrent-cap@example.org",
+          "Valid#Password2026"
+        )
+      )
+    );
+
+    expect(logins).toHaveLength(9);
+    expect(db.sessions).toHaveLength(8);
+    expect(db.maxCommittedSessionRows).toBe(8);
   });
 });
 
@@ -8466,9 +8638,11 @@ class InMemoryD1 {
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
   beforePasswordResetBatch: (() => void) | null = null;
+  beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   passwordResetBatchCount = 0;
-  private passwordResetBatchTail: Promise<void> = Promise.resolve();
+  maxCommittedSessionRows = 0;
+  private batchTail: Promise<void> = Promise.resolve();
 
   prepare(sql: string): Statement {
     this.preparedSql.push(sql);
@@ -8476,9 +8650,26 @@ class InMemoryD1 {
   }
 
   async batch(statements: Statement[]): Promise<StatementRunResult[]> {
-    const previous = this.passwordResetBatchTail;
+    const credentialGuarded = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO sessions") &&
+        statement.sql.includes("password_hash = ?") &&
+        statement.sql.includes("password_salt = ?")
+    );
+    const passwordReset = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE password_reset_tokens") &&
+        statement.sql.includes("SET used_at = ?")
+    );
+    if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
+      const beforeBatch = this.beforeCredentialGuardedSessionBatch;
+      this.beforeCredentialGuardedSessionBatch = null;
+      await beforeBatch();
+    }
+
+    const previous = this.batchTail;
     let release!: () => void;
-    this.passwordResetBatchTail = new Promise<void>((resolve) => {
+    this.batchTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     await previous;
@@ -8487,15 +8678,27 @@ class InMemoryD1 {
     const sessionsBefore = structuredClone(this.sessions);
     const tokensBefore = structuredClone(this.resetTokens);
     try {
-      this.passwordResetBatchCount += 1;
-      this.beforePasswordResetBatch?.();
-      this.beforePasswordResetBatch = null;
+      if (passwordReset) {
+        this.passwordResetBatchCount += 1;
+        this.beforePasswordResetBatch?.();
+        this.beforePasswordResetBatch = null;
+      }
+      const transaction = new InMemoryD1();
+      transaction.users.push(...structuredClone(this.users));
+      transaction.sessions.push(...structuredClone(this.sessions));
+      transaction.resetTokens.push(...structuredClone(this.resetTokens));
       const results: StatementRunResult[] = [];
       for (const [index, statement] of statements.entries()) {
-        results.push(await statement.run());
-        if (this.failPasswordResetBatchAfterStatement === index + 1) {
+        results.push(await statement.withDatabase(transaction).run());
+        if (passwordReset && this.failPasswordResetBatchAfterStatement === index + 1) {
           throw new Error("injected password-reset batch failure");
         }
+      }
+      this.users.splice(0, this.users.length, ...transaction.users);
+      this.sessions.splice(0, this.sessions.length, ...transaction.sessions);
+      this.resetTokens.splice(0, this.resetTokens.length, ...transaction.resetTokens);
+      if (credentialGuarded) {
+        this.maxCommittedSessionRows = Math.max(this.maxCommittedSessionRows, this.sessions.length);
       }
       return results;
     } catch (error) {
@@ -8504,7 +8707,9 @@ class InMemoryD1 {
       this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
       throw error;
     } finally {
-      this.failPasswordResetBatchAfterStatement = null;
+      if (passwordReset) {
+        this.failPasswordResetBatchAfterStatement = null;
+      }
       release();
     }
   }
@@ -8521,12 +8726,16 @@ class Statement {
 
   constructor(
     private readonly db: InMemoryD1,
-    private readonly sql: string
+    readonly sql: string
   ) {}
 
   bind(...args: unknown[]): this {
     this.args = args;
     return this;
+  }
+
+  withDatabase(db: InMemoryD1): Statement {
+    return new Statement(db, this.sql).bind(...this.args);
   }
 
   async first<T>(): Promise<T | null> {
@@ -8594,7 +8803,31 @@ class Statement {
       return { id: document.id } as T;
     }
     if (this.sql.includes("FROM sessions") && this.sql.includes("JOIN users")) {
-      return this.db.sessionUser as T | null;
+      if (this.db.sessionUser) {
+        return this.db.sessionUser as T;
+      }
+      const [tokenHash, nowIso] = this.args.map(String);
+      const session = this.db.sessions.find(
+        (row) =>
+          row.token_hash === tokenHash &&
+          !row.revoked_at &&
+          String(row.expires_at) > nowIso
+      );
+      if (!session) {
+        return null;
+      }
+      const user = this.db.users.find(
+        (row) => row.id === session.user_id && !row.disabled_at
+      );
+      if (!user) {
+        return null;
+      }
+      return {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM users")) {
       return { count: this.db.users.length } as T;
@@ -9165,6 +9398,93 @@ class Statement {
     if (this.sql.includes("INSERT INTO password_reset_tokens")) {
       const [id, userId, tokenHash, expiresAt] = this.args.map(String);
       this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
+    }
+    if (
+      this.sql.includes("DELETE FROM sessions") &&
+      this.sql.includes("revoked_at IS NOT NULL OR expires_at <= ?")
+    ) {
+      const [userId, expiresAt, guardUserId, passwordHash, passwordSalt] = this.args;
+      const currentCredentials = this.db.users.some(
+        (row) =>
+          row.id === guardUserId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt
+      );
+      if (currentCredentials) {
+        for (let index = this.db.sessions.length - 1; index >= 0; index -= 1) {
+          const session = this.db.sessions[index];
+          if (
+            session.user_id === userId &&
+            (Boolean(session.revoked_at) || String(session.expires_at) <= String(expiresAt))
+          ) {
+            this.db.sessions.splice(index, 1);
+            changes += 1;
+          }
+        }
+      }
+    }
+    if (
+      this.sql.includes("DELETE FROM sessions") &&
+      this.sql.includes("LIMIT -1 OFFSET 7")
+    ) {
+      const [userId, expiresAt, guardUserId, passwordHash, passwordSalt] = this.args;
+      const currentCredentials = this.db.users.some(
+        (row) =>
+          row.id === guardUserId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt
+      );
+      if (currentCredentials) {
+        const prunedIds = new Set(
+          this.db.sessions
+            .filter(
+              (row) =>
+                row.user_id === userId &&
+                !row.revoked_at &&
+                String(row.expires_at) > String(expiresAt)
+            )
+            .sort(
+              (left, right) =>
+                String(right.created_at).localeCompare(String(left.created_at)) ||
+                String(right.id).localeCompare(String(left.id))
+            )
+            .slice(7)
+            .map((row) => row.id)
+        );
+        for (let index = this.db.sessions.length - 1; index >= 0; index -= 1) {
+          if (prunedIds.has(this.db.sessions[index].id)) {
+            this.db.sessions.splice(index, 1);
+            changes += 1;
+          }
+        }
+      }
+    }
+    if (
+      this.sql.includes("INSERT INTO sessions") &&
+      this.sql.includes("password_hash = ?") &&
+      this.sql.includes("password_salt = ?")
+    ) {
+      const [id, tokenHash, expiresAt, createdAt, userId, passwordHash, passwordSalt] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt
+      );
+      if (user) {
+        this.db.sessions.push({
+          id,
+          user_id: user.id,
+          token_hash: tokenHash,
+          expires_at: expiresAt,
+          created_at: createdAt,
+          revoked_at: null
+        });
+        changes = 1;
+      }
     }
     if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
       if (this.sql.includes("WHERE user_id = ?")) {
