@@ -8,7 +8,7 @@ import {
   buildInvalidacionEvent,
   cdeEmisorFromConfig
 } from "../../src/worker/domain/dteBuilder";
-import type { DteDocumentRecord, WompiWebhook } from "../../src/worker/types";
+import type { DteDocumentRecord, EmisorConfig, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
 const FALLBACK_COMPLEMENTO = "No proporcionada por el donante";
@@ -202,6 +202,77 @@ describe("DTE builders", () => {
 
     expect(() =>
       assertCdeIssuerMatchesConfig(trusted, emisorConfig)
+    ).toThrow(/emisor/i);
+  });
+
+  it("normalizes omitted optional issuer fields for every builder across persistence", () => {
+    const config = {
+      ...emisorConfig,
+      direccion: { ...emisorConfig.direccion }
+    } as Partial<EmisorConfig>;
+    delete config.nrc;
+    delete config.nombreComercial;
+    delete config.codEstable;
+    delete config.codPuntoVenta;
+    const trustedConfig = config as EmisorConfig;
+    const wompiDocument = buildCdeDocument(
+      wompiSample as WompiWebhook,
+      trustedConfig,
+      { sequence: 1 }
+    );
+    const directDocument = buildDirectCdeDocument(
+      {
+        donorName: "Donante Directo",
+        donorDocumentType: "37",
+        donorDocument: "SIN-DOCUMENTO",
+        amount: "5.00"
+      },
+      trustedConfig,
+      { sequence: 2, environment: "00" }
+    );
+    const advancedDocument = buildAdvancedCdeDocument(wompiDocument, trustedConfig, {
+      sequence: 3,
+      environment: "00"
+    });
+
+    for (const generated of [wompiDocument, directDocument, advancedDocument]) {
+      const persisted = JSON.parse(JSON.stringify(generated)) as Record<string, any>;
+
+      expect(persisted.emisor).toMatchObject({
+        nrc: null,
+        nombreComercial: null,
+        codEstable: null,
+        codPuntoVenta: null
+      });
+      expect(() =>
+        assertCdeIssuerMatchesConfig(persisted, trustedConfig)
+      ).not.toThrow();
+    }
+  });
+
+  it("does not alias the generated issuer address to trusted configuration", () => {
+    const config: EmisorConfig = {
+      ...emisorConfig,
+      direccion: { ...emisorConfig.direccion }
+    };
+    const originalComplemento = config.direccion.complemento;
+    const draft = buildCdeDocument(
+      wompiSample as WompiWebhook,
+      config,
+      { sequence: 1 }
+    );
+    const generated = buildAdvancedCdeDocument(draft, config, {
+      sequence: 2,
+      environment: "00"
+    });
+    const generatedAddress = (generated.emisor as Record<string, any>)
+      .direccion as Record<string, unknown>;
+
+    generatedAddress.complemento = "Changed after generation";
+
+    expect.soft(config.direccion.complemento).toBe(originalComplemento);
+    expect(() =>
+      assertCdeIssuerMatchesConfig(generated, config)
     ).toThrow(/emisor/i);
   });
 

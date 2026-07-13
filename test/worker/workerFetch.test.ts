@@ -6346,6 +6346,44 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.transmission_deferred_at).toBeTruthy();
   });
 
+  it("rejects deferred issuer drift before an unsigned recovery can sign or call MH", async () => {
+    const db = new InMemoryD1();
+    const document = advancedCdeDraft();
+    (document.emisor as Record<string, unknown>).numDocumento = "06142803901122";
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_deferred_issuer_drift",
+      wompi_event_id: null,
+      status: "SIGNED",
+      plain_json: JSON.stringify(document),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null,
+      transmission_deferred_at: new Date().toISOString()
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    const mhFetch = stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const signSpy = vi.spyOn(crypto.subtle, "sign");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    expect(result).toEqual({ transmitted: 0, rejected: 0, pending: 1 });
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(mhFetch).not.toHaveBeenCalled();
+    expect(db.documents.find((row) => row.id === "doc_deferred_issuer_drift")).toMatchObject({
+      status: "SIGNED",
+      signed_jws: null
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      "Reintento de transmisión diferida falló",
+      "doc_deferred_issuer_drift",
+      expect.objectContaining({ message: expect.stringMatching(/emisor/i) })
+    );
+  });
+
   it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);

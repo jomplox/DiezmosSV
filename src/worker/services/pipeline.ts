@@ -193,6 +193,7 @@ export class IssuancePipeline {
     });
 
     try {
+      assertCdeIssuerMatchesConfig(normalDocument, config);
       const signedJws = await signMhDocument(normalDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
       await this.repo.updateDocumentSigned(record.id, signedJws);
       const mhResult = await this.mh.transmitDte({
@@ -289,6 +290,7 @@ export class IssuancePipeline {
     const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
     const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
     const identifiers = extractCdeIdentifiers(rebuilt);
+    assertCdeIssuerMatchesConfig(rebuilt, config);
     const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
     // Atomically claim the rebuild before transmitting: only one concurrent operator
     // retry may move this REJECTED CDE to SIGNED with the freshly rebuilt payload. The
@@ -456,7 +458,9 @@ export class IssuancePipeline {
         if (!signedJws) {
           // Defensivo: todos los caminos que difieren firman antes. RS512/PKCS1 es
           // determinista, así que re-firmar el mismo plain_json es idempotente.
-          signedJws = await signMhDocument(JSON.parse(record.plain_json), getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+          const document = JSON.parse(record.plain_json) as Record<string, unknown>;
+          assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
+          signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
         }
         const mhResult = await this.mh.transmitDte({
           ambiente: record.environment,
