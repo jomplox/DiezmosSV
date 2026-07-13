@@ -369,7 +369,38 @@ describe("auth rate limiting", () => {
       expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.70");
     });
 
-    it("keeps aggregate login buckets independent and resets an expired bucket", async () => {
+    it("resets an expired aggregate login bucket before normal credential handling", async () => {
+      const db = new InMemoryD1();
+      const callerIp = "198.51.100.9";
+      const keyHash = await sha256Hex(utf8Bytes(callerIp));
+      db.loginRateLimits.set(keyHash, {
+        window_started_at: "2026-07-04T11:00:00.000Z",
+        attempt_count: 60,
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": callerIp
+          },
+          body: JSON.stringify({ email: "other@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(500);
+      expect(db.loginCredentialReads).toBe(1);
+      expect(db.loginRateLimits.get(keyHash)).toEqual({
+        window_started_at: "2026-07-04T12:00:00.000Z",
+        attempt_count: 1,
+        expires_at: "2026-07-04T12:15:00.000Z"
+      });
+    });
+
+    it("keeps aggregate login buckets independent and deletes expired buckets during scheduled cleanup", async () => {
       const db = new InMemoryD1();
       db.loginRateLimits.set("expired-hash", {
         window_started_at: "2026-07-04T11:00:00.000Z",
@@ -382,9 +413,9 @@ describe("auth rate limiting", () => {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "CF-Connecting-IP": "198.51.100.9"
+            "CF-Connecting-IP": "192.0.2.18"
           },
-          body: JSON.stringify({ email: "other@example.org", password: "invalid" })
+          body: JSON.stringify({ email: "independent@example.org", password: "invalid" })
         }),
         env(db)
       );
@@ -395,6 +426,7 @@ describe("auth rate limiting", () => {
         env(db)
       );
       expect(db.loginRateLimits.has("expired-hash")).toBe(false);
+      expect(db.loginRateLimits.size).toBe(1);
     });
 
     it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
@@ -9759,7 +9791,10 @@ class Statement {
       const key = String(keyHash);
       const current = this.db.loginRateLimits.get(key);
       const limit = Number(limitValue);
-      if (!current || current.window_started_at <= String(cutoff)) {
+      const resetsExpiredRows =
+        (this.sql.match(/WHEN login_rate_limits\.window_started_at <= \?/g)?.length ?? 0) === 3 &&
+        this.sql.includes("WHERE login_rate_limits.window_started_at <= ?");
+      if (!current || (resetsExpiredRows && current.window_started_at <= String(cutoff))) {
         const next = {
           window_started_at: String(now),
           attempt_count: 1,
