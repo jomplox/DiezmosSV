@@ -49,7 +49,7 @@ import {
   parseBrandingSettings
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
-import { computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
+import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
@@ -1205,11 +1205,21 @@ async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser |
   if (!range) {
     return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
   }
-  const analytics = await computeAnalytics(repo, range, environment, now, {
-    department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
-    country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
-  });
-  return jsonResponse({ analytics });
+  try {
+    const analytics = await computeAnalytics(repo, range, environment, now, {
+      department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+      country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
+    });
+    return jsonResponse({ analytics });
+  } catch (error) {
+    if (error instanceof AnalyticsCapacityError) {
+      return jsonResponse(
+        { error: error.code, message: error.message },
+        { status: 422 }
+      );
+    }
+    throw error;
+  }
 }
 
 // Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El

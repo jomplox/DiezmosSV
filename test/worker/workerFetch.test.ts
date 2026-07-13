@@ -9127,6 +9127,76 @@ describe("analytics endpoint (Wompi lane)", () => {
     expect(JSON.stringify(analytics.giving.topDonors)).not.toContain("numero_control");
   });
 
+  it("returns 422 before materializing more than ten thousand analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 10_001; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "analytics_range_too_large"
+    });
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(false);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("returns 422 when serialized analytics rows exceed eight MiB", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    db.documents.push(
+      testDocument({
+        id: "doc_byte_budget",
+        wompi_event_id: "wompi_byte_budget",
+        environment: "00",
+        donor_name: "🧪".repeat(2_100_000),
+        issued_at: "2026-06-10T18:00:00.000Z"
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "analytics_range_too_large"
+    });
+  });
+
   it("scopes every metric to the requested ambiente", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
