@@ -8,7 +8,7 @@ import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
-import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
+import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
 
@@ -1686,6 +1686,44 @@ describe("donation intents", () => {
   });
 });
 
+function seededUserLifecycleDb(): InMemoryD1 {
+  const db = new InMemoryD1();
+  db.sessionUser = {
+    id: "user_owner",
+    email: "owner@example.org",
+    name: "Owner",
+    role: "OWNER"
+  };
+  db.users.push({
+    id: "user_target",
+    email: "target@example.org",
+    name: "Target",
+    role: "OPERATOR",
+    password_hash: "target-hash",
+    password_salt: "target-salt",
+    disabled_at: null,
+    updated_at: "2026-07-03T12:00:00.000Z"
+  });
+  for (let index = 0; index < 2; index += 1) {
+    db.sessions.push({
+      id: `session_lifecycle_${index}`,
+      user_id: "user_target",
+      token_hash: `lifecycle_token_${index}`,
+      expires_at: "2026-07-05T12:00:00.000Z",
+      created_at: `2026-07-04T11:0${index}:00.000Z`,
+      revoked_at: null
+    });
+    db.resetTokens.push({
+      id: `reset_lifecycle_${index}`,
+      user_id: "user_target",
+      token_hash: `reset_hash_${index}`,
+      expires_at: "2026-07-05T12:00:00.000Z",
+      used_at: null
+    });
+  }
+  return db;
+}
+
 describe("password reset", () => {
   beforeEach(() => {
     vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
@@ -1830,6 +1868,46 @@ describe("password reset", () => {
     expect(db.sessions[0].revoked_at).toBeTruthy();
     expect(db.resetTokens[0].used_at).toBeTruthy();
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_COMPLETED", entity_id: "user_operator" }));
+  });
+
+  it("serializes reset redemption with lifecycle invalidation in both orders", async () => {
+    const firstDb = seededUserLifecycleDb();
+    const firstEnv = env(firstDb);
+    const firstRawToken = "lifecycle-reset-first";
+    firstDb.resetTokens[0].token_hash = await sha256Hex(utf8Bytes(firstRawToken));
+    firstDb.beforePasswordResetBatch = async () => {
+      firstDb.beforePasswordResetBatch = null;
+      await new Repository(firstEnv.DB).updateUser("user_target", {
+        email: "transitioned@example.org"
+      });
+    };
+
+    await expect(
+      new AuthService(firstEnv).confirmPasswordReset(
+        firstRawToken,
+        "New#Password2026"
+      )
+    ).rejects.toThrow(/válido|expiró/i);
+    expect(firstDb.users[0].email).toBe("transitioned@example.org");
+    expect(firstDb.users[0].password_hash).toBe("target-hash");
+    expect(firstDb.sessions.every((row) => row.revoked_at != null)).toBe(true);
+    expect(firstDb.resetTokens.every((row) => row.used_at != null)).toBe(true);
+
+    const secondDb = seededUserLifecycleDb();
+    const secondEnv = env(secondDb);
+    const secondRawToken = "reset-wins-first";
+    secondDb.resetTokens[0].token_hash = await sha256Hex(utf8Bytes(secondRawToken));
+    await new AuthService(secondEnv).confirmPasswordReset(
+      secondRawToken,
+      "New#Password2026"
+    );
+    await new Repository(secondEnv.DB).updateUser("user_target", {
+      email: "after-reset@example.org"
+    });
+    expect(secondDb.users[0].email).toBe("after-reset@example.org");
+    expect(secondDb.users[0].password_hash).not.toBe("target-hash");
+    expect(secondDb.sessions.every((row) => row.revoked_at != null)).toBe(true);
+    expect(secondDb.resetTokens.every((row) => row.used_at != null)).toBe(true);
   });
 
   it("invalidates every sibling password reset token after one succeeds", async () => {
@@ -2416,6 +2494,43 @@ describe("user administration", () => {
       entity_id: "user_operator"
     });
   });
+
+  it.each([
+    ["email", { email: "changed@example.org" }, true],
+    ["disable", { disabled: true }, true],
+    ["re-enable", { disabled: false }, true],
+    ["name", { name: "Changed Name" }, false],
+    ["role", { role: "ADMIN" }, false]
+  ] as const)(
+    "%s updates %s existing sessions and reset tokens",
+    async (_label, patch, invalidates) => {
+      const db = seededUserLifecycleDb();
+      if ("disabled" in patch && patch.disabled === false) {
+        db.users.find((row) => row.id === "user_target")!.disabled_at =
+          "2026-07-03T12:00:00.000Z";
+      }
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/users/user_target", {
+          method: "PATCH",
+          headers: {
+            Authorization: "Bearer test-token",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(patch)
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(200);
+      expect(
+        db.sessions.every((row) => row.revoked_at != null)
+      ).toBe(invalidates);
+      expect(
+        db.resetTokens.every((row) => row.used_at != null)
+      ).toBe(invalidates);
+    }
+  );
 
   it("stops an ADMIN from creating or promoting a user to OWNER", async () => {
     const db = new InMemoryD1();
@@ -8682,7 +8797,7 @@ class InMemoryD1 {
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
-  beforePasswordResetBatch: (() => void) | null = null;
+  beforePasswordResetBatch: (() => void | Promise<void>) | null = null;
   beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   passwordResetBatchCount = 0;
@@ -8703,12 +8818,17 @@ class InMemoryD1 {
     );
     const passwordReset = statements.some(
       (statement) =>
-        statement.sql.includes("UPDATE password_reset_tokens") &&
-        statement.sql.includes("SET used_at = ?")
+        statement.sql.includes("UPDATE users") &&
+        statement.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?")
     );
     if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
       const beforeBatch = this.beforeCredentialGuardedSessionBatch;
       this.beforeCredentialGuardedSessionBatch = null;
+      await beforeBatch();
+    }
+    if (passwordReset && this.beforePasswordResetBatch) {
+      const beforeBatch = this.beforePasswordResetBatch;
+      this.beforePasswordResetBatch = null;
       await beforeBatch();
     }
 
@@ -8725,8 +8845,6 @@ class InMemoryD1 {
     try {
       if (passwordReset) {
         this.passwordResetBatchCount += 1;
-        this.beforePasswordResetBatch?.();
-        this.beforePasswordResetBatch = null;
       }
       const transaction = new InMemoryD1();
       transaction.users.push(...structuredClone(this.users));
@@ -9533,14 +9651,22 @@ class Statement {
     }
     if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
       if (this.sql.includes("WHERE user_id = ?")) {
-        const [usedAt, userId, markerUserId, passwordHash, passwordSalt, updatedAt] = this.args.map(String);
-        const marker = this.db.users.some(
-          (row) =>
-            row.id === markerUserId &&
-            row.password_hash === passwordHash &&
-            row.password_salt === passwordSalt &&
-            row.updated_at === updatedAt
-        );
+        const [usedAt, userId, markerUserId, expectedValue, expectedState, updatedAt] = this.args;
+        const marker = this.sql.includes("AND email = ?")
+          ? this.db.users.some(
+              (row) =>
+                row.id === markerUserId &&
+                row.email === expectedValue &&
+                (row.disabled_at ?? null) === (expectedState ?? null) &&
+                row.updated_at === updatedAt
+            )
+          : this.db.users.some(
+              (row) =>
+                row.id === markerUserId &&
+                row.password_hash === expectedValue &&
+                row.password_salt === expectedState &&
+                row.updated_at === updatedAt
+            );
         if (marker) {
           for (const token of this.db.resetTokens.filter((row) => row.user_id === userId && !row.used_at)) {
             token.used_at = usedAt;
@@ -9934,7 +10060,7 @@ class Statement {
         user.updated_at = updatedAt;
       }
     }
-    if (this.sql.includes("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")) {
+    if (this.sql.includes("SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?")) {
       const [name, email, role, disabledAt, updatedAt, userId] = this.args;
       const user = this.db.users.find((row) => row.id === userId);
       if (user) {
@@ -9943,6 +10069,7 @@ class Statement {
         user.role = role;
         user.disabled_at = disabledAt;
         user.updated_at = updatedAt;
+        changes = 1;
       }
     }
     if (
@@ -9981,13 +10108,21 @@ class Statement {
     ) {
       const [revokedAt, userId] = this.args;
       const marker = this.sql.includes("SELECT 1")
-        ? this.db.users.some(
-            (row) =>
-              row.id === this.args[2] &&
-              row.password_hash === this.args[3] &&
-              row.password_salt === this.args[4] &&
-              row.updated_at === this.args[5]
-          )
+        ? this.sql.includes("AND email = ?")
+          ? this.db.users.some(
+              (row) =>
+                row.id === this.args[2] &&
+                row.email === this.args[3] &&
+                (row.disabled_at ?? null) === (this.args[4] ?? null) &&
+                row.updated_at === this.args[5]
+            )
+          : this.db.users.some(
+              (row) =>
+                row.id === this.args[2] &&
+                row.password_hash === this.args[3] &&
+                row.password_salt === this.args[4] &&
+                row.updated_at === this.args[5]
+            )
         : true;
       if (marker) {
         for (const session of this.db.sessions.filter((row) => row.user_id === userId && !row.revoked_at)) {

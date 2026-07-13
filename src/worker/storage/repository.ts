@@ -1281,17 +1281,75 @@ export class Repository {
     if (!existing) {
       throw new Error("Usuario no encontrado");
     }
-    await this.db
-      .prepare("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")
+    const changedAt = nowIso();
+    const currentEmail = String(existing.email).toLowerCase();
+    const nextEmail = String(input.email ?? existing.email).trim().toLowerCase();
+    const wasDisabled = existing.disabled_at != null && existing.disabled_at !== "";
+    const willBeDisabled = input.disabled === undefined ? wasDisabled : input.disabled;
+    const nextDisabledAt =
+      input.disabled === undefined
+        ? existing.disabled_at
+        : willBeDisabled
+          ? changedAt
+          : null;
+    const invalidatesCapabilities =
+      nextEmail !== currentEmail || willBeDisabled !== wasDisabled;
+
+    const update = this.db
+      .prepare(
+        `UPDATE users
+            SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?
+          WHERE id = ?`
+      )
       .bind(
         input.name ?? existing.name,
-        String(input.email ?? existing.email).toLowerCase(),
+        nextEmail,
         input.role ?? existing.role,
-        input.disabled === undefined ? existing.disabled_at : input.disabled ? nowIso() : null,
-        nowIso(),
+        nextDisabledAt,
+        changedAt,
         id
-      )
-      .run();
+      );
+
+    if (invalidatesCapabilities) {
+      const results = await this.db.batch([
+        update,
+        this.db
+          .prepare(
+            `UPDATE sessions
+                SET revoked_at = ?
+              WHERE user_id = ?
+                AND revoked_at IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM users
+                   WHERE id = ?
+                     AND email = ?
+                     AND disabled_at IS ?
+                     AND updated_at = ?
+                )`
+          )
+          .bind(changedAt, id, id, nextEmail, nextDisabledAt, changedAt),
+        this.db
+          .prepare(
+            `UPDATE password_reset_tokens
+                SET used_at = ?
+              WHERE user_id = ?
+                AND used_at IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM users
+                   WHERE id = ?
+                     AND email = ?
+                     AND disabled_at IS ?
+                     AND updated_at = ?
+                )`
+          )
+          .bind(changedAt, id, id, nextEmail, nextDisabledAt, changedAt)
+      ]);
+      if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
+        throw new Error("Usuario no encontrado");
+      }
+    } else {
+      await update.run();
+    }
     const updated = await this.db
       .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
       .bind(id)
