@@ -32,6 +32,22 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("builds a schema-valid CDE for cent amounts that are not binary-exact", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Monto: "1.11" } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-07-13T16:06:23.4101468-06:00")
+      }
+    ) as Record<string, any>;
+
+    expect(document.cuerpoDocumento[0].valorUni).toBe(1.11);
+    expect(document.cuerpoDocumento[0].valor).toBe(1.11);
+    expect(document.resumen.valorTotal).toBe(1.11);
+    expect(document.resumen.pagos[0].montoPago).toBe(1.11);
+  });
+
   it("pins the CDE descripcion to DONACIÓN even when the Wompi link carries a product name", () => {
     const document = buildCdeDocument(
       { ...wompiSample, EnlacePago: { ...wompiSample.EnlacePago, NombreProducto: "Testing" } } as WompiWebhook,

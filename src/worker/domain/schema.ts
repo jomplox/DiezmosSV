@@ -3,7 +3,7 @@ import addFormats from "ajv-formats";
 import cdeSchema from "../../../DTE/svfe-json-schemas/v2/fe-cd-v2.json";
 import invalidacionSchema from "../../../DTE/svfe-json-schemas/v3/invalidacion-schema-v3.json";
 
-const ajv = new Ajv({ allErrors: true, strict: false });
+const ajv = new Ajv({ allErrors: true, strict: false, multipleOfPrecision: 12 });
 addFormats(ajv);
 
 // El validador del evento de contingencia se eliminó junto con la emisión en
