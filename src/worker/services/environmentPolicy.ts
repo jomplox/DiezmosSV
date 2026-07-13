@@ -34,7 +34,7 @@ export class PaymentCollectionDisabledError extends Error {
 }
 
 export function deploymentEnvironmentPolicy(env: Pick<Env, "APP_ENV">): DeploymentEnvironmentPolicy {
-  const normalized = env.APP_ENV?.trim().toLowerCase();
+  const normalized = typeof env.APP_ENV === "string" ? env.APP_ENV.trim().toLowerCase() : undefined;
   if (normalized === "local") {
     return { appEnv: "local", allowedAmbiente: "00", directGenerationAllowed: true };
   }
