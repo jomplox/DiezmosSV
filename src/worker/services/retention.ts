@@ -167,6 +167,10 @@ async function streamRetentionTable(
   const digest = new crypto.DigestStream("SHA-256");
   const bodyWriter = identity.writable.getWriter();
   const digestWriter = digest.getWriter();
+  const digestResultPromise = digest.digest.then(
+    (value) => ({ ok: true as const, value }),
+    (error) => ({ ok: false as const, error })
+  );
   const putPromise = env.ARCHIVE.put(key, identity.readable);
   void putPromise.catch((error) => bodyWriter.abort(error).catch(() => undefined));
   let cursor: RetentionCursor | null = null;
@@ -185,14 +189,28 @@ async function streamRetentionTable(
       if (rows.length < RETENTION_PAGE_SIZE) break;
     }
 
-    await Promise.all([bodyWriter.close(), digestWriter.close()]);
+    await digestWriter.close();
+    const digestResult = await digestResultPromise;
+    if (!digestResult.ok) {
+      throw digestResult.error;
+    }
+    await bodyWriter.close();
     await putPromise;
-    const sha256 = hexFromBytes(new Uint8Array(await digest.digest));
+    const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
     return { rowCount, sha256 };
   } catch (error) {
     await Promise.allSettled([bodyWriter.abort(error), digestWriter.abort(error)]);
-    await Promise.allSettled([putPromise, digest.digest]);
-    await env.ARCHIVE.delete(key);
+    await Promise.allSettled([putPromise, digestResultPromise]);
+    try {
+      await env.ARCHIVE.delete(key);
+    } catch (cleanupError) {
+      try {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        console.error("Retention partial-object cleanup failed", { key, error: message });
+      } catch {
+        // Cleanup diagnostics must never replace the primary export failure.
+      }
+    }
     throw error;
   }
 }
