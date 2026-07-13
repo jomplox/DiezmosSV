@@ -1,6 +1,7 @@
 node_modules/
 dist/
 .wrangler/
+.worktrees/
 .dev.vars
 .dev.vars.*
 # .dev.vars.ci holds committed NON-SECRET demo values used by the CI Playwright
