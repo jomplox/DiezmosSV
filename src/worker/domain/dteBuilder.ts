@@ -107,16 +107,21 @@ export function cdeEmisorFromConfig(
   return {
     tipoDocumento: config.tipoDocumento,
     numDocumento: config.numDocumento,
-    nrc: config.nrc,
+    nrc: config.nrc ?? null,
     nombre: config.nombre,
     codActividad: config.codActividad,
     descActividad: config.descActividad,
-    nombreComercial: config.nombreComercial,
-    direccion: config.direccion,
+    nombreComercial: config.nombreComercial ?? null,
+    direccion: {
+      departamento: config.direccion.departamento,
+      municipio: config.direccion.municipio,
+      distrito: config.direccion.distrito,
+      complemento: config.direccion.complemento
+    },
     telefono: config.telefono,
     correo: config.correo,
-    codEstable: config.codEstable,
-    codPuntoVenta: config.codPuntoVenta
+    codEstable: config.codEstable ?? null,
+    codPuntoVenta: config.codPuntoVenta ?? null
   };
 }
 
@@ -180,20 +185,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       horEmi: time,
       tipoMoneda: "USD"
     },
-    emisor: {
-      tipoDocumento: config.tipoDocumento,
-      numDocumento: config.numDocumento,
-      nrc: config.nrc,
-      nombre: config.nombre,
-      codActividad: config.codActividad,
-      descActividad: config.descActividad,
-      nombreComercial: config.nombreComercial,
-      direccion: config.direccion,
-      telefono: config.telefono,
-      correo: config.correo,
-      codEstable: config.codEstable,
-      codPuntoVenta: config.codPuntoVenta
-    },
+    emisor: cdeEmisorFromConfig(config),
     receptor: {
       tipoDocumento: override ? override.tipoDocumento : donorDocumentType,
       numDocumento: override ? override.numDocumento : donorDocument,
@@ -294,20 +286,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
       horEmi: time,
       tipoMoneda: "USD"
     },
-    emisor: {
-      tipoDocumento: config.tipoDocumento,
-      numDocumento: config.numDocumento,
-      nrc: config.nrc,
-      nombre: config.nombre,
-      codActividad: config.codActividad,
-      descActividad: config.descActividad,
-      nombreComercial: config.nombreComercial,
-      direccion: config.direccion,
-      telefono: config.telefono,
-      correo: config.correo,
-      codEstable: config.codEstable,
-      codPuntoVenta: config.codPuntoVenta
-    },
+    emisor: cdeEmisorFromConfig(config),
     receptor: {
       tipoDocumento: donorDocumentType,
       numDocumento: donorDocument ?? "",
