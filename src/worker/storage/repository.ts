@@ -2,7 +2,7 @@ import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, Dona
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
-import type { AuditRequestContext } from "../services/requestContext";
+import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
 
 export interface DteDocumentListPage {
@@ -866,14 +866,14 @@ export class Repository {
     actorIp?: string | null;
     actorContext?: unknown;
   }): Promise<void> {
-    const actorIp = input.actorIp ?? this.auditContext?.ip ?? null;
-    const contextValue = input.actorContext ?? this.auditContext?.context;
+    const actorIp = normalizeAuditIp(
+      input.actorIp ?? this.auditContext?.ip ?? null
+    );
     // Persist context only when there is something to persist; an absent request
     // (cron/queue) or an all-undefined cf blob leaves actor_context NULL.
-    const actorContext =
-      contextValue && typeof contextValue === "object" && Object.keys(contextValue as object).length > 0
-        ? JSON.stringify(contextValue)
-        : null;
+    const actorContext = serializeAuditContext(
+      input.actorContext ?? this.auditContext?.context
+    );
     await this.db
       .prepare(
         `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
