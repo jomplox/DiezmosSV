@@ -1,5 +1,5 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
-import { buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
+import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
@@ -365,8 +365,10 @@ export class IssuancePipeline {
     const summary = cdeDocumentSummary(document);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
     try {
-      const signedJws = record.signed_jws ?? await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      if (!record.signed_jws) {
+      let signedJws = record.signed_jws;
+      if (!signedJws) {
+        assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
+        signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
         await this.repo.updateDocumentSigned(record.id, signedJws);
       }
       const mhResult = await this.mh.transmitDte({
