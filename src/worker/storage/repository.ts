@@ -1,6 +1,6 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { newId } from "../utils/ids";
+import { generationCode, newId, numeroControl } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
@@ -140,6 +140,54 @@ export class Repository {
 
   async getWompiEventByTransaction(transactionId: string): Promise<WompiEventRecord | null> {
     return this.db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
+  }
+
+  async reserveWompiDocumentIdentifiers(
+    wompiEventId: string,
+    environment: Ambiente,
+    controlPrefix: string
+  ): Promise<WompiDocumentIdentifiers> {
+    const normalizedPrefix = controlPrefix.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (normalizedPrefix.length !== 8) {
+      throw new Error("El prefijo de control debe contener ocho caracteres alfanuméricos");
+    }
+
+    const event = await this.getWompiEventById(wompiEventId);
+    if (!event) {
+      throw new Error("No se encontró el evento Wompi para reservar identificadores");
+    }
+    if (event.environment !== environment) {
+      throw new Error("El ambiente del evento Wompi no coincide con la reserva");
+    }
+
+    const existing = wompiDocumentIdentifiers(event);
+    if (existing) {
+      return existing;
+    }
+
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET control_prefix = ?, reserved_codigo_generacion = ?
+         WHERE id = ?
+           AND environment = ?
+           AND control_prefix IS NULL
+           AND control_sequence IS NULL
+           AND reserved_numero_control IS NULL
+           AND reserved_codigo_generacion IS NULL`
+      )
+      .bind(normalizedPrefix, generationCode(), wompiEventId, environment)
+      .run();
+
+    const reservedEvent = await this.getWompiEventById(wompiEventId);
+    if (!reservedEvent || reservedEvent.environment !== environment) {
+      throw new Error("No se pudo leer la reserva de identificadores Wompi");
+    }
+    const reserved = wompiDocumentIdentifiers(reservedEvent);
+    if (!reserved) {
+      throw new Error("No se pudo reservar los identificadores del documento Wompi");
+    }
+    return reserved;
   }
 
   async createDonationIntent(input: {
@@ -1662,6 +1710,34 @@ export class Repository {
       .first<{ id: string }>();
     return Boolean(updated);
   }
+}
+
+function wompiDocumentIdentifiers(event: WompiEventRecord): WompiDocumentIdentifiers | null {
+  const reservation = [
+    event.control_prefix,
+    event.control_sequence,
+    event.reserved_numero_control,
+    event.reserved_codigo_generacion
+  ];
+  if (reservation.every((value) => value === null)) {
+    return null;
+  }
+  if (reservation.some((value) => value === null)) {
+    throw new Error("El evento Wompi contiene una reserva parcial de identificadores");
+  }
+
+  const sequence = event.control_sequence as number;
+  const prefix = event.control_prefix as string;
+  const expectedNumeroControl = numeroControl(prefix, sequence);
+  if (event.reserved_numero_control !== expectedNumeroControl) {
+    throw new Error("La reserva Wompi contiene un número de control inconsistente");
+  }
+
+  return {
+    sequence,
+    numeroControl: expectedNumeroControl,
+    codigoGeneracion: event.reserved_codigo_generacion as string
+  };
 }
 
 function normalizeDocumentListLimit(value: number | undefined): number {

@@ -32,6 +32,16 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("uses a reserved generation code for a Wompi CDE", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 31,
+      codigoGeneracion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    });
+
+    expect((document.identificacion as Record<string, unknown>).codigoGeneracion)
+      .toBe("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA");
+  });
+
   it("builds a schema-valid CDE for cent amounts that are not binary-exact", () => {
     const document = buildCdeDocument(
       { ...wompiSample, Monto: "1.11" } as WompiWebhook,
