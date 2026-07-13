@@ -4,6 +4,49 @@ import { Repository } from "../../src/worker/storage/repository";
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 
+const nativeCrypto = crypto;
+
+class TestDigestStream extends WritableStream<ArrayBuffer | ArrayBufferView> {
+  readonly digest: Promise<ArrayBuffer>;
+
+  constructor() {
+    const chunks: Uint8Array[] = [];
+    let resolveDigest!: (value: ArrayBuffer) => void;
+    let rejectDigest!: (reason: unknown) => void;
+    const digest = new Promise<ArrayBuffer>((resolve, reject) => {
+      resolveDigest = resolve;
+      rejectDigest = reject;
+    });
+    super({
+      write(chunk) {
+        const view =
+          chunk instanceof ArrayBuffer
+            ? new Uint8Array(chunk)
+            : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        chunks.push(view.slice());
+      },
+      async close() {
+        const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        try {
+          resolveDigest(await nativeCrypto.subtle.digest("SHA-256", bytes));
+        } catch (error) {
+          rejectDigest(error);
+        }
+      },
+      abort(reason) {
+        rejectDigest(reason);
+      }
+    });
+    this.digest = digest;
+  }
+}
+
 interface FakeR2Object {
   key: string;
   body: Uint8Array;
@@ -11,14 +54,25 @@ interface FakeR2Object {
 
 class FakeArchiveBucket implements Partial<R2Bucket> {
   readonly objects = new Map<string, FakeR2Object>();
-  readonly putCalls: Array<{ key: string; bytes: Uint8Array }> = [];
+  readonly putCalls: Array<{ key: string; bytes: Uint8Array; streamed: boolean }> = [];
+  readonly deleteCalls: string[] = [];
   readonly headCalls: string[] = [];
 
   async put(key: string, value: unknown): Promise<R2Object> {
-    const bytes = value instanceof Uint8Array ? value : utf8Bytes(String(value));
+    const bytes =
+      value instanceof ReadableStream
+        ? new Uint8Array(await new Response(value).arrayBuffer())
+        : value instanceof Uint8Array
+          ? value
+          : utf8Bytes(String(value));
     this.objects.set(key, { key, body: bytes });
-    this.putCalls.push({ key, bytes });
+    this.putCalls.push({ key, bytes, streamed: value instanceof ReadableStream });
     return { key } as R2Object;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    this.objects.delete(key);
   }
 
   async head(key: string): Promise<R2Object | null> {
@@ -26,6 +80,87 @@ class FakeArchiveBucket implements Partial<R2Bucket> {
     return this.objects.has(key) ? ({ key } as R2Object) : null;
   }
 }
+
+class Deferred {
+  readonly promise: Promise<void>;
+  private resolvePromise!: () => void;
+
+  constructor() {
+    this.promise = new Promise<void>((resolve) => {
+      this.resolvePromise = resolve;
+    });
+  }
+
+  resolve(): void {
+    this.resolvePromise();
+  }
+}
+
+function mergeTestChunks(chunks: Uint8Array[]): Uint8Array {
+  const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+  const bytes = new Uint8Array(length);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+class SlowArchiveBucket extends FakeArchiveBucket {
+  readonly firstChunkRead = new Deferred();
+  readonly resume = new Deferred();
+
+  override async put(key: string, value: unknown): Promise<R2Object> {
+    if (!(value instanceof ReadableStream) || !key.endsWith(".ndjson")) {
+      return super.put(key, value);
+    }
+    const reader = value.getReader();
+    const chunks: Uint8Array[] = [];
+    let first = true;
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) break;
+      chunks.push(next.value);
+      if (first) {
+        first = false;
+        this.firstChunkRead.resolve();
+        await this.resume.promise;
+      }
+    }
+    return super.put(key, mergeTestChunks(chunks));
+  }
+}
+
+class FailingArchiveBucket extends FakeArchiveBucket {
+  override async put(key: string, value: unknown): Promise<R2Object> {
+    if (value instanceof ReadableStream && key.endsWith(".ndjson")) {
+      const reader = value.getReader();
+      const first = await reader.read();
+      if (!first.done) {
+        this.objects.set(key, { key, body: first.value.slice() });
+      }
+      await reader.cancel(new Error("stream upload failed"));
+      throw new Error("stream upload failed");
+    }
+    return super.put(key, value);
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal("crypto", {
+    ...nativeCrypto,
+    subtle: nativeCrypto.subtle,
+    getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto),
+    randomUUID: nativeCrypto.randomUUID.bind(nativeCrypto),
+    DigestStream: TestDigestStream
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 function envWithArchive(db: InMemoryRetentionD1, archive: FakeArchiveBucket, overrides: Partial<Env> = {}): Env {
   return {
@@ -152,10 +287,6 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 }
 
 describe("runRetentionExport", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("exports the previous El Salvador calendar month for windowed tables into NDJSON keyed objects", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(
@@ -306,6 +437,66 @@ describe("runRetentionExport", () => {
     // never a single unpaged read of everything at once.
     expect(db.appliedLimits.length).toBeGreaterThanOrEqual(3);
     expect(db.appliedLimits.every((limit) => limit === 500)).toBe(true);
+  });
+
+  it("puts every table as a stream and preserves exact NDJSON digests", async () => {
+    const db = new InMemoryRetentionD1();
+    for (let index = 0; index < 1_200; index += 1) {
+      db.dteDocuments.push(
+        row({
+          id: `dte_stream_${String(index).padStart(4, "0")}`,
+          created_at: "2026-06-15T12:00:00.000Z"
+        })
+      );
+    }
+    const archive = new FakeArchiveBucket();
+    const result = await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    expect(result.status).toBe("completed");
+    const tablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
+    expect(tablePuts).toHaveLength(9);
+    expect(tablePuts.every((call) => call.streamed)).toBe(true);
+    const key = "retention/2026/2026-06/dte_documents.ndjson";
+    const bytes = archive.objects.get(key)!.body;
+    const expectedBytes = utf8Bytes(db.dteDocuments.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+    expect(bytes).toEqual(expectedBytes);
+    const manifest = JSON.parse(
+      new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)
+    ) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    expect(manifest.tables.dte_documents.rowCount).toBe(1_200);
+    expect(manifest.tables.dte_documents.sha256).toBe(await sha256Hex(bytes));
+  });
+
+  it("does not read the next D1 page while R2 backpressure is active (bounded read-ahead)", async () => {
+    const db = new InMemoryRetentionD1();
+    for (let index = 0; index < 1_200; index += 1) {
+      db.dteDocuments.push(
+        row({
+          id: `dte_slow_${String(index).padStart(4, "0")}`,
+          created_at: "2026-06-15T12:00:00.000Z"
+        })
+      );
+    }
+    const archive = new SlowArchiveBucket();
+    const exportPromise = runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    await archive.firstChunkRead.promise;
+    expect(db.appliedLimits).toEqual([500]);
+    archive.resume.resolve();
+    await expect(exportPromise).resolves.toMatchObject({ status: "completed", totalRows: 1_200 });
+  });
+
+  it("deletes a partial table object after a streamed write failure and never writes the manifest", async () => {
+    const db = new InMemoryRetentionD1();
+    db.dteDocuments.push(row({ id: "dte_failure" }));
+    const archive = new FailingArchiveBucket();
+    const result = await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    const key = "retention/2026/2026-06/dte_documents.ndjson";
+    expect(result.status).toBe("failed");
+    expect(archive.deleteCalls).toContain(key);
+    expect(archive.objects.has(key)).toBe(false);
+    expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
   });
 
   it("audits RETENTION_EXPORT_FAILED and does not throw when the archive write fails", async () => {
