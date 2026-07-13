@@ -49,6 +49,19 @@ describe("deployment environment policy", () => {
       PaymentCollectionDisabledError
     );
   });
+
+  it("rejects a non-string runtime APP_ENV as an unknown deployment", () => {
+    const malformedEnv = { APP_ENV: 42 } as unknown as Env;
+
+    expect(deploymentEnvironmentPolicy(malformedEnv)).toEqual({
+      appEnv: "unknown",
+      allowedAmbiente: null,
+      directGenerationAllowed: false
+    });
+    expect(() => assertDeploymentCanCollectPayments(malformedEnv)).toThrow(
+      PaymentCollectionDisabledError
+    );
+  });
 });
 
 describe("deployment endpoint availability", () => {

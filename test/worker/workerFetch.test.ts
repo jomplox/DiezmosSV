@@ -812,6 +812,23 @@ describe("donation intents", () => {
     expect(outbound).not.toHaveBeenCalled();
   });
 
+  it("rejects payment creation for a non-string runtime APP_ENV before DB or Wompi work", async () => {
+    const db = new InMemoryD1();
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const response = await worker.fetch(
+      intentRequest(validIntentBody()),
+      env(db, { APP_ENV: 42 } as unknown as Partial<Env>)
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "payment_collection_disabled"
+    });
+    expect(db.preparedSql).toHaveLength(0);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("creates a PENDING intent, attaches a mock Wompi link, and returns all three link fields", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
