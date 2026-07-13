@@ -88,6 +88,61 @@ describe("Worker fetch error handling", () => {
   });
 });
 
+describe("Wompi document identifier reservation", () => {
+  it("returns the same identifiers without consuming a second sequence", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const identifiers = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+    const repeated = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+
+    expect(identifiers).toMatchObject({
+      sequence: 1,
+      numeroControl: "DTE-15-M001P004-000000000000001"
+    });
+    expect(repeated).toEqual(identifiers);
+    expect(db.nextSequence).toBe(2);
+  });
+
+  it("normalizes a lowercase punctuated control prefix before reserving", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const identifiers = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "m001-p004");
+
+    expect(identifiers.numeroControl).toBe("DTE-15-M001P004-000000000000001");
+  });
+
+  it("rejects a control prefix that does not normalize to eight characters", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "short")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+
+  it("rejects an environment that differs from the Wompi event", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "01", "M001P004")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+
+  it("rejects a partial identifier reservation", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation({ control_prefix: "M001P004" }));
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+});
+
 describe("request body limits", () => {
   it("rejects an oversized login body before authentication or throttling", async () => {
     const db = new InMemoryD1();
@@ -9679,6 +9734,35 @@ interface LoginRateLimitRow {
   expires_at: string;
 }
 
+function wompiEventForReservation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "wompi_1",
+    transaction_id: "transaction_1",
+    environment: "00",
+    result: "ExitosaAprobada",
+    amount_cents: 1000,
+    donor_email: "donor@example.org",
+    donor_name: "Donante",
+    raw_body: "{}",
+    headers_json: "{}",
+    received_at: "2026-07-13T12:00:00.000Z",
+    processed_at: null,
+    created_document_id: null,
+    issuance_status: null,
+    control_prefix: null,
+    control_sequence: null,
+    reserved_numero_control: null,
+    reserved_codigo_generacion: null,
+    issuance_attempt_count: 0,
+    issuance_error_code: null,
+    issuance_error_message: null,
+    issuance_last_attempt_at: null,
+    issuance_failed_at: null,
+    issuance_dead_lettered_at: null,
+    ...overrides
+  };
+}
+
 function sqliteD1(database: DatabaseSync): D1Database {
   return {
     prepare(query: string) {
@@ -10960,6 +11044,30 @@ class Statement {
         created_at: "2026-06-26T01:46:47.015Z",
         updated_at: "2026-06-26T01:46:47.015Z"
       });
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET control_prefix = ?, reserved_codigo_generacion = ?")
+    ) {
+      const [controlPrefix, codigoGeneracion, wompiEventId, environment] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.environment === environment &&
+          row.control_prefix == null &&
+          row.control_sequence == null &&
+          row.reserved_numero_control == null &&
+          row.reserved_codigo_generacion == null
+      );
+      if (event) {
+        const sequence = this.db.nextSequence;
+        this.db.nextSequence += 1;
+        event.control_prefix = String(controlPrefix);
+        event.control_sequence = sequence;
+        event.reserved_numero_control = `DTE-15-${String(controlPrefix)}-${String(sequence).padStart(15, "0")}`;
+        event.reserved_codigo_generacion = String(codigoGeneracion);
+        changes = 1;
+      }
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&

@@ -61,6 +61,7 @@ const GIFT_TYPE_APENDICE_LABEL: Record<DonationGiftType, string> = {
 
 interface CdeBuildOptions {
   sequence: number;
+  codigoGeneracion?: string;
   environment?: Ambiente;
   issuedAt?: Date;
   donorOverride?: IntentDonorOverride;
@@ -176,7 +177,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       ambiente,
       tipoDte: "15",
       numeroControl: numeroControl(config.controlPrefix, options.sequence),
-      codigoGeneracion: generationCode(),
+      codigoGeneracion: options.codigoGeneracion ?? generationCode(),
       // Siempre modelo 1 (previo): el CDE no participa del evento de contingencia
       // (Anexo, campo 35), así que el modelo diferido (2) nunca aplica al tipo 15.
       tipoModelo: 1,
