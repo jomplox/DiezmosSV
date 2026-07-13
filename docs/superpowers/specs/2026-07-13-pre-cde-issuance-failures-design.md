@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-13
 
-**Status:** Approved in conversation; pending written-spec review.
+**Status:** Approved in conversation and reviewed; ready for implementation.
 
 ## Objective
 
@@ -26,8 +26,14 @@ procedure first queries the transmitted document and then resends the same recep
 request if MH did not receive it. A transport retry is therefore the same DTE, not a new
 control number.
 
-Source: [MH technical and functional documentation](https://factura.gob.sv/informacion-tecnica-y-funcional/),
-including the 2026 functional and transmission manuals published there.
+Authoritative source supplied for implementation:
+
+- `V2 - DTE (mayo 2026)/Manual Funcional del Sistema de Transmisión V 2.0.pdf`,
+  manual pages 28-29;
+- `V2 - DTE (mayo 2026)/Manual Técnico para la Integración Tecnológica del
+  Sistema de Transmisión v2.pdf`, manual pages 14-15.
+
+The same manuals are published through [MH technical and functional documentation](https://factura.gob.sv/informacion-tecnica-y-funcional/).
 
 The failed staging donation `wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8` never created
 a `dte_documents` row and was never signed or sent to MH. Its four queue deliveries
@@ -84,8 +90,9 @@ Add nullable pre-CDE issuance columns to `wompi_events` in the next migration:
 `reserved_codigo_generacion` prevent two events from owning the same identifiers.
 
 Legacy events keep the new columns null. They are not shown as failures merely because
-they have no document; only an explicit `FAILED` or `DEAD_LETTERED` issuance status is
-eligible for **CDE no creado**.
+they have no document. An explicit `FAILED` or `DEAD_LETTERED` status makes an item
+eligible for **CDE no creado**; after an operator retries it, the same item remains
+visible in `RETRY_QUEUED` or `PROCESSING` while it retains prior failure evidence.
 
 The stored error is an operator-safe projection, not a stack trace or raw webhook. The
 repository records a stable error code plus a whitespace-normalized message capped at
