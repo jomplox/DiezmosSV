@@ -118,6 +118,15 @@ describe("Wompi document identifier reservation", () => {
     expect(identifiers.numeroControl).toBe("DTE-15-M001P004-000000000000001");
   });
 
+  it("normalizes the direct allocator prefix identically", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(db as unknown as D1Database);
+
+    await repo.nextControlSequence("00", "m001-p004");
+
+    expect(db.sequencePrefixes).toEqual(["M001P004"]);
+  });
+
   it("rejects prefix drift after identifiers have already been reserved", async () => {
     const db = new InMemoryD1();
     db.wompiEvents.push(wompiEventForReservation());
@@ -10683,6 +10692,7 @@ class InMemoryD1 {
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
+  readonly sequencePrefixes: string[] = [];
   readonly analyticsQueryLimits: Array<{
     reader: "documents" | "intents" | "emails";
     limit: number;
@@ -11541,6 +11551,9 @@ class Statement {
 
   async run(): Promise<StatementRunResult> {
     let changes = 0;
+    if (this.sql.includes("INSERT OR IGNORE INTO document_sequences")) {
+      this.db.sequencePrefixes.push(String(this.args[1]));
+    }
     if (this.sql.includes("DELETE FROM login_rate_limits")) {
       const [now] = this.args.map(String);
       for (const [key, row] of this.db.loginRateLimits) {

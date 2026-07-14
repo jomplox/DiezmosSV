@@ -74,6 +74,10 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npm run cf:deploy:staging
    ```
 
+   The migration command includes a mandatory read-only duplicate-link preflight. If
+   it reports more than one legal DTE for a Wompi event, stop for manual review; do not
+   delete, relink, or select a row automatically.
+
 ## Edge Smoke Test
 
 Capture the Worker URL from Wrangler after deploy.

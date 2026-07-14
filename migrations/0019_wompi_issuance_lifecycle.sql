@@ -11,6 +11,27 @@ ALTER TABLE wompi_events ADD COLUMN issuance_last_attempt_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_failed_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_dead_lettered_at TEXT;
 
+-- Legacy sequence prefixes were not normalized at every allocator. Canonicalize
+-- case before the reservation trigger can create a parallel uppercase counter.
+-- When both spellings exist, the highest next_value is the only safe forward
+-- position; moving a legal counter backward is never allowed.
+INSERT OR IGNORE INTO document_sequences (environment, control_prefix, next_value)
+SELECT environment, UPPER(control_prefix), next_value
+FROM document_sequences
+WHERE control_prefix <> UPPER(control_prefix);
+
+UPDATE document_sequences
+SET next_value = (
+  SELECT MAX(source.next_value)
+  FROM document_sequences AS source
+  WHERE source.environment = document_sequences.environment
+    AND UPPER(source.control_prefix) = UPPER(document_sequences.control_prefix)
+)
+WHERE control_prefix = UPPER(control_prefix);
+
+DELETE FROM document_sequences
+WHERE control_prefix <> UPPER(control_prefix);
+
 CREATE UNIQUE INDEX idx_wompi_reserved_control
   ON wompi_events(environment, control_prefix, control_sequence)
   WHERE control_sequence IS NOT NULL;

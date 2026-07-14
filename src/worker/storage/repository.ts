@@ -1,6 +1,6 @@
 import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { generationCode, newId, numeroControl } from "../utils/ids";
+import { generationCode, newId, normalizeControlPrefix, numeroControl } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
@@ -192,10 +192,7 @@ export class Repository {
     environment: Ambiente,
     controlPrefix: string
   ): Promise<WompiDocumentIdentifiers> {
-    const normalizedPrefix = controlPrefix.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    if (normalizedPrefix.length !== 8) {
-      throw new Error("El prefijo de control debe contener ocho caracteres alfanuméricos");
-    }
+    const normalizedPrefix = normalizeControlPrefix(controlPrefix);
 
     const event = await this.getWompiEventById(wompiEventId);
     if (!event) {
@@ -559,13 +556,14 @@ export class Repository {
   }
 
   async nextControlSequence(environment: Ambiente, controlPrefix: string): Promise<number> {
+    const normalizedPrefix = normalizeControlPrefix(controlPrefix);
     await this.db
       .prepare("INSERT OR IGNORE INTO document_sequences (environment, control_prefix, next_value) VALUES (?, ?, 1)")
-      .bind(environment, controlPrefix)
+      .bind(environment, normalizedPrefix)
       .run();
     const row = await this.db
       .prepare("UPDATE document_sequences SET next_value = next_value + 1 WHERE environment = ? AND control_prefix = ? RETURNING next_value - 1 AS value")
-      .bind(environment, controlPrefix)
+      .bind(environment, normalizedPrefix)
       .first<{ value: number }>();
     if (!row) {
       throw new Error("No se pudo asignar la secuencia de control");
