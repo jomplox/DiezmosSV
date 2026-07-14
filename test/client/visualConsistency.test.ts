@@ -42,6 +42,52 @@ describe("visual consistency pack", () => {
     expect(stylesSource).toContain(".stats-caption");
   });
 
+  it("keeps pre-CDE failures above and separate from legal DTE rows", () => {
+    const panelRenderIndex = appSource.indexOf("<PreCdeFailuresPanel");
+    const statsRenderIndex = appSource.indexOf("<Stats documents={documents}");
+    const tableRenderIndex = appSource.indexOf("<DocumentTable documents={documents}");
+
+    expect(appSource).toContain('import { filterPreCdeFailures } from "./preCdeFailures";');
+    expect(panelRenderIndex).toBeGreaterThan(-1);
+    expect(panelRenderIndex).toBeLessThan(statsRenderIndex);
+    expect(panelRenderIndex).toBeLessThan(tableRenderIndex);
+    expect(appSource).toContain("preCdeFailureCount={visiblePreCdeFailures.length}");
+    expect(appSource).toContain("Sin CDE emitidos fallidos o rechazados");
+  });
+
+  it("renders exact pre-CDE evidence with safe retry states and no document actions", () => {
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+
+    expect(panelBlock).toContain('<span className="status pre-cde">CDE NO CREADO</span>');
+    expect(panelBlock).toContain('<strong>{item.donor_name ?? "Donante sin nombre"}</strong>');
+    expect(panelBlock).toContain('<span>${(item.amount_cents / 100).toFixed(2)}</span>');
+    expect(panelBlock).toContain('<span>Intentos: {item.issuance_attempt_count}</span>');
+    expect(panelBlock).toContain('<p>{item.issuance_error_message}</p>');
+    expect(panelBlock).toContain('`Número reservado: ${item.reserved_numero_control}`');
+    expect(panelBlock).toContain('"Número aún no asignado"');
+    expect(panelBlock).toContain('item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING"');
+    expect(panelBlock).toContain("{canRetry && (");
+    expect(panelBlock).toContain('disabled={retryQueued || busy === `pre-cde-retry:${item.id}`}');
+    expect(panelBlock).toContain('{retryQueued ? "Reintento en cola" : "Reintentar creación"}');
+
+    for (const forbiddenAction of ["PDF", "JSON", "Sello", "Invalidar", "DetailPanel", "onDownload", "documentAction"]) {
+      expect(panelBlock).not.toContain(forbiddenAction);
+    }
+  });
+
+  it("uses a responsive dashed danger boundary for pre-CDE cards", () => {
+    const panelRule = stylesSource.match(/\.pre-cde-failures \{[^}]*\}/)?.[0] ?? "";
+    const gridRule = stylesSource.match(/\.pre-cde-failure-grid \{[^}]*\}/)?.[0] ?? "";
+    const cardRule = stylesSource.match(/\.pre-cde-failure-card \{[^}]*\}/)?.[0] ?? "";
+    const mobileGridRule = stylesSource.match(/@media \(max-width: 720px\) \{[\s\S]*?\.pre-cde-failure-grid \{[^}]*\}/)?.[0] ?? "";
+
+    expect(panelRule).toContain("border: 1px dashed var(--danger-border);");
+    expect(panelRule).toContain("background: var(--danger-tint);");
+    expect(gridRule).toContain("grid-template-columns: repeat(2, minmax(0, 1fr));");
+    expect(cardRule).toContain("overflow-wrap: anywhere;");
+    expect(mobileGridRule).toContain("grid-template-columns: 1fr;");
+  });
+
   it("collapses the JSON DTE preview into a closed-by-default details element", () => {
     expect(appSource).toContain('<details className="json-details">');
     expect(appSource).toContain("<summary>Ver JSON completo</summary>");

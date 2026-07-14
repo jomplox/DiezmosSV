@@ -3,7 +3,7 @@ import { FAILURE_VIEW_STATUSES, documentListEmptyMessage, viewSubtitle } from ".
 
 describe("viewSubtitle", () => {
   it("gives the Fallos view a subtitle describing errors needing attention", () => {
-    expect(viewSubtitle("failures")).toBe("CDE con errores o rechazos que requieren su atención.");
+    expect(viewSubtitle("failures")).toBe("CDE con errores, rechazos o pagos sin comprobante que requieren su atención.");
   });
 
   it("gives the audit view a subtitle describing the action history", () => {

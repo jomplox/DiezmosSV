@@ -2446,6 +2446,81 @@ input.file-input-hidden {
   padding: 0;
 }
 
+.pre-cde-failures {
+  border: 1px dashed var(--danger-border);
+  border-radius: 10px;
+  background: var(--danger-tint);
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.pre-cde-failures-heading {
+  margin-bottom: 12px;
+}
+
+.pre-cde-failures-heading h2 {
+  color: var(--danger-ink);
+  margin: 0 0 4px;
+}
+
+.pre-cde-failures-heading p {
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.pre-cde-failure-error {
+  margin: 0;
+}
+
+.pre-cde-failure-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.pre-cde-failure-card {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--danger-border);
+  border-radius: 8px;
+  background: var(--surface);
+  overflow-wrap: anywhere;
+}
+
+.status.pre-cde {
+  width: fit-content;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-tint);
+  color: var(--danger-ink);
+}
+
+.pre-cde-failure-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 12px;
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.pre-cde-failure-card > p {
+  color: var(--danger-ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.pre-cde-failure-card > span:not(.status) {
+  color: var(--ink-secondary);
+  font-size: 12px;
+}
+
+.pre-cde-failure-card > button {
+  justify-self: start;
+  margin-top: 2px;
+}
+
 .stats-caption {
   font-size: 12px;
   color: var(--ink-muted);
@@ -3945,6 +4020,10 @@ pre {
   }
 
   .test-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .pre-cde-failure-grid {
     grid-template-columns: 1fr;
   }
 
