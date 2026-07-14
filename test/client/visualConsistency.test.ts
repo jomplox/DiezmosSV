@@ -65,13 +65,30 @@ describe("visual consistency pack", () => {
     expect(appSource).toContain('import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";');
     expect(fetchBlock).toContain("const request = preCdeFailureRequests.current.start();");
     expect(fetchBlock.match(/request\.commit/g)).toHaveLength(3);
+    expect(fetchBlock).toContain("setPreCdeFailuresLoading(true);");
+    expect(fetchBlock.match(/setPreCdeFailuresLoading\(false\)/g)).toHaveLength(2);
     expect(clearBlock.indexOf("preCdeFailureRequests.current.invalidate();")).toBeGreaterThan(-1);
     expect(clearBlock.indexOf("preCdeFailureRequests.current.invalidate();")).toBeLessThan(clearBlock.indexOf("setPreCdeFailures([]);"));
+    expect(clearBlock).toContain("setPreCdeFailuresLoading(false);");
     expect(changeViewBlock).toContain('if (nextView !== "failures")');
     expect(changeViewBlock).toContain("clearPreCdeFailures();");
+    expect(changeViewBlock).toContain('if (nextView === "failures" && view !== "failures")');
+    expect(changeViewBlock).toContain("setPreCdeFailuresLoading(true);");
     expect(appSource).toContain('onClick={() => changeView(item.id)}');
     expect(logoutBlock).toContain("clearPreCdeFailures();");
     expect(expireBlock).toContain("clearPreCdeFailures();");
+  });
+
+  it("shows an honest pre-CDE loading state before Fallos can say everything is fine", () => {
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+
+    expect(appSource).toContain("const [preCdeFailuresLoading, setPreCdeFailuresLoading] = useState(false);");
+    expect(appSource).toContain("loading={preCdeFailuresLoading}");
+    expect(panelBlock).toContain("loading: boolean;");
+    expect(panelBlock).toContain('aria-busy={loading}');
+    expect(panelBlock).toContain('role="status"');
+    expect(panelBlock).toContain("Revisando pagos sin CDE creado…");
+    expect(appSource).toContain('documentListEmptyMessage(view === "failures" ? "failures" : "documents", query, preCdeFailuresLoading)');
   });
 
   it("renders exact pre-CDE evidence with safe retry states and no document actions", () => {

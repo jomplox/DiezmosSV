@@ -62,6 +62,28 @@ describe("filterPreCdeFailures", () => {
 });
 
 describe("createLatestRequestGate", () => {
+  it("does not let a stale completion clear a newer request's loading state", () => {
+    const gate = createLatestRequestGate();
+    const state = { loading: false };
+    const olderRequest = gate.start();
+    olderRequest.commit(() => {
+      state.loading = true;
+    });
+    const newerRequest = gate.start();
+    newerRequest.commit(() => {
+      state.loading = true;
+    });
+
+    expect(olderRequest.commit(() => {
+      state.loading = false;
+    })).toBe(false);
+    expect(state.loading).toBe(true);
+    expect(newerRequest.commit(() => {
+      state.loading = false;
+    })).toBe(true);
+    expect(state.loading).toBe(false);
+  });
+
   it("prevents an older request from replacing newer items or errors", () => {
     const gate = createLatestRequestGate();
     const state = { items: [] as string[], error: "" };

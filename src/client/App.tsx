@@ -216,6 +216,7 @@ export function App() {
   const [documents, setDocuments] = useState<DteDocument[]>([]);
   const [preCdeFailures, setPreCdeFailures] = useState<WompiIssuanceFailureItem[]>([]);
   const [preCdeFailuresError, setPreCdeFailuresError] = useState("");
+  const [preCdeFailuresLoading, setPreCdeFailuresLoading] = useState(false);
   const preCdeFailureRequests = useRef(createLatestRequestGate());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
@@ -514,23 +515,27 @@ export function App() {
     preCdeFailureRequests.current.invalidate();
     setPreCdeFailures([]);
     setPreCdeFailuresError("");
+    setPreCdeFailuresLoading(false);
   }
 
   async function fetchPreCdeFailures() {
     const request = preCdeFailureRequests.current.start();
     request.commit(() => {
       setPreCdeFailuresError("");
+      setPreCdeFailuresLoading(true);
     });
     try {
       const result = await api<{ failures: WompiIssuanceFailureItem[] }>("/api/wompi-events/issuance-failures", token);
       request.commit(() => {
         setPreCdeFailures(result.failures);
         setPreCdeFailuresError("");
+        setPreCdeFailuresLoading(false);
       });
     } catch (error) {
       request.commit(() => {
         setPreCdeFailures([]);
         setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+        setPreCdeFailuresLoading(false);
       });
     }
   }
@@ -1151,6 +1156,9 @@ export function App() {
   }
 
   function changeView(nextView: View) {
+    if (nextView === "failures" && view !== "failures") {
+      setPreCdeFailuresLoading(true);
+    }
     if (nextView !== "failures") {
       clearPreCdeFailures();
     }
@@ -1256,6 +1264,7 @@ export function App() {
                 <PreCdeFailuresPanel
                   items={visiblePreCdeFailures}
                   error={preCdeFailuresError}
+                  loading={preCdeFailuresLoading}
                   busy={busy}
                   canRetry={can(user, "OPERATOR")}
                   onRetry={retryPreCdeFailure}
@@ -1271,7 +1280,7 @@ export function App() {
                 emptyMessage={
                   view === "failures" && (visiblePreCdeFailures.length > 0 || preCdeFailuresError)
                     ? "Sin CDE emitidos fallidos o rechazados"
-                    : documentListEmptyMessage(view === "failures" ? "failures" : "documents", query)
+                    : documentListEmptyMessage(view === "failures" ? "failures" : "documents", query, preCdeFailuresLoading)
                 }
               />
             </div>
@@ -4138,26 +4147,29 @@ function AuthScreen({
 function PreCdeFailuresPanel({
   items,
   error,
+  loading,
   busy,
   canRetry,
   onRetry
 }: {
   items: WompiIssuanceFailureItem[];
   error: string;
+  loading: boolean;
   busy: string;
   canRetry: boolean;
   onRetry: (id: string) => Promise<void>;
 }) {
-  if (items.length === 0 && !error) {
+  if (items.length === 0 && !error && !loading) {
     return null;
   }
 
   return (
-    <section className="pre-cde-failures" aria-labelledby="pre-cde-failures-title">
+    <section className="pre-cde-failures" aria-labelledby="pre-cde-failures-title" aria-busy={loading}>
       <div className="pre-cde-failures-heading">
         <h2 id="pre-cde-failures-title">Pagos sin CDE creado</h2>
         <p>Estos registros todavía no son comprobantes emitidos.</p>
       </div>
+      {loading && <p className="pre-cde-failure-loading" role="status">Revisando pagos sin CDE creado…</p>}
       {error && <p className="error pre-cde-failure-error" role="alert">{error}</p>}
       {items.length > 0 && (
         <div className="pre-cde-failure-grid">
@@ -4930,7 +4942,12 @@ export function viewSubtitle(view: View): string {
   return VIEW_SUBTITLES[view];
 }
 
-export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
+export function documentListEmptyMessage(
+  view: "documents" | "failures",
+  query: string,
+  preCdeFailuresLoading = false
+): string {
+  if (view === "failures" && preCdeFailuresLoading) return "Revisando pagos sin CDE creado…";
   if (view === "failures" && query.trim() === "") return "Sin fallos pendientes. Todo en orden.";
   if (view === "failures") return "No hay CDE ni pagos sin comprobante que coincidan con la búsqueda.";
   return "No hay CDE que coincidan con la búsqueda o el filtro.";
