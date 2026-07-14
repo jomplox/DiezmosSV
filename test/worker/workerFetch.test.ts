@@ -169,6 +169,16 @@ describe("Wompi document identifier reservation", () => {
 
 describe("Wompi issuance failure recovery API", () => {
   const authorization = { Authorization: "Bearer test-token" };
+  const safeOperationalError = {
+    error: "wompi_issuance_operation_failed",
+    message: "No se pudo completar la operación de emisión. Intente de nuevo."
+  };
+
+  function unsafeOperationalError(): Error {
+    return new Error(
+      `FORBIDDEN_SENTINEL Bearer sk-live-secret https://internal.example/retry\n${"x".repeat(1_200)}\n    at retryIssuance (worker.ts:1:1)`
+    );
+  }
 
   function failedWompiEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return wompiEventForReservation({
@@ -193,7 +203,10 @@ describe("Wompi issuance failure recovery API", () => {
     });
   }
 
-  function expectedFailureItem(status = "DEAD_LETTERED"): Record<string, unknown> {
+  function expectedFailureItem(
+    status = "DEAD_LETTERED",
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
     return {
       id: "wompi_failed",
       environment: "00",
@@ -208,7 +221,8 @@ describe("Wompi issuance failure recovery API", () => {
       issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
       issuance_failed_at: "2026-07-13T22:06:49.000Z",
       issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
-      reserved_numero_control: "DTE-15-M001P004-000000000000031"
+      reserved_numero_control: "DTE-15-M001P004-000000000000031",
+      ...overrides
     };
   }
 
@@ -322,6 +336,7 @@ describe("Wompi issuance failure recovery API", () => {
     expect(response.status).toBe(202);
     await expect(response.json()).resolves.toEqual({ ok: true, queued: true });
     expect(queued).toEqual([{ wompiEventId: "wompi_failed" }]);
+    expect(db.wompiEvents[0].issuance_last_attempt_at).not.toBe("2026-07-13T22:06:49.000Z");
     expect(db.audits).toContainEqual(expect.objectContaining({
       actor_id: "user_operator",
       action: "WOMPI_ISSUANCE_RETRY_QUEUED",
@@ -354,7 +369,9 @@ describe("Wompi issuance failure recovery API", () => {
     const loser = responses.find((response) => response.status === 200);
     await expect(loser?.json()).resolves.toEqual({
       queued: false,
-      failure: expectedFailureItem("RETRY_QUEUED")
+      failure: expectedFailureItem("RETRY_QUEUED", {
+        issuance_last_attempt_at: db.wompiEvents[0].issuance_last_attempt_at
+      })
     });
   });
 
@@ -385,6 +402,68 @@ describe("Wompi issuance failure recovery API", () => {
     expect(queued).toHaveLength(0);
     expect(JSON.stringify(await created.json())).not.toContain("raw_body");
     expect(JSON.stringify(await missing.json())).not.toContain("headers_json");
+  });
+
+  it("returns a stable generic error when retry queueing fails without leaking failure detail", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({ issuance_status: "FAILED", processed_at: null }));
+    const failure = unsafeOperationalError();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: { send: async () => { throw failure; } } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toEqual(safeOperationalError);
+    expect(responseText).not.toContain("FORBIDDEN_SENTINEL");
+    expect(responseText).not.toContain("https://");
+    expect(responseText).not.toContain("Bearer");
+    expect(responseText).not.toContain("sk-live");
+    expect(responseText).not.toContain("at retryIssuance");
+    expect(responseText.length).toBeLessThan(256);
+    expect(db.wompiEvents[0].issuance_status).toBe("RETRY_QUEUED");
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "WOMPI_ISSUANCE_RETRY_QUEUED" }));
+    expect(consoleError).toHaveBeenCalledWith("Wompi issuance retry failed", failure);
+  });
+
+  it("returns the same stable generic error when the failure list query rejects", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const failure = unsafeOperationalError();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const realPrepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (sql.includes("issuance_error_message IS NOT NULL")) {
+        statement.all = async () => { throw failure; };
+      }
+      return statement;
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", { headers: authorization }),
+      env(db)
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toEqual(safeOperationalError);
+    expect(responseText).not.toContain("FORBIDDEN_SENTINEL");
+    expect(responseText).not.toContain("https://");
+    expect(responseText).not.toContain("Bearer");
+    expect(responseText).not.toContain("sk-live");
+    expect(responseText).not.toContain("at retryIssuance");
+    expect(responseText.length).toBeLessThan(256);
+    expect(consoleError).toHaveBeenCalledWith("Wompi issuance failure list failed", failure);
   });
 });
 
@@ -7998,6 +8077,75 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     expect(queued).not.toContainEqual({ wompiEventId: "wompi_retry_fresh" });
   });
 
+  it("ignores historical requeue audits from before the current retry epoch", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    const eventId = "wompi_retry_new_epoch";
+    db.wompiEvents.push(stalledWompiEvent({
+      id: eventId,
+      processed_at: "2026-06-01T00:00:00.000Z",
+      issuance_status: "RETRY_QUEUED",
+      issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
+    }));
+    for (let index = 0; index < 3; index += 1) {
+      db.audits.push({
+        id: `audit_historical_${index}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_REQUEUED",
+        entity_type: "wompi_event",
+        entity_id: eventId,
+        summary: "",
+        metadata_json: "{}",
+        created_at: `2026-05-0${index + 1}T00:00:00.000Z`
+      });
+    }
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toEqual([{ wompiEventId: eventId }]);
+    expect(db.audits.filter(
+      (audit) => audit.action === "WOMPI_EVENT_REQUEUED" && audit.entity_id === eventId
+    )).toHaveLength(4);
+  });
+
+  it("caps three requeues from the current retry epoch and raises the stalled alert", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    const eventId = "wompi_retry_current_epoch";
+    db.wompiEvents.push(stalledWompiEvent({
+      id: eventId,
+      processed_at: "2026-06-01T00:00:00.000Z",
+      issuance_status: "PROCESSING",
+      issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
+    }));
+    for (let index = 0; index < 3; index += 1) {
+      db.audits.push({
+        id: `audit_current_${index}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_REQUEUED",
+        entity_type: "wompi_event",
+        entity_id: eventId,
+        summary: "",
+        metadata_json: "{}",
+        created_at: `2026-06-0${index + 1}T00:00:00.000Z`
+      });
+    }
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toHaveLength(0);
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "WOMPI_EVENT_STALLED",
+      entity_id: eventId
+    }));
+  });
+
   it("gives up after three requeues and flags the event exactly once", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
@@ -10716,7 +10864,8 @@ class Statement {
       this.sql.includes("RETURNING id")
     ) {
       this.db.wompiIssuanceRetryClaimCount += 1;
-      const wompiEventId = String(this.args[0]);
+      const [retryQueuedAt, rawWompiEventId] = this.args;
+      const wompiEventId = String(rawWompiEventId);
       const event = this.db.wompiEvents.find(
         (row) =>
           row.id === wompiEventId &&
@@ -10727,6 +10876,7 @@ class Statement {
         return null;
       }
       event.issuance_status = "RETRY_QUEUED";
+      event.issuance_last_attempt_at = String(retryQueuedAt);
       return { id: wompiEventId } as T;
     }
     if (

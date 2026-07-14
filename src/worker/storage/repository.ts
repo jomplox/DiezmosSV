@@ -172,16 +172,17 @@ export class Repository {
   }
 
   async claimWompiIssuanceRetry(wompiEventId: string): Promise<boolean> {
+    const retryQueuedAt = nowIso();
     const claimed = await this.db
       .prepare(
         `UPDATE wompi_events
-         SET issuance_status = 'RETRY_QUEUED'
+         SET issuance_status = 'RETRY_QUEUED', issuance_last_attempt_at = ?
          WHERE id = ?
            AND created_document_id IS NULL
            AND issuance_status IN ('FAILED', 'DEAD_LETTERED')
          RETURNING id`
       )
-      .bind(wompiEventId)
+      .bind(retryQueuedAt, wompiEventId)
       .first<{ id: string }>();
     return claimed !== null;
   }
@@ -1760,7 +1761,7 @@ export class Repository {
     // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
     const rows = await this.db
       .prepare(
-        `SELECT id, transaction_id, environment, received_at FROM wompi_events
+        `SELECT id, transaction_id, environment, received_at, issuance_last_attempt_at FROM wompi_events
          WHERE created_document_id IS NULL
            AND result = 'ExitosaAprobada'
            AND (
