@@ -18,6 +18,7 @@ import {
 import { assertValidDui, cleanDui, formatDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
+import { OperatorSafeIssuanceError } from "./operatorSafeIssuanceError";
 
 // Receptor fields lifted from a correlated donation intent (donor-checkout). When
 // present they replace the fallback receptor derived from the raw Wompi payload,
@@ -537,7 +538,10 @@ function validateCdeCatalogs(document: Record<string, unknown>): void {
 
 function assertCatalogField(label: string, catalogName: string, value: unknown, isValid: (value: unknown) => boolean): void {
   if (!isValid(value)) {
-    throw new Error(`CDE ${label} debe existir en el catálogo ${catalogName}: ${displayValue(value)}`);
+    throw new OperatorSafeIssuanceError(
+      "ISSUANCE_ERROR",
+      `CDE ${label} debe existir en el catálogo ${catalogName}.`
+    );
   }
 }
 
@@ -550,10 +554,6 @@ function assertOptionalCatalogField(label: string, catalogName: string, value: u
 
 function firstArrayRecord(value: unknown): Record<string, unknown> | null {
   return Array.isArray(value) && isRecord(value[0]) ? value[0] : null;
-}
-
-function displayValue(value: unknown): string {
-  return value == null ? "missing" : String(value);
 }
 
 function centsToAmount(cents: number): number {

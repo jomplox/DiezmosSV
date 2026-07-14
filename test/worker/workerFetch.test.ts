@@ -8091,6 +8091,58 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     expect(ack).toHaveBeenCalledTimes(1);
   });
 
+  it("never persists or exposes arbitrary secret-bearing queue errors", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const eventId = "wompi_unsafe_failure";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_unsafe_failure_tx"
+    }));
+    const unsafe = new Error(
+      "Bearer sk-live-secret private-victim@example.net $123.45 " +
+      "https://internal.example/retry\n    at retryIssuance (worker.ts:1:1)"
+    );
+    vi.spyOn(IssuancePipeline.prototype, "processWompiEvent").mockRejectedValue(unsafe);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { batch, retry } = deadLetterBatch(
+      { wompiEventId: eventId },
+      "diezmossv-staging-issuance-example"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    const event = db.wompiEvents.find((row) => row.id === eventId);
+    expect(event).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: "Fallo de emisión sin detalle"
+    });
+    const audit = db.audits.find(
+      (row) => row.action === "WOMPI_ISSUANCE_FAILED" && row.entity_id === eventId
+    );
+    expect(audit).toMatchObject({
+      summary: "Fallo de emisión sin detalle",
+      metadata_json: JSON.stringify({ code: "ISSUANCE_ERROR" })
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(200);
+    const responseText = await response.text();
+    expect(responseText).not.toContain("sk-live-secret");
+    expect(responseText).not.toContain("private-victim@example.net");
+    expect(responseText).not.toContain("$123.45");
+    expect(responseText).not.toContain("https://internal.example");
+    expect(responseText).not.toContain("retryIssuance");
+    expect(responseText).toContain("Fallo de emisión sin detalle");
+  });
+
   it("resumes a stored nonterminal Wompi document without changing its identifiers or JSON", async () => {
     const db = new InMemoryD1();
     db.nextSequence = 32;
