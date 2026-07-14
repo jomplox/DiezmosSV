@@ -15,6 +15,7 @@ import {
   intentThrottleSinceIso,
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
+  INTENT_THROTTLE_WINDOW_MINUTES,
   isDraftIntentBody,
   validateDatosInput,
   validateDraftIntentInput,
@@ -67,7 +68,7 @@ import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
-import { Repository } from "./storage/repository";
+import { OwnerTargetProtectedError, Repository } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
@@ -86,24 +87,22 @@ const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
-// Audit-based auth throttling. Failed logins and password-reset requests are
-// counted over a rolling window; crossing the threshold short-circuits the endpoint
-// before any credential work runs, so there is no timing oracle to distinguish
-// throttled from rejected. Login failures are keyed on (email, caller IP) so a third
-// party cannot lock out a victim's email by spamming failures from another address,
-// while real brute-force from a single IP is still capped.
+// Auth throttling uses atomic claim ledgers for aggregate login attempts and
+// password-reset requests. Account-specific login failures remain keyed on
+// (email, caller IP), so a third party cannot lock out a victim's email by spamming
+// failures from another address while brute-force traffic from one IP is still capped.
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const LOGIN_IP_ATTEMPT_LIMIT = 60;
 const PASSWORD_RESET_LIMIT = 3;
 
-// The public donation endpoints parse untrusted JSON before any validation or
-// persistence, and the per-IP throttle counts only PERSISTED intents — so oversized
-// invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
-// payloads are a few hundred bytes) so an oversized request is rejected up front.
+// Public donation endpoints parse untrusted JSON before validation and rate-limit
+// admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
+// oversized request is rejected before it can consume application resources.
 const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
+const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
 
 type BrandingLogoSlot = {
   settingKey: string;
@@ -158,8 +157,12 @@ function authThrottleExpiresIso(): string {
   return new Date(Date.now() + AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
-async function loginAttemptKey(callerIp: string | null): Promise<string> {
-  return sha256Hex(utf8Bytes(callerIp?.trim() || "unknown"));
+async function rateLimitKey(value: string | null): Promise<string> {
+  return sha256Hex(utf8Bytes(value?.trim() || "unknown"));
+}
+
+function intentThrottleExpiresIso(): string {
+  return new Date(Date.now() + INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
 async function listAuditForUser(
@@ -182,6 +185,27 @@ function resolveAppOrigin(env: Env, url: URL): string {
   return url.origin;
 }
 
+function documentResponseWithSecurityHeaders(response: Response): Response {
+  const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+  if (!contentType.includes("text/html")) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  const directives = (headers.get("Content-Security-Policy") ?? "")
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter((directive) => directive && !/^frame-ancestors(?:\s|$)/i.test(directive));
+  directives.push("frame-ancestors 'none'");
+  headers.set("Content-Security-Policy", directives.join("; "));
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Referrer-Policy", "no-referrer");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
@@ -192,7 +216,7 @@ export default {
       if (url.pathname === "/webhooks/wompi") {
         return await handleWompiWebhook(request, env);
       }
-      return env.ASSETS.fetch(request);
+      return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
         return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
@@ -248,6 +272,7 @@ export default {
     const repo = new Repository(env.DB);
     const now = nowIso();
     await repo.deleteExpiredLoginRateLimits(now);
+    await repo.deleteExpiredSecurityRateLimitClaims(now);
     const pipeline = new IssuancePipeline(env);
     try {
       await pipeline.retryDeferredTransmissions();
@@ -472,11 +497,6 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
     assertDeploymentCanCollectPayments(env);
     const clientIp = clientIpFrom(request);
-    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
-    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
-      // Short-circuit before any validation/persistence so a throttled attempt is cheap.
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
     let body: Record<string, unknown>;
     try {
       body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
@@ -495,6 +515,18 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
         return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
       }
       throw error;
+    }
+    const claimNow = nowIso();
+    const admitted = await repo.claimSecurityRateLimit(
+      "donation_intent",
+      await rateLimitKey(clientIp),
+      claimNow,
+      intentThrottleSinceIso(),
+      intentThrottleExpiresIso(),
+      INTENT_THROTTLE_LIMIT
+    );
+    if (!admitted) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     try {
       const created = draft
@@ -572,7 +604,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const { ip: callerIp } = auditContextFrom(request);
     const claimNow = nowIso();
     const accepted = await repo.claimLoginAttempt(
-      await loginAttemptKey(callerIp),
+      await rateLimitKey(callerIp),
       claimNow,
       authThrottleSinceIso(),
       authThrottleExpiresIso(),
@@ -605,24 +637,37 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse(result);
   }
 
+  if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+    await auth.logout(request);
+    return new Response(null, { status: 204 });
+  }
+
   if (url.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
     const email = String(body.email ?? "").trim();
     if (email) {
-      // Resolve the account first so the throttle can key on its id (matching
-      // PASSWORD_RESET_REQUESTED) and, crucially, run BEFORE any token is created.
+      // Resolve the account first so the atomic throttle can key on its stable id and,
+      // crucially, run before any token is created.
       // Unknown emails yield no account and fall through to the enumeration-safe
       // 200 below without ever touching the rate limiter.
       const account = await repo.getUserForLogin(email);
       if (account && !account.disabled_at) {
-        const recentRequests = await repo.countAuditEntriesSince("PASSWORD_RESET_REQUESTED", account.id, authThrottleSinceIso());
-        if (recentRequests >= PASSWORD_RESET_LIMIT) {
+        const claimNow = nowIso();
+        const admitted = await repo.claimSecurityRateLimit(
+          "password_reset",
+          await rateLimitKey(account.id),
+          claimNow,
+          authThrottleSinceIso(),
+          authThrottleExpiresIso(),
+          PASSWORD_RESET_LIMIT
+        );
+        if (!admitted) {
           return jsonResponse({ ok: true });
         }
 
         const created = await auth.createPasswordResetToken(email);
         if (created) {
-          const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
+          const link = `${resolveAppOrigin(env, url)}/#reset=${created.token}`;
           try {
             const resetBranding = await loadEmailBranding(repo, env);
             await new EmailService(
@@ -637,6 +682,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
             );
             await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
           } catch (error) {
+            await repo.invalidatePasswordResetToken(created.tokenId);
             await repo.createAudit({
               action: "PASSWORD_RESET_EMAIL_FAILED",
               entityType: "user",
@@ -1155,13 +1201,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
     }
     try {
-      await auth.resetUserPassword(passwordMatch[1], body.password);
+      await auth.resetUserPassword(passwordMatch[1], body.password, actor.role === "OWNER");
     } catch (error) {
       if (error instanceof PasswordPolicyError) {
         return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
       }
       if (error instanceof UserNotFoundError) {
         return jsonResponse({ error: "user_not_found", message: error.message }, { status: 404 });
+      }
+      if (error instanceof OwnerTargetProtectedError) {
+        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
       }
       throw error;
     }
@@ -1185,7 +1234,15 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (actor.role !== "OWNER" && (await repo.getUserRole(userMatch[1])) === "OWNER") {
       return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
     }
-    const updated = await repo.updateUser(userMatch[1], patch);
+    let updated: Record<string, unknown>;
+    try {
+      updated = await repo.updateUser(userMatch[1], patch, actor.role === "OWNER");
+    } catch (error) {
+      if (error instanceof OwnerTargetProtectedError) {
+        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
+      }
+      throw error;
+    }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
     return jsonResponse({ user: updated });
   }
@@ -1924,21 +1981,25 @@ async function handleDocumentRoute(
       return jsonResponse({ error: "outside_legal_window", deadline }, { status: 409 });
     }
     assertDeploymentAllowsAmbiente(env, document.environment);
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as Partial<InvalidationInput>;
-    if (body.tipoAnulacion === 1 && !body.codigoGeneracionR) {
+    const body = await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" });
+    if (Object.keys(body).some((key) => !INVALIDATION_REQUEST_KEYS.has(key))) {
+      return jsonResponse({ error: "invalid_invalidation_input", message: "La solicitud contiene campos no permitidos" }, { status: 400 });
+    }
+    const requested = body as { tipoAnulacion?: 1 | 2 | 3; motivoAnulacion?: string; codigoGeneracionR?: string | null };
+    if (requested.tipoAnulacion === 1 && !requested.codigoGeneracionR) {
       return jsonResponse({ error: "replacement_required_for_tipo_1" }, { status: 400 });
     }
     const config = getEmisorConfig(env);
     const input: InvalidationInput = {
-      tipoAnulacion: body.tipoAnulacion ?? 2,
-      motivoAnulacion: body.motivoAnulacion ?? "Invalidación solicitada por operador",
-      nombreResponsable: body.nombreResponsable ?? config.responsable.nombre,
-      tipDocResponsable: body.tipDocResponsable ?? config.responsable.tipoDocumento,
-      numDocResponsable: body.numDocResponsable ?? config.responsable.numeroDocumento,
-      nombreSolicita: body.nombreSolicita ?? actor.name,
-      tipDocSolicita: body.tipDocSolicita ?? config.responsable.tipoDocumento,
-      numDocSolicita: body.numDocSolicita ?? config.responsable.numeroDocumento,
-      codigoGeneracionR: body.codigoGeneracionR ?? null
+      tipoAnulacion: requested.tipoAnulacion ?? 2,
+      motivoAnulacion: requested.motivoAnulacion ?? "Invalidación solicitada por operador",
+      nombreResponsable: config.responsable.nombre,
+      tipDocResponsable: config.responsable.tipoDocumento,
+      numDocResponsable: config.responsable.numeroDocumento,
+      nombreSolicita: config.responsable.nombre,
+      tipDocSolicita: config.responsable.tipoDocumento,
+      numDocSolicita: config.responsable.numeroDocumento,
+      codigoGeneracionR: requested.codigoGeneracionR ?? null
     };
     const eventDocument = buildInvalidacionEvent(document, config, input);
     const signedJws = await signMhDocument(eventDocument, getMhCertificateXml(env), requireSecret(env, "MH_CERT_PASSWORD"));

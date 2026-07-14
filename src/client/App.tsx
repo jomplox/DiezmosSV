@@ -40,7 +40,7 @@ import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstr
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
-import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
+import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
@@ -193,7 +193,7 @@ function StartupShell() {
   );
 }
 
-export function App() {
+export function App({ initialResetToken = null }: { initialResetToken?: string | null }) {
   // Public donor-checkout routes render as standalone pages WITHOUT a session and
   // never trigger the auth bootstrap/login flow. Branch on pathname before any of
   // App's own hooks run so the hook order stays stable for a given URL (the page
@@ -582,7 +582,13 @@ export function App() {
     await api("/api/auth/password-reset/confirm", "", { method: "POST", body: { token: resetToken, password } });
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      await api("/api/auth/logout", token, { method: "POST" });
+    } catch (error) {
+      setToast(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+      return;
+    }
     localStorage.removeItem("diezmos_token");
     localStorage.removeItem("diezmos_user");
     setToken("");
@@ -1058,6 +1064,7 @@ export function App() {
   if (!token || !user) {
     return (
       <AuthScreen
+        initialResetToken={initialResetToken}
         notice={authNotice}
         branding={branding}
         onLogin={login}
@@ -3927,6 +3934,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 }
 
 function AuthScreen({
+  initialResetToken,
   notice,
   branding,
   onLogin,
@@ -3935,6 +3943,7 @@ function AuthScreen({
   onConfirmReset,
   bootstrapAvailable
 }: {
+  initialResetToken: string | null;
   notice?: string;
   branding: Branding;
   onLogin: (email: string, password: string) => Promise<void>;
@@ -3943,7 +3952,7 @@ function AuthScreen({
   onConfirmReset: (token: string, password: string) => Promise<void>;
   bootstrapAvailable: boolean;
 }) {
-  const [resetToken] = useState(() => resetTokenFromSearch(window.location.search));
+  const [resetToken] = useState(initialResetToken);
   const [mode, setMode] = useState<"login" | "bootstrap" | "reset-request" | "reset-confirm">(resetToken ? "reset-confirm" : "login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");

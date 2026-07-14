@@ -19,6 +19,15 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
+export type SecurityRateLimitScope = "donation_intent" | "password_reset";
+
+export class OwnerTargetProtectedError extends Error {
+  constructor() {
+    super("Solo un propietario puede modificar a otro propietario");
+    this.name = "OwnerTargetProtectedError";
+  }
+}
+
 // Rows one cron sweep may expire (and deactivate the Wompi links of) per tick. Caps
 // the outbound Wompi fanout so attacker-created expired intents cannot translate into
 // an unbounded burst of API calls in a single invocation; the remainder is picked up
@@ -1210,6 +1219,35 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
+  async claimSecurityRateLimit(
+    scope: SecurityRateLimitScope,
+    keyHash: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<boolean> {
+    const id = newId("rate");
+    const row = await this.db
+      .prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         )
+         SELECT ?, ?, ?, ?, ?
+          WHERE (
+            SELECT COUNT(*)
+              FROM security_rate_limit_claims
+             WHERE scope = ?
+               AND key_hash = ?
+               AND claimed_at >= ?
+          ) < ?
+         RETURNING id`
+      )
+      .bind(id, scope, keyHash, now, expiresAt, scope, keyHash, cutoff, limit)
+      .first<{ id: string }>();
+    return row !== null;
+  }
+
   async claimLoginAttempt(
     keyHash: string,
     now: string,
@@ -1250,6 +1288,13 @@ export class Repository {
   async deleteExpiredLoginRateLimits(now: string): Promise<void> {
     await this.db
       .prepare("DELETE FROM login_rate_limits WHERE expires_at <= ?")
+      .bind(now)
+      .run();
+  }
+
+  async deleteExpiredSecurityRateLimitClaims(now: string): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM security_rate_limit_claims WHERE expires_at <= ?")
       .bind(now)
       .run();
   }
@@ -1341,7 +1386,23 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
-  async updateUser(id: string, input: { role?: string; disabled?: boolean; name?: string; email?: string }): Promise<Record<string, unknown>> {
+  async revokeSession(tokenHash: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE sessions
+            SET revoked_at = ?
+          WHERE token_hash = ?
+            AND revoked_at IS NULL`
+      )
+      .bind(nowIso(), tokenHash)
+      .run();
+  }
+
+  async updateUser(
+    id: string,
+    input: { role?: string; disabled?: boolean; name?: string; email?: string },
+    allowOwnerTarget = false
+  ): Promise<Record<string, unknown>> {
     const existing = await this.db.prepare("SELECT id, email, name, role, disabled_at FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
     if (!existing) {
       throw new Error("Usuario no encontrado");
@@ -1364,7 +1425,8 @@ export class Repository {
       .prepare(
         `UPDATE users
             SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?
-          WHERE id = ?`
+          WHERE id = ?
+            AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))`
       )
       .bind(
         input.name ?? existing.name,
@@ -1372,7 +1434,8 @@ export class Repository {
         input.role ?? existing.role,
         nextDisabledAt,
         changedAt,
-        id
+        id,
+        allowOwnerTarget ? 1 : 0
       );
 
     if (invalidatesCapabilities) {
@@ -1410,10 +1473,13 @@ export class Repository {
           .bind(changedAt, id, id, nextEmail, nextDisabledAt, changedAt)
       ]);
       if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
-        throw new Error("Usuario no encontrado");
+        await this.throwUserMutationFailure(id, allowOwnerTarget);
       }
     } else {
-      await update.run();
+      const result = await update.run();
+      if (Number(result.meta?.changes ?? 0) !== 1) {
+        await this.throwUserMutationFailure(id, allowOwnerTarget);
+      }
     }
     const updated = await this.db
       .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
@@ -1423,6 +1489,14 @@ export class Repository {
       throw new Error("No se pudo leer el usuario actualizado");
     }
     return updated;
+  }
+
+  private async throwUserMutationFailure(id: string, allowOwnerTarget: boolean): Promise<never> {
+    const currentRole = await this.getUserRole(id);
+    if (!allowOwnerTarget && currentRole === "OWNER") {
+      throw new OwnerTargetProtectedError();
+    }
+    throw new Error("Usuario no encontrado");
   }
 
   async listStalledApprovedWompiEvents(cutoffIso: string): Promise<Array<Record<string, unknown>>> {
@@ -1516,11 +1590,33 @@ export class Repository {
 
   async createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
     const id = newId("reset");
-    await this.db
-      .prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-      .bind(id, userId, tokenHash, expiresAt)
-      .run();
+    const changedAt = nowIso();
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE password_reset_tokens
+              SET used_at = ?
+            WHERE user_id = ?
+              AND used_at IS NULL`
+        )
+        .bind(changedAt, userId),
+      this.db
+        .prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
+        .bind(id, userId, tokenHash, expiresAt)
+    ]);
     return id;
+  }
+
+  async invalidatePasswordResetToken(id: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE password_reset_tokens
+            SET used_at = ?
+          WHERE id = ?
+            AND used_at IS NULL`
+      )
+      .bind(nowIso(), id)
+      .run();
   }
 
   async getActivePasswordResetUser(tokenHash: string): Promise<Record<string, string> | null> {
@@ -1598,12 +1694,22 @@ export class Repository {
     return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
-  async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<boolean> {
+  async setUserPassword(
+    userId: string,
+    passwordHash: string,
+    passwordSalt: string,
+    allowOwnerTarget = false
+  ): Promise<boolean> {
     const changedAt = nowIso();
     const results = await this.db.batch([
       this.db
-        .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
-        .bind(passwordHash, passwordSalt, changedAt, userId),
+        .prepare(
+          `UPDATE users
+              SET password_hash = ?, password_salt = ?, updated_at = ?
+            WHERE id = ?
+              AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))`
+        )
+        .bind(passwordHash, passwordSalt, changedAt, userId, allowOwnerTarget ? 1 : 0),
       this.db
         .prepare(
           `UPDATE sessions
@@ -1637,7 +1743,11 @@ export class Repository {
         )
         .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
     ]);
-    return Number(results[0]?.meta?.changes ?? 0) === 1;
+    const changed = Number(results[0]?.meta?.changes ?? 0) === 1;
+    if (!changed && !allowOwnerTarget && (await this.getUserRole(userId)) === "OWNER") {
+      throw new OwnerTargetProtectedError();
+    }
+    return changed;
   }
 
   // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does

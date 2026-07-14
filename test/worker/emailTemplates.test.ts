@@ -1,12 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
+  normalizeEmailTemplateSettings,
   renderEmailTemplate,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
+import { EmailService } from "../../src/worker/services/email";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
-import type { DteDocumentRecord } from "../../src/worker/types";
+import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 function fakeRecord(): DteDocumentRecord {
   return {
@@ -129,6 +131,51 @@ describe("email template defaults", () => {
 
     expect(invalidation?.defaultBody).toContain("ante el Ministerio de Hacienda");
     expect(invalidation?.defaultBody).not.toContain("ante MH");
+  });
+});
+
+describe("email subject boundary", () => {
+  it("rejects control characters when an operator saves a subject", () => {
+    expect(() =>
+      normalizeEmailTemplateSettings({
+        dteReceipt: { subject: "Receipt\r\nBcc: attacker@example.org", body: "Body" },
+        dteInvalidation: { ...DEFAULT_EMAIL_TEMPLATES.dteInvalidation }
+      })
+    ).toThrow(/asunto/i);
+    expect(() =>
+      normalizeEmailTemplateSettings({
+        dteReceipt: { subject: `Receipt${String.fromCharCode(0x85)}hidden`, body: "Body" },
+        dteInvalidation: { ...DEFAULT_EMAIL_TEMPLATES.dteInvalidation }
+      })
+    ).toThrow(/asunto/i);
+  });
+
+  it("rejects donor control characters after placeholder rendering", () => {
+    expect(() =>
+      renderEmailTemplate(
+        { subject: "Receipt for {{donante}}", body: "Body" },
+        { ...fakeRecord(), donor_name: "Ana\r\nBcc: attacker@example.org" }
+      )
+    ).toThrow(/asunto/i);
+  });
+
+  it("rejects unsafe subjects at the common dispatch boundary before a provider call", async () => {
+    const send = vi.fn();
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    await expect(
+      service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert\r\nBcc: attacker@example.org",
+        text: "Body",
+        html: "<p>Body</p>"
+      })
+    ).rejects.toThrow(/asunto/i);
+    expect(send).not.toHaveBeenCalled();
   });
 });
 

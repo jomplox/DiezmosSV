@@ -2,7 +2,7 @@ import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
-import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
+import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
 export interface EmailDeliveryResult {
@@ -207,6 +207,7 @@ export class EmailService {
   }
 
   private async dispatch(payload: EmailPayload, cfAttachments: CloudflareEmailAttachment[]): Promise<unknown> {
+    assertSafeEmailSubject(payload.subject);
     if (isMockMode(this.env)) {
       return { mock: true, toEmail: payload.to, subject: payload.subject };
     }
