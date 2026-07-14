@@ -29,6 +29,10 @@ describe("viewSubtitle", () => {
 });
 
 describe("documentListEmptyMessage", () => {
+  it("does not claim everything is fine while pre-CDE failures are still loading", () => {
+    expect(documentListEmptyMessage("failures", "", true)).toBe("Revisando pagos sin CDE creado…");
+  });
+
   it("reassures the user in the failures view when there is no query", () => {
     expect(documentListEmptyMessage("failures", "")).toBe("Sin fallos pendientes. Todo en orden.");
   });
