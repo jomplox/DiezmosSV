@@ -113,6 +113,8 @@ export class AuthService {
       userId: row.id,
       expectedPasswordHash,
       expectedPasswordSalt,
+      expectedEmail: row.email,
+      expectedAuthGeneration: Number(row.auth_generation ?? 0),
       tokenHash: await sha256Hex(token),
       expiresAt
     });
@@ -129,7 +131,18 @@ export class AuthService {
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60_000).toISOString();
-    const tokenId = await this.repo.createPasswordResetToken(row.id, await sha256Hex(token), expiresAt);
+    const tokenId = await this.repo.createPasswordResetToken(
+      row.id,
+      await sha256Hex(token),
+      expiresAt,
+      row.email,
+      Number(row.auth_generation ?? 0),
+      row.password_hash,
+      row.password_salt
+    );
+    if (!tokenId) {
+      return null;
+    }
     return { user: publicUser(row), token, tokenId, expiresAt };
   }
 

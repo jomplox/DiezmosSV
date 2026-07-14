@@ -18,9 +18,11 @@ import { WompiApiError, WompiApiService } from "./wompiApi";
 // are stored as integer cents; the DTE side already rounds the same way.
 const MIN_AMOUNT_CENTS = 100; // $1.00
 const MAX_AMOUNT_CENTS = 500_000; // $5,000.00
-const MAX_FREE_DOCUMENT = 50;
+const MAX_FREE_DOCUMENT = 20;
 const MIN_IDENTITY_DOCUMENT = 5; // pasaporte (03) / carnet de residente (02)
-const MAX_IDENTITY_DOCUMENT = 30;
+const MAX_IDENTITY_DOCUMENT = 20;
+const MIN_PHONE = 8;
+const MAX_PHONE = 30;
 const MAX_RAZON_SOCIAL = 200;
 // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters. The intent
 // limit must never exceed it: a longer complemento would pass here, take the
@@ -170,12 +172,12 @@ export function validateDonorData(body: Record<string, unknown>): ValidatedDonor
     donorDocument = formatNit(rawDocument); // stored canonically as XXXX-XXXXXX-XXX-X
   } else if (donorDocumentType === "03" || donorDocumentType === "02") {
     if (rawDocument.length < MIN_IDENTITY_DOCUMENT || rawDocument.length > MAX_IDENTITY_DOCUMENT) {
-      throw new IntentValidationError("invalid_identity_document", "Ingrese su documento (entre 5 y 30 caracteres).");
+      throw new IntentValidationError("invalid_identity_document", "Ingrese su documento (entre 5 y 20 caracteres).");
     }
     donorDocument = rawDocument.toUpperCase(); // stored uppercase
   } else {
     if (!rawDocument || rawDocument.length > MAX_FREE_DOCUMENT) {
-      throw new IntentValidationError("invalid_document", "Ingrese el documento del donante (máximo 50 caracteres).");
+      throw new IntentValidationError("invalid_document", "Ingrese el documento del donante (máximo 20 caracteres).");
     }
     donorDocument = rawDocument;
   }
@@ -193,6 +195,9 @@ export function validateDonorData(body: Record<string, unknown>): ValidatedDonor
   }
 
   const donorPhone = requireString(body.donorPhone) || null;
+  if (donorPhone && (donorPhone.length < MIN_PHONE || donorPhone.length > MAX_PHONE)) {
+    throw new IntentValidationError("invalid_phone", "Ingrese un teléfono de 8 a 30 caracteres.");
+  }
 
   const direccionDepartamento = requireString(body.departamento);
   if (!isCat012DepartmentCode(direccionDepartamento)) {

@@ -22,13 +22,13 @@ describe("CRM contacts export UI contract", () => {
     expect(appSource).toContain('runAction("export-contacts"');
     // Auth-header fetch → blob → anchor download, mirroring the F960 pattern.
     expect(appSource).toContain("Authorization: `Bearer ${token}`");
-    expect(appSource).toContain('filenameFromDisposition(response.headers.get("Content-Disposition"), "contactos-donantes.csv")');
+    expect(appSource).toContain('filenameFromDisposition(contentDisposition, "contactos-donantes.csv")');
     expect(appSource).toContain('setToast("Contactos exportados")');
   });
 
   it("loads the active ambiente when admins open the exports view", () => {
     expect(appSource).toContain('view === "exports" && can(user, "ADMIN")');
-    expect(appSource).toContain('api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)');
+    expect(appSource).toContain('accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")');
     expect(appSource).toContain("setEmissionEnvironment(environmentResult.emissionEnvironment)");
   });
 

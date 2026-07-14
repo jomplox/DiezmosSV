@@ -1,25 +1,22 @@
-import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { assertPrivateEnvFile } from "./assert-private-env-file.mjs";
 
 const configured = process.env.DIEZMOSSV_ENV_FILE?.trim();
 const envFile = configured
   ? (isAbsolute(configured) ? configured : resolve(process.cwd(), configured))
   : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "env", "local-operator.env");
 
-let stat;
 try {
-  stat = lstatSync(envFile);
+  // The checked-in CI fixture contains mock-only values and is intentionally 0644 so
+  // Git can reproduce it. No other readable path (including another .dev.vars.ci in
+  // a different cwd) receives this exception.
+  const ciFixture = fileURLToPath(new URL("../.dev.vars.ci", import.meta.url));
+  assertPrivateEnvFile(envFile, { allowReadableFixturePath: ciFixture });
 } catch (error) {
-  if (error?.code === "ENOENT") {
-    console.error(`Environment file not found: ${envFile}`);
-    process.exit(1);
-  }
-  throw error;
-}
-if (!stat.isFile() || stat.isSymbolicLink()) {
-  console.error(`Environment path must be a regular non-symlink file: ${envFile}`);
+  console.error(error instanceof Error ? error.message : String(error));
   process.exit(1);
 }
 

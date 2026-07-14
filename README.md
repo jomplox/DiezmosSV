@@ -221,7 +221,7 @@ MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
 
 MH_USER_TEST="..."
 MH_PASSWORD_TEST="..."
-# Optional deployment-owned fallback when Cloudflare Email Service is limited to verified destination addresses.
+# Optional deployment-owned alternative selected before dispatch when Cloudflare cannot address arbitrary recipients.
 # Must be an absolute HTTPS URL without embedded credentials; never set it from the credentials panel.
 # EMAIL_PROVIDER_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="..."
@@ -293,14 +293,16 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
-npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned fallback
-npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
+npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
-# 4 - Apply migrations and deploy the Worker + ASSETS
+# 4 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
+export FISCAL_CUTOVER_QUIESCED=1
 npm run cf:migrate:staging
 npm run cf:deploy:staging
+unset FISCAL_CUTOVER_QUIESCED
 
 # 5 - Run the deployed edge smoke test
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
@@ -343,14 +345,16 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
-npx wrangler secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned fallback
-npx wrangler secret put EMAIL_API_KEY --env production   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned alternative
+npx wrangler secret put EMAIL_API_KEY --env production   # optional alternative-provider token
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
 
-# 3 - Apply migrations and deploy after staging approval
+# 3 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
+export FISCAL_CUTOVER_QUIESCED=1
 npm run cf:migrate:prod
 npm run cf:deploy:prod
+unset FISCAL_CUTOVER_QUIESCED
 ```
 
 Do one controlled low-value production issuance with live monitoring before enabling normal volume.
@@ -375,8 +379,8 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
-| `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional fallback transactional provider used when Cloudflare Email Service rejects arbitrary donor recipients. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
-| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service and the HTTP fallback. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml`. |
+| `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional alternative transactional provider selected before dispatch when Cloudflare arbitrary-recipient delivery is not enabled. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
+| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service or the selected HTTP provider. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml` when Cloudflare is selected. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
@@ -398,12 +402,13 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
-Remote staging/production email delivery uses Cloudflare Email Service first. The binding is declared
-as `send_email` in `wrangler.toml` and is restricted to the configured `EMAIL_FROM` sender. To send
-receipts to arbitrary donor addresses, the Cloudflare account must have Email Sending enabled for the
-sender domain; otherwise Cloudflare may only permit delivery to verified destination addresses. If
-Cloudflare returns `destination address is not a verified address`, the Worker can fall back to
-`EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` so donors do not need to be pre-verified in Cloudflare.
+Remote staging/production email delivery selects exactly one provider before dispatch. When both are
+configured, set `EMAIL_ARBITRARY_RECIPIENTS=true` only after the Cloudflare `send_email` binding can
+reach arbitrary donor addresses; that selects Cloudflare, while an unset marker selects the configured
+HTTP provider. If Cloudflare is the only configured provider, it remains the sole dispatch path, but
+the credential status does not call arbitrary-recipient delivery ready until the marker is set. The
+Worker never retries the same receipt through a second provider after a dispatch attempt, because an
+error may arrive after the first provider accepted it.
 
 `EMAIL_PROVIDER_URL` is deployment-owned. Set it with Wrangler or the Cloudflare deployment
 configuration, not from the application credentials panel. After the release is deployed and the
@@ -412,7 +417,7 @@ each deployment. This repository change does not modify staging or production co
 
 The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
 credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
-sender/fallback token. It shows the deployment-owned fallback destination as read-only status.
+sender/alternative-provider token. It shows the deployment-owned alternative destination as read-only status.
 Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or

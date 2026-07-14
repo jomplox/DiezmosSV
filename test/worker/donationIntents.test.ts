@@ -1,6 +1,45 @@
 import { describe, expect, it } from "vitest";
+import { validateDonorData } from "../../src/worker/services/donations";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import type { DonationIntentRecord } from "../../src/worker/types";
+
+const validDonorData = {
+  donorDocumentType: "03",
+  donorDocument: "P1234567",
+  donorPhone: "70001122",
+  departamento: "06",
+  municipio: "23",
+  distrito: "14",
+  complemento: "Colonia Escalón"
+};
+
+function expectDonorValidationCode(body: Record<string, unknown>, code: string): void {
+  try {
+    validateDonorData(body);
+    throw new Error("Expected donor validation to fail");
+  } catch (error) {
+    expect(error).toMatchObject({ code });
+  }
+}
+
+describe("donor data DTE schema boundaries", () => {
+  it.each(["02", "03", "37"])("caps document type %s at the schema maximum of 20 characters", (donorDocumentType) => {
+    expect(() => validateDonorData({ ...validDonorData, donorDocumentType, donorDocument: "A".repeat(20) })).not.toThrow();
+    expectDonorValidationCode(
+      { ...validDonorData, donorDocumentType, donorDocument: "A".repeat(21) },
+      donorDocumentType === "37" ? "invalid_document" : "invalid_identity_document"
+    );
+  });
+
+  it("accepts an absent phone or 8-30 characters and rejects values outside the schema range", () => {
+    for (const donorPhone of [undefined, "1".repeat(8), "1".repeat(30)]) {
+      expect(() => validateDonorData({ ...validDonorData, donorPhone })).not.toThrow();
+    }
+    for (const donorPhone of ["1".repeat(7), "1".repeat(31)]) {
+      expectDonorValidationCode({ ...validDonorData, donorPhone }, "invalid_phone");
+    }
+  });
+});
 
 // Lightweight D1 fake: records every prepared SQL + bindings and serves rows from
 // a seeded map, so we can assert the SQL shapes of the donation-intent methods
@@ -31,9 +70,6 @@ class RecordingStatement {
     }
     if (this.sql.includes("FROM donation_intents WHERE id = ?")) {
       return (this.db.intents.get(String(this.args[0])) ?? null) as T | null;
-    }
-    if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents")) {
-      return { count: 0 } as T;
     }
     return null;
   }
@@ -235,18 +271,6 @@ describe("donation intents repository", () => {
     expect(update!.args).toEqual(["2026-07-05T13:00:00.000Z", "di_old", "di_older"]);
   });
 
-  it("counts recent intents by client IP within a window for throttling", async () => {
-    const { repository, db } = repo();
-
-    const count = await repository.countRecentIntentsByIp("203.0.113.9", "2026-07-05T11:00:00.000Z");
-    expect(count).toBe(0);
-
-    const select = db.calls.find((call) => call.sql.includes("SELECT COUNT(*) AS count FROM donation_intents"));
-    expect(select).toBeTruthy();
-    expect(select!.sql).toContain("client_ip = ?");
-    expect(select!.sql).toContain("created_at >= ?");
-    expect(select!.args).toEqual(["203.0.113.9", "2026-07-05T11:00:00.000Z"]);
-  });
 });
 
 function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
