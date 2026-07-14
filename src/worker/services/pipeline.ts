@@ -67,6 +67,7 @@ const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
 // una alerta operativa MH_UNAVAILABLE (una sola vez por documento, vía dedupe).
 const DEFERRED_ALERT_AGE_MS = 60 * 60 * 1000;
+const DTE_TRANSMISSION_LEASE_MS = 5 * 60 * 1000;
 
 export class IssuancePipeline {
   private readonly repo: Repository;
@@ -273,47 +274,8 @@ export class IssuancePipeline {
     if (!claimed) {
       throw new RejectedWompiRetryConflictError();
     }
-    let mhResult: MhResponse;
-    try {
-      mhResult = await this.mh.transmitDte({
-        ambiente: record.environment,
-        version: 2,
-        tipoDte: "15",
-        codigoGeneracion: identifiers.codigoGeneracion,
-        signedJws
-      });
-    } catch (error) {
-      if (error instanceof MhUnavailableError) {
-        // MH cayó durante el reintento del operador: el CDE reconstruido (forma
-        // normal, ya firmado) se difiere y el cron lo transmitirá al volver MH.
-        const reason = String(error.message);
-        await this.deferTransmission(record.id, reason);
-        return { accepted: false, estado: "TRANSMISION_DIFERIDA", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
-      }
-      throw error;
-    }
-    await this.repo.updateDocumentMhResult(record.id, {
-      status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-      sello: mhResult.selloRecibido,
-      mhEstado: mhResult.estado,
-      observaciones: mhResult.observaciones,
-      acceptedAt: mhResult.accepted ? nowIso() : null
-    });
-    const updated = (await this.repo.getDteDocument(record.id)) ?? record;
-    await this.repo.createAudit({
-      action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-      entityType: "dte_document",
-      entityId: updated.id,
-      summary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
-      metadata: mhResult.raw
-    });
-    if (mhResult.accepted) {
-      if (intent) {
-        await this.completeIntent(intent, updated.id);
-      }
-      await this.emailReceipt(updated);
-    }
-    return mhResult;
+    const updated = await this.processDteDocument(record.id);
+    return mhResponseFromDocument(updated);
   }
 
   async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
@@ -336,12 +298,24 @@ export class IssuancePipeline {
     const summary = cdeDocumentSummary(document);
     const wompiBacked = Boolean(record.wompi_event_id);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
+    let transmissionClaimed = false;
     try {
       let signedJws = record.signed_jws;
       if (!signedJws) {
         assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
         signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-        await this.repo.updateDocumentSigned(record.id, signedJws);
+      }
+      const staleBefore = new Date(Date.now() - DTE_TRANSMISSION_LEASE_MS).toISOString();
+      transmissionClaimed = await this.repo.claimDteTransmission(record.id, signedJws, staleBefore);
+      if (!transmissionClaimed) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (!current) {
+          throw new Error(`Documento DTE ${record.id} no encontrado después de reclamar transmisión`);
+        }
+        if (current.status === "ACCEPTED" && current.wompi_event_id) {
+          await this.finalizeAcceptedWompiDocument(current);
+        }
+        return current;
       }
       const mhResult = await this.mh.transmitDte({
         ambiente: summary.environment,
@@ -350,13 +324,23 @@ export class IssuancePipeline {
         codigoGeneracion: summary.codigoGeneracion,
         signedJws
       });
-      await this.repo.updateDocumentMhResult(record.id, {
+      const resultStored = await this.repo.updateDocumentMhResult(record.id, {
         status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
         sello: mhResult.selloRecibido,
         mhEstado: mhResult.estado,
         observaciones: mhResult.observaciones,
         acceptedAt: mhResult.accepted ? nowIso() : null
       });
+      if (!resultStored) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (!current) {
+          throw new Error(`Documento DTE ${record.id} no encontrado después de transmitir`);
+        }
+        if (current.status === "ACCEPTED" && current.wompi_event_id) {
+          await this.finalizeAcceptedWompiDocument(current);
+        }
+        return current;
+      }
       record = (await this.repo.getDteDocument(record.id)) ?? record;
       if (mhResult.accepted && wompiBacked) {
         await this.finalizeAcceptedWompiDocument(record, mhResult.raw);
@@ -378,7 +362,7 @@ export class IssuancePipeline {
       }
       return record;
     } catch (error) {
-      if (error instanceof MhUnavailableError) {
+      if (error instanceof MhUnavailableError && transmissionClaimed) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
         return this.deferTransmission(record.id, String(error.message));
       }
@@ -393,13 +377,29 @@ export class IssuancePipeline {
         }
         return latest;
       }
-      await this.repo.updateDocumentMhResult(record.id, {
-        status: "FAILED",
-        sello: null,
-        mhEstado: wompiBacked ? "PIPELINE_ERROR" : "ADVANCED_PIPELINE_ERROR",
-        observaciones: [error instanceof Error ? error.message : String(error)]
-      });
+      // A deferred row whose local validation/signing still cannot proceed must
+      // remain in the deferred sweep. Configuration can be corrected without
+      // converting the recoverable CDE into an operator-facing FAILED record.
+      if (!transmissionClaimed && record.status === "SIGNED" && record.transmission_deferred_at) {
+        throw error;
+      }
       const failureMessage = error instanceof Error ? error.message : String(error);
+      const failureStored = transmissionClaimed
+        ? await this.repo.updateDocumentMhResult(record.id, {
+            status: "FAILED",
+            sello: null,
+            mhEstado: wompiBacked ? "PIPELINE_ERROR" : "ADVANCED_PIPELINE_ERROR",
+            observaciones: [failureMessage],
+            acceptedAt: null
+          })
+        : await this.repo.markDocumentPipelineFailure(record.id, {
+            mhEstado: wompiBacked ? "PIPELINE_ERROR" : "ADVANCED_PIPELINE_ERROR",
+            observaciones: [failureMessage]
+          });
+      if (!failureStored) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (current) return current;
+      }
       await this.repo.createAudit({
         action: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
@@ -427,61 +427,21 @@ export class IssuancePipeline {
   // cron de 15 minutos reintenta la transmisión hasta obtener el sello definitivo
   // (o un rechazo real de MH, que sigue el flujo normal de rechazados).
   async retryDeferredTransmissions(): Promise<{ transmitted: number; rejected: number; pending: number }> {
-    const docs = await this.repo.listDeferredTransmissionDocuments();
+    const staleBefore = new Date(Date.now() - DTE_TRANSMISSION_LEASE_MS).toISOString();
+    const docs = await this.repo.listDeferredTransmissionDocuments(staleBefore);
     let transmitted = 0;
     let rejected = 0;
     let pending = 0;
     for (const record of docs) {
       // Cada documento se reintenta aislado: un fallo no debe abortar el barrido.
       try {
-        assertDeploymentAllowsAmbiente(this.env, record.environment);
-        let signedJws = record.signed_jws;
-        if (!signedJws) {
-          // Defensivo: todos los caminos que difieren firman antes. RS512/PKCS1 es
-          // determinista, así que re-firmar el mismo plain_json es idempotente.
-          const document = JSON.parse(record.plain_json) as Record<string, unknown>;
-          assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
-          signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-        }
-        const mhResult = await this.mh.transmitDte({
-          ambiente: record.environment,
-          version: 2,
-          tipoDte: record.tipo_dte || "15",
-          codigoGeneracion: record.codigo_generacion,
-          signedJws
-        });
-        if (!record.signed_jws) {
-          await this.repo.updateDocumentSigned(record.id, signedJws);
-        }
-        // El status sale de SIGNED (ACCEPTED/REJECTED) y con eso el documento deja de
-        // aparecer en listDeferredTransmissionDocuments; transmission_deferred_at se
-        // conserva a propósito como evidencia histórica de que estuvo diferido.
-        await this.repo.updateDocumentMhResult(record.id, {
-          status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-          sello: mhResult.selloRecibido,
-          mhEstado: mhResult.estado,
-          observaciones: mhResult.observaciones,
-          acceptedAt: mhResult.accepted ? nowIso() : null
-        });
-        const updated = (await this.repo.getDteDocument(record.id)) ?? record;
-        await this.repo.createAudit({
-          action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-          entityType: "dte_document",
-          entityId: updated.id,
-          summary: `${updated.numero_control} ${mhResult.estado} (transmisión diferida)`,
-          metadata: mhResult.raw
-        });
-        if (mhResult.accepted) {
+        const updated = await this.processDteDocument(record.id);
+        if (updated.status === "ACCEPTED") {
           transmitted += 1;
-          // La aceptación REAL de MH completa la intención correlacionada y envía el
-          // comprobante DEFINITIVO (el PDF ahora lleva el Sello de Recepción).
-          const intent = await this.correlateIntentForDocument(updated);
-          if (intent) {
-            await this.completeIntent(intent, updated.id);
-          }
-          await this.emailReceipt(updated);
-        } else {
+        } else if (updated.status === "REJECTED") {
           rejected += 1;
+        } else {
+          pending += 1;
         }
       } catch (error) {
         // MH sigue sin responder (u otro fallo transitorio): el documento permanece
@@ -502,7 +462,8 @@ export class IssuancePipeline {
   // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
   // del documento más antiguo la dispara UNA sola vez por atasco.
   private async alertOnDeferredBacklog(): Promise<void> {
-    const remaining = await this.repo.listDeferredTransmissionDocuments();
+    const staleBefore = new Date(Date.now() - DTE_TRANSMISSION_LEASE_MS).toISOString();
+    const remaining = await this.repo.listDeferredTransmissionDocuments(staleBefore);
     const cutoff = new Date(Date.now() - DEFERRED_ALERT_AGE_MS).toISOString();
     // La antigüedad se mide desde el MOMENTO del deferimiento, no desde la creación.
     const overdue = remaining.filter((record) => String(record.transmission_deferred_at ?? record.created_at) < cutoff);
@@ -522,12 +483,15 @@ export class IssuancePipeline {
   // inmediato el comprobante TRANSITORIO — pdf.ts imprime "TRANSITORIO" como sello
   // cuando sello_recibido es null — y el cron reintenta la transmisión.
   private async deferTransmission(documentId: string, reason: string): Promise<DteDocumentRecord> {
-    await this.repo.markDocumentTransmissionDeferred(documentId, reason);
+    const deferred = await this.repo.markDocumentTransmissionDeferred(documentId, reason);
     const updated = await this.repo.getDteDocument(documentId);
     if (!updated) {
       throw new Error(`Documento DTE ${documentId} no encontrado al diferir su transmisión`);
     }
-    await this.repo.createAudit({
+    if (!deferred) {
+      return updated;
+    }
+    await this.repo.createAuditIfAbsent({
       action: "DTE_TRANSMISSION_DEFERRED",
       entityType: "dte_document",
       entityId: updated.id,
@@ -793,4 +757,34 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
     codigoGeneracion: identificacion.codigoGeneracion,
     numeroControl: identificacion.numeroControl
   };
+}
+
+function mhResponseFromDocument(record: DteDocumentRecord): MhResponse {
+  if (record.status === "SIGNED" && record.transmission_deferred_at) {
+    return {
+      accepted: false,
+      estado: "TRANSMISION_DIFERIDA",
+      selloRecibido: null,
+      observaciones: parseMhObservaciones(record.mh_observaciones_json),
+      raw: { deferred: true }
+    };
+  }
+  return {
+    accepted: record.status === "ACCEPTED",
+    estado: record.mh_estado ?? record.status,
+    selloRecibido: record.sello_recibido,
+    observaciones: parseMhObservaciones(record.mh_observaciones_json),
+    raw: { stored: true }
+  };
+}
+
+function parseMhObservaciones(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }

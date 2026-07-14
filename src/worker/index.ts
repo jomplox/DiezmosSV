@@ -1968,20 +1968,22 @@ async function handleDocumentRoute(
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }
-    const result = await new MhClient(env).transmitDte({
-      ambiente: document.environment,
-      version: 2,
-      tipoDte: document.tipo_dte,
-      codigoGeneracion: document.codigo_generacion,
-      signedJws: document.signed_jws
-    });
-    await repo.updateDocumentMhResult(document.id, {
-      status: result.accepted ? "ACCEPTED" : "REJECTED",
-      sello: result.selloRecibido,
-      mhEstado: result.estado,
-      observaciones: result.observaciones,
-      acceptedAt: result.accepted ? nowIso() : null
-    });
+    const updated = await new IssuancePipeline(env).processDteDocument(document.id);
+    if (updated.status === "TRANSMITTED") {
+      return jsonResponse(
+        { error: "document_retry_in_progress", message: "Ya hay una transmisión en curso para este documento." },
+        { status: 409 }
+      );
+    }
+    const result: MhResponse = {
+      accepted: updated.status === "ACCEPTED",
+      estado: updated.status === "SIGNED" && updated.transmission_deferred_at
+        ? "TRANSMISION_DIFERIDA"
+        : updated.mh_estado ?? updated.status,
+      selloRecibido: updated.sello_recibido,
+      observaciones: JSON.parse(updated.mh_observaciones_json) as string[],
+      raw: { stored: true }
+    };
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRIED", entityType: "dte_document", entityId: document.id, summary: result.estado, metadata: result.raw });
     return jsonResponse({ ok: true, result });
   }
