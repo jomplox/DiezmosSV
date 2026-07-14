@@ -695,6 +695,45 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse({ intents: await repo.listRecentDonationIntents(50) });
   }
 
+  if (url.pathname === "/api/wompi-events/issuance-failures" && request.method === "GET") {
+    requireRole(user, "VIEWER");
+    return jsonResponse({ failures: await repo.listWompiIssuanceFailures(100) });
+  }
+
+  const wompiIssuanceRetryMatch = url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/retry$/);
+  if (wompiIssuanceRetryMatch && request.method === "POST") {
+    const actor = requireRole(user, "OPERATOR");
+    const wompiEventId = wompiIssuanceRetryMatch[1];
+    const claimed = await repo.claimWompiIssuanceRetry(wompiEventId);
+    if (!claimed) {
+      const current = await repo.getWompiIssuanceFailureById(wompiEventId);
+      if (!current) {
+        return notFound();
+      }
+      if (current.issuance_status === "RETRY_QUEUED" || current.issuance_status === "PROCESSING") {
+        return jsonResponse({ queued: false, failure: current });
+      }
+      return jsonResponse(
+        {
+          error: "wompi_issuance_retry_not_available",
+          message: "El evento Wompi ya no está disponible para reintento.",
+          failure: current
+        },
+        { status: 409 }
+      );
+    }
+    await env.ISSUANCE_QUEUE.send({ wompiEventId });
+    await repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "WOMPI_ISSUANCE_RETRY_QUEUED",
+      entityType: "wompi_event",
+      entityId: wompiEventId,
+      summary: "Reintento de creación de CDE en cola"
+    });
+    return jsonResponse({ ok: true, queued: true }, { status: 202 });
+  }
+
   if (url.pathname === "/api/credentials") {
     return handleCredentialsRoute(request, env, repo, user);
   }
