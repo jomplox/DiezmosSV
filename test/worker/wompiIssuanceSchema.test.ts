@@ -261,6 +261,86 @@ describe("Wompi issuance reservation migration", () => {
     )).resolves.toBe(false);
   });
 
+  it("does not revive a current attempt after its DLQ wins the stalled-sweep race", async () => {
+    const repo = new Repository(sqliteD1(database));
+    database.prepare(
+      `UPDATE wompi_events
+       SET issuance_status = 'PROCESSING',
+           issuance_attempt_id = 'attempt-dlq-winner',
+           issuance_last_attempt_at = '2026-07-13T18:00:00.000Z'
+       WHERE id = 'wompi_a'`
+    ).run();
+
+    await expect(repo.markWompiIssuanceDeadLettered(
+      "wompi_a",
+      "attempt-dlq-winner"
+    )).resolves.toBe(true);
+    await expect(repo.claimStalledWompiIssuanceAttempt(
+      "wompi_a",
+      "attempt-dlq-winner",
+      "2026-07-13T19:00:00.000Z"
+    )).resolves.toBeNull();
+
+    expect(database.prepare(
+      `SELECT issuance_status, issuance_attempt_id, processed_at
+       FROM wompi_events WHERE id = 'wompi_a'`
+    ).get()).toEqual({
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_id: "attempt-dlq-winner",
+      processed_at: expect.any(String)
+    });
+  });
+
+  it("claims only unprocessed status-null work through the null-attempt legacy path", async () => {
+    insertApprovedWompiEvent(database, "wompi_processed_legacy");
+    insertApprovedWompiEvent(database, "wompi_eligible_legacy");
+    database.prepare(
+      `UPDATE wompi_events
+       SET received_at = '2026-07-13T18:00:00.000Z'
+       WHERE id IN ('wompi_a', 'wompi_b', 'wompi_processed_legacy', 'wompi_eligible_legacy')`
+    ).run();
+    database.prepare(
+      `UPDATE wompi_events
+       SET issuance_status = 'FAILED',
+           issuance_attempt_id = NULL,
+           issuance_last_attempt_at = '2026-07-13T18:00:00.000Z'
+       WHERE id = 'wompi_b'`
+    ).run();
+    database.prepare(
+      `UPDATE wompi_events
+       SET processed_at = '2026-07-13T18:30:00.000Z'
+       WHERE id = 'wompi_processed_legacy'`
+    ).run();
+    const repo = new Repository(sqliteD1(database));
+
+    const stalled = await repo.listStalledApprovedWompiEvents(
+      "2026-07-13T19:00:00.000Z"
+    );
+    const failedClaim = await repo.claimStalledWompiIssuanceAttempt(
+      "wompi_b",
+      null,
+      "2026-07-13T19:00:00.000Z"
+    );
+    const processedClaim = await repo.claimStalledWompiIssuanceAttempt(
+      "wompi_processed_legacy",
+      null,
+      "2026-07-13T19:00:00.000Z"
+    );
+    const eligibleClaim = await repo.claimStalledWompiIssuanceAttempt(
+      "wompi_eligible_legacy",
+      null,
+      "2026-07-13T19:00:00.000Z"
+    );
+
+    expect(stalled.map((event) => event.id).sort()).toEqual([
+      "wompi_a",
+      "wompi_eligible_legacy"
+    ]);
+    expect(failedClaim).toBeNull();
+    expect(processedClaim).toBeNull();
+    expect(eligibleClaim).toEqual(expect.any(String));
+  });
+
   it("fences an expired DTE claimant from storing a result or deferring a newer lease", async () => {
     insertAcceptedDocument(database, "wompi_a", "dte_fenced_claim");
     database.prepare(

@@ -8701,16 +8701,19 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       id: "wompi_retry_stale",
       processed_at: "2026-01-01T00:05:00.000Z",
       issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-retry-stale",
       issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
     }));
     db.wompiEvents.push(stalledWompiEvent({
       id: "wompi_processing_stale",
       issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-processing-stale",
       issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
     }));
     db.wompiEvents.push(stalledWompiEvent({
       id: "wompi_retry_fresh",
       issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-retry-fresh",
       issuance_last_attempt_at: new Date().toISOString()
     }));
 
@@ -8734,6 +8737,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       id: eventId,
       processed_at: "2026-06-01T00:00:00.000Z",
       issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-new-epoch",
       issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
     }));
     for (let index = 0; index < 3; index += 1) {
@@ -8771,6 +8775,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       id: eventId,
       processed_at: "2026-06-01T00:00:00.000Z",
       issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-current-epoch",
       issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
     }));
     for (let index = 0; index < 3; index += 1) {
@@ -12233,8 +12238,7 @@ class Statement {
           (
             (
               !event.processed_at &&
-              event.issuance_status !== "RETRY_QUEUED" &&
-              event.issuance_status !== "PROCESSING" &&
+              event.issuance_status == null &&
               String(event.received_at) < receivedCutoff
             ) ||
             (
@@ -13240,10 +13244,15 @@ class Statement {
       const attemptMatches = guardsExistingAttempt
         ? event?.issuance_attempt_id === expectedAttempt
         : event?.issuance_attempt_id == null;
+      const statusEligible = guardsExistingAttempt
+        ? event?.issuance_status === "RETRY_QUEUED" || event?.issuance_status === "PROCESSING"
+        : event?.issuance_status == null;
       if (
         event &&
         event.created_document_id == null &&
         attemptMatches &&
+        (guardsExistingAttempt || event.processed_at == null) &&
+        statusEligible &&
         String(event.issuance_last_attempt_at ?? event.received_at) < staleBefore
       ) {
         event.issuance_status = "RETRY_QUEUED";

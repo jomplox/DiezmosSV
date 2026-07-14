@@ -265,6 +265,9 @@ export class Repository {
   ): Promise<string | null> {
     const attemptId = newId("issuance_attempt");
     const queuedAt = nowIso();
+    // Operator retries from DEAD_LETTERED keep processed_at as historical evidence,
+    // so tokenized work is fenced by attempt + eligible status. Only the legacy
+    // null-token path also requires processed_at to remain null.
     const statement = currentAttemptId
       ? this.db.prepare(
           `UPDATE wompi_events
@@ -274,6 +277,7 @@ export class Repository {
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_attempt_id = ?
+             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
              AND COALESCE(issuance_last_attempt_at, received_at) < ?`
         ).bind(attemptId, queuedAt, wompiEventId, currentAttemptId, staleBefore)
       : this.db.prepare(
@@ -284,6 +288,8 @@ export class Repository {
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_attempt_id IS NULL
+             AND processed_at IS NULL
+             AND issuance_status IS NULL
              AND COALESCE(issuance_last_attempt_at, received_at) < ?`
         ).bind(attemptId, queuedAt, wompiEventId, staleBefore);
     const result = await statement.run();
@@ -2082,7 +2088,7 @@ export class Repository {
            AND (
              (
                processed_at IS NULL
-               AND (issuance_status IS NULL OR issuance_status NOT IN ('RETRY_QUEUED', 'PROCESSING'))
+               AND issuance_status IS NULL
                AND received_at < ?
              )
              OR (
