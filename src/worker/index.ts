@@ -306,6 +306,11 @@ export default {
       console.error("Deferred transmission retry failed", error);
     }
     try {
+      await pipeline.retryAcceptedWompiFinalizations();
+    } catch (error) {
+      console.error("Accepted Wompi finalization retry failed", error);
+    }
+    try {
       await pipeline.sweepStalledWompiEvents();
     } catch (error) {
       console.error("Stalled Wompi event sweep failed", error);

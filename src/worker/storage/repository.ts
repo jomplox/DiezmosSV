@@ -4,6 +4,7 @@ import { generationCode, newId, normalizeControlPrefix, numeroControl } from "..
 import { amountCents, donorName } from "../domain/wompi";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
+import { sha256Hex, utf8Bytes } from "../utils/encoding";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -24,6 +25,15 @@ export const RETENTION_PAGE_SIZE = 500;
 // an unbounded burst of API calls in a single invocation; the remainder is picked up
 // by the next tick.
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+export const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
+
+export async function emailDeliveryIdempotencyKey(
+  documentId: string,
+  emailType: string
+): Promise<string> {
+  const digest = await sha256Hex(utf8Bytes(`example-worker:receipt:v1:${documentId}:${emailType}`));
+  return `dsv-receipt-v1-${digest}`;
+}
 
 export const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
 export const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
@@ -1305,6 +1315,26 @@ export class Repository {
       .then((result) => result.results ?? []);
   }
 
+  async listAcceptedWompiDocumentsMissingFinalization(limit = 100): Promise<DteDocumentRecord[]> {
+    return this.db
+      .prepare(
+        `SELECT d.* FROM dte_documents d
+         WHERE d.status = 'ACCEPTED'
+           AND d.wompi_event_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_logs a
+             WHERE a.action = 'DTE_ACCEPTED_FINALIZED'
+               AND a.entity_type = 'dte_document'
+               AND a.entity_id = d.id
+           )
+         ORDER BY COALESCE(d.accepted_at, d.created_at) ASC, d.id ASC
+         LIMIT ?`
+      )
+      .bind(Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .all<DteDocumentRecord>()
+      .then((result) => result.results ?? []);
+  }
+
   // Dedupe de evidencia de correo: ¿ya existe un envío SENT de este tipo para el
   // documento? Evita que una reentrega de cola duplique el comprobante transitorio.
   async hasSentEmail(documentId: string, emailType: string): Promise<boolean> {
@@ -1647,28 +1677,57 @@ export class Repository {
       .run();
   }
 
-  // Claim one receipt type before contacting the external provider. PENDING and
-  // SENT both block a competing delivery; FAILED remains retryable on a later call.
-  // As with lifecycle audits, the race boundary is this single D1 statement.
+  // Claim one receipt type before contacting the external provider. A current
+  // PENDING claim and SENT evidence both block a competing delivery. FAILED or
+  // lease-expired PENDING work reuses the same row and provider identity. Legacy
+  // PENDING rows have no attempt timestamp and deliberately remain blocked for
+  // manual review: we cannot know whether their provider request succeeded.
   async claimEmailDelivery(input: {
     documentId: string;
     toEmail: string;
     emailType: string;
     documentStatusAtSend: string;
-  }): Promise<string | null> {
+  }): Promise<{ id: string; idempotencyKey: string } | null> {
     const id = newId("email");
-    const result = await this.db
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - EMAIL_DELIVERY_CLAIM_LEASE_MS).toISOString();
+    const idempotencyKey = await emailDeliveryIdempotencyKey(
+      input.documentId,
+      input.emailType
+    );
+    const row = await this.db
       .prepare(
         `INSERT INTO email_deliveries (
            id, document_id, to_email, status, provider_response_json,
-           email_type, document_status_at_send
+           email_type, document_status_at_send, claim_attempted_at,
+           idempotency_key
          )
-         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?
          WHERE NOT EXISTS (
            SELECT 1 FROM email_deliveries
            WHERE document_id = ? AND email_type = ?
-             AND status IN ('PENDING', 'SENT')
-         )`
+             AND (
+               status = 'SENT'
+               OR (
+                 status = 'PENDING'
+                 AND (claim_attempted_at IS NULL OR claim_attempted_at >= ?)
+               )
+             )
+         )
+         ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL
+         DO UPDATE SET
+           to_email = excluded.to_email,
+           status = 'PENDING',
+           provider_response_json = '{}',
+           document_status_at_send = excluded.document_status_at_send,
+           claim_attempted_at = excluded.claim_attempted_at
+         WHERE email_deliveries.status = 'FAILED'
+            OR (
+              email_deliveries.status = 'PENDING'
+              AND email_deliveries.claim_attempted_at IS NOT NULL
+              AND email_deliveries.claim_attempted_at < ?
+            )
+         RETURNING id, idempotency_key`
       )
       .bind(
         id,
@@ -1676,11 +1735,15 @@ export class Repository {
         input.toEmail,
         input.emailType,
         input.documentStatusAtSend,
+        claimedAt,
+        idempotencyKey,
         input.documentId,
-        input.emailType
+        input.emailType,
+        staleBefore,
+        staleBefore
       )
-      .run();
-    return Number(result.meta?.changes ?? 0) === 1 ? id : null;
+      .first<{ id: string; idempotency_key: string }>();
+    return row ? { id: row.id, idempotencyKey: row.idempotency_key } : null;
   }
 
   // Finalize the exact PENDING row won above. This deliberately updates instead of
