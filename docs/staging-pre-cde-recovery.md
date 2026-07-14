@@ -26,7 +26,7 @@ historical D1 mutation has separate approval. Never run this recovery against pr
 
 ## Read-only preflight
 
-These four commands target only the configured `diezmossv-staging-resource-example` D1 database. They
+These five commands target only the configured `diezmossv-staging-resource-example` D1 database. They
 were prepared locally and were not executed while implementing the feature.
 
 ### 1. Exact failed Wompi event
