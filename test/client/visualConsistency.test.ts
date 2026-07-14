@@ -94,6 +94,13 @@ describe("visual consistency pack", () => {
     }
   });
 
+  it("renders donor email and payment-received time on pre-CDE cards", () => {
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+
+    expect(panelBlock).toContain('<span>{item.donor_email ?? "Correo no disponible"}</span>');
+    expect(panelBlock).toContain('<span>Pago recibido: {formatDateTime(item.received_at)}</span>');
+  });
+
   it("uses a responsive dashed danger boundary for pre-CDE cards", () => {
     const panelRule = stylesSource.match(/\.pre-cde-failures \{[^}]*\}/)?.[0] ?? "";
     const gridRule = stylesSource.match(/\.pre-cde-failure-grid \{[^}]*\}/)?.[0] ?? "";
