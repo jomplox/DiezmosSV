@@ -263,17 +263,19 @@ export class Repository {
     currentAttemptId: string | null,
     staleBefore: string
   ): Promise<string | null> {
-    const attemptId = currentAttemptId ?? newId("issuance_attempt");
+    const attemptId = newId("issuance_attempt");
     const queuedAt = nowIso();
     const statement = currentAttemptId
       ? this.db.prepare(
           `UPDATE wompi_events
-           SET issuance_status = 'RETRY_QUEUED', issuance_last_attempt_at = ?
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_attempt_id = ?
              AND COALESCE(issuance_last_attempt_at, received_at) < ?`
-        ).bind(queuedAt, wompiEventId, currentAttemptId, staleBefore)
+        ).bind(attemptId, queuedAt, wompiEventId, currentAttemptId, staleBefore)
       : this.db.prepare(
           `UPDATE wompi_events
            SET issuance_status = 'RETRY_QUEUED',
@@ -1190,20 +1192,23 @@ export class Repository {
       .run();
   }
 
-  // Atomic lease used immediately before contacting MH. A current TRANSMITTED
-  // row blocks concurrent sends; an abandoned claim becomes recoverable after
-  // the caller-supplied cutoff. Rows carrying an MH seal are never claimable.
+  // Atomic fenced lease used immediately before contacting MH. A current
+  // TRANSMITTED row blocks concurrent sends; an abandoned claim becomes
+  // recoverable after the caller-supplied cutoff with a new token. Result writers
+  // must present that token, and rows carrying an MH seal are never claimable.
   async claimDteTransmission(
     id: string,
     signedJws: string,
     staleBefore: string
-  ): Promise<boolean> {
+  ): Promise<string | null> {
+    const claimId = newId("dte_transmission_claim");
     const claimedAt = nowIso();
     const row = await this.db
       .prepare(
         `UPDATE dte_documents
          SET signed_jws = COALESCE(signed_jws, ?),
              status = 'TRANSMITTED',
+             transmission_claim_id = ?,
              updated_at = ?
          WHERE id = ?
            AND sello_recibido IS NULL
@@ -1211,11 +1216,11 @@ export class Repository {
              status IN ('PENDING', 'SIGNED', 'FAILED')
              OR (status = 'TRANSMITTED' AND updated_at < ?)
            )
-         RETURNING id`
+         RETURNING transmission_claim_id`
       )
-      .bind(signedJws, claimedAt, id, staleBefore)
-      .first<{ id: string }>();
-    return row !== null;
+      .bind(signedJws, claimId, claimedAt, id, staleBefore)
+      .first<{ transmission_claim_id: string }>();
+    return row?.transmission_claim_id ?? null;
   }
 
   // CAS claim for an operator rebuild of a REJECTED Wompi CDE. Atomically writes the
@@ -1247,15 +1252,17 @@ export class Repository {
     return true;
   }
 
-  async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<boolean> {
+  async updateDocumentMhResult(id: string, claimId: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<boolean> {
     const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = ?, updated_at = ?
+         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?,
+             accepted_at = ?, transmission_claim_id = NULL, updated_at = ?
          WHERE id = ? AND status = 'TRANSMITTED' AND sello_recibido IS NULL
+           AND transmission_claim_id = ?
          RETURNING id`
       )
-      .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt ?? null, nowIso(), id)
+      .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt ?? null, nowIso(), id, claimId)
       .first<{ id: string }>();
     return row !== null;
   }
@@ -1288,30 +1295,33 @@ export class Repository {
   // reconstruir la tabla para ampliar su CHECK). El marcador NO se limpia al resolver:
   // queda como evidencia histórica ("estuvo diferido desde"), y es el status al salir
   // de SIGNED (ACCEPTED/REJECTED) lo que retira al documento del barrido de reintento.
-  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<boolean> {
+  async markDocumentTransmissionDeferred(id: string, claimId: string, reason: string): Promise<boolean> {
     const deferredAt = nowIso();
     const row = await this.db
       .prepare(
         `UPDATE dte_documents
          SET status = 'SIGNED',
              transmission_deferred_at = COALESCE(transmission_deferred_at, ?),
+             transmission_claim_id = NULL,
              sello_recibido = NULL,
              mh_estado = ?, mh_observaciones_json = ?, updated_at = ?
          WHERE id = ? AND status = 'TRANSMITTED' AND sello_recibido IS NULL
+           AND transmission_claim_id = ?
          RETURNING id`
       )
-      .bind(deferredAt, "MH_NO_DISPONIBLE", JSON.stringify([reason]), deferredAt, id)
+      .bind(deferredAt, "MH_NO_DISPONIBLE", JSON.stringify([reason]), deferredAt, id, claimId)
       .first<{ id: string }>();
     return row !== null;
   }
 
-  // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
-  // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
+  // CDE con transmisión diferida (MH no disponible al emitir) y reconstrucciones
+  // Wompi que pudieron quedar SIGNED antes de transmitir: el cron de 15 minutos los
+  // recupera en orden de emisión. Lee por el índice idx_dte_documents_status.
   async listDeferredTransmissionDocuments(staleClaimBefore: string, limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
       .prepare(
         `SELECT * FROM dte_documents
-         WHERE (status = 'SIGNED' AND transmission_deferred_at IS NOT NULL)
+         WHERE (status = 'SIGNED' AND (transmission_deferred_at IS NOT NULL OR wompi_event_id IS NOT NULL))
             OR (status = 'TRANSMITTED' AND sello_recibido IS NULL AND updated_at < ?)
          ORDER BY created_at ASC LIMIT ?`
       )
@@ -1692,8 +1702,9 @@ export class Repository {
     toEmail: string;
     emailType: string;
     documentStatusAtSend: string;
-  }): Promise<{ id: string; idempotencyKey: string } | null> {
+  }): Promise<{ id: string; idempotencyKey: string; claimToken: string } | null> {
     const id = newId("email");
+    const claimToken = newId("email_claim");
     const claimedAt = nowIso();
     const staleBefore = new Date(Date.now() - EMAIL_DELIVERY_CLAIM_LEASE_MS).toISOString();
     const idempotencyKey = await emailDeliveryIdempotencyKey(
@@ -1705,9 +1716,9 @@ export class Repository {
         `INSERT INTO email_deliveries (
            id, document_id, to_email, status, provider_response_json,
            email_type, document_status_at_send, claim_attempted_at,
-           idempotency_key
+           idempotency_key, claim_token
          )
-         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?
          WHERE NOT EXISTS (
            SELECT 1 FROM email_deliveries
            WHERE document_id = ? AND email_type = ?
@@ -1725,14 +1736,15 @@ export class Repository {
            status = 'PENDING',
            provider_response_json = '{}',
            document_status_at_send = excluded.document_status_at_send,
-           claim_attempted_at = excluded.claim_attempted_at
+           claim_attempted_at = excluded.claim_attempted_at,
+           claim_token = excluded.claim_token
          WHERE email_deliveries.status = 'FAILED'
             OR (
               email_deliveries.status = 'PENDING'
               AND email_deliveries.claim_attempted_at IS NOT NULL
               AND email_deliveries.claim_attempted_at < ?
             )
-         RETURNING id, idempotency_key`
+         RETURNING id, idempotency_key, claim_token`
       )
       .bind(
         id,
@@ -1742,13 +1754,18 @@ export class Repository {
         input.documentStatusAtSend,
         claimedAt,
         idempotencyKey,
+        claimToken,
         input.documentId,
         input.emailType,
         staleBefore,
         staleBefore
       )
-      .first<{ id: string; idempotency_key: string }>();
-    return row ? { id: row.id, idempotencyKey: row.idempotency_key } : null;
+      .first<{ id: string; idempotency_key: string; claim_token: string }>();
+    return row ? {
+      id: row.id,
+      idempotencyKey: row.idempotency_key,
+      claimToken: row.claim_token
+    } : null;
   }
 
   // Finalize the exact PENDING row won above. This deliberately updates instead of
@@ -1756,6 +1773,7 @@ export class Repository {
   // record even when the provider fails.
   async finalizeEmailDeliveryClaim(
     id: string,
+    claimToken: string,
     input: {
       status: "SENT" | "FAILED";
       providerResponse?: unknown;
@@ -1775,7 +1793,7 @@ export class Repository {
              email_type = ?, document_status_at_send = ?, template_version = ?,
              pdf_renderer_version = ?, pdf_sha256 = ?, dte_json_sha256 = ?,
              provider_delivery_id = ?
-         WHERE id = ? AND status = 'PENDING'`
+         WHERE id = ? AND status = 'PENDING' AND claim_token = ?`
       )
       .bind(
         input.status,
@@ -1788,7 +1806,8 @@ export class Repository {
         input.pdfSha256 ?? null,
         input.dteJsonSha256 ?? null,
         input.providerDeliveryId ?? null,
-        id
+        id,
+        claimToken
       )
       .run();
     if (Number(result.meta?.changes ?? 0) !== 1) {

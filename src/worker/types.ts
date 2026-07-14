@@ -147,6 +147,7 @@ export interface DteDocumentRecord {
   // (no hay valor nuevo en el CHECK de status — D1 no puede reconstruir tablas
   // padre de FK). Se conserva tras la resolución como evidencia histórica.
   transmission_deferred_at: string | null;
+  transmission_claim_id: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -562,7 +562,8 @@ describe("DTE builders", () => {
       issued_at: "2026-06-02T20:05:20.742Z",
       accepted_at: "2026-06-02T20:06:20.742Z",
       contingency_period_id: null,
-    transmission_deferred_at: null,
+      transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-02T20:05:20.742Z",
       updated_at: "2026-06-02T20:06:20.742Z"
     } satisfies DteDocumentRecord;

@@ -6,6 +6,7 @@ import { legacyIssuanceAttemptId, Repository } from "../../src/worker/storage/re
 
 const initMigrationPath = resolve(import.meta.dirname, "../../migrations/0001_init.sql");
 const auditActorMigrationPath = resolve(import.meta.dirname, "../../migrations/0013_audit_actor_context.sql");
+const transmissionPendingMigrationPath = resolve(import.meta.dirname, "../../migrations/0014_transmission_pending_status.sql");
 const issuanceMigrationPath = resolve(import.meta.dirname, "../../migrations/0019_wompi_issuance_lifecycle.sql");
 
 describe("Wompi issuance reservation migration", () => {
@@ -15,6 +16,7 @@ describe("Wompi issuance reservation migration", () => {
     database = new DatabaseSync(":memory:");
     database.exec(readFileSync(initMigrationPath, "utf8"));
     database.exec(readFileSync(auditActorMigrationPath, "utf8"));
+    database.exec(readFileSync(transmissionPendingMigrationPath, "utf8"));
     database.exec(readFileSync(issuanceMigrationPath, "utf8"));
     insertApprovedWompiEvent(database, "wompi_a");
     insertApprovedWompiEvent(database, "wompi_b");
@@ -50,6 +52,18 @@ describe("Wompi issuance reservation migration", () => {
     expect(columns.map((column) => column.name)).toContain("issuance_attempt_id");
   });
 
+  it("persists claimant fencing tokens for DTE transmission and receipt delivery", () => {
+    const documentColumns = database
+      .prepare("PRAGMA table_info(dte_documents)")
+      .all() as Array<{ name: string }>;
+    const emailColumns = database
+      .prepare("PRAGMA table_info(email_deliveries)")
+      .all() as Array<{ name: string }>;
+
+    expect(documentColumns.map((column) => column.name)).toContain("transmission_claim_id");
+    expect(emailColumns.map((column) => column.name)).toContain("claim_token");
+  });
+
   it("persists recoverable email claim evidence and a unique stable provider key", () => {
     const columns = database
       .prepare("PRAGMA table_info(email_deliveries)")
@@ -81,7 +95,8 @@ describe("Wompi issuance reservation migration", () => {
     const first = await repo.claimEmailDelivery(input);
     expect(first).toMatchObject({
       id: expect.any(String),
-      idempotencyKey: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/)
+      idempotencyKey: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/),
+      claimToken: expect.any(String)
     });
     await expect(repo.claimEmailDelivery(input)).resolves.toBeNull();
 
@@ -89,13 +104,49 @@ describe("Wompi issuance reservation migration", () => {
       "UPDATE email_deliveries SET status = 'FAILED' WHERE id = ?"
     ).run(first!.id);
     const failedRetry = await repo.claimEmailDelivery(input);
-    expect(failedRetry).toEqual(first);
+    expect(failedRetry).toMatchObject({
+      id: first!.id,
+      idempotencyKey: first!.idempotencyKey,
+      claimToken: expect.any(String)
+    });
+    expect(failedRetry!.claimToken).not.toBe(first!.claimToken);
 
     database.prepare(
       "UPDATE email_deliveries SET claim_attempted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
     ).run(first!.id);
     const staleRetry = await repo.claimEmailDelivery(input);
-    expect(staleRetry).toEqual(first);
+    expect(staleRetry).toMatchObject({
+      id: first!.id,
+      idempotencyKey: first!.idempotencyKey,
+      claimToken: expect.any(String)
+    });
+    expect(staleRetry!.claimToken).not.toBe(failedRetry!.claimToken);
+
+    await expect(repo.finalizeEmailDeliveryClaim(
+      failedRetry!.id,
+      failedRetry!.claimToken,
+      {
+        status: "FAILED",
+        emailType: input.emailType,
+        documentStatusAtSend: input.documentStatusAtSend
+      }
+    )).rejects.toThrow(/ya no está pendiente/);
+    await expect(repo.finalizeEmailDeliveryClaim(
+      staleRetry!.id,
+      staleRetry!.claimToken,
+      {
+        status: "SENT",
+        emailType: input.emailType,
+        documentStatusAtSend: input.documentStatusAtSend
+      }
+    )).resolves.toBeUndefined();
+    expect(database.prepare(
+      "SELECT status, idempotency_key, claim_token FROM email_deliveries WHERE id = ?"
+    ).get(first!.id)).toEqual({
+      status: "SENT",
+      idempotency_key: first!.idempotencyKey,
+      claim_token: staleRetry!.claimToken
+    });
 
     database.prepare(
       `INSERT INTO email_deliveries (
@@ -173,6 +224,104 @@ describe("Wompi issuance reservation migration", () => {
     expect(database.prepare(
       "SELECT issuance_attempt_id FROM wompi_events WHERE id = 'wompi_b'"
     ).get()).toEqual({ issuance_attempt_id: legacyAttempt });
+  });
+
+  it("mints a new attempt when requeuing stalled work so an old failure cannot win", async () => {
+    const repo = new Repository(sqliteD1(database));
+    database.prepare(
+      `UPDATE wompi_events
+       SET issuance_status = 'PROCESSING',
+           issuance_attempt_id = 'attempt-stalled',
+           issuance_last_attempt_at = '2026-07-13T18:00:00.000Z'
+       WHERE id = 'wompi_a'`
+    ).run();
+
+    const requeuedAttempt = await repo.claimStalledWompiIssuanceAttempt(
+      "wompi_a",
+      "attempt-stalled",
+      "2026-07-13T19:00:00.000Z"
+    );
+
+    expect(requeuedAttempt).toEqual(expect.any(String));
+    expect(requeuedAttempt).not.toBe("attempt-stalled");
+    expect(database.prepare(
+      "SELECT issuance_status, issuance_attempt_id FROM wompi_events WHERE id = 'wompi_a'"
+    ).get()).toEqual({
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: requeuedAttempt
+    });
+    await expect(repo.recordWompiIssuanceFailure(
+      "wompi_a",
+      "attempt-stalled",
+      { code: "ISSUANCE_ERROR", message: "Entrega anterior" }
+    )).resolves.toBe(false);
+    await expect(repo.markWompiIssuanceDeadLettered(
+      "wompi_a",
+      "attempt-stalled"
+    )).resolves.toBe(false);
+  });
+
+  it("fences an expired DTE claimant from storing a result or deferring a newer lease", async () => {
+    insertAcceptedDocument(database, "wompi_a", "dte_fenced_claim");
+    database.prepare(
+      `UPDATE dte_documents
+       SET status = 'SIGNED', sello_recibido = NULL, accepted_at = NULL
+       WHERE id = 'dte_fenced_claim'`
+    ).run();
+    const repo = new Repository(sqliteD1(database));
+
+    const firstClaim = await repo.claimDteTransmission(
+      "dte_fenced_claim",
+      "stable-signed-jws",
+      "2026-07-13T19:00:00.000Z"
+    );
+    expect(firstClaim).toEqual(expect.any(String));
+    database.prepare(
+      "UPDATE dte_documents SET updated_at = '2000-01-01T00:00:00.000Z' WHERE id = 'dte_fenced_claim'"
+    ).run();
+    const secondClaim = await repo.claimDteTransmission(
+      "dte_fenced_claim",
+      "stable-signed-jws",
+      "2026-07-13T19:00:00.000Z"
+    );
+    expect(secondClaim).toEqual(expect.any(String));
+    expect(secondClaim).not.toBe(firstClaim);
+
+    await expect(repo.updateDocumentMhResult("dte_fenced_claim", firstClaim!, {
+      status: "ACCEPTED",
+      sello: "STALE-SEAL",
+      mhEstado: "PROCESADO",
+      observaciones: [],
+      acceptedAt: "2026-07-13T20:00:00.000Z"
+    })).resolves.toBe(false);
+    await expect(repo.updateDocumentMhResult("dte_fenced_claim", firstClaim!, {
+      status: "FAILED",
+      sello: null,
+      mhEstado: "PIPELINE_ERROR",
+      observaciones: ["stale claimant failed"],
+      acceptedAt: null
+    })).resolves.toBe(false);
+    await expect(repo.markDocumentTransmissionDeferred(
+      "dte_fenced_claim",
+      firstClaim!,
+      "stale claimant timeout"
+    )).resolves.toBe(false);
+    await expect(repo.updateDocumentMhResult("dte_fenced_claim", secondClaim!, {
+      status: "ACCEPTED",
+      sello: "CURRENT-SEAL",
+      mhEstado: "PROCESADO",
+      observaciones: [],
+      acceptedAt: "2026-07-13T20:01:00.000Z"
+    })).resolves.toBe(true);
+
+    expect(database.prepare(
+      `SELECT status, sello_recibido, transmission_claim_id
+       FROM dte_documents WHERE id = 'dte_fenced_claim'`
+    ).get()).toEqual({
+      status: "ACCEPTED",
+      sello_recibido: "CURRENT-SEAL",
+      transmission_claim_id: null
+    });
   });
 
   it("rejects duplicate reserved generation codes", () => {

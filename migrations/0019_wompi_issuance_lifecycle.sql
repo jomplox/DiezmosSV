@@ -12,11 +12,16 @@ ALTER TABLE wompi_events ADD COLUMN issuance_last_attempt_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_failed_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_dead_lettered_at TEXT;
 
+-- Fencing token for the current MH transmission lease. A claimant must present
+-- this exact token when it stores success, failure, or deferred state.
+ALTER TABLE dte_documents ADD COLUMN transmission_claim_id TEXT;
+
 -- Durable receipt-send claims. Existing PENDING rows intentionally keep a NULL
 -- attempt timestamp/key: the runtime treats those legacy claims as manual-review
 -- blockers instead of guessing that an already-accepted provider request is stale.
 ALTER TABLE email_deliveries ADD COLUMN claim_attempted_at TEXT;
 ALTER TABLE email_deliveries ADD COLUMN idempotency_key TEXT;
+ALTER TABLE email_deliveries ADD COLUMN claim_token TEXT;
 
 CREATE UNIQUE INDEX idx_email_deliveries_idempotency_key
   ON email_deliveries(idempotency_key)

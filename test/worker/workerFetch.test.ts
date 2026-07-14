@@ -6876,6 +6876,7 @@ describe("donation intent correlation", () => {
       accepted_at: null,
       contingency_period_id: null,
       transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -6918,6 +6919,7 @@ describe("donation intent correlation", () => {
       accepted_at: null,
       contingency_period_id: null,
       transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -8062,19 +8064,20 @@ describe("DTE transmission claim", () => {
     }));
     const repo = new Repository(db as unknown as D1Database);
 
-    await expect(repo.claimDteTransmission(
+    const claimId = await repo.claimDteTransmission(
       "dte_terminal_result_guard",
       "stable-signed-jws",
       "2026-07-13T20:00:00.000Z"
-    )).resolves.toBe(true);
-    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", {
+    );
+    expect(claimId).toEqual(expect.any(String));
+    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", claimId!, {
       status: "ACCEPTED",
       sello: "SELLO-WINNER",
       mhEstado: "PROCESADO",
       observaciones: [],
       acceptedAt: "2026-07-13T20:05:00.000Z"
     })).resolves.toBe(true);
-    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", {
+    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", claimId!, {
       status: "REJECTED",
       sello: null,
       mhEstado: "RECHAZADO",
@@ -8114,12 +8117,12 @@ describe("DTE transmission claim", () => {
       "dte_stale_claim",
       "stable-signed-jws",
       "2026-07-13T20:00:00.000Z"
-    )).resolves.toBe(true);
+    )).resolves.toEqual(expect.any(String));
     await expect(new Repository(activeDb as unknown as D1Database).claimDteTransmission(
       "dte_active_claim",
       "stable-signed-jws",
       "2026-07-13T20:00:00.000Z"
-    )).resolves.toBe(false);
+    )).resolves.toBeNull();
   });
 
   it("recovers a stale TRANSMITTED claim through the scheduled transmission sweep", async () => {
@@ -8160,6 +8163,65 @@ describe("DTE transmission claim", () => {
     expect(db.documents[0]).toMatchObject({
       status: "ACCEPTED",
       sello_recibido: "SELLO-STALE-SWEEP"
+    });
+  });
+
+  it("recovers a rebuilt Wompi SIGNED row when the operator path crashes before transmission", async () => {
+    const db = new InMemoryD1();
+    const wompiEventId = "wompi_rebuild_crash_gap";
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const rebuilt = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 73, codigoGeneracion, environment: "00" }
+    );
+    db.wompiEvents.push(wompiEventForReservation({
+      id: wompiEventId,
+      transaction_id: "transaction_rebuild_crash_gap",
+      raw_body: JSON.stringify(wompiSample)
+    }));
+    db.documents.push(testDocument({
+      id: "dte_rebuild_crash_gap",
+      wompi_event_id: wompiEventId,
+      status: "REJECTED",
+      signed_jws: null,
+      sello_recibido: null,
+      accepted_at: null,
+      donor_email: null
+    }));
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.claimRejectedWompiRebuild(
+      "dte_rebuild_crash_gap",
+      wompiEventId,
+      {
+        codigoGeneracion,
+        numeroControl: "DTE-15-M001P004-000000000000073",
+        plainJson: rebuilt,
+        signedJws: "rebuilt-signed-jws"
+      }
+    )).resolves.toBe(true);
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      transmission_deferred_at: null
+    });
+
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-REBUILT-SWEEP",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const result = await new IssuancePipeline(env(db, {
+      MOCK_EXTERNAL_SERVICES: "true"
+    })).retryDeferredTransmissions();
+
+    expect(result).toEqual({ transmitted: 1, rejected: 0, pending: 0 });
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-REBUILT-SWEEP"
     });
   });
 });
@@ -11443,7 +11505,7 @@ class Statement {
     if (
       this.sql.includes("INSERT INTO email_deliveries") &&
       this.sql.includes("ON CONFLICT(idempotency_key)") &&
-      this.sql.includes("RETURNING id, idempotency_key")
+      this.sql.includes("RETURNING id, idempotency_key, claim_token")
     ) {
       const [
         id,
@@ -11453,6 +11515,7 @@ class Statement {
         documentStatusAtSend,
         claimAttemptedAt,
         idempotencyKey,
+        claimToken,
         ,
         ,
         staleBefore
@@ -11489,7 +11552,8 @@ class Statement {
         existing.provider_response_json = "{}";
         existing.document_status_at_send = documentStatusAtSend;
         existing.claim_attempted_at = claimAttemptedAt;
-        return { id: String(existing.id), idempotency_key: idempotencyKey } as T;
+        existing.claim_token = claimToken;
+        return { id: String(existing.id), idempotency_key: idempotencyKey, claim_token: claimToken } as T;
       }
 
       this.db.emailDeliveries.push({
@@ -11507,9 +11571,10 @@ class Statement {
         dte_json_sha256: null,
         provider_delivery_id: null,
         claim_attempted_at: claimAttemptedAt,
-        idempotency_key: idempotencyKey
+        idempotency_key: idempotencyKey,
+        claim_token: claimToken
       });
-      return { id, idempotency_key: idempotencyKey } as T;
+      return { id, idempotency_key: idempotencyKey, claim_token: claimToken } as T;
     }
     if (this.sql.includes("INSERT INTO login_rate_limits")) {
       const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
@@ -11631,9 +11696,9 @@ class Statement {
       this.sql.includes("UPDATE dte_documents") &&
       this.sql.includes("status = 'TRANSMITTED'") &&
       this.sql.includes("COALESCE(signed_jws, ?)") &&
-      this.sql.includes("RETURNING id")
+      this.sql.includes("RETURNING transmission_claim_id")
     ) {
-      const [signedJws, claimedAt, documentId, staleBefore] = this.args;
+      const [signedJws, claimId, claimedAt, documentId, staleBefore] = this.args;
       const document = this.db.documents.find((row) => row.id === documentId);
       const claimable = document && document.sello_recibido == null && (
         ["PENDING", "SIGNED", "FAILED"].includes(document.status) ||
@@ -11642,8 +11707,9 @@ class Statement {
       if (!claimable || !document) return null;
       document.signed_jws = document.signed_jws ?? String(signedJws);
       document.status = "TRANSMITTED";
+      document.transmission_claim_id = String(claimId);
       document.updated_at = String(claimedAt);
-      return { id: document.id } as T;
+      return { transmission_claim_id: document.transmission_claim_id } as T;
     }
     if (
       this.sql.includes("UPDATE dte_documents") &&
@@ -11651,9 +11717,13 @@ class Statement {
       this.sql.includes("status = 'TRANSMITTED'") &&
       this.sql.includes("RETURNING id")
     ) {
-      const [status, sello, mhEstado, observacionesJson, acceptedAt, updatedAt, documentId] = this.args;
+      const [status, sello, mhEstado, observacionesJson, acceptedAt, updatedAt, documentId, claimId] = this.args;
       const document = this.db.documents.find(
-        (row) => row.id === documentId && row.status === "TRANSMITTED" && row.sello_recibido == null
+        (row) =>
+          row.id === documentId &&
+          row.status === "TRANSMITTED" &&
+          row.sello_recibido == null &&
+          row.transmission_claim_id === claimId
       );
       if (!document) return null;
       document.status = String(status);
@@ -11661,6 +11731,7 @@ class Statement {
       document.mh_estado = String(mhEstado);
       document.mh_observaciones_json = String(observacionesJson);
       document.accepted_at = acceptedAt === null ? null : String(acceptedAt);
+      document.transmission_claim_id = null;
       document.updated_at = String(updatedAt);
       return { id: document.id } as T;
     }
@@ -11688,13 +11759,18 @@ class Statement {
       this.sql.includes("status = 'TRANSMITTED'") &&
       this.sql.includes("RETURNING id")
     ) {
-      const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
+      const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId, claimId] = this.args;
       const document = this.db.documents.find(
-        (row) => row.id === documentId && row.status === "TRANSMITTED" && row.sello_recibido == null
+        (row) =>
+          row.id === documentId &&
+          row.status === "TRANSMITTED" &&
+          row.sello_recibido == null &&
+          row.transmission_claim_id === claimId
       );
       if (!document) return null;
       document.status = "SIGNED";
       document.transmission_deferred_at ??= String(deferredAt);
+      document.transmission_claim_id = null;
       document.mh_estado = String(mhEstado);
       document.mh_observaciones_json = String(observacionesJson);
       document.updated_at = String(updatedAt);
@@ -12255,14 +12331,17 @@ class Statement {
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
       if (
-        this.sql.includes("status = 'SIGNED' AND transmission_deferred_at IS NOT NULL") &&
+        this.sql.includes("status = 'SIGNED' AND (transmission_deferred_at IS NOT NULL OR wompi_event_id IS NOT NULL)") &&
         this.sql.includes("status = 'TRANSMITTED'") &&
         this.sql.includes("updated_at < ?")
       ) {
         const staleBefore = String(this.args[0]);
         const limit = Number(this.args[1] ?? 100);
         documents = documents.filter((document) =>
-          (document.status === "SIGNED" && document.transmission_deferred_at != null) ||
+          (
+            document.status === "SIGNED" &&
+            (document.transmission_deferred_at != null || document.wompi_event_id != null)
+          ) ||
           (document.status === "TRANSMITTED" && document.sello_recibido == null && document.updated_at < staleBefore)
         );
         documents.sort((left, right) =>
@@ -12797,10 +12876,14 @@ class Statement {
         pdfSha256,
         dteJsonSha256,
         providerDeliveryId,
-        id
+        id,
+        claimToken
       ] = this.args;
       const delivery = this.db.emailDeliveries.find(
-        (row) => row.id === id && row.status === "PENDING"
+        (row) =>
+          row.id === id &&
+          row.status === "PENDING" &&
+          row.claim_token === claimToken
       );
       if (delivery) {
         delivery.status = status;
@@ -12985,6 +13068,7 @@ class Statement {
         accepted_at: null,
         contingency_period_id: contingencyPeriodId === null ? null : String(contingencyPeriodId),
         transmission_deferred_at: null,
+        transmission_claim_id: null,
         created_at: String(issuedAt),
         updated_at: String(issuedAt)
       });
@@ -13136,15 +13220,26 @@ class Statement {
       this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("COALESCE(issuance_last_attempt_at, received_at) < ?")
     ) {
-      const assignsAttempt = this.sql.includes("SET issuance_status = 'RETRY_QUEUED',\n               issuance_attempt_id = ?");
-      const [attemptId, queuedAt, wompiEventId, staleBefore] = assignsAttempt
-        ? [String(this.args[0]), String(this.args[1]), String(this.args[2]), String(this.args[3])]
-        : [String(this.args[2]), String(this.args[0]), String(this.args[1]), String(this.args[3])];
+      const guardsExistingAttempt = this.sql.includes("AND issuance_attempt_id = ?");
+      const [attemptId, queuedAt, wompiEventId, expectedAttempt, staleBefore] = guardsExistingAttempt
+        ? [
+            String(this.args[0]),
+            String(this.args[1]),
+            String(this.args[2]),
+            String(this.args[3]),
+            String(this.args[4])
+          ]
+        : [
+            String(this.args[0]),
+            String(this.args[1]),
+            String(this.args[2]),
+            null,
+            String(this.args[3])
+          ];
       const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
-      const expectedAttempt = assignsAttempt ? null : attemptId;
-      const attemptMatches = assignsAttempt
-        ? event?.issuance_attempt_id == null
-        : event?.issuance_attempt_id === expectedAttempt;
+      const attemptMatches = guardsExistingAttempt
+        ? event?.issuance_attempt_id === expectedAttempt
+        : event?.issuance_attempt_id == null;
       if (
         event &&
         event.created_document_id == null &&
@@ -13152,7 +13247,7 @@ class Statement {
         String(event.issuance_last_attempt_at ?? event.received_at) < staleBefore
       ) {
         event.issuance_status = "RETRY_QUEUED";
-        event.issuance_attempt_id ??= attemptId;
+        event.issuance_attempt_id = attemptId;
         event.issuance_last_attempt_at = queuedAt;
         changes = 1;
       }
@@ -13652,6 +13747,7 @@ function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRe
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
     transmission_deferred_at: null,
+    transmission_claim_id: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z",
     ...overrides
