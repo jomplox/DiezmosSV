@@ -79,6 +79,28 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("bypasses final validation only for direct template previews", () => {
+    const invalidInput = {
+      donorName: "Vista previa",
+      donorDocument: "SIN-DOCUMENTO",
+      donorDocumentType: "99",
+      amount: "1.11"
+    };
+    const options = {
+      sequence: 3,
+      environment: "00" as const,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+    };
+
+    const preview = buildDirectCdeDocument(invalidInput, emisorConfig, {
+      ...options,
+      templatePreview: true
+    }) as Record<string, any>;
+
+    expect(preview.receptor.tipoDocumento).toBe("99");
+    expect(() => buildDirectCdeDocument(invalidInput, emisorConfig, options)).toThrow(/CAT-022/i);
+  });
+
   it("builds a CDE for real payment-link payloads without document or address", () => {
     const cliente: Record<string, unknown> = { ...wompiSample.Cliente };
     delete cliente.DocumentoIdentidad;

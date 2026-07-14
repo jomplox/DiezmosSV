@@ -254,9 +254,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
         : [])
     ]
   };
-  validateCdeDui(document);
-  validateCdeCatalogs(document);
-  validateCde(document);
+  validateBuiltCde(document);
   return document;
 }
 
@@ -344,9 +342,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
     ]
   };
   if (!options.templatePreview) {
-    validateCdeDui(document);
-    validateCdeCatalogs(document);
-    validateCde(document);
+    validateBuiltCde(document);
   }
   return document;
 }
@@ -376,9 +372,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     tipoMoneda: "USD"
   };
   document.emisor = cdeEmisorFromConfig(config);
-  validateCdeDui(document);
-  validateCdeCatalogs(document);
-  validateCde(document);
+  validateBuiltCde(document);
   return document;
 }
 
@@ -495,6 +489,12 @@ function intentReceptorDireccion(
   }
   void codPais;
   return null;
+}
+
+function validateBuiltCde(document: Record<string, unknown>): void {
+  validateCdeDui(document);
+  validateCdeCatalogs(document);
+  validateCde(document);
 }
 
 function validateCdeDui(document: Record<string, unknown>): void {
