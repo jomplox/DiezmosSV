@@ -35,10 +35,11 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User, WompiIssuanceFailureItem } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
+import { filterPreCdeFailures } from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
@@ -213,6 +214,8 @@ export function App() {
   });
   const [view, setView] = useState<View>("documents");
   const [documents, setDocuments] = useState<DteDocument[]>([]);
+  const [preCdeFailures, setPreCdeFailures] = useState<WompiIssuanceFailureItem[]>([]);
+  const [preCdeFailuresError, setPreCdeFailuresError] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   // Keyset cursor for the audit trail ("<created_at>|<id>"); null = no older pages.
@@ -297,6 +300,10 @@ export function App() {
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
   const pendingInvalidation = useMemo(() => documents.find((document) => document.id === pendingInvalidationId) ?? null, [documents, pendingInvalidationId]);
+  const visiblePreCdeFailures = useMemo(
+    () => view === "failures" ? filterPreCdeFailures(preCdeFailures, debouncedQuery) : [],
+    [view, preCdeFailures, debouncedQuery]
+  );
   const filteredStatus = view === "failures" ? FAILURE_VIEW_STATUSES : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
 
@@ -349,6 +356,13 @@ export function App() {
     const handle = window.setTimeout(() => setDebouncedQuery(query.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [query]);
+
+  useEffect(() => {
+    if (view !== "failures") {
+      setPreCdeFailures([]);
+      setPreCdeFailuresError("");
+    }
+  }, [view]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
@@ -496,8 +510,22 @@ export function App() {
     return page;
   }
 
+  async function fetchPreCdeFailures() {
+    setPreCdeFailuresError("");
+    try {
+      const result = await api<{ failures: WompiIssuanceFailureItem[] }>("/api/wompi-events/issuance-failures", token);
+      setPreCdeFailures(result.failures);
+    } catch (error) {
+      setPreCdeFailures([]);
+      setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+    }
+  }
+
   async function refresh() {
-    await fetchDocumentPage();
+    await Promise.all([
+      fetchDocumentPage(),
+      view === "failures" ? fetchPreCdeFailures() : Promise.resolve()
+    ]);
     if (view === "audit") {
       const auditPage = await api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50", token);
       setAudit(auditPage.audit);
@@ -589,12 +617,22 @@ export function App() {
     setUser(null);
     setAuthNotice("");
     setDocuments([]);
+    setPreCdeFailures([]);
+    setPreCdeFailuresError("");
     setSelectedId(null);
     setSelectedUserId(null);
     setUserSettings(emptyUserSettings());
     setPendingInvalidationId(null);
     setEmailEditingId(null);
     setEmailDraft("");
+  }
+
+  async function retryPreCdeFailure(id: string) {
+    await runAction(`pre-cde-retry:${id}`, async () => {
+      await api(`/api/wompi-events/${id}/retry`, token, { method: "POST", body: {} });
+      setToast("Reintento de creación en cola");
+      await refresh();
+    });
   }
 
   async function createTestDte() {
@@ -1083,6 +1121,8 @@ export function App() {
     setToken("");
     setUser(null);
     setDocuments([]);
+    setPreCdeFailures([]);
+    setPreCdeFailuresError("");
     setSelectedId(null);
     setAudit([]);
     setUsers([]);
@@ -1193,14 +1233,27 @@ export function App() {
                   <RefreshCw size={17} />
                 </button>
               </div>
-              <Stats documents={documents} onlyFailed={view === "failures"} />
+              {view === "failures" && (
+                <PreCdeFailuresPanel
+                  items={visiblePreCdeFailures}
+                  error={preCdeFailuresError}
+                  busy={busy}
+                  canRetry={can(user, "OPERATOR")}
+                  onRetry={retryPreCdeFailure}
+                />
+              )}
+              <Stats documents={documents} onlyFailed={view === "failures"} preCdeFailureCount={visiblePreCdeFailures.length} />
               <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
               <DocumentListFooter
                 count={documents.length}
                 hasMore={documentsHasMore}
                 loading={documentsLoadingMore}
                 onLoadMore={loadMoreDocuments}
-                emptyMessage={documentListEmptyMessage(view === "failures" ? "failures" : "documents", query)}
+                emptyMessage={
+                  view === "failures" && (visiblePreCdeFailures.length > 0 || preCdeFailuresError)
+                    ? "Sin CDE emitidos fallidos o rechazados"
+                    : documentListEmptyMessage(view === "failures" ? "failures" : "documents", query)
+                }
               />
             </div>
               <DetailPanel
@@ -4063,9 +4116,77 @@ function AuthScreen({
   );
 }
 
-function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed?: boolean }) {
+function PreCdeFailuresPanel({
+  items,
+  error,
+  busy,
+  canRetry,
+  onRetry
+}: {
+  items: WompiIssuanceFailureItem[];
+  error: string;
+  busy: string;
+  canRetry: boolean;
+  onRetry: (id: string) => Promise<void>;
+}) {
+  if (items.length === 0 && !error) {
+    return null;
+  }
+
+  return (
+    <section className="pre-cde-failures" aria-labelledby="pre-cde-failures-title">
+      <div className="pre-cde-failures-heading">
+        <h2 id="pre-cde-failures-title">Pagos sin CDE creado</h2>
+        <p>Estos registros todavía no son comprobantes emitidos.</p>
+      </div>
+      {error && <p className="error pre-cde-failure-error" role="alert">{error}</p>}
+      {items.length > 0 && (
+        <div className="pre-cde-failure-grid">
+          {items.map((item) => {
+            const retryQueued = item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING";
+            return (
+              <article className="pre-cde-failure-card" key={item.id}>
+                <span className="status pre-cde">CDE NO CREADO</span>
+                <strong>{item.donor_name ?? "Donante sin nombre"}</strong>
+                <div className="pre-cde-failure-meta">
+                  <span>${(item.amount_cents / 100).toFixed(2)}</span>
+                  <span>Intentos: {item.issuance_attempt_count}</span>
+                </div>
+                <p>{item.issuance_error_message}</p>
+                <span>
+                  {item.reserved_numero_control
+                    ? `Número reservado: ${item.reserved_numero_control}`
+                    : "Número aún no asignado"}
+                </span>
+                {canRetry && (
+                  <button
+                    type="button"
+                    disabled={retryQueued || busy === `pre-cde-retry:${item.id}`}
+                    onClick={() => void onRetry(item.id)}
+                  >
+                    {retryQueued ? "Reintento en cola" : "Reintentar creación"}
+                  </button>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function Stats({
+  documents,
+  onlyFailed,
+  preCdeFailureCount = 0
+}: {
+  documents: DteDocument[];
+  onlyFailed?: boolean;
+  preCdeFailureCount?: number;
+}) {
   const counts = countByStatus(documents);
-  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />;
+  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + preCdeFailureCount} tone="bad" />;
   if (onlyFailed) {
     return (
       <>
@@ -4775,7 +4896,7 @@ function delay(ms: number): Promise<void> {
 
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
-  failures: "CDE con errores o rechazos que requieren su atención.",
+  failures: "CDE con errores, rechazos o pagos sin comprobante que requieren su atención.",
   contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",
   audit: "Historial de todas las acciones realizadas en el panel.",
   analytics: "Tendencias de las donaciones en línea (carril Wompi).",
