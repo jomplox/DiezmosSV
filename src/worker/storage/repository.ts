@@ -25,6 +25,14 @@ export const RETENTION_PAGE_SIZE = 500;
 // by the next tick.
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
 
+export const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
+export const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
+  "El mensaje de emisión agotó sus reintentos antes de crear el CDE.";
+
+export function legacyIssuanceAttemptId(wompiEventId: string): string {
+  return `legacy:${wompiEventId}`;
+}
+
 const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_name, donor_email,
   received_at, issuance_status, issuance_attempt_count, issuance_error_code,
   issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
@@ -171,20 +179,129 @@ export class Repository {
       .first<WompiIssuanceFailureItem>();
   }
 
-  async claimWompiIssuanceRetry(wompiEventId: string): Promise<boolean> {
-    const retryQueuedAt = nowIso();
-    const claimed = await this.db
+  async claimInitialWompiIssuanceAttempt(wompiEventId: string): Promise<string | null> {
+    const attemptId = newId("issuance_attempt");
+    const queuedAt = nowIso();
+    const result = await this.db
       .prepare(
         `UPDATE wompi_events
-         SET issuance_status = 'RETRY_QUEUED', issuance_last_attempt_at = ?
+         SET issuance_status = 'RETRY_QUEUED',
+             issuance_attempt_id = ?,
+             issuance_last_attempt_at = ?
          WHERE id = ?
            AND created_document_id IS NULL
-           AND issuance_status IN ('FAILED', 'DEAD_LETTERED')
-         RETURNING id`
+           AND issuance_attempt_id IS NULL
+           AND issuance_status IS NULL`
       )
-      .bind(retryQueuedAt, wompiEventId)
-      .first<{ id: string }>();
-    return claimed !== null;
+      .bind(attemptId, queuedAt, wompiEventId)
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async claimWompiIssuanceRetry(wompiEventId: string, actorId: string): Promise<string | null> {
+    const attemptId = newId("issuance_attempt");
+    const retryQueuedAt = nowIso();
+    const actorIp = normalizeAuditIp(this.auditContext?.ip ?? null);
+    const actorContext = serializeAuditContext(this.auditContext?.context);
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_status IN ('FAILED', 'DEAD_LETTERED')`
+        )
+        .bind(attemptId, retryQueuedAt, wompiEventId),
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'USER', ?, 'WOMPI_ISSUANCE_RETRY_QUEUED',
+                  'wompi_event', id, ?, ?, ?, ?
+           FROM wompi_events
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_status = 'RETRY_QUEUED'
+             AND issuance_attempt_id = ?`
+        )
+        .bind(
+          newId("audit"),
+          actorId,
+          "Reintento de creación de CDE en cola",
+          JSON.stringify({ attemptId }),
+          actorIp,
+          actorContext,
+          wompiEventId,
+          attemptId
+        )
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async claimStalledWompiIssuanceAttempt(
+    wompiEventId: string,
+    currentAttemptId: string | null,
+    staleBefore: string
+  ): Promise<string | null> {
+    const attemptId = currentAttemptId ?? newId("issuance_attempt");
+    const queuedAt = nowIso();
+    const statement = currentAttemptId
+      ? this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED', issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+        ).bind(queuedAt, wompiEventId, currentAttemptId, staleBefore)
+      : this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id IS NULL
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+        ).bind(attemptId, queuedAt, wompiEventId, staleBefore);
+    const result = await statement.run();
+    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async createWompiAttemptAudit(input: {
+    wompiEventId: string;
+    attemptId: string;
+    action: string;
+    summary: string;
+    metadata?: unknown;
+  }): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `INSERT INTO audit_logs (
+           id, actor_type, actor_id, action, entity_type, entity_id,
+           summary, metadata_json, actor_ip, actor_context
+         )
+         SELECT ?, 'SYSTEM', NULL, ?, 'wompi_event', id, ?, ?, NULL, NULL
+         FROM wompi_events
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND issuance_attempt_id = ?`
+      )
+      .bind(
+        newId("audit"),
+        input.action,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+        input.wompiEventId,
+        input.attemptId
+      )
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1;
   }
 
   async reserveWompiDocumentIdentifiers(
@@ -232,24 +349,43 @@ export class Repository {
     return reserved;
   }
 
-  async markWompiIssuanceProcessing(wompiEventId: string): Promise<void> {
+  async markWompiIssuanceProcessing(
+    wompiEventId: string,
+    attemptId: string,
+    legacyMessage = false
+  ): Promise<boolean> {
     const attemptedAt = nowIso();
-    await this.db
-      .prepare(
-        `UPDATE wompi_events
-         SET issuance_status = 'PROCESSING', issuance_last_attempt_at = ?
-         WHERE id = ? AND created_document_id IS NULL`
-      )
-      .bind(attemptedAt, wompiEventId)
-      .run();
+    const statement = legacyMessage
+      ? this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'PROCESSING',
+               issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND (issuance_attempt_id IS NULL OR issuance_attempt_id = ?)
+             AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
+           RETURNING id`
+        ).bind(attemptId, attemptedAt, wompiEventId, attemptId)
+      : this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'PROCESSING', issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED')
+           RETURNING id`
+        ).bind(attemptedAt, wompiEventId, attemptId);
+    return (await statement.first<{ id: string }>()) !== null;
   }
 
   async recordWompiIssuanceFailure(
     wompiEventId: string,
+    attemptId: string,
     evidence: { code: string; message: string }
-  ): Promise<void> {
+  ): Promise<boolean> {
     const failedAt = nowIso();
-    await this.db.batch([
+    const results = await this.db.batch([
       this.db
         .prepare(
           `UPDATE wompi_events
@@ -259,14 +395,18 @@ export class Repository {
                issuance_error_message = ?,
                issuance_last_attempt_at = ?,
                issuance_failed_at = ?
-           WHERE id = ? AND created_document_id IS NULL`
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND issuance_status = 'PROCESSING'`
         )
         .bind(
           evidence.code,
           evidence.message,
           failedAt,
           failedAt,
-          wompiEventId
+          wompiEventId,
+          attemptId
         ),
       this.db
         .prepare(
@@ -279,30 +419,61 @@ export class Repository {
            FROM wompi_events
            WHERE id = ?
              AND created_document_id IS NULL
-             AND issuance_failed_at = ?`
+             AND issuance_failed_at = ?
+             AND issuance_attempt_id = ?
+             AND issuance_status = 'FAILED'`
         )
         .bind(
           newId("audit"),
           evidence.message,
           JSON.stringify({ code: evidence.code }),
           wompiEventId,
-          failedAt
+          failedAt,
+          attemptId
         )
     ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
-  async markWompiIssuanceDeadLettered(wompiEventId: string): Promise<void> {
+  async markWompiIssuanceDeadLettered(
+    wompiEventId: string,
+    attemptId: string,
+    legacyMessage = false
+  ): Promise<boolean> {
     const deadLetteredAt = nowIso();
-    await this.db
+    const attemptPredicate = legacyMessage
+      ? "(issuance_attempt_id IS NULL OR issuance_attempt_id = ?)"
+      : "issuance_attempt_id = ?";
+    const row = await this.db
       .prepare(
         `UPDATE wompi_events
          SET issuance_status = 'DEAD_LETTERED',
+             issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
+             issuance_error_code = CASE
+               WHEN issuance_error_message IS NULL THEN ?
+               ELSE COALESCE(issuance_error_code, ?)
+             END,
+             issuance_error_message = COALESCE(issuance_error_message, ?),
              issuance_dead_lettered_at = ?,
              processed_at = COALESCE(processed_at, ?)
-         WHERE id = ? AND created_document_id IS NULL`
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND ${attemptPredicate}
+           AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
+         RETURNING id`
       )
-      .bind(deadLetteredAt, deadLetteredAt, wompiEventId)
-      .run();
+      .bind(
+        attemptId,
+        ISSUANCE_RETRIES_EXHAUSTED_CODE,
+        ISSUANCE_RETRIES_EXHAUSTED_CODE,
+        ISSUANCE_RETRIES_EXHAUSTED_MESSAGE,
+        deadLetteredAt,
+        deadLetteredAt,
+        wompiEventId,
+        attemptId
+      )
+      .first<{ id: string }>();
+    return row !== null;
   }
 
   async markWompiIssuanceIgnored(wompiEventId: string): Promise<void> {
@@ -1818,7 +1989,7 @@ export class Repository {
     // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
     const rows = await this.db
       .prepare(
-        `SELECT id, transaction_id, environment, received_at, issuance_last_attempt_at FROM wompi_events
+        `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at FROM wompi_events
          WHERE created_document_id IS NULL
            AND result = 'ExitosaAprobada'
            AND (

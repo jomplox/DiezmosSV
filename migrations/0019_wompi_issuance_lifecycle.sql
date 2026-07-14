@@ -5,6 +5,7 @@ ALTER TABLE wompi_events ADD COLUMN control_sequence INTEGER;
 ALTER TABLE wompi_events ADD COLUMN reserved_numero_control TEXT;
 ALTER TABLE wompi_events ADD COLUMN reserved_codigo_generacion TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (issuance_attempt_count >= 0);
+ALTER TABLE wompi_events ADD COLUMN issuance_attempt_id TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_error_code TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_error_message TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_last_attempt_at TEXT;

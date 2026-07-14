@@ -4,7 +4,7 @@ import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
-import { Repository } from "../storage/repository";
+import { legacyIssuanceAttemptId, Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
@@ -124,20 +124,41 @@ export class IssuancePipeline {
         });
         continue;
       }
-      await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId });
-      await this.repo.createAudit({
+      const attemptId = await this.repo.claimStalledWompiIssuanceAttempt(
+        eventId,
+        typeof event.issuance_attempt_id === "string" ? event.issuance_attempt_id : null,
+        cutoff
+      );
+      if (!attemptId) {
+        continue;
+      }
+      await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId, issuanceAttemptId: attemptId });
+      await this.repo.createWompiAttemptAudit({
+        wompiEventId: eventId,
+        attemptId,
         action: "WOMPI_EVENT_REQUEUED",
-        entityType: "wompi_event",
-        entityId: eventId,
         summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora"
       });
     }
   }
 
-  async processWompiEvent(wompiEventId: string): Promise<DteDocumentRecord | null> {
+  async processWompiEvent(
+    wompiEventId: string,
+    issuanceAttemptId?: string
+  ): Promise<DteDocumentRecord | null> {
     const event = await this.repo.getWompiEventById(wompiEventId);
     if (!event) {
       throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
+    }
+    const activeAttemptId = issuanceAttemptId
+      ?? event.issuance_attempt_id
+      ?? legacyIssuanceAttemptId(wompiEventId);
+    if (!issuanceAttemptId) {
+      await this.repo.markWompiIssuanceProcessing(
+        wompiEventId,
+        activeAttemptId,
+        event.issuance_attempt_id === null
+      );
     }
     assertDeploymentAllowsAmbiente(this.env, event.environment);
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
@@ -162,7 +183,7 @@ export class IssuancePipeline {
     const correlation = await this.correlateIntent(payload);
     if (correlation.kind === "quarantined") {
       await this.quarantineWompiEvent(wompiEventId, correlation);
-      await this.repo.recordWompiIssuanceFailure(wompiEventId, {
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
         code: "WOMPI_INTENT_QUARANTINED",
         message: WOMPI_INTENT_QUARANTINED_MESSAGE
       });
@@ -184,7 +205,7 @@ export class IssuancePipeline {
         entityId: wompiEventId,
         summary: WOMPI_INVALID_DONOR_DUI_MESSAGE
       });
-      await this.repo.recordWompiIssuanceFailure(wompiEventId, {
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
         code: "WOMPI_INVALID_DONOR_DUI",
         message: WOMPI_INVALID_DONOR_DUI_MESSAGE
       });

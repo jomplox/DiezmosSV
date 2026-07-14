@@ -2,8 +2,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { legacyIssuanceAttemptId, Repository } from "../../src/worker/storage/repository";
 
 const initMigrationPath = resolve(import.meta.dirname, "../../migrations/0001_init.sql");
+const auditActorMigrationPath = resolve(import.meta.dirname, "../../migrations/0013_audit_actor_context.sql");
 const issuanceMigrationPath = resolve(import.meta.dirname, "../../migrations/0019_wompi_issuance_lifecycle.sql");
 
 describe("Wompi issuance reservation migration", () => {
@@ -12,6 +14,7 @@ describe("Wompi issuance reservation migration", () => {
   beforeEach(() => {
     database = new DatabaseSync(":memory:");
     database.exec(readFileSync(initMigrationPath, "utf8"));
+    database.exec(readFileSync(auditActorMigrationPath, "utf8"));
     database.exec(readFileSync(issuanceMigrationPath, "utf8"));
     insertApprovedWompiEvent(database, "wompi_a");
     insertApprovedWompiEvent(database, "wompi_b");
@@ -37,6 +40,78 @@ describe("Wompi issuance reservation migration", () => {
     reserve(database, "wompi_b", "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC");
     expect(reservation(database, "wompi_b")?.control_sequence).toBe(2);
     expect(nextValue(database)).toBe(3);
+  });
+
+  it("persists the queue-attempt epoch used to reject stale failures and DLQs", () => {
+    const columns = database
+      .prepare("PRAGMA table_info(wompi_events)")
+      .all() as Array<{ name: string }>;
+
+    expect(columns.map((column) => column.name)).toContain("issuance_attempt_id");
+  });
+
+  it("enforces attempt CAS and the legacy fallback against real SQLite", async () => {
+    const repo = new Repository(sqliteD1(database));
+    database.prepare(
+      `UPDATE wompi_events
+       SET issuance_status = 'RETRY_QUEUED', issuance_attempt_id = 'attempt-old'
+       WHERE id = 'wompi_a'`
+    ).run();
+
+    await expect(repo.markWompiIssuanceProcessing(
+      "wompi_a",
+      "attempt-old"
+    )).resolves.toBe(true);
+    database.prepare(
+      `UPDATE wompi_events
+       SET issuance_status = 'RETRY_QUEUED', issuance_attempt_id = 'attempt-current'
+       WHERE id = 'wompi_a'`
+    ).run();
+
+    await expect(repo.recordWompiIssuanceFailure(
+      "wompi_a",
+      "attempt-old",
+      { code: "ISSUANCE_ERROR", message: "Fallo anterior" }
+    )).resolves.toBe(false);
+    await expect(repo.markWompiIssuanceDeadLettered(
+      "wompi_a",
+      "attempt-old"
+    )).resolves.toBe(false);
+    expect(database.prepare(
+      `SELECT issuance_status, issuance_attempt_id, issuance_error_message
+       FROM wompi_events WHERE id = 'wompi_a'`
+    ).get()).toEqual({
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_message: null
+    });
+
+    await expect(repo.markWompiIssuanceProcessing(
+      "wompi_a",
+      "attempt-current"
+    )).resolves.toBe(true);
+    await expect(repo.markWompiIssuanceDeadLettered(
+      "wompi_a",
+      "attempt-current"
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      `SELECT issuance_status, issuance_attempt_id, issuance_error_code
+       FROM wompi_events WHERE id = 'wompi_a'`
+    ).get()).toEqual({
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_code: "ISSUANCE_RETRIES_EXHAUSTED"
+    });
+
+    const legacyAttempt = legacyIssuanceAttemptId("wompi_b");
+    await expect(repo.markWompiIssuanceProcessing(
+      "wompi_b",
+      legacyAttempt,
+      true
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      "SELECT issuance_attempt_id FROM wompi_events WHERE id = 'wompi_b'"
+    ).get()).toEqual({ issuance_attempt_id: legacyAttempt });
   });
 
   it("rejects duplicate reserved generation codes", () => {
@@ -65,6 +140,7 @@ describe("Wompi issuance reservation migration", () => {
     const legacy = new DatabaseSync(":memory:");
     try {
       legacy.exec(readFileSync(initMigrationPath, "utf8"));
+      legacy.exec(readFileSync(auditActorMigrationPath, "utf8"));
       legacy.prepare(
         "INSERT INTO document_sequences (environment, control_prefix, next_value) VALUES ('00', 'm001p004', 17)"
       ).run();
@@ -86,6 +162,7 @@ describe("Wompi issuance reservation migration", () => {
     const legacy = new DatabaseSync(":memory:");
     try {
       legacy.exec(readFileSync(initMigrationPath, "utf8"));
+      legacy.exec(readFileSync(auditActorMigrationPath, "utf8"));
       legacy.exec(`
         INSERT INTO document_sequences (environment, control_prefix, next_value)
         VALUES ('00', 'M001P004', 4), ('00', 'm001p004', 23);
@@ -173,4 +250,72 @@ function sequenceRows(database: DatabaseSync): Array<{
       control_prefix: string;
       next_value: number;
     }>;
+}
+
+function sqliteD1(database: DatabaseSync): D1Database {
+  function prepare(query: string): D1PreparedStatement {
+    let boundValues: unknown[] = [];
+    const statement = {
+      bind(...values: unknown[]) {
+        boundValues = values;
+        return statement;
+      },
+      async first<T>() {
+        return (database.prepare(query).get(...sqliteValues(boundValues)) ?? null) as T | null;
+      },
+      async run() {
+        const result = database.prepare(query).run(...sqliteValues(boundValues));
+        return {
+          success: true,
+          meta: { changes: Number(result.changes) },
+          results: []
+        } as unknown as D1Result;
+      },
+      async all<T>() {
+        return {
+          success: true,
+          meta: {},
+          results: database.prepare(query).all(...sqliteValues(boundValues)) as T[]
+        } as unknown as D1Result<T>;
+      },
+      raw: async () => [],
+      columnNames: async () => []
+    };
+    return statement as unknown as D1PreparedStatement;
+  }
+
+  return {
+    prepare,
+    async batch<T = unknown>(statements: D1PreparedStatement[]) {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        const results: D1Result<T>[] = [];
+        for (const statement of statements) {
+          results.push(await statement.run<T>());
+        }
+        database.exec("COMMIT");
+        return results;
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    },
+    exec: async () => ({ count: 0, duration: 0 }),
+    dump: async () => new ArrayBuffer(0)
+  } as unknown as D1Database;
+}
+
+function sqliteValues(values: unknown[]): Array<string | number | bigint | Uint8Array | null> {
+  return values.map((value) => {
+    if (
+      value === null ||
+      typeof value === "string" ||
+      typeof value === "number" ||
+      typeof value === "bigint" ||
+      value instanceof Uint8Array
+    ) {
+      return value;
+    }
+    throw new TypeError(`Unsupported SQLite bind value: ${typeof value}`);
+  });
 }
