@@ -176,7 +176,7 @@ export class IssuancePipeline {
         action: "WOMPI_INVALID_DONOR_DUI",
         entityType: "wompi_event",
         entityId: wompiEventId,
-        summary: duiReason
+        summary: WOMPI_INVALID_DONOR_DUI_MESSAGE
       });
       await this.repo.recordWompiIssuanceFailure(wompiEventId, {
         code: "WOMPI_INVALID_DONOR_DUI",
@@ -322,6 +322,9 @@ export class IssuancePipeline {
     // y su veredicto no se sobrescribe. Los diferidos (SIGNED + marcador) NO son
     // terminales: siguen su reintento por el cron.
     if (isTerminalDteStatus(record.status)) {
+      if (record.status === "ACCEPTED" && record.wompi_event_id) {
+        await this.finalizeAcceptedWompiDocument(record);
+      }
       return record;
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
@@ -350,22 +353,20 @@ export class IssuancePipeline {
         acceptedAt: mhResult.accepted ? nowIso() : null
       });
       record = (await this.repo.getDteDocument(record.id)) ?? record;
-      await this.repo.createAudit({
-        action: mhResult.accepted
-          ? wompiBacked ? "DTE_ACCEPTED" : "ADVANCED_CDE_ACCEPTED"
-          : wompiBacked ? "DTE_REJECTED" : "ADVANCED_CDE_REJECTED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `${record.numero_control} ${mhResult.estado}`,
-        metadata: mhResult.raw
-      });
-      if (mhResult.accepted) {
-        if (wompiBacked) {
-          const intent = await this.correlateIntentForDocument(record);
-          if (intent) {
-            await this.completeIntent(intent, record.id);
-          }
-        }
+      if (mhResult.accepted && wompiBacked) {
+        await this.finalizeAcceptedWompiDocument(record, mhResult.raw);
+      } else {
+        await this.repo.createAudit({
+          action: mhResult.accepted
+            ? "ADVANCED_CDE_ACCEPTED"
+            : wompiBacked ? "DTE_REJECTED" : "ADVANCED_CDE_REJECTED",
+          entityType: "dte_document",
+          entityId: record.id,
+          summary: `${record.numero_control} ${mhResult.estado}`,
+          metadata: mhResult.raw
+        });
+      }
+      if (mhResult.accepted && !wompiBacked) {
         if (!(await this.repo.hasSentEmail(record.id, "dteReceipt"))) {
           await this.emailReceipt(record);
         }
@@ -382,6 +383,9 @@ export class IssuancePipeline {
       // conserva el sello y se devuelve el estado terminal.
       const latest = await this.repo.getDteDocument(record.id);
       if (latest && isTerminalDteStatus(latest.status)) {
+        if (wompiBacked && latest.status === "ACCEPTED") {
+          throw error;
+        }
         return latest;
       }
       await this.repo.updateDocumentMhResult(record.id, {
@@ -534,7 +538,8 @@ export class IssuancePipeline {
 
   // Resuelve la intención de donación de un documento respaldado por Wompi para
   // completarla cuando MH acepta el reintento. Documentos rápidos/avanzados no
-  // tienen intención; cualquier problema de parseo degrada a null (sin intención).
+  // tienen intención; fallos reales de lectura/correlación se propagan para que la
+  // cola reintente la finalización sin retransmitir el CDE ya aceptado.
   private async correlateIntentForDocument(record: DteDocumentRecord): Promise<DonationIntentRecord | null> {
     if (!record.wompi_event_id) {
       return null;
@@ -543,14 +548,10 @@ export class IssuancePipeline {
     if (!event) {
       return null;
     }
-    try {
-      const correlation = await this.correlateIntent(
-        normalizeWompiWebhook(JSON.parse(event.raw_body))
-      );
-      return correlation.kind === "ready" ? correlation.intent : null;
-    } catch {
-      return null;
-    }
+    const correlation = await this.correlateIntent(
+      normalizeWompiWebhook(JSON.parse(event.raw_body))
+    );
+    return correlation.kind === "ready" ? correlation.intent : null;
   }
 
   // The shared resolver is the only authority for both the synchronous paid marker
@@ -609,12 +610,54 @@ export class IssuancePipeline {
   }
 
   private async completeIntent(intent: DonationIntentRecord, documentId: string): Promise<void> {
-    await this.repo.markIntentCompleted(intent.id, documentId);
+    const completed = await this.repo.getCompletedIntentForDocument(documentId);
+    if (completed && completed.id !== intent.id) {
+      throw new Error("El CDE ya está vinculado a otra intención completada");
+    }
+    if (!completed) {
+      await this.repo.markIntentCompleted(intent.id, documentId);
+    }
+    await this.ensureIntentCompletionAudit(intent.id, documentId);
+  }
+
+  private async finalizeAcceptedWompiDocument(
+    record: DteDocumentRecord,
+    metadata?: unknown
+  ): Promise<void> {
+    if ((await this.repo.countAuditEntries("DTE_ACCEPTED", record.id)) === 0) {
+      await this.repo.createAudit({
+        action: "DTE_ACCEPTED",
+        entityType: "dte_document",
+        entityId: record.id,
+        summary: `${record.numero_control} ${record.mh_estado ?? "PROCESADO"}`,
+        metadata
+      });
+    }
+
+    const completed = await this.repo.getCompletedIntentForDocument(record.id);
+    if (completed) {
+      await this.ensureIntentCompletionAudit(completed.id, record.id);
+    } else {
+      const intent = await this.correlateIntentForDocument(record);
+      if (intent) {
+        await this.completeIntent(intent, record.id);
+      }
+    }
+
+    if (!(await this.repo.hasSentEmail(record.id, "dteReceipt"))) {
+      await this.emailReceipt(record);
+    }
+  }
+
+  private async ensureIntentCompletionAudit(intentId: string, documentId: string): Promise<void> {
+    if ((await this.repo.countAuditEntries("DONATION_INTENT_COMPLETED", intentId)) !== 0) {
+      return;
+    }
     await this.repo.createAudit({
       action: "DONATION_INTENT_COMPLETED",
       entityType: "donation_intent",
-      entityId: intent.id,
-      summary: `Intención ${intent.id} completada por el CDE ${documentId}`,
+      entityId: intentId,
+      summary: `Intención ${intentId} completada por el CDE ${documentId}`,
       metadata: { documentId }
     });
   }
