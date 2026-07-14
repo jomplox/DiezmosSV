@@ -7406,10 +7406,19 @@ describe("deferred transmission when MH is unavailable", () => {
 
   it("runs the deferred-transmission retry on the 15-minute cron tick", async () => {
     const db = new InMemoryD1();
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const document = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 73, codigoGeneracion, environment: "00" }
+    );
     db.documents.push({
       ...testDocument(),
       id: "doc_sched_defer",
       wompi_event_id: null,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000073",
+      plain_json: JSON.stringify(document),
       status: "SIGNED",
       transmission_deferred_at: "2026-06-26T01:49:00.000Z",
       signed_jws: "signed-jws",
@@ -7829,6 +7838,172 @@ describe("advanced DTE queue idempotency", () => {
     expect(record.status).toBe("ACCEPTED");
     expect(db.documents.find((row) => row.id === "doc_advanced_postfail")?.status).toBe("ACCEPTED");
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "ADVANCED_CDE_FAILED" }));
+  });
+});
+
+describe("DTE transmission claim", () => {
+  it("lets only one of two nonterminal deliveries call MH", async () => {
+    const db = new InMemoryD1();
+    const codigoGeneracion = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const document = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 71, codigoGeneracion, environment: "00" }
+    );
+    db.documents.push(testDocument({
+      id: "dte_concurrent_transmission",
+      wompi_event_id: null,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000071",
+      plain_json: JSON.stringify(document),
+      status: "SIGNED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null
+    }));
+    let release!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockImplementation(async () => {
+      await providerGate;
+      return {
+        accepted: true,
+        estado: "PROCESADO",
+        selloRecibido: "SELLO-CONCURRENT-CLAIM",
+        observaciones: [],
+        raw: { estado: "PROCESADO" }
+      };
+    });
+    const runtime = env(db, { MOCK_EXTERNAL_SERVICES: "true" });
+
+    const processing = Promise.all([
+      new IssuancePipeline(runtime).processDteDocument("dte_concurrent_transmission"),
+      new IssuancePipeline(runtime).processDteDocument("dte_concurrent_transmission")
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const callsBeforeRelease = transmit.mock.calls.length;
+    release();
+    await processing;
+
+    expect(callsBeforeRelease).toBe(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-CONCURRENT-CLAIM"
+    });
+  });
+
+  it("does not let a late divergent result replace a terminal verdict or seal", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({
+      id: "dte_terminal_result_guard",
+      status: "SIGNED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null
+    }));
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.claimDteTransmission(
+      "dte_terminal_result_guard",
+      "stable-signed-jws",
+      "2026-07-13T20:00:00.000Z"
+    )).resolves.toBe(true);
+    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", {
+      status: "ACCEPTED",
+      sello: "SELLO-WINNER",
+      mhEstado: "PROCESADO",
+      observaciones: [],
+      acceptedAt: "2026-07-13T20:05:00.000Z"
+    })).resolves.toBe(true);
+    await expect(repo.updateDocumentMhResult("dte_terminal_result_guard", {
+      status: "REJECTED",
+      sello: null,
+      mhEstado: "RECHAZADO",
+      observaciones: ["late loser"],
+      acceptedAt: null
+    })).resolves.toBe(false);
+
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-WINNER",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T20:05:00.000Z"
+    });
+  });
+
+  it("reclaims a stale transmission claim but not an active lease", async () => {
+    const staleDb = new InMemoryD1();
+    staleDb.documents.push(testDocument({
+      id: "dte_stale_claim",
+      status: "TRANSMITTED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null,
+      updated_at: "2026-07-13T19:00:00.000Z"
+    }));
+    const activeDb = new InMemoryD1();
+    activeDb.documents.push(testDocument({
+      id: "dte_active_claim",
+      status: "TRANSMITTED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null,
+      updated_at: "2026-07-13T20:30:00.000Z"
+    }));
+
+    await expect(new Repository(staleDb as unknown as D1Database).claimDteTransmission(
+      "dte_stale_claim",
+      "stable-signed-jws",
+      "2026-07-13T20:00:00.000Z"
+    )).resolves.toBe(true);
+    await expect(new Repository(activeDb as unknown as D1Database).claimDteTransmission(
+      "dte_active_claim",
+      "stable-signed-jws",
+      "2026-07-13T20:00:00.000Z"
+    )).resolves.toBe(false);
+  });
+
+  it("recovers a stale TRANSMITTED claim through the scheduled transmission sweep", async () => {
+    const db = new InMemoryD1();
+    const codigoGeneracion = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const document = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 72, codigoGeneracion, environment: "00" }
+    );
+    db.documents.push(testDocument({
+      id: "dte_stale_scheduled_claim",
+      wompi_event_id: null,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000072",
+      plain_json: JSON.stringify(document),
+      status: "TRANSMITTED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null,
+      transmission_deferred_at: null,
+      updated_at: "2020-01-01T00:00:00.000Z"
+    }));
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-STALE-SWEEP",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+
+    const result = await new IssuancePipeline(env(db, {
+      MOCK_EXTERNAL_SERVICES: "true"
+    })).retryDeferredTransmissions();
+
+    expect(result).toEqual({ transmitted: 1, rejected: 0, pending: 0 });
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-STALE-SWEEP"
+    });
   });
 });
 
@@ -10911,6 +11086,79 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("status = 'TRANSMITTED'") &&
+      this.sql.includes("COALESCE(signed_jws, ?)") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [signedJws, claimedAt, documentId, staleBefore] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      const claimable = document && document.sello_recibido == null && (
+        ["PENDING", "SIGNED", "FAILED"].includes(document.status) ||
+        (document.status === "TRANSMITTED" && document.updated_at < String(staleBefore))
+      );
+      if (!claimable || !document) return null;
+      document.signed_jws = document.signed_jws ?? String(signedJws);
+      document.status = "TRANSMITTED";
+      document.updated_at = String(claimedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = ?") &&
+      this.sql.includes("status = 'TRANSMITTED'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [status, sello, mhEstado, observacionesJson, acceptedAt, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.status === "TRANSMITTED" && row.sello_recibido == null
+      );
+      if (!document) return null;
+      document.status = String(status);
+      document.sello_recibido = sello === null ? null : String(sello);
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observacionesJson);
+      document.accepted_at = acceptedAt === null ? null : String(acceptedAt);
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = 'FAILED'") &&
+      this.sql.includes("status IN ('PENDING', 'SIGNED', 'FAILED')") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [mhEstado, observacionesJson, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && ["PENDING", "SIGNED", "FAILED"].includes(row.status) && row.sello_recibido == null
+      );
+      if (!document) return null;
+      document.status = "FAILED";
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observacionesJson);
+      document.accepted_at = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("transmission_deferred_at = COALESCE(transmission_deferred_at, ?)") &&
+      this.sql.includes("status = 'TRANSMITTED'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.status === "TRANSMITTED" && row.sello_recibido == null
+      );
+      if (!document) return null;
+      document.status = "SIGNED";
+      document.transmission_deferred_at ??= String(deferredAt);
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observacionesJson);
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
       this.sql.includes("status = 'REJECTED'") &&
       this.sql.includes("RETURNING id")
     ) {
@@ -11437,6 +11685,22 @@ class Statement {
     }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
+      if (
+        this.sql.includes("status = 'SIGNED' AND transmission_deferred_at IS NOT NULL") &&
+        this.sql.includes("status = 'TRANSMITTED'") &&
+        this.sql.includes("updated_at < ?")
+      ) {
+        const staleBefore = String(this.args[0]);
+        const limit = Number(this.args[1] ?? 100);
+        documents = documents.filter((document) =>
+          (document.status === "SIGNED" && document.transmission_deferred_at != null) ||
+          (document.status === "TRANSMITTED" && document.sello_recibido == null && document.updated_at < staleBefore)
+        );
+        documents.sort((left, right) =>
+          String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id))
+        );
+        return { results: documents.slice(0, limit) as T[] };
+      }
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
         let argIndex = 0;
         if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
@@ -12298,13 +12562,13 @@ class Statement {
         changes = 1;
       }
     }
-    if (this.sql.includes("transmission_deferred_at = ?")) {
+    if (this.sql.includes("transmission_deferred_at = COALESCE(transmission_deferred_at, ?)")) {
       // markDocumentTransmissionDeferred: SIGNED + deferral marker + MH_NO_DISPONIBLE.
       const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
       const document = this.db.documents.find((row) => row.id === documentId);
       if (document) {
         document.status = "SIGNED";
-        document.transmission_deferred_at = String(deferredAt);
+        document.transmission_deferred_at ??= String(deferredAt);
         document.sello_recibido = null;
         document.mh_estado = String(mhEstado);
         document.mh_observaciones_json = String(observacionesJson);
@@ -12604,6 +12868,8 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
     wompi_event_id: null,
     status: "PENDING",
     signed_jws: null,
+    sello_recibido: null,
+    accepted_at: null,
     plain_json: JSON.stringify({
       emisor: advancedCdeDraft().emisor,
       receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },

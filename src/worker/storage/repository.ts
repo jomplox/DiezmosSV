@@ -1004,6 +1004,34 @@ export class Repository {
       .run();
   }
 
+  // Atomic lease used immediately before contacting MH. A current TRANSMITTED
+  // row blocks concurrent sends; an abandoned claim becomes recoverable after
+  // the caller-supplied cutoff. Rows carrying an MH seal are never claimable.
+  async claimDteTransmission(
+    id: string,
+    signedJws: string,
+    staleBefore: string
+  ): Promise<boolean> {
+    const claimedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET signed_jws = COALESCE(signed_jws, ?),
+             status = 'TRANSMITTED',
+             updated_at = ?
+         WHERE id = ?
+           AND sello_recibido IS NULL
+           AND (
+             status IN ('PENDING', 'SIGNED', 'FAILED')
+             OR (status = 'TRANSMITTED' AND updated_at < ?)
+           )
+         RETURNING id`
+      )
+      .bind(signedJws, claimedAt, id, staleBefore)
+      .first<{ id: string }>();
+    return row !== null;
+  }
+
   // CAS claim for an operator rebuild of a REJECTED Wompi CDE. Atomically writes the
   // freshly rebuilt payload + signature and moves the row REJECTED → SIGNED, clearing
   // the stale MH verdict in the same statement. Guarded on status = 'REJECTED', so two
@@ -1033,15 +1061,36 @@ export class Repository {
     return true;
   }
 
-  async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
-    await this.db
+  async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<boolean> {
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = COALESCE(?, accepted_at), updated_at = ?
-         WHERE id = ?`
+         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = ?, updated_at = ?
+         WHERE id = ? AND status = 'TRANSMITTED' AND sello_recibido IS NULL
+         RETURNING id`
       )
       .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt ?? null, nowIso(), id)
-      .run();
+      .first<{ id: string }>();
+    return row !== null;
+  }
+
+  async markDocumentPipelineFailure(
+    id: string,
+    result: { mhEstado: string; observaciones: string[] }
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET status = 'FAILED', mh_estado = ?, mh_observaciones_json = ?,
+             accepted_at = NULL, updated_at = ?
+         WHERE id = ?
+           AND status IN ('PENDING', 'SIGNED', 'FAILED')
+           AND sello_recibido IS NULL
+         RETURNING id`
+      )
+      .bind(result.mhEstado, JSON.stringify(result.observaciones), nowIso(), id)
+      .first<{ id: string }>();
+    return row !== null;
   }
 
   async markDocumentInvalidated(id: string): Promise<void> {
@@ -1053,24 +1102,34 @@ export class Repository {
   // reconstruir la tabla para ampliar su CHECK). El marcador NO se limpia al resolver:
   // queda como evidencia histórica ("estuvo diferido desde"), y es el status al salir
   // de SIGNED (ACCEPTED/REJECTED) lo que retira al documento del barrido de reintento.
-  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<void> {
-    await this.db
+  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<boolean> {
+    const deferredAt = nowIso();
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET status = 'SIGNED', transmission_deferred_at = ?, sello_recibido = NULL,
+         SET status = 'SIGNED',
+             transmission_deferred_at = COALESCE(transmission_deferred_at, ?),
+             sello_recibido = NULL,
              mh_estado = ?, mh_observaciones_json = ?, updated_at = ?
-         WHERE id = ?`
+         WHERE id = ? AND status = 'TRANSMITTED' AND sello_recibido IS NULL
+         RETURNING id`
       )
-      .bind(nowIso(), "MH_NO_DISPONIBLE", JSON.stringify([reason]), nowIso(), id)
-      .run();
+      .bind(deferredAt, "MH_NO_DISPONIBLE", JSON.stringify([reason]), deferredAt, id)
+      .first<{ id: string }>();
+    return row !== null;
   }
 
   // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
   // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
-  async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
+  async listDeferredTransmissionDocuments(staleClaimBefore: string, limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
-      .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL ORDER BY created_at ASC LIMIT ?")
-      .bind("SIGNED", Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .prepare(
+        `SELECT * FROM dte_documents
+         WHERE (status = 'SIGNED' AND transmission_deferred_at IS NOT NULL)
+            OR (status = 'TRANSMITTED' AND sello_recibido IS NULL AND updated_at < ?)
+         ORDER BY created_at ASC LIMIT ?`
+      )
+      .bind(staleClaimBefore, Math.min(Math.max(Math.trunc(limit), 1), 500))
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
   }
