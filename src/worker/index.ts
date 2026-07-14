@@ -68,7 +68,7 @@ import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
-import { Repository } from "./storage/repository";
+import { legacyIssuanceAttemptId, Repository } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
@@ -232,23 +232,55 @@ export default {
     const pipeline = new IssuancePipeline(env);
     const repo = new Repository(env.DB);
     for (const message of batch.messages) {
+      const wompiEventId = message.body.wompiEventId;
+      const legacyMessage = Boolean(wompiEventId && !message.body.issuanceAttemptId);
+      const issuanceAttemptId = wompiEventId
+        ? message.body.issuanceAttemptId ?? legacyIssuanceAttemptId(wompiEventId)
+        : null;
+      let currentWompiAttempt = false;
       try {
         if (message.body.advancedDocumentId) {
           await pipeline.processDteDocument(message.body.advancedDocumentId);
-        } else if (message.body.wompiEventId) {
-          await repo.markWompiIssuanceProcessing(message.body.wompiEventId);
-          await pipeline.processWompiEvent(message.body.wompiEventId);
+        } else if (wompiEventId && issuanceAttemptId) {
+          currentWompiAttempt = await repo.markWompiIssuanceProcessing(
+            wompiEventId,
+            issuanceAttemptId,
+            legacyMessage
+          );
+          if (!currentWompiAttempt) {
+            const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
+            if (!existing) {
+              message.ack();
+              continue;
+            }
+            // A prior delivery may already have created/accepted the CDE and then
+            // crashed during intent/email bookkeeping. Resume that persisted row
+            // without reopening the pre-CDE lifecycle or retransmitting a terminal CDE.
+            await pipeline.processDteDocument(existing.id);
+          } else {
+            await pipeline.processWompiEvent(wompiEventId, issuanceAttemptId);
+          }
         } else {
           throw new Error("Issuance message did not include a target id");
         }
         message.ack();
       } catch (error) {
         console.error("Issuance message failed", error);
-        if (message.body.wompiEventId) {
-          await repo.recordWompiIssuanceFailure(
-            message.body.wompiEventId,
+        if (wompiEventId && issuanceAttemptId) {
+          const recorded = currentWompiAttempt && await repo.recordWompiIssuanceFailure(
+            wompiEventId,
+            issuanceAttemptId,
             issuanceFailureEvidence(error)
           );
+          if (!recorded) {
+            const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
+            if (existing) {
+              message.retry();
+            } else {
+              message.ack();
+            }
+            continue;
+          }
         }
         message.retry();
       }
@@ -320,14 +352,36 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
     const entityId = documentId ?? wompiEventId ?? "desconocido";
     const summary = "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión";
     if (wompiEventId) {
-      await repo.markWompiIssuanceDeadLettered(wompiEventId);
+      const legacyMessage = !message.body.issuanceAttemptId;
+      const attemptId = message.body.issuanceAttemptId ?? legacyIssuanceAttemptId(wompiEventId);
+      const current = await repo.markWompiIssuanceDeadLettered(
+        wompiEventId,
+        attemptId,
+        legacyMessage
+      );
+      if (!current) {
+        message.ack();
+        continue;
+      }
+      const audited = await repo.createWompiAttemptAudit({
+        wompiEventId,
+        attemptId,
+        action: "ISSUANCE_DEAD_LETTERED",
+        summary,
+        metadata: { attemptId }
+      });
+      if (!audited) {
+        message.ack();
+        continue;
+      }
+    } else {
+      await repo.createAudit({
+        action: "ISSUANCE_DEAD_LETTERED",
+        entityType,
+        entityId,
+        summary
+      });
     }
-    await repo.createAudit({
-      action: "ISSUANCE_DEAD_LETTERED",
-      entityType,
-      entityId,
-      summary
-    });
     await sendOperationalAlert(env, repo, {
       kind: "ISSUANCE_DEAD_LETTERED",
       title: "Mensaje de emisión agotó reintentos",
@@ -432,9 +486,13 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   if (environmentAllowed) {
     await markIntentPaidFromWebhook(repo, payload);
   }
-  const queued = inserted && environmentAllowed && isApprovedDonation(payload);
-  if (queued) {
-    await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id });
+  let queued = false;
+  if (inserted && environmentAllowed && isApprovedDonation(payload)) {
+    const attemptId = await repo.claimInitialWompiIssuanceAttempt(record.id);
+    if (attemptId) {
+      await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id, issuanceAttemptId: attemptId });
+      queued = true;
+    }
   }
   return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued }, { status: inserted ? 202 : 200 });
 }
@@ -720,8 +778,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const actor = requireRole(user, "OPERATOR");
     const wompiEventId = wompiIssuanceRetryMatch[1];
     try {
-      const claimed = await repo.claimWompiIssuanceRetry(wompiEventId);
-      if (!claimed) {
+      const attemptId = await repo.claimWompiIssuanceRetry(wompiEventId, actor.id);
+      if (!attemptId) {
         const current = await repo.getWompiIssuanceFailureById(wompiEventId);
         if (!current) {
           return notFound();
@@ -738,15 +796,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
           { status: 409 }
         );
       }
-      await env.ISSUANCE_QUEUE.send({ wompiEventId });
-      await repo.createAudit({
-        actorType: "USER",
-        actorId: actor.id,
-        action: "WOMPI_ISSUANCE_RETRY_QUEUED",
-        entityType: "wompi_event",
-        entityId: wompiEventId,
-        summary: "Reintento de creación de CDE en cola"
-      });
+      await env.ISSUANCE_QUEUE.send({ wompiEventId, issuanceAttemptId: attemptId });
       return jsonResponse({ ok: true, queued: true }, { status: 202 });
     } catch (error) {
       console.error("Wompi issuance retry failed", error);
@@ -1960,11 +2010,7 @@ async function handleDocumentRoute(
       return jsonResponse({ ok: true, result });
     }
     if (!document.signed_jws) {
-      if (document.wompi_event_id) {
-        await env.ISSUANCE_QUEUE.send({ wompiEventId: document.wompi_event_id });
-      } else {
-        await env.ISSUANCE_QUEUE.send({ advancedDocumentId: document.id });
-      }
+      await env.ISSUANCE_QUEUE.send({ advancedDocumentId: document.id });
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }

@@ -48,6 +48,7 @@ export interface Env {
 
 export interface IssuanceMessage {
   wompiEventId?: string;
+  issuanceAttemptId?: string;
   advancedDocumentId?: string;
 }
 
@@ -315,6 +316,7 @@ export interface WompiEventRecord {
   reserved_numero_control: string | null;
   reserved_codigo_generacion: string | null;
   issuance_attempt_count: number;
+  issuance_attempt_id: string | null;
   issuance_error_code: string | null;
   issuance_error_message: string | null;
   issuance_last_attempt_at: string | null;
