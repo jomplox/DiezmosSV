@@ -13,15 +13,16 @@ The recorded incident invariant is:
 - the four failed deliveries advanced only the local counter through 31, 32, 33, and
   34, so the recorded pre-recovery `next_value` is 35.
 
-## Pause first
+## Pause before recovery
 
-Before applying migration `0019_wompi_issuance_lifecycle.sql`, deploying this feature,
-or running a recovery mutation, pause all new staging Wompi issuance and queue
-processing. Confirm the pause is effective; a new staging issuance could legitimately
-claim sequence 35 and invalidate this plan.
+Apply migration `0019_wompi_issuance_lifecycle.sql` and deploy this feature only under
+their own approvals; neither action authorizes the historical repair below. Immediately
+before running a separately authorized recovery mutation, pause all new staging Wompi
+issuance and queue processing. Confirm the pause is effective; a new staging issuance
+could legitimately claim sequence 35 and invalidate this plan.
 
-Do not continue unless the feature deployment and migration have separate approval.
-Never run this recovery against production.
+Do not begin recovery unless the feature deployment and migration are complete and the
+historical D1 mutation has separate approval. Never run this recovery against production.
 
 ## Read-only preflight
 
@@ -38,6 +39,16 @@ Expected before recovery: exactly one `ExitosaAprobada` row in environment `00`,
 `created_document_id`, `control_prefix`, `control_sequence`,
 `reserved_numero_control`, and `reserved_codigo_generacion` all null. An older incident
 row may also have null lifecycle/error columns after the migration adds them.
+
+### 1b. Recorded dead-letter timestamp
+
+```bash
+npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT action, summary, created_at FROM audit_logs WHERE entity_type = 'wompi_event' AND entity_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8' AND action = 'ISSUANCE_DEAD_LETTERED' ORDER BY created_at, id;"
+```
+
+Expected before recovery: exactly one row. Its `created_at` is the recorded terminal
+incident timestamp the repair must use; do not infer a timestamp from the alert email's
+displayed local time.
 
 ### 2. CDE, signature, and MH-response evidence
 
@@ -70,6 +81,7 @@ Keep staging issuance paused and abort without mutating D1 if any of these is tr
 
 - the incident event is missing, is not the approved environment-`00` event, already
   links to a document, or already owns any reservation;
+- the dead-letter audit is missing, duplicated, or does not belong to the exact event;
 - the CDE query returns a row for the event or for control numbers 31 through 34;
 - the reservation query returns any row;
 - the sequence row is missing, duplicated, uses another prefix/environment, or its
@@ -81,12 +93,29 @@ Reassess the live state and prepare a new plan instead.
 
 ## Separately authorized atomic repair
 
-The future repair must reserve sequence 31 for this exact event and leave the next free
-sequence at 32 in one atomic D1 operation. Use a reviewed transactional D1 batch (or an
-equivalent single guarded operation) that rechecks the invariants, moves the counter to
-31, writes the event's `M001P004` prefix and a newly generated generation code, lets the
+The future repair must reserve sequence 31 for this exact event, leave the next free
+sequence at 32, and establish an honest retryable failure record in one atomic D1
+operation. Use a reviewed transactional D1 batch (or an equivalent single guarded
+operation) that rechecks the invariants, moves the counter to 31, writes the event's
+`M001P004` prefix and a newly generated generation code, lets the
 `reserve_wompi_document_identifiers` trigger claim 31, and verifies that the trigger
 advanced the counter to 32.
+
+The same guarded operation must set `issuance_status = 'DEAD_LETTERED'`, preserve the
+recorded four original deliveries as `issuance_attempt_count = 4`, and store only this
+bounded factual evidence:
+
+- `issuance_error_code = 'HISTORICAL_PRE_CDE_FAILURE'`;
+- `issuance_error_message = 'Pago recibido; CDE no creado en los cuatro intentos originales.'`;
+- `issuance_last_attempt_at`, `issuance_failed_at`, and
+  `issuance_dead_lettered_at` set to the exact `ISSUANCE_DEAD_LETTERED` audit
+  `created_at` verified in step 1b, never to a guessed timestamp.
+
+It must also write a dedicated recovery audit row. Before committing, verify inside the
+same guarded operation that the event has no document, owns sequence 31, has the exact
+failure fields above, is eligible for the normal retry compare-and-swap, and would match
+the **CDE NO CREADO** list predicate (`issuance_error_message` is non-null and status is
+`FAILED` or `DEAD_LETTERED`).
 
 Do not issue separate ad hoc counter and event updates: a partial success would expose
 the wrong next value or an incomplete reservation. The atomic operation must roll back
@@ -99,8 +128,9 @@ authorization; this runbook provides none of them.
 After the authorized atomic repair succeeds:
 
 1. Re-run the event, reservation, and counter `SELECT` checks. The event must own
-   sequence 31 and `DTE-15-M001P004-000000000000031`; the counter must be 32; no other
-   event may own 31 through 34.
+   sequence 31 and `DTE-15-M001P004-000000000000031`, have the exact retryable failure
+   fields above, and appear as **CDE NO CREADO** in Fallos; the counter must be 32; no
+   other event may own 31 through 34.
 2. Use the normal **Fallos → CDE NO CREADO → Reintentar creación** operator action for
    the exact event. Do not construct a second payload or a synthetic `dte_documents`
    row.
