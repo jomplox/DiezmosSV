@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { previousElSalvadorMonth, runRetentionExport } from "../../src/worker/services/retention";
 import { Repository } from "../../src/worker/storage/repository";
@@ -308,6 +310,7 @@ class InMemoryRetentionD1 {
   readonly contingencyPeriods: Array<Record<string, unknown>> = [];
   readonly contingencyBatches: Array<Record<string, unknown>> = [];
   readonly contingencyBatchLines: Array<Record<string, unknown>> = [];
+  readonly documentSequences: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
   readonly settings: Array<Record<string, unknown>> = [];
   readonly preparedSql: string[] = [];
@@ -324,6 +327,7 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM contingency_periods")) return this.contingencyPeriods;
     if (sql.includes("FROM contingency_batch_lines")) return this.contingencyBatchLines;
     if (sql.includes("FROM contingency_batches")) return this.contingencyBatches;
+    if (sql.includes("FROM document_sequences")) return this.documentSequences;
     return null;
   }
 
@@ -362,6 +366,27 @@ class RetentionStatement {
     if (!table) return { results: [] };
     if (this.db.retentionPageError) {
       throw this.db.retentionPageError;
+    }
+    if (this.sql.includes("FROM document_sequences")) {
+      let rows = [...table].sort(
+        (left, right) =>
+          String(left.environment).localeCompare(String(right.environment)) ||
+          String(left.control_prefix).localeCompare(String(right.control_prefix))
+      );
+      if (this.sql.includes("(environment, control_prefix) > (?, ?)")) {
+        const [afterEnvironment, afterPrefix] = this.args.slice(-3, -1).map(String);
+        rows = rows.filter(
+          (row) =>
+            String(row.environment) > afterEnvironment ||
+            (
+              String(row.environment) === afterEnvironment &&
+              String(row.control_prefix) > afterPrefix
+            )
+        );
+      }
+      const limit = Number(this.args.at(-1) ?? 500);
+      this.db.appliedLimits.push(limit);
+      return { results: rows.slice(0, limit) as T[] };
     }
     const column = this.sql.includes("received_at") ? "received_at" : "created_at";
     let rows = [...table];
@@ -458,7 +483,7 @@ describe("runRetentionExport", () => {
     };
     expect(manifest.month).toBe("2026-06");
 
-    for (const table of ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines"]) {
+    for (const table of ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines", "document_sequences"]) {
       expect(manifest.tables[table]).toBeDefined();
     }
     expect(manifest.tables.dte_documents.rowCount).toBe(1);
@@ -522,6 +547,91 @@ describe("runRetentionExport", () => {
     ) as { tables: Record<string, { rowCount: number; sha256: string }> };
     expect(manifest.tables.wompi_events.rowCount).toBe(1);
     expect(manifest.tables.wompi_events.sha256).toBe(await sha256Hex(wompiBody));
+  });
+
+  it("snapshots the current Wompi lifecycle again after its received-month archive", async () => {
+    const db = new InMemoryRetentionD1();
+    const wompi = row({
+      id: "wompi_mutated_after_received_month",
+      created_at: undefined,
+      received_at: "2026-05-15T12:00:00.000Z",
+      issuance_status: "PROCESSING",
+      processed_at: null,
+      created_document_id: null
+    });
+    db.wompiEvents.push(wompi);
+    const archive = new FakeArchiveBucket();
+    const runtime = envWithArchive(db, archive);
+
+    await runRetentionExport(runtime, new Date("2026-06-04T15:00:00.000Z"), {
+      month: "2026-05"
+    });
+    wompi.issuance_status = "DOCUMENT_CREATED";
+    wompi.processed_at = "2026-06-20T12:00:00.000Z";
+    wompi.created_document_id = "dte_created_later";
+    await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"), {
+      month: "2026-06"
+    });
+
+    const readSnapshot = (month: string) =>
+      new TextDecoder()
+        .decode(archive.objects.get(`retention/2026/${month}/wompi_events.ndjson`)!.body)
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line));
+    expect(readSnapshot("2026-05")).toContainEqual(expect.objectContaining({
+      id: "wompi_mutated_after_received_month",
+      issuance_status: "PROCESSING",
+      created_document_id: null
+    }));
+    expect(readSnapshot("2026-06")).toContainEqual(expect.objectContaining({
+      id: "wompi_mutated_after_received_month",
+      issuance_status: "DOCUMENT_CREATED",
+      created_document_id: "dte_created_later"
+    }));
+  });
+
+  it("exports a bounded full document-sequence snapshot with a composite cursor", async () => {
+    const db = new InMemoryRetentionD1();
+    for (let index = 0; index < 1_200; index += 1) {
+      db.documentSequences.push({
+        environment: index < 600 ? "00" : "01",
+        control_prefix: `P${String(index).padStart(7, "0")}`,
+        next_value: index + 10
+      });
+    }
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(
+      envWithArchive(db, archive),
+      new Date("2026-07-04T15:00:00.000Z")
+    );
+
+    const key = "retention/2026/2026-06/document_sequences.ndjson";
+    const body = archive.objects.get(key)!.body;
+    const exported = new TextDecoder().decode(body).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(exported).toHaveLength(1_200);
+    expect(exported[0]).toEqual({
+      environment: "00",
+      control_prefix: "P0000000",
+      next_value: 10
+    });
+    expect(exported.at(-1)).toEqual({
+      environment: "01",
+      control_prefix: "P0001199",
+      next_value: 1_209
+    });
+    const sequenceReads = db.preparedSql.filter((sql) => sql.includes("FROM document_sequences"));
+    expect(sequenceReads).toHaveLength(3);
+    expect(sequenceReads.every((sql) => sql.includes("LIMIT ?"))).toBe(true);
+    expect(sequenceReads.some((sql) => sql.includes("(environment, control_prefix) > (?, ?)"))).toBe(true);
+    const manifest = JSON.parse(
+      new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)
+    ) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    expect(manifest.tables.document_sequences).toEqual({
+      rowCount: 1_200,
+      sha256: await sha256Hex(body)
+    });
   });
 
   it("windows donation_intents into the manifest by created_at like the other windowed tables", async () => {
@@ -634,7 +744,7 @@ describe("runRetentionExport", () => {
 
     expect(result.status).toBe("completed");
     const tablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
-    expect(tablePuts).toHaveLength(9);
+    expect(tablePuts).toHaveLength(10);
     expect(tablePuts.every((call) => call.streamed)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
@@ -855,5 +965,22 @@ describe("previousElSalvadorMonth (UTC/El Salvador day seam)", () => {
   it("rolls over the year correctly: 2027-01-01T06:00:00.000Z (Jan 1 El Salvador) -> previous month is 2026-12", () => {
     const now = new Date("2027-01-01T06:00:00.000Z");
     expect(previousElSalvadorMonth(now)).toBe("2026-12");
+  });
+});
+
+describe("retention restore guidance", () => {
+  it("uses the latest mutable snapshots and advances legacy counters without moving backward", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+
+    expect(guidance).toContain("latest `wompi_events.ndjson` snapshot");
+    expect(guidance).toContain("latest `document_sequences.ndjson` snapshot");
+    expect(guidance.toLowerCase()).toContain("archives created before `document_sequences.ndjson`");
+    expect(guidance).toContain(
+      "MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)"
+    );
+    expect(guidance).toContain("Never move an existing counter backward");
   });
 });
