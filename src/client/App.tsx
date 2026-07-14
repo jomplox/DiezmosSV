@@ -4167,8 +4167,10 @@ function PreCdeFailuresPanel({
               <article className="pre-cde-failure-card" key={item.id}>
                 <span className="status pre-cde">CDE NO CREADO</span>
                 <strong>{item.donor_name ?? "Donante sin nombre"}</strong>
+                <span>{item.donor_email ?? "Correo no disponible"}</span>
                 <div className="pre-cde-failure-meta">
                   <span>${(item.amount_cents / 100).toFixed(2)}</span>
+                  <span>Pago recibido: {formatDateTime(item.received_at)}</span>
                   <span>Intentos: {item.issuance_attempt_count}</span>
                 </div>
                 <p>{item.issuance_error_message}</p>
