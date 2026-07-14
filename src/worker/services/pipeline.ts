@@ -9,7 +9,7 @@ import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWeb
 import { nowIso } from "../utils/dates";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
-import { EmailService } from "./email";
+import { EmailService, type EmailDeliveryResult } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
@@ -624,15 +624,13 @@ export class IssuancePipeline {
     record: DteDocumentRecord,
     metadata?: unknown
   ): Promise<void> {
-    if ((await this.repo.countAuditEntries("DTE_ACCEPTED", record.id)) === 0) {
-      await this.repo.createAudit({
-        action: "DTE_ACCEPTED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `${record.numero_control} ${record.mh_estado ?? "PROCESADO"}`,
-        metadata
-      });
-    }
+    await this.repo.createAuditIfAbsent({
+      action: "DTE_ACCEPTED",
+      entityType: "dte_document",
+      entityId: record.id,
+      summary: `${record.numero_control} ${record.mh_estado ?? "PROCESADO"}`,
+      metadata
+    });
 
     const completed = await this.repo.getCompletedIntentForDocument(record.id);
     if (completed) {
@@ -644,16 +642,11 @@ export class IssuancePipeline {
       }
     }
 
-    if (!(await this.repo.hasSentEmail(record.id, "dteReceipt"))) {
-      await this.emailReceipt(record);
-    }
+    await this.emailReceipt(record);
   }
 
   private async ensureIntentCompletionAudit(intentId: string, documentId: string): Promise<void> {
-    if ((await this.repo.countAuditEntries("DONATION_INTENT_COMPLETED", intentId)) !== 0) {
-      return;
-    }
-    await this.repo.createAudit({
+    await this.repo.createAuditIfAbsent({
       action: "DONATION_INTENT_COMPLETED",
       entityType: "donation_intent",
       entityId: intentId,
@@ -672,36 +665,31 @@ export class IssuancePipeline {
       });
       return;
     }
+    const emailType =
+      record.status === "SIGNED" && record.transmission_deferred_at
+        ? "dteReceiptTransitorio"
+        : "dteReceipt";
+    const deliveryClaimId = await this.repo.claimEmailDelivery({
+      documentId: record.id,
+      toEmail: record.donor_email,
+      emailType,
+      documentStatusAtSend: record.status
+    });
+    if (!deliveryClaimId) {
+      return;
+    }
+
+    let response: EmailDeliveryResult;
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(this.repo, this.env);
-      const response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
-      await this.repo.recordEmailDelivery({
-        documentId: record.id,
-        toEmail: record.donor_email,
-        status: "SENT",
-        providerResponse: response.providerResponse,
-        emailType: response.emailType,
-        documentStatusAtSend: response.documentStatusAtSend,
-        templateVersion: response.templateVersion,
-        pdfRendererVersion: response.pdfRendererVersion,
-        pdfSha256: response.pdfSha256,
-        dteJsonSha256: response.dteJsonSha256,
-        providerDeliveryId: response.providerDeliveryId
-      });
-      await this.repo.createAudit({
-        action: "EMAIL_SENT",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `Comprobante enviado a ${record.donor_email}`,
-        metadata: response
-      });
+      response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
     } catch (error) {
-      await this.repo.recordEmailDelivery({
-        documentId: record.id,
-        toEmail: record.donor_email,
+      await this.repo.finalizeEmailDeliveryClaim(deliveryClaimId, {
         status: "FAILED",
-        providerResponse: { error: error instanceof Error ? error.message : String(error) }
+        providerResponse: { error: error instanceof Error ? error.message : String(error) },
+        emailType,
+        documentStatusAtSend: record.status
       });
       await this.repo.createAudit({
         action: "EMAIL_FAILED",
@@ -709,7 +697,27 @@ export class IssuancePipeline {
         entityId: record.id,
         summary: error instanceof Error ? error.message : String(error)
       });
+      return;
     }
+
+    await this.repo.finalizeEmailDeliveryClaim(deliveryClaimId, {
+      status: "SENT",
+      providerResponse: response.providerResponse,
+      emailType: response.emailType,
+      documentStatusAtSend: response.documentStatusAtSend,
+      templateVersion: response.templateVersion,
+      pdfRendererVersion: response.pdfRendererVersion,
+      pdfSha256: response.pdfSha256,
+      dteJsonSha256: response.dteJsonSha256,
+      providerDeliveryId: response.providerDeliveryId
+    });
+    await this.repo.createAudit({
+      action: "EMAIL_SENT",
+      entityType: "dte_document",
+      entityId: record.id,
+      summary: `Comprobante enviado a ${record.donor_email}`,
+      metadata: response
+    });
   }
 }
 
