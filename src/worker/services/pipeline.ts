@@ -94,7 +94,12 @@ export class IssuancePipeline {
         }
         throw error;
       }
-      const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
+      const issuanceEpoch = typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
+        ? event.issuance_last_attempt_at
+        : null;
+      const requeues = issuanceEpoch
+        ? await this.repo.countAuditEntriesSince("WOMPI_EVENT_REQUEUED", eventId, issuanceEpoch)
+        : await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
         if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
