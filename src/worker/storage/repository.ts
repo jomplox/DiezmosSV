@@ -173,6 +173,7 @@ export class Repository {
     clientIp: string | null;
     expiresAt: string;
     datosTokenHash: string | null;
+    rateLimitClaimId: string;
   }): Promise<DonationIntentRecord> {
     // Capability hash is appended after gift_type so the established donor-field
     // bindings remain stable. Full creates pass NULL; only drafts receive a hash.
@@ -181,8 +182,8 @@ export class Repository {
         `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
           direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type,
-          datos_token_hash
-        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          datos_token_hash, rate_limit_claim_id
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.id,
@@ -200,7 +201,8 @@ export class Repository {
         input.clientIp,
         input.expiresAt,
         input.giftType,
-        input.datosTokenHash
+        input.datosTokenHash,
+        input.rateLimitClaimId
       )
       .run();
     const record = await this.getDonationIntent(input.id);
@@ -937,6 +939,7 @@ export class Repository {
     // callers rarely need them since handleApi/webhook inject the context once.
     actorIp?: string | null;
     actorContext?: unknown;
+    rateLimitClaimId?: string | null;
   }): Promise<void> {
     const actorIp = normalizeAuditIp(
       input.actorIp ?? this.auditContext?.ip ?? null
@@ -948,8 +951,8 @@ export class Repository {
     );
     await this.db
       .prepare(
-        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context, rate_limit_claim_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         newId("audit"),
@@ -961,7 +964,8 @@ export class Repository {
         input.summary,
         JSON.stringify(input.metadata ?? {}),
         actorIp,
-        actorContext
+        actorContext,
+        input.rateLimitClaimId ?? null
       )
       .run();
   }
@@ -1224,9 +1228,9 @@ export class Repository {
     cutoff: string,
     expiresAt: string,
     limit: number
-  ): Promise<boolean> {
-    // Rows before the first active claim bridge a ledger deployment without double
-    // counting intents created after that claim.
+  ): Promise<string | null> {
+    // Unattributed rows are legacy activity, including old-version requests that
+    // finish after the first new claim. New-version rows carry their claim id.
     const id = newId("rate");
     const row = await this.db
       .prepare(
@@ -1243,26 +1247,17 @@ export class Repository {
                  AND claimed_at >= ?
             ) + (
               SELECT COUNT(*)
-                FROM donation_intents
+               FROM donation_intents
                WHERE client_ip = ?
                  AND created_at >= ?
-                 AND created_at < COALESCE(
-                   (
-                     SELECT MIN(claimed_at)
-                       FROM security_rate_limit_claims
-                      WHERE scope = 'donation_intent'
-                        AND key_hash = ?
-                        AND claimed_at >= ?
-                   ),
-                   ?
-                 )
+                 AND rate_limit_claim_id IS NULL
             )
           ) < ?
          RETURNING id`
       )
-      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, clientIp, cutoff, keyHash, cutoff, now, limit)
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, clientIp, cutoff, limit)
       .first<{ id: string }>();
-    return row !== null;
+    return row?.id ?? null;
   }
 
   async claimPasswordResetRateLimit(
@@ -1272,9 +1267,9 @@ export class Repository {
     cutoff: string,
     expiresAt: string,
     limit: number
-  ): Promise<boolean> {
-    // Successful reset audits before the first active claim preserve the in-flight
-    // legacy window; subsequent outcomes are represented only by claims.
+  ): Promise<string | null> {
+    // Unattributed success audits are legacy activity, including old-version requests
+    // that finish after the first new claim. New-version audits carry their claim id.
     const id = newId("rate");
     const row = await this.db
       .prepare(
@@ -1295,23 +1290,14 @@ export class Repository {
                WHERE action = 'PASSWORD_RESET_REQUESTED'
                  AND entity_id = ?
                  AND created_at >= ?
-                 AND created_at < COALESCE(
-                   (
-                     SELECT MIN(claimed_at)
-                       FROM security_rate_limit_claims
-                      WHERE scope = 'password_reset'
-                        AND key_hash = ?
-                        AND claimed_at >= ?
-                   ),
-                   ?
-                 )
+                 AND rate_limit_claim_id IS NULL
             )
           ) < ?
          RETURNING id`
       )
-      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, userId, cutoff, keyHash, cutoff, now, limit)
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, userId, cutoff, limit)
       .first<{ id: string }>();
-    return row !== null;
+    return row?.id ?? null;
   }
 
   async claimLoginAttempt(

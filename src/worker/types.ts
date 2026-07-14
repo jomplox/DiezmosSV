@@ -232,6 +232,9 @@ export interface DonationIntentRecord {
   // SHA-256 of the one-time draft /datos capability (migration 0017). The raw
   // capability is never stored and this column is cleared by the successful CAS.
   datos_token_hash: string | null;
+  // Admission claim that reserved this create in the atomic public-rate-limit ledger.
+  // Legacy rows remain null so deployment-overlap activity is still counted.
+  rate_limit_claim_id: string | null;
   // Wompi payment marker (migration 0016): stamped by the webhook the moment an
   // approved payment for this intent arrives — independent of status. COMPLETED still
   // means the CDE was accepted by MH; paid_at means the donor paid. The donor-facing

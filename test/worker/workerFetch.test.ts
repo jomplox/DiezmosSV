@@ -516,6 +516,7 @@ describe("auth rate limiting", () => {
         CREATE TABLE donation_intents (
           id TEXT PRIMARY KEY,
           client_ip TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
           created_at TEXT NOT NULL
         );
         INSERT INTO donation_intents (id, client_ip, created_at) VALUES
@@ -545,6 +546,89 @@ describe("auth rate limiting", () => {
             )
             .get("donation_intent", "hashed-client-ip")
         ).toEqual({ count: 3 });
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("counts a late legacy donation row after the first ledger claim", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE TABLE donation_intents (
+          id TEXT PRIMARY KEY,
+          client_ip TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO security_rate_limit_claims (id, scope, key_hash, claimed_at, expires_at)
+          VALUES ('first_new_claim', 'donation_intent', 'hashed-client-ip', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z');
+        INSERT INTO donation_intents (id, client_ip, rate_limit_claim_id, created_at)
+          VALUES ('late_legacy_intent', '203.0.113.7', NULL, '2026-07-04T12:01:00.000Z');`);
+        const repo = new Repository(sqliteD1(sqlite));
+
+        const admitted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimDonationIntentRateLimit(
+              "hashed-client-ip",
+              "203.0.113.7",
+              "2026-07-04T12:02:00.000Z",
+              "2026-07-04T11:47:00.000Z",
+              "2026-07-04T12:17:00.000Z",
+              5
+            )
+          )
+        );
+
+        expect(admitted.filter(Boolean)).toHaveLength(3);
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("counts a late legacy reset audit after the first ledger claim", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE TABLE audit_logs (
+          id TEXT PRIMARY KEY,
+          action TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO security_rate_limit_claims (id, scope, key_hash, claimed_at, expires_at)
+          VALUES ('first_new_claim', 'password_reset', 'hashed-user-id', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z');
+        INSERT INTO audit_logs (id, action, entity_id, rate_limit_claim_id, created_at)
+          VALUES ('late_legacy_audit', 'PASSWORD_RESET_REQUESTED', 'user_operator', NULL, '2026-07-04T12:01:00.000Z');`);
+        const repo = new Repository(sqliteD1(sqlite));
+
+        const admitted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimPasswordResetRateLimit(
+              "hashed-user-id",
+              "user_operator",
+              "2026-07-04T12:02:00.000Z",
+              "2026-07-04T11:47:00.000Z",
+              "2026-07-04T12:17:00.000Z",
+              3
+            )
+          )
+        );
+
+        expect(admitted.filter(Boolean)).toHaveLength(1);
       } finally {
         sqlite.close();
       }
@@ -1144,6 +1228,7 @@ describe("donation intents", () => {
     expect(intent.donor_email).toBeNull();
     expect(intent.client_ip).toBe("203.0.113.7");
     expect(intent.wompi_url_enlace).toBe(payload.urlEnlace);
+    expect(intent.rate_limit_claim_id).toBe(db.securityRateLimitClaims[0].id);
 
     // Audit records the intent creation with amount + document type, never the number.
     const audit = db.audits.find((row) => row.action === "DONATION_INTENT_CREATED");
@@ -2151,7 +2236,11 @@ describe("password reset", () => {
     expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/#reset=${link![1]}"`);
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
-    expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "PASSWORD_RESET_REQUESTED",
+      entity_id: "user_operator",
+      rate_limit_claim_id: db.securityRateLimitClaims[0].id
+    }));
   });
 
   it("builds the reset link from APP_ORIGIN even when the request carries a different origin", async () => {
@@ -10303,9 +10392,6 @@ class Statement {
         cutoff,
         legacyKey,
         legacyCutoff,
-        boundaryKeyHash,
-        boundaryCutoff,
-        now,
         limitValue
       ] = this.args;
       const scope = this.sql.includes("'donation_intent'") ? "donation_intent" : "password_reset";
@@ -10315,30 +10401,20 @@ class Statement {
           claim.key_hash === countKeyHash &&
           claim.claimed_at >= String(cutoff)
       );
-      const firstClaimAt = this.db.securityRateLimitClaims
-        .filter(
-          (claim) =>
-            claim.scope === scope &&
-            claim.key_hash === boundaryKeyHash &&
-            claim.claimed_at >= String(boundaryCutoff)
-        )
-        .map((claim) => claim.claimed_at)
-        .sort()[0];
-      const legacyBoundary = firstClaimAt ?? String(now);
       const legacyCount =
         scope === "donation_intent"
           ? this.db.donationIntents.filter(
               (intent) =>
                 intent.client_ip === legacyKey &&
                 String(intent.created_at) >= String(legacyCutoff) &&
-                String(intent.created_at) < legacyBoundary
+                (intent.rate_limit_claim_id ?? null) === null
             ).length
           : this.db.audits.filter(
               (audit) =>
                 audit.action === "PASSWORD_RESET_REQUESTED" &&
                 audit.entity_id === legacyKey &&
                 String(audit.created_at) >= String(legacyCutoff) &&
-                String(audit.created_at) < legacyBoundary
+                (audit.rate_limit_claim_id ?? null) === null
             ).length;
       if (activeClaims.length + legacyCount >= Number(limitValue)) {
         return null;
@@ -11160,7 +11236,7 @@ class Statement {
         changes = 1;
       }
     } else if (this.sql.includes("INSERT INTO audit_logs")) {
-      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
+      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext, rateLimitClaimId] = this.args;
       this.db.audits.push({
         id,
         actor_type: actorType,
@@ -11172,6 +11248,7 @@ class Statement {
         metadata_json: metadataJson,
         actor_ip: actorIp ?? null,
         actor_context: actorContext ?? null,
+        rate_limit_claim_id: rateLimitClaimId ?? null,
         created_at: "2026-06-26T01:46:47.015Z"
       });
     }
@@ -11252,7 +11329,8 @@ class Statement {
         clientIp,
         expiresAt,
         giftType,
-        datosTokenHash
+        datosTokenHash,
+        rateLimitClaimId
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -11277,6 +11355,7 @@ class Statement {
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
         datos_token_hash: datosTokenHash == null ? null : String(datosTokenHash),
+        rate_limit_claim_id: rateLimitClaimId == null ? null : String(rateLimitClaimId),
         // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
         // never on create — a fresh intent has not been paid.
         paid_at: null,

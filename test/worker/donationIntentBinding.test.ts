@@ -107,6 +107,7 @@ function bindingIntent(overrides: Partial<DonationIntentRecord> = {}): DonationI
     document_id: null,
     client_ip: null,
     datos_token_hash: null,
+    rate_limit_claim_id: null,
     paid_at: null,
     created_at: "2026-07-09T12:00:00.000Z",
     updated_at: "2026-07-09T12:00:00.000Z",
