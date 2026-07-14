@@ -9,15 +9,19 @@ export interface IssuanceFailureEvidence {
 }
 
 export function issuanceFailureEvidence(error: unknown): IssuanceFailureEvidence {
-  if (!(error instanceof Error)) {
+  if (!(error instanceof OperatorSafeIssuanceError)) {
     return { code: DEFAULT_CODE, message: DEFAULT_MESSAGE };
   }
 
-  const candidateCode = (error as Error & { code?: unknown }).code;
-  const code = typeof candidateCode === "string" && SAFE_CODE.test(candidateCode)
-    ? candidateCode
-    : DEFAULT_CODE;
-  const message = error.message.replace(/\s+/g, " ").trim().slice(0, MAX_MESSAGE_LENGTH);
+  if (!SAFE_CODE.test(error.evidenceCode)) {
+    return { code: DEFAULT_CODE, message: DEFAULT_MESSAGE };
+  }
+  const message = error.evidenceMessage.replace(/\s+/g, " ").trim().slice(0, MAX_MESSAGE_LENGTH);
 
-  return { code, message: message || DEFAULT_MESSAGE };
+  return message
+    ? { code: error.evidenceCode, message }
+    : { code: DEFAULT_CODE, message: DEFAULT_MESSAGE };
 }
+import { OperatorSafeIssuanceError } from "../domain/operatorSafeIssuanceError";
+
+export { OperatorSafeIssuanceError } from "../domain/operatorSafeIssuanceError";

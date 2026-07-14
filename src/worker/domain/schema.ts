@@ -2,6 +2,7 @@ import Ajv, { type ErrorObject } from "ajv";
 import addFormats from "ajv-formats";
 import cdeSchema from "../../../DTE/svfe-json-schemas/v2/fe-cd-v2.json";
 import invalidacionSchema from "../../../DTE/svfe-json-schemas/v3/invalidacion-schema-v3.json";
+import { OperatorSafeIssuanceError } from "./operatorSafeIssuanceError";
 
 const ajv = new Ajv({ allErrors: true, strict: false, multipleOfPrecision: 12 });
 addFormats(ajv);
@@ -22,13 +23,12 @@ export function validateInvalidacion(document: unknown): void {
   assertValid("Invalidación", validators.invalidacion(document), validators.invalidacion.errors);
 }
 
-function assertValid(label: string, valid: boolean, errors: ErrorObject[] | null | undefined): void {
+function assertValid(label: string, valid: boolean, _errors: ErrorObject[] | null | undefined): void {
   if (valid) {
     return;
   }
-  const detail = (errors ?? [])
-    .slice(0, 8)
-    .map((error) => `${error.instancePath || "/"} ${error.message ?? ""}`.trim())
-    .join("; ");
-  throw new Error(`La validación del esquema ${label} falló: ${detail}`);
+  throw new OperatorSafeIssuanceError(
+    label === "CDE" ? "CDE_SCHEMA" : "ISSUANCE_SCHEMA",
+    `La validación del esquema ${label} falló.`
+  );
 }
