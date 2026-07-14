@@ -5970,6 +5970,134 @@ describe("donation intent correlation", () => {
     expect(transmit).toHaveBeenCalledTimes(1);
   });
 
+  it("finalizes concurrent deliveries of one accepted Wompi CDE exactly once", async () => {
+    const db = new InMemoryD1();
+    const intent = seedIntentRow(db);
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_concurrent_finalization_tx"
+    });
+    const eventId = seedWompiEvent(
+      db,
+      webhook,
+      "wompi_concurrent_finalization"
+    );
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const plainDocument = buildCdeDocument(
+      webhook as unknown as WompiWebhook,
+      emisorConfig(),
+      {
+        sequence: 32,
+        codigoGeneracion,
+        environment: "00",
+        issuedAt: new Date("2026-07-13T11:30:00-06:00")
+      }
+    );
+    db.documents.push(testDocument({
+      id: "dte_concurrent_finalization",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000032",
+      status: "ACCEPTED",
+      plain_json: JSON.stringify(plainDocument),
+      signed_jws: "stored-concurrent-signed-jws",
+      sello_recibido: "SELLO-CONCURRENT-FINALIZATION",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T17:30:05.000Z",
+      donor_email: "fallback@example.org"
+    }));
+
+    const pairBarrier = () => {
+      let arrivals = 0;
+      let release!: () => void;
+      const bothArrived = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return async () => {
+        arrivals += 1;
+        if (arrivals === 2) {
+          release();
+        }
+        await bothArrived;
+      };
+    };
+    const acceptedAuditCount = pairBarrier();
+    const completedAuditCount = pairBarrier();
+    const sentEmailLookup = pairBarrier();
+    db.beforeAuditCount = async (action, entityId) => {
+      if (action === "DTE_ACCEPTED" && entityId === "dte_concurrent_finalization") {
+        await acceptedAuditCount();
+      }
+      if (action === "DONATION_INTENT_COMPLETED" && entityId === "di_corr_1") {
+        await completedAuditCount();
+      }
+    };
+    db.beforeSentEmailLookup = async (documentId, emailType) => {
+      if (documentId === "dte_concurrent_finalization" && emailType === "dteReceipt") {
+        await sentEmailLookup();
+      }
+    };
+
+    const sent: unknown[] = [];
+    const intentCompletedAtSend: boolean[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      EMAIL_FROM: "comprobantes@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          intentCompletedAtSend.push(intent.status === "COMPLETED");
+          sent.push(message);
+          return { messageId: `concurrent-receipt-${sent.length}` };
+        }
+      } as SendEmail
+    });
+    const transmit = vi
+      .spyOn(MhClient.prototype, "transmitDte")
+      .mockRejectedValue(new Error("an accepted CDE must not be retransmitted"));
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).processWompiEvent(eventId),
+      new IssuancePipeline(runtime).processWompiEvent(eventId)
+    ]);
+
+    expect(results.map((record) => record?.status)).toEqual(["ACCEPTED", "ACCEPTED"]);
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-CONCURRENT-FINALIZATION"
+    });
+    expect(intent).toMatchObject({
+      status: "COMPLETED",
+      document_id: "dte_concurrent_finalization"
+    });
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(
+      db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")
+    ).toHaveLength(1);
+    expect(intentCompletedAtSend).toEqual([true]);
+    expect(sent).toHaveLength(1);
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      document_id: "dte_concurrent_finalization",
+      status: "SENT",
+      email_type: "dteReceipt",
+      document_status_at_send: "ACCEPTED",
+      provider_delivery_id: "concurrent-receipt-1"
+    });
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("SELECT COUNT(*) AS count FROM audit_logs")
+      )
+    ).toBe(false);
+    expect(
+      db.preparedSql.some(
+        (sql) =>
+          sql.includes("INSERT INTO email_deliveries") &&
+          sql.includes("WHERE NOT EXISTS")
+      )
+    ).toBe(true);
+  });
+
   it("keeps the payload-derived codPais/codDomiciliado for a domestic intent", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -10152,6 +10280,8 @@ class InMemoryD1 {
   beforePasswordResetBatch: (() => void | Promise<void>) | null = null;
   beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
   beforeBindingAuditCount: (() => Promise<void>) | null = null;
+  beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
+  beforeSentEmailLookup: ((documentId: string, emailType: string) => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   failBindingQuarantineBatchAfterStatement: number | null = null;
   passwordResetBatchCount = 0;
@@ -10405,6 +10535,9 @@ class Statement {
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
       if (
         action === "DONATION_INTENT_BINDING_REJECTED" &&
         this.db.beforeBindingAuditCount
@@ -10511,6 +10644,9 @@ class Statement {
     if (this.sql.includes("FROM email_deliveries") && this.sql.includes("email_type = ?")) {
       // hasSentEmail dedupe lookup: SENT delivery of a given evidence type for a document.
       const [documentId, emailType] = this.args.map(String);
+      if (this.db.beforeSentEmailLookup) {
+        await this.db.beforeSentEmailLookup(documentId, emailType);
+      }
       return (this.db.emailDeliveries.find(
         (row) => row.document_id === documentId && row.email_type === emailType && row.status === "SENT"
       ) ?? null) as T | null;
@@ -11112,6 +11248,44 @@ class Statement {
         });
         changes = 1;
       }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        actorType,
+        actorId,
+        action,
+        entityType,
+        entityId,
+        summary,
+        metadataJson,
+        actorIp,
+        actorContext
+      ] = this.args;
+      const exists = this.db.audits.some(
+        (audit) =>
+          audit.action === action &&
+          audit.entity_type === entityType &&
+          audit.entity_id === entityId
+      );
+      if (!exists) {
+        this.db.audits.push({
+          id,
+          actor_type: actorType,
+          actor_id: actorId,
+          action,
+          entity_type: entityType,
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: actorIp ?? null,
+          actor_context: actorContext ?? null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
     } else if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
       this.db.audits.push({
@@ -11139,7 +11313,42 @@ class Statement {
         this.db.settings.push({ key, value, updated_by: updatedBy, updated_at: updatedAt });
       }
     }
-    if (this.sql.includes("INSERT INTO email_deliveries")) {
+    if (
+      this.sql.includes("INSERT INTO email_deliveries") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend
+      ] = this.args;
+      const exists = this.db.emailDeliveries.some(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === emailType &&
+          (delivery.status === "PENDING" || delivery.status === "SENT")
+      );
+      if (!exists) {
+        this.db.emailDeliveries.push({
+          id,
+          document_id: documentId,
+          to_email: toEmail,
+          status: "PENDING",
+          provider_response_json: "{}",
+          sent_at: null,
+          email_type: emailType,
+          document_status_at_send: documentStatusAtSend,
+          template_version: null,
+          pdf_renderer_version: null,
+          pdf_sha256: null,
+          dte_json_sha256: null,
+          provider_delivery_id: null
+        });
+        changes = 1;
+      }
+    } else if (this.sql.includes("INSERT INTO email_deliveries")) {
       const [
         id,
         documentId,
@@ -11170,6 +11379,41 @@ class Statement {
         dte_json_sha256: dteJsonSha256,
         provider_delivery_id: providerDeliveryId
       });
+      changes = 1;
+    }
+    if (
+      this.sql.includes("UPDATE email_deliveries") &&
+      this.sql.includes("status = 'PENDING'")
+    ) {
+      const [
+        status,
+        providerResponseJson,
+        sentAt,
+        emailType,
+        documentStatusAtSend,
+        templateVersion,
+        pdfRendererVersion,
+        pdfSha256,
+        dteJsonSha256,
+        providerDeliveryId,
+        id
+      ] = this.args;
+      const delivery = this.db.emailDeliveries.find(
+        (row) => row.id === id && row.status === "PENDING"
+      );
+      if (delivery) {
+        delivery.status = status;
+        delivery.provider_response_json = providerResponseJson;
+        delivery.sent_at = sentAt;
+        delivery.email_type = emailType;
+        delivery.document_status_at_send = documentStatusAtSend;
+        delivery.template_version = templateVersion;
+        delivery.pdf_renderer_version = pdfRendererVersion;
+        delivery.pdf_sha256 = pdfSha256;
+        delivery.dte_json_sha256 = dteJsonSha256;
+        delivery.provider_delivery_id = providerDeliveryId;
+        changes = 1;
+      }
     }
     if (this.sql.includes("INSERT INTO wompi_events")) {
       const [id, transactionId, environment, result, amountCents, donorEmail, donorName, rawBody, headersJson] = this.args;

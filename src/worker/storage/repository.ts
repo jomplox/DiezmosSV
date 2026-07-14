@@ -1117,6 +1117,54 @@ export class Repository {
       .run();
   }
 
+  // Idempotent lifecycle evidence. The existence check and insert live in one
+  // SQLite/D1 statement so concurrent queue deliveries cannot both observe an
+  // absent logical audit key and append duplicate evidence.
+  async createAuditIfAbsent(input: {
+    actorType?: "SYSTEM" | "USER";
+    actorId?: string | null;
+    action: string;
+    entityType: string;
+    entityId: string;
+    summary: string;
+    metadata?: unknown;
+    actorIp?: string | null;
+    actorContext?: unknown;
+  }): Promise<boolean> {
+    const actorIp = normalizeAuditIp(
+      input.actorIp ?? this.auditContext?.ip ?? null
+    );
+    const actorContext = serializeAuditContext(
+      input.actorContext ?? this.auditContext?.context
+    );
+    const result = await this.db
+      .prepare(
+        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM audit_logs
+           WHERE action = ? AND entity_type = ? AND entity_id = ?
+         )`
+      )
+      .bind(
+        newId("audit"),
+        input.actorType ?? "SYSTEM",
+        input.actorId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+        actorIp,
+        actorContext,
+        input.action,
+        input.entityType,
+        input.entityId
+      )
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1;
+  }
+
   async listAudit(entityType?: string, entityId?: string): Promise<Array<Record<string, unknown>>> {
     // LEFT JOIN users on actor_id so USER rows resolve to a display name/email while
     // SYSTEM rows (and USER rows whose account was later deleted) fall through to NULL.
@@ -1324,6 +1372,87 @@ export class Repository {
         input.providerDeliveryId ?? null
       )
       .run();
+  }
+
+  // Claim one receipt type before contacting the external provider. PENDING and
+  // SENT both block a competing delivery; FAILED remains retryable on a later call.
+  // As with lifecycle audits, the race boundary is this single D1 statement.
+  async claimEmailDelivery(input: {
+    documentId: string;
+    toEmail: string;
+    emailType: string;
+    documentStatusAtSend: string;
+  }): Promise<string | null> {
+    const id = newId("email");
+    const result = await this.db
+      .prepare(
+        `INSERT INTO email_deliveries (
+           id, document_id, to_email, status, provider_response_json,
+           email_type, document_status_at_send
+         )
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM email_deliveries
+           WHERE document_id = ? AND email_type = ?
+             AND status IN ('PENDING', 'SENT')
+         )`
+      )
+      .bind(
+        id,
+        input.documentId,
+        input.toEmail,
+        input.emailType,
+        input.documentStatusAtSend,
+        input.documentId,
+        input.emailType
+      )
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1 ? id : null;
+  }
+
+  // Finalize the exact PENDING row won above. This deliberately updates instead of
+  // appending a second delivery row, keeping the claim and its outcome one evidence
+  // record even when the provider fails.
+  async finalizeEmailDeliveryClaim(
+    id: string,
+    input: {
+      status: "SENT" | "FAILED";
+      providerResponse?: unknown;
+      emailType: string;
+      documentStatusAtSend: string;
+      templateVersion?: string | null;
+      pdfRendererVersion?: string | null;
+      pdfSha256?: string | null;
+      dteJsonSha256?: string | null;
+      providerDeliveryId?: string | null;
+    }
+  ): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE email_deliveries
+         SET status = ?, provider_response_json = ?, sent_at = ?,
+             email_type = ?, document_status_at_send = ?, template_version = ?,
+             pdf_renderer_version = ?, pdf_sha256 = ?, dte_json_sha256 = ?,
+             provider_delivery_id = ?
+         WHERE id = ? AND status = 'PENDING'`
+      )
+      .bind(
+        input.status,
+        JSON.stringify(input.providerResponse ?? {}),
+        input.status === "SENT" ? nowIso() : null,
+        input.emailType,
+        input.documentStatusAtSend,
+        input.templateVersion ?? null,
+        input.pdfRendererVersion ?? null,
+        input.pdfSha256 ?? null,
+        input.dteJsonSha256 ?? null,
+        input.providerDeliveryId ?? null,
+        id
+      )
+      .run();
+    if (Number(result.meta?.changes ?? 0) !== 1) {
+      throw new Error(`La reserva de correo ${id} ya no está pendiente`);
+    }
   }
 
   // Rol del usuario objetivo para los guards de gestión de usuarios (un ADMIN nunca
