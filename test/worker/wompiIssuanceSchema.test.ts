@@ -60,6 +60,49 @@ describe("Wompi issuance reservation migration", () => {
         .run("M001P004", 1, "wompi_b")
     ).toThrow(/UNIQUE constraint failed: wompi_events\.environment, wompi_events\.control_prefix, wompi_events\.control_sequence/);
   });
+
+  it("canonicalizes a lowercase-only legacy sequence before reserving", () => {
+    const legacy = new DatabaseSync(":memory:");
+    try {
+      legacy.exec(readFileSync(initMigrationPath, "utf8"));
+      legacy.prepare(
+        "INSERT INTO document_sequences (environment, control_prefix, next_value) VALUES ('00', 'm001p004', 17)"
+      ).run();
+
+      legacy.exec(readFileSync(issuanceMigrationPath, "utf8"));
+      insertApprovedWompiEvent(legacy, "wompi_legacy_lowercase");
+      reserve(legacy, "wompi_legacy_lowercase", "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD");
+
+      expect(reservation(legacy, "wompi_legacy_lowercase")?.control_sequence).toBe(17);
+      expect(sequenceRows(legacy)).toEqual([
+        { environment: "00", control_prefix: "M001P004", next_value: 18 }
+      ]);
+    } finally {
+      legacy.close();
+    }
+  });
+
+  it("merges case-colliding legacy sequences using the highest next value", () => {
+    const legacy = new DatabaseSync(":memory:");
+    try {
+      legacy.exec(readFileSync(initMigrationPath, "utf8"));
+      legacy.exec(`
+        INSERT INTO document_sequences (environment, control_prefix, next_value)
+        VALUES ('00', 'M001P004', 4), ('00', 'm001p004', 23);
+      `);
+
+      legacy.exec(readFileSync(issuanceMigrationPath, "utf8"));
+      insertApprovedWompiEvent(legacy, "wompi_legacy_collision");
+      reserve(legacy, "wompi_legacy_collision", "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE");
+
+      expect(reservation(legacy, "wompi_legacy_collision")?.control_sequence).toBe(23);
+      expect(sequenceRows(legacy)).toEqual([
+        { environment: "00", control_prefix: "M001P004", next_value: 24 }
+      ]);
+    } finally {
+      legacy.close();
+    }
+  });
 });
 
 function insertApprovedWompiEvent(database: DatabaseSync, id: string): void {
@@ -112,4 +155,22 @@ function nextValue(database: DatabaseSync): number | undefined {
        WHERE environment = '00' AND control_prefix = 'M001P004'`
     )
     .get()?.next_value as number | undefined;
+}
+
+function sequenceRows(database: DatabaseSync): Array<{
+  environment: string;
+  control_prefix: string;
+  next_value: number;
+}> {
+  return database
+    .prepare(
+      `SELECT environment, control_prefix, next_value
+       FROM document_sequences
+       ORDER BY environment, control_prefix`
+    )
+    .all() as Array<{
+      environment: string;
+      control_prefix: string;
+      next_value: number;
+    }>;
 }

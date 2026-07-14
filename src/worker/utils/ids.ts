@@ -10,10 +10,14 @@ export function padControlSequence(value: number): string {
   return String(value).padStart(15, "0");
 }
 
-export function numeroControl(controlPrefix: string, sequence: number): string {
-  const cleanPrefix = controlPrefix.replace(/[^A-Z0-9]/gi, "").toUpperCase();
-  if (!/^[A-Z0-9]{8}$/.test(cleanPrefix)) {
+export function normalizeControlPrefix(controlPrefix: string): string {
+  const normalized = controlPrefix.replace(/[^A-Z0-9]/gi, "").toUpperCase();
+  if (!/^[A-Z0-9]{8}$/.test(normalized)) {
     throw new Error("El prefijo de control debe tener exactamente 8 caracteres alfanuméricos");
   }
-  return `DTE-15-${cleanPrefix}-${padControlSequence(sequence)}`;
+  return normalized;
+}
+
+export function numeroControl(controlPrefix: string, sequence: number): string {
+  return `DTE-15-${normalizeControlPrefix(controlPrefix)}-${padControlSequence(sequence)}`;
 }

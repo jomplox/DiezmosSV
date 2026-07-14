@@ -306,6 +306,10 @@ npm run cf:deploy:staging
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
 ```
 
+Both `cf:migrate:*` commands first run a read-only D1 preflight for duplicate non-null
+`dte_documents.wompi_event_id` links. Any duplicate blocks the migration for manual
+legal-record review; the preflight never deletes, relinks, or chooses a document.
+
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
 Do not place credentials, Wompi secrets, bootstrap tokens, or donor identity values inline in the
