@@ -503,7 +503,7 @@ describe("auth rate limiting", () => {
       }
     });
 
-    it("enforces the shared security-claim limit with the production SQLite statement", async () => {
+    it("combines legacy activity and atomic claims with the production SQLite statement", async () => {
       const sqlite = new DatabaseSync(":memory:");
       try {
         sqlite.exec(`CREATE TABLE security_rate_limit_claims (
@@ -512,13 +512,21 @@ describe("auth rate limiting", () => {
           key_hash TEXT NOT NULL,
           claimed_at TEXT NOT NULL,
           expires_at TEXT NOT NULL
-        )`);
+        );
+        CREATE TABLE donation_intents (
+          id TEXT PRIMARY KEY,
+          client_ip TEXT NOT NULL,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO donation_intents (id, client_ip, created_at) VALUES
+          ('legacy_1', '203.0.113.7', '2026-07-04T11:50:00.000Z'),
+          ('legacy_2', '203.0.113.7', '2026-07-04T11:51:00.000Z');`);
         const repo = new Repository(sqliteD1(sqlite));
         const accepted = await Promise.all(
           Array.from({ length: 20 }, () =>
-            repo.claimSecurityRateLimit(
-              "donation_intent",
+            repo.claimDonationIntentRateLimit(
               "hashed-client-ip",
+              "203.0.113.7",
               "2026-07-04T12:00:00.000Z",
               "2026-07-04T11:45:00.000Z",
               "2026-07-04T12:15:00.000Z",
@@ -527,7 +535,7 @@ describe("auth rate limiting", () => {
           )
         );
 
-        expect(accepted.filter(Boolean)).toHaveLength(5);
+        expect(accepted.filter(Boolean)).toHaveLength(3);
         expect(
           sqlite
             .prepare(
@@ -536,7 +544,7 @@ describe("auth rate limiting", () => {
                 WHERE scope = ? AND key_hash = ?`
             )
             .get("donation_intent", "hashed-client-ip")
-        ).toEqual({ count: 5 });
+        ).toEqual({ count: 3 });
       } finally {
         sqlite.close();
       }
@@ -748,16 +756,9 @@ describe("auth rate limiting", () => {
       disabled_at: ""
     });
     const sentMessages: unknown[] = [];
-    // Three accepted claims inside the window — the next one must be throttled.
-    const resetKeyHash = await sha256Hex(utf8Bytes("user_operator"));
+    // Three requests completed before the claim ledger was deployed. The transition
+    // must preserve their active-window quota without requiring a hash backfill.
     for (let i = 0; i < 3; i += 1) {
-      db.securityRateLimitClaims.push({
-        id: `reset_claim_${i}`,
-        scope: "password_reset",
-        key_hash: resetKeyHash,
-        claimed_at: `2026-07-04T11:5${i}:00.000Z`,
-        expires_at: `2026-07-04T12:0${5 + i}:00.000Z`
-      });
       seedAudit(db, "PASSWORD_RESET_REQUESTED", "user_operator", `2026-07-04T11:5${i}:00.000Z`);
     }
 
@@ -1169,9 +1170,34 @@ describe("donation intents", () => {
     expect(claim.key_hash).not.toContain("203.0.113.7");
   });
 
+  it("counts pre-ledger intents while atomically admitting overlapping creations", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 2; index += 1) {
+        db.donationIntents.push({
+          id: `legacy_intent_${index}`,
+          client_ip: "203.0.113.7",
+          created_at: `2026-07-04T11:5${index}:00.000Z`
+        });
+      }
+
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, () => worker.fetch(intentRequest(validIntentBody()), env(db)))
+      );
+
+      expect(responses.filter((response) => response.status === 201)).toHaveLength(3);
+      expect(responses.filter((response) => response.status === 429)).toHaveLength(17);
+      expect(db.donationIntents).toHaveLength(5);
+      expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an oversized public intent body with 413 before any persistence", async () => {
     // A body over the 16 KiB cap is refused up front, so oversized spam never
-    // reaches validation or D1 (the per-IP throttle counts only persisted rows).
+    // reaches validation or the atomic D1 admission ledger.
     const db = new InMemoryD1();
     const response = await worker.fetch(
       intentRequest(validIntentBody({ filler: "x".repeat(17 * 1024) })),
@@ -1470,13 +1496,6 @@ describe("donation intents", () => {
           expires_at: "2026-07-04T13:00:00.000Z",
           created_at: `2026-07-04T11:5${i}:00.000Z`
         });
-        db.securityRateLimitClaims.push({
-          id: `donation_claim_${i}`,
-          scope: "donation_intent",
-          key_hash: await sha256Hex(utf8Bytes("203.0.113.7")),
-          claimed_at: `2026-07-04T11:5${i}:00.000Z`,
-          expires_at: `2026-07-04T12:0${5 + i}:00.000Z`
-        });
       }
 
       const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
@@ -1756,13 +1775,6 @@ describe("donation intents", () => {
       const db = new InMemoryD1();
       for (let i = 0; i < 5; i += 1) {
         db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
-        db.securityRateLimitClaims.push({
-          id: `draft_claim_${i}`,
-          scope: "donation_intent",
-          key_hash: await sha256Hex(utf8Bytes("203.0.113.7")),
-          claimed_at: "2026-07-04T12:00:00.000Z",
-          expires_at: "2026-07-04T12:15:00.000Z"
-        });
       }
       vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
       try {
@@ -2236,6 +2248,43 @@ describe("password reset", () => {
     expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
     expect(db.securityRateLimitClaims[0].key_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(db.securityRateLimitClaims[0].key_hash).not.toContain("user_operator");
+  });
+
+  it("counts pre-ledger reset audits while atomically admitting overlapping requests", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.audits.push({
+      id: "legacy_reset_audit",
+      action: "PASSWORD_RESET_REQUESTED",
+      entity_id: "user_operator",
+      created_at: "2026-07-04T11:55:00.000Z"
+    });
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: `reset-${sentMessages.length}` };
+        }
+      } as SendEmail
+    });
+    const request = () =>
+      worker.fetch(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(2);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(2);
   });
 
   it("consumes reset quota and invalidates each exact token when delivery fails", async () => {
@@ -10245,19 +10294,58 @@ class Statement {
 
   async first<T>(): Promise<T | null> {
     if (this.sql.includes("INSERT INTO security_rate_limit_claims")) {
-      const [id, scope, keyHash, claimedAt, expiresAt, countScope, countKeyHash, cutoff, limitValue] = this.args;
-      const currentCount = this.db.securityRateLimitClaims.filter(
+      const [
+        id,
+        keyHash,
+        claimedAt,
+        expiresAt,
+        countKeyHash,
+        cutoff,
+        legacyKey,
+        legacyCutoff,
+        boundaryKeyHash,
+        boundaryCutoff,
+        now,
+        limitValue
+      ] = this.args;
+      const scope = this.sql.includes("'donation_intent'") ? "donation_intent" : "password_reset";
+      const activeClaims = this.db.securityRateLimitClaims.filter(
         (claim) =>
-          claim.scope === countScope &&
+          claim.scope === scope &&
           claim.key_hash === countKeyHash &&
           claim.claimed_at >= String(cutoff)
-      ).length;
-      if (currentCount >= Number(limitValue)) {
+      );
+      const firstClaimAt = this.db.securityRateLimitClaims
+        .filter(
+          (claim) =>
+            claim.scope === scope &&
+            claim.key_hash === boundaryKeyHash &&
+            claim.claimed_at >= String(boundaryCutoff)
+        )
+        .map((claim) => claim.claimed_at)
+        .sort()[0];
+      const legacyBoundary = firstClaimAt ?? String(now);
+      const legacyCount =
+        scope === "donation_intent"
+          ? this.db.donationIntents.filter(
+              (intent) =>
+                intent.client_ip === legacyKey &&
+                String(intent.created_at) >= String(legacyCutoff) &&
+                String(intent.created_at) < legacyBoundary
+            ).length
+          : this.db.audits.filter(
+              (audit) =>
+                audit.action === "PASSWORD_RESET_REQUESTED" &&
+                audit.entity_id === legacyKey &&
+                String(audit.created_at) >= String(legacyCutoff) &&
+                String(audit.created_at) < legacyBoundary
+            ).length;
+      if (activeClaims.length + legacyCount >= Number(limitValue)) {
         return null;
       }
       const claim = {
         id: String(id),
-        scope: String(scope),
+        scope,
         key_hash: String(keyHash),
         claimed_at: String(claimedAt),
         expires_at: String(expiresAt)

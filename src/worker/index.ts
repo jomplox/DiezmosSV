@@ -517,9 +517,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     const claimNow = nowIso();
-    const admitted = await repo.claimSecurityRateLimit(
-      "donation_intent",
+    const admitted = await repo.claimDonationIntentRateLimit(
       await rateLimitKey(clientIp),
+      clientIp,
       claimNow,
       intentThrottleSinceIso(),
       intentThrottleExpiresIso(),
@@ -653,9 +653,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       const account = await repo.getUserForLogin(email);
       if (account && !account.disabled_at) {
         const claimNow = nowIso();
-        const admitted = await repo.claimSecurityRateLimit(
-          "password_reset",
+        const admitted = await repo.claimPasswordResetRateLimit(
           await rateLimitKey(account.id),
+          account.id,
           claimNow,
           authThrottleSinceIso(),
           authThrottleExpiresIso(),
