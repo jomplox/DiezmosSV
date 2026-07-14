@@ -160,7 +160,7 @@ export class Repository {
       throw new Error("El ambiente del evento Wompi no coincide con la reserva");
     }
 
-    const existing = wompiDocumentIdentifiers(event);
+    const existing = wompiDocumentIdentifiersForPrefix(event, normalizedPrefix);
     if (existing) {
       return existing;
     }
@@ -183,7 +183,7 @@ export class Repository {
     if (!reservedEvent || reservedEvent.environment !== environment) {
       throw new Error("No se pudo leer la reserva de identificadores Wompi");
     }
-    const reserved = wompiDocumentIdentifiers(reservedEvent);
+    const reserved = wompiDocumentIdentifiersForPrefix(reservedEvent, normalizedPrefix);
     if (!reserved) {
       throw new Error("No se pudo reservar los identificadores del documento Wompi");
     }
@@ -1848,6 +1848,23 @@ function wompiDocumentIdentifiers(event: WompiEventRecord): WompiDocumentIdentif
     numeroControl: expectedNumeroControl,
     codigoGeneracion: event.reserved_codigo_generacion as string
   };
+}
+
+function wompiDocumentIdentifiersForPrefix(
+  event: WompiEventRecord,
+  requestedPrefix: string
+): WompiDocumentIdentifiers | null {
+  const identifiers = wompiDocumentIdentifiers(event);
+  if (!identifiers) {
+    return null;
+  }
+  if (
+    event.control_prefix !== requestedPrefix ||
+    identifiers.numeroControl !== numeroControl(requestedPrefix, identifiers.sequence)
+  ) {
+    throw new Error("El prefijo de control solicitado no coincide con la reserva Wompi existente");
+  }
+  return identifiers;
 }
 
 function normalizeDocumentListLimit(value: number | undefined): number {

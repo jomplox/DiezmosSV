@@ -14,6 +14,7 @@ import {
   WompiIntentQuarantinedError
 } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
+import { MhClient } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -115,6 +116,27 @@ describe("Wompi document identifier reservation", () => {
     const identifiers = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "m001-p004");
 
     expect(identifiers.numeroControl).toBe("DTE-15-M001P004-000000000000001");
+  });
+
+  it("rejects prefix drift after identifiers have already been reserved", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const reserved = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+
+    await expect(
+      repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P005")
+    ).rejects.toThrow(/prefijo/i);
+    await expect(
+      repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "m001-p004")
+    ).resolves.toEqual(reserved);
+    expect(db.wompiEvents[0]).toMatchObject({
+      control_prefix: "M001P004",
+      reserved_numero_control: reserved.numeroControl,
+      reserved_codigo_generacion: reserved.codigoGeneracion
+    });
+    expect(db.nextSequence).toBe(2);
   });
 
   it("rejects a control prefix that does not normalize to eight characters", async () => {
@@ -5813,6 +5835,141 @@ describe("donation intent correlation", () => {
     );
   });
 
+  it("retries accepted Wompi bookkeeping and finalizes it without retransmitting", async () => {
+    const db = new InMemoryD1();
+    const intent = seedIntentRow(db);
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_post_acceptance_retry_tx"
+    });
+    const eventId = seedWompiEvent(db, webhook, "wompi_post_acceptance_retry");
+    const codigoGeneracion = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const numeroControl = "DTE-15-M001P004-000000000000031";
+    const plainDocument = buildCdeDocument(webhook as unknown as WompiWebhook, emisorConfig(), {
+      sequence: 31,
+      codigoGeneracion,
+      environment: "00",
+      issuedAt: new Date("2026-07-13T11:00:00-06:00")
+    });
+    db.documents.push(testDocument({
+      id: "dte_post_acceptance_retry",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: numeroControl,
+      status: "SIGNED",
+      plain_json: JSON.stringify(plainDocument),
+      signed_jws: "stored-signed-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null,
+      donor_email: "fallback@example.org"
+    }));
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-POST-ACCEPTANCE",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const realPrepare = db.prepare.bind(db);
+    let failAcceptedAudit = true;
+    let failIntentLookup = true;
+    let intentCompletedBeforeReceipt = false;
+    db.prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (sql.includes("INSERT INTO audit_logs") && failAcceptedAudit) {
+        failAcceptedAudit = false;
+        statement.run = async () => {
+          throw new Error("transient accepted-audit failure");
+        };
+      }
+      if (sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
+        const first = statement.first.bind(statement);
+        statement.first = async <T>() => {
+          if (failIntentLookup) {
+            failIntentLookup = false;
+            throw new Error("transient intent-correlation failure");
+          }
+          return first<T>();
+        };
+      }
+      if (sql.includes("INSERT INTO email_deliveries")) {
+        const run = statement.run.bind(statement);
+        statement.run = async () => {
+          intentCompletedBeforeReceipt = intent.status === "COMPLETED";
+          return run();
+        };
+      }
+      return statement;
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = await pipelineEnv(db);
+    const queueBatch = () => {
+      const ack = vi.fn();
+      const retry = vi.fn();
+      const batch = {
+        queue: "diezmossv-staging-issuance-example",
+        messages: [{
+          id: crypto.randomUUID(),
+          timestamp: new Date(),
+          body: { wompiEventId: eventId },
+          attempts: 1,
+          ack,
+          retry
+        }],
+        ackAll: vi.fn(),
+        retryAll: vi.fn()
+      } as unknown as MessageBatch<IssuanceMessage>;
+      return { batch, ack, retry };
+    };
+
+    const first = queueBatch();
+    await worker.queue(first.batch, runtime);
+
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(first.retry).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-POST-ACCEPTANCE"
+    });
+    expect(intent.status).toBe("LINK_CREATED");
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(transmit).toHaveBeenCalledTimes(1);
+
+    const second = queueBatch();
+    await worker.queue(second.batch, runtime);
+
+    expect(second.ack).not.toHaveBeenCalled();
+    expect(second.retry).toHaveBeenCalledTimes(1);
+    expect(intent.status).toBe("LINK_CREATED");
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+
+    const third = queueBatch();
+    await worker.queue(third.batch, runtime);
+
+    expect(third.ack).toHaveBeenCalledTimes(1);
+    expect(third.retry).not.toHaveBeenCalled();
+    expect(intent).toMatchObject({
+      status: "COMPLETED",
+      document_id: "dte_post_acceptance_retry"
+    });
+    expect(intentCompletedBeforeReceipt).toBe(true);
+    expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+
+    const fourth = queueBatch();
+    await worker.queue(fourth.batch, runtime);
+
+    expect(fourth.ack).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the payload-derived codPais/codDomiciliado for a domestic intent", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -6383,6 +6540,11 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
     );
+    const invalidDuiAudit = db.audits.find(
+      (audit) => audit.action === "WOMPI_INVALID_DONOR_DUI" && audit.entity_id === eventId
+    );
+    expect(invalidDuiAudit?.summary).toBe("Los datos del donante contienen un DUI inválido.");
+    expect(invalidDuiAudit?.summary).not.toContain("12345678-9");
     expect(db.wompiEvents.find((event) => event.id === eventId)).toMatchObject({
       processed_at: expect.any(String),
       issuance_status: "FAILED",
