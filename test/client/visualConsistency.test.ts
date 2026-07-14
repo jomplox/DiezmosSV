@@ -47,12 +47,31 @@ describe("visual consistency pack", () => {
     const statsRenderIndex = appSource.indexOf("<Stats documents={documents}");
     const tableRenderIndex = appSource.indexOf("<DocumentTable documents={documents}");
 
-    expect(appSource).toContain('import { filterPreCdeFailures } from "./preCdeFailures";');
+    expect(appSource).toContain('import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";');
     expect(panelRenderIndex).toBeGreaterThan(-1);
     expect(panelRenderIndex).toBeLessThan(statsRenderIndex);
     expect(panelRenderIndex).toBeLessThan(tableRenderIndex);
     expect(appSource).toContain("preCdeFailureCount={visiblePreCdeFailures.length}");
     expect(appSource).toContain("Sin CDE emitidos fallidos o rechazados");
+  });
+
+  it("guards async pre-CDE commits and invalidates every clearing path", () => {
+    const fetchBlock = appSource.match(/async function fetchPreCdeFailures\(\) \{[\s\S]*?\n  \}\n\n  async function refresh/)?.[0] ?? "";
+    const clearBlock = appSource.match(/function clearPreCdeFailures\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    const changeViewBlock = appSource.match(/function changeView\(nextView: View\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    const logoutBlock = appSource.match(/function logout\(\) \{[\s\S]*?\n  \}\n\n  async function retryPreCdeFailure/)?.[0] ?? "";
+    const expireBlock = appSource.match(/function expireSession\(\) \{[\s\S]*?\n  \}\n\n  function toggleSidebar/)?.[0] ?? "";
+
+    expect(appSource).toContain('import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";');
+    expect(fetchBlock).toContain("const request = preCdeFailureRequests.current.start();");
+    expect(fetchBlock.match(/request\.commit/g)).toHaveLength(3);
+    expect(clearBlock.indexOf("preCdeFailureRequests.current.invalidate();")).toBeGreaterThan(-1);
+    expect(clearBlock.indexOf("preCdeFailureRequests.current.invalidate();")).toBeLessThan(clearBlock.indexOf("setPreCdeFailures([]);"));
+    expect(changeViewBlock).toContain('if (nextView !== "failures")');
+    expect(changeViewBlock).toContain("clearPreCdeFailures();");
+    expect(appSource).toContain('onClick={() => changeView(item.id)}');
+    expect(logoutBlock).toContain("clearPreCdeFailures();");
+    expect(expireBlock).toContain("clearPreCdeFailures();");
   });
 
   it("renders exact pre-CDE evidence with safe retry states and no document actions", () => {

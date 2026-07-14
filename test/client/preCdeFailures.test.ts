@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { filterPreCdeFailures } from "../../src/client/preCdeFailures";
+import { createLatestRequestGate, filterPreCdeFailures } from "../../src/client/preCdeFailures";
 import type { WompiIssuanceFailureItem } from "../../src/client/types";
 
 const items: WompiIssuanceFailureItem[] = [
@@ -58,5 +58,43 @@ describe("filterPreCdeFailures", () => {
 
   it("returns the original items for an empty query", () => {
     expect(filterPreCdeFailures(items, "")).toEqual(items);
+  });
+});
+
+describe("createLatestRequestGate", () => {
+  it("prevents an older request from replacing newer items or errors", () => {
+    const gate = createLatestRequestGate();
+    const state = { items: [] as string[], error: "" };
+    const olderRequest = gate.start();
+    const newerRequest = gate.start();
+
+    expect(newerRequest.commit(() => {
+      state.items = ["newer"];
+    })).toBe(true);
+    expect(olderRequest.commit(() => {
+      state.items = ["older"];
+    })).toBe(false);
+    expect(olderRequest.commit(() => {
+      state.error = "stale error";
+    })).toBe(false);
+    expect(state).toEqual({ items: ["newer"], error: "" });
+  });
+
+  it("prevents requests invalidated by leaving Fallos or logout from committing", () => {
+    const gate = createLatestRequestGate();
+    const state = { items: [] as string[], error: "" };
+    const requestBeforeLeaving = gate.start();
+
+    gate.invalidate();
+    expect(requestBeforeLeaving.commit(() => {
+      state.items = ["stale after leaving"];
+    })).toBe(false);
+
+    const requestBeforeLogout = gate.start();
+    gate.invalidate();
+    expect(requestBeforeLogout.commit(() => {
+      state.error = "stale after logout";
+    })).toBe(false);
+    expect(state).toEqual({ items: [], error: "" });
   });
 });
