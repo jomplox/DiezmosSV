@@ -48,10 +48,10 @@ const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_nam
   issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
   issuance_dead_lettered_at, reserved_numero_control`;
 
-export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
+export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
-export const RETENTION_SNAPSHOT_TABLES = ["contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
+export const RETENTION_SNAPSHOT_TABLES = ["wompi_events", "contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
 export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
 
 export interface RetentionCursor {
@@ -59,9 +59,14 @@ export interface RetentionCursor {
   id: string;
 }
 
-// wompi_events has no created_at column — it records received_at instead
-// (migrations/0001_init.sql). Every other windowed retention table uses created_at.
-function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
+export interface DocumentSequenceRetentionCursor {
+  environment: string;
+  controlPrefix: string;
+}
+
+function retentionSnapshotTimestampColumn(
+  table: RetentionSnapshotTable
+): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
 }
 
@@ -2106,16 +2111,15 @@ export class Repository {
   // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged
   // full-table scan. `cursor` is the (timestamp, id) of the last row from the
-  // previous page, or null for the first page. The timestamp column is per-table:
-  // wompi_events has no created_at column, only received_at (migrations/0001_init.sql);
-  // every other windowed table uses created_at.
+  // previous page, or null for the first page. Mutable wompi_events are intentionally
+  // excluded from this received-month path and exported as a full snapshot below.
   async listRowsCreatedBetween(
     table: RetentionTable,
     range: { startIso: string; endIso: string },
     cursor: RetentionCursor | null,
     limit = RETENTION_PAGE_SIZE
   ): Promise<Array<Record<string, unknown>>> {
-    const column = retentionTimestampColumn(table);
+    const column = "created_at";
     const conditions = [`${column} >= ?`, `${column} < ?`];
     const bindings: Array<string | number> = [range.startIso, range.endIso];
     if (cursor) {
@@ -2129,18 +2133,42 @@ export class Repository {
     return rows.results ?? [];
   }
 
-  // Full-snapshot paged reads for the small contingency tables (no created_at
-  // window — the brief asks for a full snapshot, simpler than windowing).
+  // Full-snapshot paged reads for mutable Wompi lifecycle state and the small
+  // contingency tables. Wompi has received_at rather than created_at, but retains
+  // the same bounded (timestamp, id) cursor shape.
   async listAllRowsPaged(table: RetentionSnapshotTable, cursor: RetentionCursor | null, limit = RETENTION_PAGE_SIZE): Promise<Array<Record<string, unknown>>> {
+    const column = retentionSnapshotTimestampColumn(table);
     const conditions: string[] = [];
     const bindings: Array<string | number> = [];
     if (cursor) {
-      conditions.push("(created_at, id) > (?, ?)");
+      conditions.push(`(${column}, id) > (?, ?)`);
       bindings.push(cursor.createdAt, cursor.id);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = await this.db
-      .prepare(`SELECT * FROM ${table} ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
+      .prepare(`SELECT * FROM ${table} ${where} ORDER BY ${column} ASC, id ASC LIMIT ?`)
+      .bind(...bindings, limit)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  async listDocumentSequencesPaged(
+    cursor: DocumentSequenceRetentionCursor | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<Array<Record<string, unknown>>> {
+    const conditions: string[] = [];
+    const bindings: Array<string | number> = [];
+    if (cursor) {
+      conditions.push("(environment, control_prefix) > (?, ?)");
+      bindings.push(cursor.environment, cursor.controlPrefix);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = await this.db
+      .prepare(
+        `SELECT environment, control_prefix, next_value
+         FROM document_sequences ${where}
+         ORDER BY environment ASC, control_prefix ASC LIMIT ?`
+      )
       .bind(...bindings, limit)
       .all<Record<string, unknown>>();
     return rows.results ?? [];

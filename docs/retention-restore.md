@@ -11,10 +11,12 @@ multi-year retention tax law requires survives independently of D1.
 
 ```
 retention/<YYYY>/<YYYY-MM>/dte_documents.ndjson
+retention/<YYYY>/<YYYY-MM>/donation_intents.ndjson
 retention/<YYYY>/<YYYY-MM>/dte_events.ndjson
 retention/<YYYY>/<YYYY-MM>/email_deliveries.ndjson
-retention/<YYYY>/<YYYY-MM>/wompi_events.ndjson
 retention/<YYYY>/<YYYY-MM>/audit_logs.ndjson
+retention/<YYYY>/<YYYY-MM>/wompi_events.ndjson              (full current-state snapshot)
+retention/<YYYY>/<YYYY-MM>/document_sequences.ndjson        (full current-state snapshot)
 retention/<YYYY>/<YYYY-MM>/contingency_periods.ndjson       (full snapshot, not month-windowed)
 retention/<YYYY>/<YYYY-MM>/contingency_batches.ndjson       (full snapshot, not month-windowed)
 retention/<YYYY>/<YYYY-MM>/contingency_batch_lines.ndjson   (full snapshot, not month-windowed)
@@ -22,21 +24,24 @@ retention/<YYYY>/<YYYY-MM>/manifest.json
 ```
 
 Each `.ndjson` file has one JSON object per line (one D1 row per line). The
-five windowed tables (`dte_documents`, `dte_events`, `email_deliveries`,
-`wompi_events`, `audit_logs`) are filtered to rows whose `created_at` falls in
-the given month, evaluated in El Salvador local time (UTC-6, no DST). The
-three contingency tables are small, so each export is a full snapshot rather
-than windowed by month — every month's `contingency_*.ndjson` contains the
-same full table as of that run.
+five windowed tables (`dte_documents`, `donation_intents`, `dte_events`,
+`email_deliveries`, `audit_logs`) are filtered to rows whose `created_at`
+falls in the given month, evaluated in El Salvador local time (UTC-6, no
+DST). The mutable `wompi_events` lifecycle, the legal number counters in
+`document_sequences`, and the three contingency tables are full snapshots as
+of each run. Reads remain keyset-paged and bounded; “full” does not mean one
+unbounded D1 query.
 
 The pre-CDE issuance lifecycle stays inside the existing
-`wompi_events.ndjson` row; it does not create a separate export. The export
-therefore retains `issuance_status`, the reserved control/generation
-identifiers, `issuance_attempt_count`, the safe error code/message, and the
-attempt/failure timestamps together with the original Wompi event. Archives
-created before these columns existed may omit them. Those rows remain valid
-legacy data: do not infer a failed issuance from an absent field or invent a
-reservation/error during restore.
+`wompi_events.ndjson` row; it does not create a separate export. A Wompi row
+can resolve months after it was received, so every run captures it again. The
+latest `wompi_events.ndjson` snapshot therefore retains the current
+`issuance_status`, reserved control/generation identifiers,
+`issuance_attempt_count`, safe error code/message, and attempt/failure
+timestamps together with the original event. Archives created before these
+columns existed may omit them. Those rows remain valid legacy data: do not
+infer a failed issuance from an absent field or invent a reservation/error
+during restore.
 
 `manifest.json` is written **last** and is the completion marker: if it
 already exists for a given month, a re-run (cron retry or manual trigger)
@@ -52,6 +57,7 @@ duplicating work. It looks like:
     "dte_events": { "rowCount": 8, "sha256": "…" },
     "email_deliveries": { "rowCount": 405, "sha256": "…" },
     "wompi_events": { "rowCount": 420, "sha256": "…" },
+    "document_sequences": { "rowCount": 2, "sha256": "…" },
     "audit_logs": { "rowCount": 1890, "sha256": "…" },
     "contingency_periods": { "rowCount": 2, "sha256": "…" },
     "contingency_batches": { "rowCount": 1, "sha256": "…" },
@@ -113,6 +119,37 @@ table:
    `rowCount` for each table, and re-run the read paths (`GET
    /api/documents`, `GET /api/audit`) to confirm the restored data renders
    correctly.
+
+### Mutable snapshots and legal counter reconciliation
+
+Do not concatenate every repeated Wompi snapshot. Restore historical
+windowed records, then overlay rows by `id` from the latest
+`wompi_events.ndjson` snapshot whose manifest and hash both verify. This last
+snapshot is authoritative for the mutable issuance lifecycle. Archives from
+before the full-snapshot change may contain only the Wompi rows received that
+month; treat them as legacy partial inputs and overlay the newest verified
+full snapshot when one is available.
+
+Restore the latest `document_sequences.ndjson` snapshot after Wompi events and
+DTE documents have been restored, then reconcile each
+`(environment, UPPER(control_prefix))` before allowing any new issuance. For
+each key, the safe next value is exactly:
+
+**MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)**
+
+The restored document maximum is the greatest trailing serial from
+`dte_documents.numero_control` for that environment/prefix. The restored
+reservation maximum is the greatest non-null `wompi_events.control_sequence`
+for the same environment/prefix. If one source has no row, omit that term (or
+treat it as `1`). Archives created before `document_sequences.ndjson` existed
+are valid legacy archives: derive the counter from the document and Wompi
+reservation maxima instead of assuming `1`.
+
+Never move an existing counter backward. When restoring into a database that
+already has a counter, compare its current `next_value` with the formula above
+and retain the greater value. Normalize prefixes to uppercase before merging
+case-colliding legacy rows, and stop for manual review if restored legal rows
+conflict rather than choosing or deleting one automatically.
 
 ## Manual verification without waiting for the 1st
 
