@@ -29,6 +29,15 @@ three contingency tables are small, so each export is a full snapshot rather
 than windowed by month — every month's `contingency_*.ndjson` contains the
 same full table as of that run.
 
+The pre-CDE issuance lifecycle stays inside the existing
+`wompi_events.ndjson` row; it does not create a separate export. The export
+therefore retains `issuance_status`, the reserved control/generation
+identifiers, `issuance_attempt_count`, the safe error code/message, and the
+attempt/failure timestamps together with the original Wompi event. Archives
+created before these columns existed may omit them. Those rows remain valid
+legacy data: do not infer a failed issuance from an absent field or invent a
+reservation/error during restore.
+
 `manifest.json` is written **last** and is the completion marker: if it
 already exists for a given month, a re-run (cron retry or manual trigger)
 skips re-exporting and audits `RETENTION_EXPORT_SKIPPED` instead of
@@ -88,7 +97,11 @@ table:
    current state first if the table already has rows.
 2. Convert the NDJSON rows into `INSERT` statements matching the table's
    columns, in the same order that appears in `migrations/0001_init.sql` /
-   `migrations/0005_nullable_dte_wompi_source.sql` for that table.
+   `migrations/0005_nullable_dte_wompi_source.sql` for that table. For
+   `wompi_events`, also follow `migrations/0019_wompi_issuance_lifecycle.sql`:
+   an older row may use `NULL` for absent nullable lifecycle columns and the
+   default `0` for `issuance_attempt_count`; do not manufacture lifecycle
+   evidence.
 3. Apply via `wrangler d1 execute <database> --env <env> --remote --file
    restore.sql`, batching inserts (D1 has a statement-size limit) rather
    than issuing thousands of individual `wrangler d1 execute` calls.
