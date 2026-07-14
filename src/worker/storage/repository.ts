@@ -19,8 +19,6 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
-export type SecurityRateLimitScope = "donation_intent" | "password_reset";
-
 export class OwnerTargetProtectedError extends Error {
   constructor() {
     super("Solo un propietario puede modificar a otro propietario");
@@ -1219,31 +1217,99 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
-  async claimSecurityRateLimit(
-    scope: SecurityRateLimitScope,
+  async claimDonationIntentRateLimit(
     keyHash: string,
+    clientIp: string,
     now: string,
     cutoff: string,
     expiresAt: string,
     limit: number
   ): Promise<boolean> {
+    // Rows before the first active claim bridge a ledger deployment without double
+    // counting intents created after that claim.
     const id = newId("rate");
     const row = await this.db
       .prepare(
         `INSERT INTO security_rate_limit_claims (
            id, scope, key_hash, claimed_at, expires_at
          )
-         SELECT ?, ?, ?, ?, ?
+         SELECT ?, 'donation_intent', ?, ?, ?
           WHERE (
-            SELECT COUNT(*)
-              FROM security_rate_limit_claims
-             WHERE scope = ?
-               AND key_hash = ?
-               AND claimed_at >= ?
+            (
+              SELECT COUNT(*)
+                FROM security_rate_limit_claims
+               WHERE scope = 'donation_intent'
+                 AND key_hash = ?
+                 AND claimed_at >= ?
+            ) + (
+              SELECT COUNT(*)
+                FROM donation_intents
+               WHERE client_ip = ?
+                 AND created_at >= ?
+                 AND created_at < COALESCE(
+                   (
+                     SELECT MIN(claimed_at)
+                       FROM security_rate_limit_claims
+                      WHERE scope = 'donation_intent'
+                        AND key_hash = ?
+                        AND claimed_at >= ?
+                   ),
+                   ?
+                 )
+            )
           ) < ?
          RETURNING id`
       )
-      .bind(id, scope, keyHash, now, expiresAt, scope, keyHash, cutoff, limit)
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, clientIp, cutoff, keyHash, cutoff, now, limit)
+      .first<{ id: string }>();
+    return row !== null;
+  }
+
+  async claimPasswordResetRateLimit(
+    keyHash: string,
+    userId: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<boolean> {
+    // Successful reset audits before the first active claim preserve the in-flight
+    // legacy window; subsequent outcomes are represented only by claims.
+    const id = newId("rate");
+    const row = await this.db
+      .prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         )
+         SELECT ?, 'password_reset', ?, ?, ?
+          WHERE (
+            (
+              SELECT COUNT(*)
+                FROM security_rate_limit_claims
+               WHERE scope = 'password_reset'
+                 AND key_hash = ?
+                 AND claimed_at >= ?
+            ) + (
+              SELECT COUNT(*)
+                FROM audit_logs
+               WHERE action = 'PASSWORD_RESET_REQUESTED'
+                 AND entity_id = ?
+                 AND created_at >= ?
+                 AND created_at < COALESCE(
+                   (
+                     SELECT MIN(claimed_at)
+                       FROM security_rate_limit_claims
+                      WHERE scope = 'password_reset'
+                        AND key_hash = ?
+                        AND claimed_at >= ?
+                   ),
+                   ?
+                 )
+            )
+          ) < ?
+         RETURNING id`
+      )
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, userId, cutoff, keyHash, cutoff, now, limit)
       .first<{ id: string }>();
     return row !== null;
   }

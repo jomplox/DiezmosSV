@@ -1,12 +1,17 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { resetTokenFromHash } from "./passwordReset";
+import { readPasswordResetLocation } from "./passwordReset";
 import "./styles.css";
 
-const initialResetToken = resetTokenFromHash(window.location.hash);
-if (initialResetToken) {
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+const resetLocation = readPasswordResetLocation(window.location.search, window.location.hash);
+const initialResetToken = resetLocation.token;
+if (resetLocation.shouldReplace) {
+  window.history.replaceState(
+    null,
+    "",
+    `${window.location.pathname}${resetLocation.cleanSearch}${resetLocation.cleanHash}`
+  );
 }
 
 function BootstrappedApp() {

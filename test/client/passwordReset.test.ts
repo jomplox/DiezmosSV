@@ -1,19 +1,48 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { passwordResetConfirmValidationMessage, resetTokenFromHash } from "../../src/client/passwordReset";
+import { passwordResetConfirmValidationMessage, readPasswordResetLocation } from "../../src/client/passwordReset";
 
 describe("password reset client helpers", () => {
-  it("extracts the reset token only from a URL fragment", () => {
-    expect(resetTokenFromHash("#reset=abc123_-XYZ")).toBe("abc123_-XYZ");
-    expect(resetTokenFromHash("#foo=1&reset=tok")).toBe("tok");
-    expect(resetTokenFromHash("")).toBeNull();
-    expect(resetTokenFromHash("#reset=")).toBeNull();
+  it("prefers fragment tokens while preserving unrelated URL state during cleanup", () => {
+    expect(readPasswordResetLocation("?campaign=summer&reset=legacy", "#reset=fragment&step=confirm")).toEqual({
+      token: "fragment",
+      cleanSearch: "?campaign=summer",
+      cleanHash: "#step=confirm",
+      shouldReplace: true
+    });
+    expect(readPasswordResetLocation("?campaign=summer", "#donar")).toEqual({
+      token: null,
+      cleanSearch: "?campaign=summer",
+      cleanHash: "#donar",
+      shouldReplace: false
+    });
   });
 
-  it("captures and removes the fragment before React mounts", () => {
+  it("accepts and immediately scrubs legacy query links issued before deployment", () => {
+    expect(readPasswordResetLocation("?reset=legacy-token&utm_source=email", "")).toEqual({
+      token: "legacy-token",
+      cleanSearch: "?utm_source=email",
+      cleanHash: "",
+      shouldReplace: true
+    });
+    expect(readPasswordResetLocation("?reset=legacy-token", "#donar")).toEqual({
+      token: "legacy-token",
+      cleanSearch: "",
+      cleanHash: "#donar",
+      shouldReplace: true
+    });
+    expect(readPasswordResetLocation("?reset=", "#reset=")).toEqual({
+      token: null,
+      cleanSearch: "",
+      cleanHash: "",
+      shouldReplace: true
+    });
+  });
+
+  it("captures and removes reset parameters before React mounts", () => {
     const source = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
-    const capture = source.indexOf("resetTokenFromHash(window.location.hash)");
+    const capture = source.indexOf("readPasswordResetLocation(window.location.search, window.location.hash)");
     const cleanup = source.indexOf("window.history.replaceState");
     const mount = source.indexOf("createRoot(");
 
