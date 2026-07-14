@@ -319,7 +319,7 @@ export class IssuancePipeline {
     const summary = cdeDocumentSummary(document);
     const wompiBacked = Boolean(record.wompi_event_id);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
-    let transmissionClaimed = false;
+    let transmissionClaimId: string | null = null;
     try {
       let signedJws = record.signed_jws;
       if (!signedJws) {
@@ -327,8 +327,8 @@ export class IssuancePipeline {
         signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
       }
       const staleBefore = new Date(Date.now() - DTE_TRANSMISSION_LEASE_MS).toISOString();
-      transmissionClaimed = await this.repo.claimDteTransmission(record.id, signedJws, staleBefore);
-      if (!transmissionClaimed) {
+      transmissionClaimId = await this.repo.claimDteTransmission(record.id, signedJws, staleBefore);
+      if (!transmissionClaimId) {
         const current = await this.repo.getDteDocument(record.id);
         if (!current) {
           throw new Error(`Documento DTE ${record.id} no encontrado después de reclamar transmisión`);
@@ -345,7 +345,7 @@ export class IssuancePipeline {
         codigoGeneracion: summary.codigoGeneracion,
         signedJws
       });
-      const resultStored = await this.repo.updateDocumentMhResult(record.id, {
+      const resultStored = await this.repo.updateDocumentMhResult(record.id, transmissionClaimId, {
         status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
         sello: mhResult.selloRecibido,
         mhEstado: mhResult.estado,
@@ -383,9 +383,9 @@ export class IssuancePipeline {
       }
       return record;
     } catch (error) {
-      if (error instanceof MhUnavailableError && transmissionClaimed) {
+      if (error instanceof MhUnavailableError && transmissionClaimId) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
-        return this.deferTransmission(record.id, String(error.message));
+        return this.deferTransmission(record.id, transmissionClaimId, String(error.message));
       }
       // Entre nuestra lectura y este fallo, MH pudo haber sellado el documento
       // (ACCEPTED/REJECTED) o pudo invalidarse: si ya es TERMINAL, un fallo posterior de
@@ -401,12 +401,12 @@ export class IssuancePipeline {
       // A deferred row whose local validation/signing still cannot proceed must
       // remain in the deferred sweep. Configuration can be corrected without
       // converting the recoverable CDE into an operator-facing FAILED record.
-      if (!transmissionClaimed && record.status === "SIGNED" && record.transmission_deferred_at) {
+      if (!transmissionClaimId && record.status === "SIGNED" && record.transmission_deferred_at) {
         throw error;
       }
       const failureMessage = error instanceof Error ? error.message : String(error);
-      const failureStored = transmissionClaimed
-        ? await this.repo.updateDocumentMhResult(record.id, {
+      const failureStored = transmissionClaimId
+        ? await this.repo.updateDocumentMhResult(record.id, transmissionClaimId, {
             status: "FAILED",
             sello: null,
             mhEstado: wompiBacked ? "PIPELINE_ERROR" : "ADVANCED_PIPELINE_ERROR",
@@ -522,8 +522,8 @@ export class IssuancePipeline {
   // Difiere la transmisión de un CDE ya firmado (forma normal). El donante recibe de
   // inmediato el comprobante TRANSITORIO — pdf.ts imprime "TRANSITORIO" como sello
   // cuando sello_recibido es null — y el cron reintenta la transmisión.
-  private async deferTransmission(documentId: string, reason: string): Promise<DteDocumentRecord> {
-    const deferred = await this.repo.markDocumentTransmissionDeferred(documentId, reason);
+  private async deferTransmission(documentId: string, claimId: string, reason: string): Promise<DteDocumentRecord> {
+    const deferred = await this.repo.markDocumentTransmissionDeferred(documentId, claimId, reason);
     const updated = await this.repo.getDteDocument(documentId);
     if (!updated) {
       throw new Error(`Documento DTE ${documentId} no encontrado al diferir su transmisión`);
@@ -708,7 +708,7 @@ export class IssuancePipeline {
         deliveryClaim.idempotencyKey
       );
     } catch (error) {
-      await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, {
+      await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
         status: "FAILED",
         providerResponse: { error: error instanceof Error ? error.message : String(error) },
         emailType,
@@ -723,7 +723,7 @@ export class IssuancePipeline {
       return false;
     }
 
-    await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, {
+    await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
       status: "SENT",
       providerResponse: response.providerResponse,
       emailType: response.emailType,
