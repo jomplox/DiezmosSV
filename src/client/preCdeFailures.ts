@@ -1,5 +1,27 @@
 import type { WompiIssuanceFailureItem } from "./types";
 
+export function createLatestRequestGate() {
+  let generation = 0;
+
+  return {
+    start() {
+      const requestGeneration = ++generation;
+      return {
+        commit(update: () => void): boolean {
+          if (requestGeneration !== generation) {
+            return false;
+          }
+          update();
+          return true;
+        }
+      };
+    },
+    invalidate() {
+      generation += 1;
+    }
+  };
+}
+
 export function filterPreCdeFailures(
   items: WompiIssuanceFailureItem[],
   query: string

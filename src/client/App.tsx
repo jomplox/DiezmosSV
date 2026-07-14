@@ -39,7 +39,7 @@ import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyR
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
-import { filterPreCdeFailures } from "./preCdeFailures";
+import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
@@ -216,6 +216,7 @@ export function App() {
   const [documents, setDocuments] = useState<DteDocument[]>([]);
   const [preCdeFailures, setPreCdeFailures] = useState<WompiIssuanceFailureItem[]>([]);
   const [preCdeFailuresError, setPreCdeFailuresError] = useState("");
+  const preCdeFailureRequests = useRef(createLatestRequestGate());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   // Keyset cursor for the audit trail ("<created_at>|<id>"); null = no older pages.
@@ -359,8 +360,7 @@ export function App() {
 
   useEffect(() => {
     if (view !== "failures") {
-      setPreCdeFailures([]);
-      setPreCdeFailuresError("");
+      clearPreCdeFailures();
     }
   }, [view]);
 
@@ -510,14 +510,28 @@ export function App() {
     return page;
   }
 
-  async function fetchPreCdeFailures() {
+  function clearPreCdeFailures() {
+    preCdeFailureRequests.current.invalidate();
+    setPreCdeFailures([]);
     setPreCdeFailuresError("");
+  }
+
+  async function fetchPreCdeFailures() {
+    const request = preCdeFailureRequests.current.start();
+    request.commit(() => {
+      setPreCdeFailuresError("");
+    });
     try {
       const result = await api<{ failures: WompiIssuanceFailureItem[] }>("/api/wompi-events/issuance-failures", token);
-      setPreCdeFailures(result.failures);
+      request.commit(() => {
+        setPreCdeFailures(result.failures);
+        setPreCdeFailuresError("");
+      });
     } catch (error) {
-      setPreCdeFailures([]);
-      setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+      request.commit(() => {
+        setPreCdeFailures([]);
+        setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+      });
     }
   }
 
@@ -617,8 +631,7 @@ export function App() {
     setUser(null);
     setAuthNotice("");
     setDocuments([]);
-    setPreCdeFailures([]);
-    setPreCdeFailuresError("");
+    clearPreCdeFailures();
     setSelectedId(null);
     setSelectedUserId(null);
     setUserSettings(emptyUserSettings());
@@ -1121,8 +1134,7 @@ export function App() {
     setToken("");
     setUser(null);
     setDocuments([]);
-    setPreCdeFailures([]);
-    setPreCdeFailuresError("");
+    clearPreCdeFailures();
     setSelectedId(null);
     setAudit([]);
     setUsers([]);
@@ -1136,6 +1148,13 @@ export function App() {
       localStorage.setItem("diezmos_sidebar_collapsed", next ? "true" : "false");
       return next;
     });
+  }
+
+  function changeView(nextView: View) {
+    if (nextView !== "failures") {
+      clearPreCdeFailures();
+    }
+    setView(nextView);
   }
 
   return (
@@ -1167,7 +1186,7 @@ export function App() {
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)} aria-label={item.label} title={item.label}>
+              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => changeView(item.id)} aria-label={item.label} title={item.label}>
                 <Icon size={18} />
                 <span className="nav-label">{item.label}</span>
               </button>
@@ -4911,6 +4930,7 @@ export function viewSubtitle(view: View): string {
 
 export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
   if (view === "failures" && query.trim() === "") return "Sin fallos pendientes. Todo en orden.";
+  if (view === "failures") return "No hay CDE ni pagos sin comprobante que coincidan con la búsqueda.";
   return "No hay CDE que coincidan con la búsqueda o el filtro.";
 }
 

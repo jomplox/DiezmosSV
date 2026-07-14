@@ -33,8 +33,8 @@ describe("documentListEmptyMessage", () => {
     expect(documentListEmptyMessage("failures", "")).toBe("Sin fallos pendientes. Todo en orden.");
   });
 
-  it("keeps the generic no-results message in the failures view when a query is active", () => {
-    expect(documentListEmptyMessage("failures", "abc")).toBe("No hay CDE que coincidan con la búsqueda o el filtro.");
+  it("mentions both issued CDEs and payments without a receipt when a Fallos query has no results", () => {
+    expect(documentListEmptyMessage("failures", "abc")).toBe("No hay CDE ni pagos sin comprobante que coincidan con la búsqueda.");
   });
 
   it("keeps the generic no-results message in the documents view regardless of query", () => {
