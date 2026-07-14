@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { generationCode, newId, numeroControl } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -24,6 +24,11 @@ export const RETENTION_PAGE_SIZE = 500;
 // an unbounded burst of API calls in a single invocation; the remainder is picked up
 // by the next tick.
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+
+const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_name, donor_email,
+  received_at, issuance_status, issuance_attempt_count, issuance_error_code,
+  issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
+  issuance_dead_lettered_at, reserved_numero_control`;
 
 export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
@@ -140,6 +145,45 @@ export class Repository {
 
   async getWompiEventByTransaction(transactionId: string): Promise<WompiEventRecord | null> {
     return this.db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
+  }
+
+  async listWompiIssuanceFailures(limit = 100): Promise<WompiIssuanceFailureItem[]> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const rows = await this.db
+      .prepare(
+        `SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}
+         FROM wompi_events
+         WHERE created_document_id IS NULL
+           AND issuance_error_message IS NOT NULL
+           AND issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')
+         ORDER BY issuance_failed_at DESC, id DESC
+         LIMIT ?`
+      )
+      .bind(safeLimit)
+      .all<WompiIssuanceFailureItem>();
+    return rows.results ?? [];
+  }
+
+  async getWompiIssuanceFailureById(wompiEventId: string): Promise<WompiIssuanceFailureItem | null> {
+    return this.db
+      .prepare(`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS} FROM wompi_events WHERE id = ?`)
+      .bind(wompiEventId)
+      .first<WompiIssuanceFailureItem>();
+  }
+
+  async claimWompiIssuanceRetry(wompiEventId: string): Promise<boolean> {
+    const claimed = await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'RETRY_QUEUED'
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND issuance_status IN ('FAILED', 'DEAD_LETTERED')
+         RETURNING id`
+      )
+      .bind(wompiEventId)
+      .first<{ id: string }>();
+    return claimed !== null;
   }
 
   async reserveWompiDocumentIdentifiers(
@@ -1718,11 +1762,20 @@ export class Repository {
       .prepare(
         `SELECT id, transaction_id, environment, received_at FROM wompi_events
          WHERE created_document_id IS NULL
-           AND processed_at IS NULL
            AND result = 'ExitosaAprobada'
-           AND received_at < ?`
+           AND (
+             (
+               processed_at IS NULL
+               AND (issuance_status IS NULL OR issuance_status NOT IN ('RETRY_QUEUED', 'PROCESSING'))
+               AND received_at < ?
+             )
+             OR (
+               issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+               AND COALESCE(issuance_last_attempt_at, received_at) < ?
+             )
+           )`
       )
-      .bind(cutoffIso)
+      .bind(cutoffIso, cutoffIso)
       .all<Record<string, unknown>>();
     return rows.results ?? [];
   }

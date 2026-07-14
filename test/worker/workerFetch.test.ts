@@ -167,6 +167,227 @@ describe("Wompi document identifier reservation", () => {
   });
 });
 
+describe("Wompi issuance failure recovery API", () => {
+  const authorization = { Authorization: "Bearer test-token" };
+
+  function failedWompiEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return wompiEventForReservation({
+      id: "wompi_failed",
+      transaction_id: "transaction_failed",
+      amount_cents: 111,
+      donor_name: "Example Person",
+      donor_email: "donor@example.org",
+      raw_body: JSON.stringify({ donorDocument: "secret" }),
+      headers_json: JSON.stringify({ authorization: "secret" }),
+      received_at: "2026-07-13T22:06:32.756Z",
+      processed_at: "2026-07-13T22:06:52.000Z",
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_count: 4,
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
+      issuance_failed_at: "2026-07-13T22:06:49.000Z",
+      issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
+      reserved_numero_control: "DTE-15-M001P004-000000000000031",
+      ...overrides
+    });
+  }
+
+  function expectedFailureItem(status = "DEAD_LETTERED"): Record<string, unknown> {
+    return {
+      id: "wompi_failed",
+      environment: "00",
+      amount_cents: 111,
+      donor_name: "Example Person",
+      donor_email: "donor@example.org",
+      received_at: "2026-07-13T22:06:32.756Z",
+      issuance_status: status,
+      issuance_attempt_count: 4,
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
+      issuance_failed_at: "2026-07-13T22:06:49.000Z",
+      issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
+      reserved_numero_control: "DTE-15-M001P004-000000000000031"
+    };
+  }
+
+  it("requires authentication before listing or looking up a retry target", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(failedWompiEvent());
+
+    const list = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures"),
+      env(db)
+    );
+    const retry = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", { method: "POST" }),
+      env(db)
+    );
+
+    expect(list.status).toBe(401);
+    expect(retry.status).toBe(401);
+    expect(db.wompiIssuanceFailureLookupCount).toBe(0);
+    expect(db.wompiIssuanceRetryClaimCount).toBe(0);
+  });
+
+  it("lets a VIEWER list only the exact allowlisted unresolved failure shape", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.wompiEvents.push(failedWompiEvent());
+    db.wompiEvents.push(failedWompiEvent({
+      id: "wompi_created",
+      created_document_id: "dte_created",
+      issuance_status: "DOCUMENT_CREATED"
+    }));
+    db.wompiEvents.push(failedWompiEvent({ id: "wompi_ignored", issuance_status: "IGNORED" }));
+    db.wompiEvents.push(failedWompiEvent({ id: "wompi_without_error", issuance_error_message: null }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", { headers: authorization }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { failures: Array<Record<string, unknown>> };
+    expect(body.failures).toHaveLength(1);
+    expect(body.failures[0]).toEqual(expectedFailureItem());
+    expect(JSON.stringify(body.failures[0])).not.toContain("raw_body");
+    expect(JSON.stringify(body.failures[0])).not.toContain("headers_json");
+  });
+
+  it("orders failures newest-first and caps an oversized repository limit at 100", async () => {
+    const db = new InMemoryD1();
+    for (let index = 0; index < 101; index += 1) {
+      const failedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+      db.wompiEvents.push(failedWompiEvent({
+        id: `wompi_failed_${String(index).padStart(3, "0")}`,
+        issuance_status: "FAILED",
+        issuance_failed_at: failedAt,
+        issuance_last_attempt_at: failedAt,
+        issuance_dead_lettered_at: null
+      }));
+    }
+    const repo = new Repository(db as unknown as D1Database);
+
+    const failures = await repo.listWompiIssuanceFailures(1_000);
+
+    expect(failures).toHaveLength(100);
+    expect(failures[0].id).toBe("wompi_failed_100");
+    expect(failures.at(-1)?.id).toBe("wompi_failed_001");
+  });
+
+  it("rejects a VIEWER retry before looking up either an existing or missing event", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.wompiEvents.push(failedWompiEvent());
+    const init = { method: "POST", headers: authorization };
+
+    const existing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", init),
+      env(db)
+    );
+    const missing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_missing/retry", init),
+      env(db)
+    );
+
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(db.wompiIssuanceFailureLookupCount).toBe(0);
+    expect(db.wompiIssuanceRetryClaimCount).toBe(0);
+  });
+
+  it("lets an OPERATOR claim before queueing the same event id and audits the retry", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({ issuance_status: "FAILED", processed_at: null }));
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => {
+            expect(db.wompiEvents[0].issuance_status).toBe("RETRY_QUEUED");
+            queued.push(message);
+          }
+        } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ ok: true, queued: true });
+    expect(queued).toEqual([{ wompiEventId: "wompi_failed" }]);
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      actor_id: "user_operator",
+      action: "WOMPI_ISSUANCE_RETRY_QUEUED",
+      entity_type: "wompi_event",
+      entity_id: "wompi_failed"
+    }));
+  });
+
+  it("allows only one concurrent retry claim and returns the safe current state to the loser", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent());
+    const queued: IssuanceMessage[] = [];
+    const workerEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+    const retryRequest = () => new Request(
+      "https://example.org/api/wompi-events/wompi_failed/retry",
+      { method: "POST", headers: authorization }
+    );
+
+    const responses = await Promise.all([
+      worker.fetch(retryRequest(), workerEnv),
+      worker.fetch(retryRequest(), workerEnv)
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 202]);
+    expect(queued).toEqual([{ wompiEventId: "wompi_failed" }]);
+    expect(db.audits.filter((audit) => audit.action === "WOMPI_ISSUANCE_RETRY_QUEUED")).toHaveLength(1);
+    const loser = responses.find((response) => response.status === 200);
+    await expect(loser?.json()).resolves.toEqual({
+      queued: false,
+      failure: expectedFailureItem("RETRY_QUEUED")
+    });
+  });
+
+  it("returns conflict for a created event and not-found for an unknown id without queueing", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({
+      created_document_id: "dte_created",
+      issuance_status: "DOCUMENT_CREATED"
+    }));
+    const queued: IssuanceMessage[] = [];
+    const workerEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+    const init = { method: "POST", headers: authorization };
+
+    const created = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", init),
+      workerEnv
+    );
+    const missing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_missing/retry", init),
+      workerEnv
+    );
+
+    expect(created.status).toBe(409);
+    expect(missing.status).toBe(404);
+    expect(queued).toHaveLength(0);
+    expect(JSON.stringify(await created.json())).not.toContain("raw_body");
+    expect(JSON.stringify(await missing.json())).not.toContain("headers_json");
+  });
+});
+
 describe("request body limits", () => {
   it("rejects an oversized login body before authentication or throttling", async () => {
     const db = new InMemoryD1();
@@ -7745,6 +7966,38 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     expect(queued).toHaveLength(0);
   });
 
+  it("recovers stale queued or processing retries using the last-attempt cutoff", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_retry_stale",
+      processed_at: "2026-01-01T00:05:00.000Z",
+      issuance_status: "RETRY_QUEUED",
+      issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
+    }));
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_processing_stale",
+      issuance_status: "PROCESSING",
+      issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
+    }));
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_retry_fresh",
+      issuance_status: "RETRY_QUEUED",
+      issuance_last_attempt_at: new Date().toISOString()
+    }));
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toHaveLength(2);
+    expect(queued).toEqual(expect.arrayContaining([
+      { wompiEventId: "wompi_retry_stale" },
+      { wompiEventId: "wompi_processing_stale" }
+    ]));
+    expect(queued).not.toContainEqual({ wompiEventId: "wompi_retry_fresh" });
+  });
+
   it("gives up after three requeues and flags the event exactly once", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
@@ -10230,6 +10483,29 @@ function withWompiIssuanceDefaults(
   return event;
 }
 
+const WOMPI_ISSUANCE_FAILURE_FIELDS = [
+  "id",
+  "environment",
+  "amount_cents",
+  "donor_name",
+  "donor_email",
+  "received_at",
+  "issuance_status",
+  "issuance_attempt_count",
+  "issuance_error_code",
+  "issuance_error_message",
+  "issuance_last_attempt_at",
+  "issuance_failed_at",
+  "issuance_dead_lettered_at",
+  "reserved_numero_control"
+] as const;
+
+function wompiIssuanceFailureProjection(event: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    WOMPI_ISSUANCE_FAILURE_FIELDS.map((field) => [field, event[field] ?? null])
+  );
+}
+
 function sqliteD1(database: DatabaseSync): D1Database {
   return {
     prepare(query: string) {
@@ -10273,6 +10549,8 @@ class InMemoryD1 {
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
+  wompiIssuanceFailureLookupCount = 0;
+  wompiIssuanceRetryClaimCount = 0;
   loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
@@ -10430,6 +10708,26 @@ class Statement {
       if (current.attempt_count >= limit) return null;
       current.attempt_count += 1;
       return { attempt_count: current.attempt_count } as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      this.db.wompiIssuanceRetryClaimCount += 1;
+      const wompiEventId = String(this.args[0]);
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id == null &&
+          (row.issuance_status === "FAILED" || row.issuance_status === "DEAD_LETTERED")
+      );
+      if (!event) {
+        return null;
+      }
+      event.issuance_status = "RETRY_QUEUED";
+      return { id: wompiEventId } as T;
     }
     if (
       this.sql.includes("UPDATE users") &&
@@ -10627,6 +10925,18 @@ class Statement {
           (intent) => intent.client_ip === clientIp && String(intent.created_at) >= sinceIso
         ).length
       } as T;
+    }
+    if (
+      this.sql.includes("FROM wompi_events") &&
+      this.sql.includes("issuance_dead_lettered_at") &&
+      this.sql.includes("WHERE id = ?") &&
+      !this.sql.includes("SELECT *")
+    ) {
+      this.db.wompiIssuanceFailureLookupCount += 1;
+      const event = withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((row) => row.id === this.args[0])
+      );
+      return (event ? wompiIssuanceFailureProjection(event) : null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
       return (withWompiIssuanceDefaults(
@@ -10828,6 +11138,29 @@ class Statement {
         return { results: rows.slice(0, limit) as T[] };
       }
     }
+    if (
+      this.sql.includes("FROM wompi_events") &&
+      this.sql.includes("issuance_error_message IS NOT NULL") &&
+      this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')")
+    ) {
+      const limit = Number(this.args.at(-1));
+      const failures = this.db.wompiEvents
+        .filter(
+          (event) =>
+            event.created_document_id == null &&
+            event.issuance_error_message != null &&
+            ["FAILED", "DEAD_LETTERED", "RETRY_QUEUED", "PROCESSING"].includes(String(event.issuance_status))
+        )
+        .sort(
+          (left, right) =>
+            String(right.issuance_failed_at ?? right.received_at).localeCompare(
+              String(left.issuance_failed_at ?? left.received_at)
+            ) || String(right.id).localeCompare(String(left.id))
+        )
+        .slice(0, limit)
+        .map((event) => wompiIssuanceFailureProjection(withWompiIssuanceDefaults(event)!));
+      return { results: failures as T[] };
+    }
     if (this.sql.includes("FROM wompi_events") && this.sql.includes("created_document_id IS NULL")) {
       // The real wompi_events schema has no created_at column (only received_at) —
       // require the query to reference the column that actually exists, so a
@@ -10836,13 +11169,26 @@ class Statement {
       if (!this.sql.includes("received_at < ?") || this.sql.includes("created_at < ?")) {
         throw new Error(`SQLITE_ERROR: no such column: created_at (simulated) for SQL: ${this.sql}`);
       }
-      const cutoff = String(this.args[0]);
+      if (!this.sql.includes("COALESCE(issuance_last_attempt_at, received_at) < ?")) {
+        throw new Error(`Stalled Wompi SQL must use the last-attempt cutoff: ${this.sql}`);
+      }
+      const [receivedCutoff, retryCutoff] = this.args.map(String);
       const stalled = this.db.wompiEvents.filter(
         (event) =>
-          !event.created_document_id &&
-          !event.processed_at &&
+          event.created_document_id == null &&
           event.result === "ExitosaAprobada" &&
-          String(event.received_at) < cutoff
+          (
+            (
+              !event.processed_at &&
+              event.issuance_status !== "RETRY_QUEUED" &&
+              event.issuance_status !== "PROCESSING" &&
+              String(event.received_at) < receivedCutoff
+            ) ||
+            (
+              (event.issuance_status === "RETRY_QUEUED" || event.issuance_status === "PROCESSING") &&
+              String(event.issuance_last_attempt_at ?? event.received_at) < retryCutoff
+            )
+          )
       );
       return { results: stalled as T[] };
     }
