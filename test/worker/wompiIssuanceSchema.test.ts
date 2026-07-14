@@ -50,6 +50,67 @@ describe("Wompi issuance reservation migration", () => {
     expect(columns.map((column) => column.name)).toContain("issuance_attempt_id");
   });
 
+  it("persists recoverable email claim evidence and a unique stable provider key", () => {
+    const columns = database
+      .prepare("PRAGMA table_info(email_deliveries)")
+      .all() as Array<{ name: string }>;
+    const indexes = database
+      .prepare("PRAGMA index_list(email_deliveries)")
+      .all() as Array<{ name: string; unique: number }>;
+
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "claim_attempted_at",
+      "idempotency_key"
+    ]));
+    expect(indexes).toContainEqual(expect.objectContaining({
+      name: "idx_email_deliveries_idempotency_key",
+      unique: 1
+    }));
+  });
+
+  it("excludes an active email claim, reclaims failed/stale work with the same key, and leaves legacy PENDING manual", async () => {
+    insertAcceptedDocument(database, "wompi_a", "dte_email_claim");
+    const repo = new Repository(sqliteD1(database));
+    const input = {
+      documentId: "dte_email_claim",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED"
+    };
+
+    const first = await repo.claimEmailDelivery(input);
+    expect(first).toMatchObject({
+      id: expect.any(String),
+      idempotencyKey: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/)
+    });
+    await expect(repo.claimEmailDelivery(input)).resolves.toBeNull();
+
+    database.prepare(
+      "UPDATE email_deliveries SET status = 'FAILED' WHERE id = ?"
+    ).run(first!.id);
+    const failedRetry = await repo.claimEmailDelivery(input);
+    expect(failedRetry).toEqual(first);
+
+    database.prepare(
+      "UPDATE email_deliveries SET claim_attempted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+    ).run(first!.id);
+    const staleRetry = await repo.claimEmailDelivery(input);
+    expect(staleRetry).toEqual(first);
+
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, email_type, document_status_at_send,
+         claim_attempted_at, idempotency_key
+       ) VALUES ('legacy_pending', 'dte_email_claim', 'donor@example.org', 'PENDING',
+         'dteReceiptTransitorio', 'SIGNED', NULL, NULL)`
+    ).run();
+    await expect(repo.claimEmailDelivery({
+      ...input,
+      emailType: "dteReceiptTransitorio",
+      documentStatusAtSend: "SIGNED"
+    })).resolves.toBeNull();
+  });
+
   it("enforces attempt CAS and the legacy fallback against real SQLite", async () => {
     const repo = new Repository(sqliteD1(database));
     database.prepare(
@@ -190,6 +251,27 @@ function insertApprovedWompiEvent(database: DatabaseSync, id: string): void {
        ) VALUES (?, ?, '00', 'ExitosaAprobada', 1000, '{}')`
     )
     .run(id, `transaction_${id}`);
+}
+
+function insertAcceptedDocument(
+  database: DatabaseSync,
+  wompiEventId: string,
+  documentId: string
+): void {
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, sello_recibido, mh_estado, donor_email,
+       amount_cents, issued_at, accepted_at
+     ) VALUES (?, ?, '00', ?, ?, 'ACCEPTED', '{}', 'SELLO', 'PROCESADO',
+       'donor@example.org', 1000, '2026-07-13T18:00:00.000Z',
+       '2026-07-13T18:00:01.000Z')`
+  ).run(
+    documentId,
+    wompiEventId,
+    `AAAAAAAA-AAAA-4AAA-8AAA-${documentId.padEnd(12, "A").slice(0, 12)}`,
+    `DTE-15-M001P004-${documentId.padEnd(15, "0").slice(0, 15)}`
+  );
 }
 
 function reserve(database: DatabaseSync, id: string, codigoGeneracion: string): void {

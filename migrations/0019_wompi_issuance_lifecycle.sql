@@ -12,6 +12,16 @@ ALTER TABLE wompi_events ADD COLUMN issuance_last_attempt_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_failed_at TEXT;
 ALTER TABLE wompi_events ADD COLUMN issuance_dead_lettered_at TEXT;
 
+-- Durable receipt-send claims. Existing PENDING rows intentionally keep a NULL
+-- attempt timestamp/key: the runtime treats those legacy claims as manual-review
+-- blockers instead of guessing that an already-accepted provider request is stale.
+ALTER TABLE email_deliveries ADD COLUMN claim_attempted_at TEXT;
+ALTER TABLE email_deliveries ADD COLUMN idempotency_key TEXT;
+
+CREATE UNIQUE INDEX idx_email_deliveries_idempotency_key
+  ON email_deliveries(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;
+
 -- Legacy sequence prefixes were not normalized at every allocator. Canonicalize
 -- case before the reservation trigger can create a parallel uppercase counter.
 -- When both spellings exist, the highest next_value is the only safe forward

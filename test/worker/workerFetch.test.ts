@@ -14,6 +14,7 @@ import {
   WompiIntentQuarantinedError
 } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
+import { EmailService } from "../../src/worker/services/email";
 import { MhClient } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
@@ -3619,6 +3620,30 @@ describe("document email resend", () => {
     }));
   });
 
+  it("passes a receipt claim's stable provider identity to the HTTP provider", async () => {
+    const db = new InMemoryD1();
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_http_stable" }), { status: 202 })
+    );
+    const idempotencyKey = `dsv-receipt-v1-${"a".repeat(64)}`;
+
+    await new EmailService(env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    })).sendReceipt(testDocument(), "legacy-contact-2@example.com", idempotencyKey);
+
+    expect(providerFetch).toHaveBeenCalledWith(
+      "https://mail.example/send",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "Idempotency-Key": idempotencyKey
+        })
+      })
+    );
+  });
+
   it.each([
     "http://mail.example/send",
     "https://user:password@mail.example/send",
@@ -6217,9 +6242,14 @@ describe("donation intent correlation", () => {
       }
       if (sql.includes("INSERT INTO email_deliveries")) {
         const run = statement.run.bind(statement);
+        const first = statement.first.bind(statement);
         statement.run = async () => {
           intentCompletedBeforeReceipt = intent.status === "COMPLETED";
           return run();
+        };
+        statement.first = async <T>() => {
+          intentCompletedBeforeReceipt = intent.status === "COMPLETED";
+          return first<T>();
         };
       }
       return statement;
@@ -6256,6 +6286,7 @@ describe("donation intent correlation", () => {
     });
     expect(intent.status).toBe("LINK_CREATED");
     expect(db.emailDeliveries).toHaveLength(0);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(0);
     expect(transmit).toHaveBeenCalledTimes(1);
 
     const second = queueBatch();
@@ -6266,6 +6297,7 @@ describe("donation intent correlation", () => {
     expect(intent.status).toBe("LINK_CREATED");
     expect(db.emailDeliveries).toHaveLength(0);
     expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(0);
     expect(transmit).toHaveBeenCalledTimes(1);
 
     const third = queueBatch();
@@ -6281,6 +6313,7 @@ describe("donation intent correlation", () => {
     expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
     expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
     expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
     expect(transmit).toHaveBeenCalledTimes(1);
 
     const fourth = queueBatch();
@@ -6290,6 +6323,7 @@ describe("donation intent correlation", () => {
     expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
     expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
     expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
     expect(transmit).toHaveBeenCalledTimes(1);
   });
 
@@ -6345,18 +6379,12 @@ describe("donation intent correlation", () => {
     };
     const acceptedAuditCount = pairBarrier();
     const completedAuditCount = pairBarrier();
-    const sentEmailLookup = pairBarrier();
     db.beforeAuditCount = async (action, entityId) => {
       if (action === "DTE_ACCEPTED" && entityId === "dte_concurrent_finalization") {
         await acceptedAuditCount();
       }
       if (action === "DONATION_INTENT_COMPLETED" && entityId === "di_corr_1") {
         await completedAuditCount();
-      }
-    };
-    db.beforeSentEmailLookup = async (documentId, emailType) => {
-      if (documentId === "dte_concurrent_finalization" && emailType === "dteReceipt") {
-        await sentEmailLookup();
       }
     };
 
@@ -6396,6 +6424,9 @@ describe("donation intent correlation", () => {
     expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
     expect(
       db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")
+    ).toHaveLength(1);
+    expect(
+      db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")
     ).toHaveLength(1);
     expect(intentCompletedAtSend).toEqual([true]);
     expect(sent).toHaveLength(1);
@@ -7362,6 +7393,83 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_defer_1" })
     );
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED_FINALIZED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+  });
+
+  it("recovers a deferred post-accept email timeout with one stable provider identity and no second MH send", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook({
+      IdTransaccion: "wompi_deferred_finalization_recovery_tx"
+    }), "wompi_deferred_finalization_recovery");
+    const sent: Array<{
+      subject: string;
+      to: string;
+      text: string;
+      headers?: Record<string, string>;
+    }> = [];
+    const runtime = await deferredEnv(db, sent);
+    let definitiveAttempts = 0;
+    runtime.EMAIL = {
+      send: async (message: unknown) => {
+        const outbound = message as (typeof sent)[number];
+        sent.push(outbound);
+        if (!outbound.subject.includes("(en trámite)")) {
+          definitiveAttempts += 1;
+          if (definitiveAttempts === 1) {
+            throw new Error("provider timeout after accepting the message");
+          }
+        }
+        return { messageId: `deferred-finalization-${sent.length}` };
+      }
+    } as SendEmail;
+
+    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const deferred = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    expect(deferred?.status).toBe("SIGNED");
+    expect(sent).toHaveLength(1);
+
+    const mhRecoveryFetch = stubMhFetch(() => jsonResponse({
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-DEFERRED-FINALIZATION",
+      observaciones: []
+    }));
+    await new IssuancePipeline(runtime).retryDeferredTransmissions();
+
+    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("ACCEPTED");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("COMPLETED");
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(0);
+    const failedDelivery = db.emailDeliveries.find(
+      (row) => row.document_id === deferred!.id && row.email_type === "dteReceipt"
+    );
+    expect(failedDelivery).toMatchObject({
+      status: "FAILED",
+      idempotency_key: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/),
+      claim_attempted_at: expect.any(String)
+    });
+    expect(sent[1].headers).toMatchObject({
+      "Idempotency-Key": failedDelivery!.idempotency_key,
+      "Message-ID": `<${failedDelivery!.idempotency_key}@example-worker.invalid>`
+    });
+
+    const result = await new IssuancePipeline(runtime).retryAcceptedWompiFinalizations();
+
+    expect(result).toEqual({ finalized: 1, pending: 0 });
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
+    expect(db.emailDeliveries.filter(
+      (row) => row.document_id === deferred!.id && row.email_type === "dteReceipt"
+    )).toHaveLength(1);
+    expect(failedDelivery).toMatchObject({
+      status: "SENT",
+      idempotency_key: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/),
+      provider_delivery_id: "deferred-finalization-3"
+    });
+    expect(sent[2].headers).toEqual(sent[1].headers);
+    expect(
+      mhRecoveryFetch.mock.calls.filter(([input]) => String(input).includes("recepciondte"))
+    ).toHaveLength(1);
   });
 
   it("keeps the CDE pending without email or audit spam while MH stays down, alerting once after an hour", async () => {
@@ -7446,6 +7554,41 @@ describe("deferred transmission when MH is unavailable", () => {
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
 
     expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
+  });
+
+  it("finalizes an accepted Wompi CDE missing its completion marker on the 15-minute cron without retransmitting", async () => {
+    const db = new InMemoryD1();
+    const eventId = seedWompiEvent(db, deferWebhook({
+      IdTransaccion: "wompi_scheduled_finalization_tx",
+      IdExterno: undefined,
+      EnlacePago: undefined
+    }), "wompi_scheduled_finalization");
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_scheduled_finalization",
+      wompi_event_id: eventId,
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-SCHEDULED-FINALIZATION",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T18:00:00.000Z",
+      donor_email: null
+    });
+    const transmit = vi
+      .spyOn(MhClient.prototype, "transmitDte")
+      .mockRejectedValue(new Error("accepted finalization sweep must not call MH"));
+
+    await worker.scheduled(
+      { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+      env(db)
+    );
+
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.audits.filter(
+      (row) => row.action === "DTE_ACCEPTED_FINALIZED" && row.entity_id === "doc_scheduled_finalization"
+    )).toHaveLength(1);
+    expect(db.audits.filter(
+      (row) => row.action === "EMAIL_SKIPPED" && row.entity_id === "doc_scheduled_finalization"
+    )).toHaveLength(1);
   });
 
   it("lists FAILED and REJECTED under the combined Fallos filter while a deferred SIGNED doc stays out", async () => {
@@ -11297,6 +11440,77 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("INSERT INTO email_deliveries") &&
+      this.sql.includes("ON CONFLICT(idempotency_key)") &&
+      this.sql.includes("RETURNING id, idempotency_key")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend,
+        claimAttemptedAt,
+        idempotencyKey,
+        ,
+        ,
+        staleBefore
+      ] = this.args.map(String);
+      const blocker = this.db.emailDeliveries.find(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === emailType &&
+          (
+            delivery.status === "SENT" ||
+            (
+              delivery.status === "PENDING" &&
+              (
+                delivery.claim_attempted_at == null ||
+                String(delivery.claim_attempted_at) >= staleBefore
+              )
+            )
+          )
+      );
+      if (blocker) return null;
+
+      const existing = this.db.emailDeliveries.find(
+        (delivery) => delivery.idempotency_key === idempotencyKey
+      );
+      if (existing) {
+        const reclaimable = existing.status === "FAILED" || (
+          existing.status === "PENDING" &&
+          existing.claim_attempted_at != null &&
+          String(existing.claim_attempted_at) < staleBefore
+        );
+        if (!reclaimable) return null;
+        existing.to_email = toEmail;
+        existing.status = "PENDING";
+        existing.provider_response_json = "{}";
+        existing.document_status_at_send = documentStatusAtSend;
+        existing.claim_attempted_at = claimAttemptedAt;
+        return { id: String(existing.id), idempotency_key: idempotencyKey } as T;
+      }
+
+      this.db.emailDeliveries.push({
+        id,
+        document_id: documentId,
+        to_email: toEmail,
+        status: "PENDING",
+        provider_response_json: "{}",
+        sent_at: null,
+        email_type: emailType,
+        document_status_at_send: documentStatusAtSend,
+        template_version: null,
+        pdf_renderer_version: null,
+        pdf_sha256: null,
+        dte_json_sha256: null,
+        provider_delivery_id: null,
+        claim_attempted_at: claimAttemptedAt,
+        idempotency_key: idempotencyKey
+      });
+      return { id, idempotency_key: idempotencyKey } as T;
+    }
     if (this.sql.includes("INSERT INTO login_rate_limits")) {
       const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
       const key = String(keyHash);
@@ -11720,6 +11934,32 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (
+      this.sql.includes("SELECT d.* FROM dte_documents d") &&
+      this.sql.includes("DTE_ACCEPTED_FINALIZED")
+    ) {
+      const limit = Number(this.args.at(-1));
+      const documents = this.db.documents
+        .filter(
+          (document) =>
+            document.status === "ACCEPTED" &&
+            document.wompi_event_id != null &&
+            !this.db.audits.some(
+              (audit) =>
+                audit.action === "DTE_ACCEPTED_FINALIZED" &&
+                audit.entity_type === "dte_document" &&
+                audit.entity_id === document.id
+            )
+        )
+        .sort(
+          (left, right) =>
+            String(left.accepted_at ?? left.created_at).localeCompare(
+              String(right.accepted_at ?? right.created_at)
+            ) || left.id.localeCompare(right.id)
+        )
+        .slice(0, limit);
+      return { results: documents as T[] };
+    }
     // ----- Analítica (carril Wompi) -----
     // Documentos: dte_documents con wompi_event_id, LEFT JOIN a donation_intents por
     // document_id, filtrado por environment + ventana issued_at, paginado por (issued_at, id).

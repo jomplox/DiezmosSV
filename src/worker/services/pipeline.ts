@@ -479,6 +479,25 @@ export class IssuancePipeline {
     return { transmitted, rejected, pending };
   }
 
+  async retryAcceptedWompiFinalizations(): Promise<{ finalized: number; pending: number }> {
+    const documents = await this.repo.listAcceptedWompiDocumentsMissingFinalization();
+    let finalized = 0;
+    let pending = 0;
+    for (const record of documents) {
+      try {
+        if (await this.finalizeAcceptedWompiDocument(record)) {
+          finalized += 1;
+        } else {
+          pending += 1;
+        }
+      } catch (error) {
+        console.error("Finalización de CDE aceptado falló", record.id, error);
+        pending += 1;
+      }
+    }
+    return { finalized, pending };
+  }
+
   // Alerta operativa MH_UNAVAILABLE cuando algún CDE diferido lleva más de una hora
   // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
   // del documento más antiguo la dispara UNA sola vez por atasco.
@@ -613,7 +632,7 @@ export class IssuancePipeline {
   private async finalizeAcceptedWompiDocument(
     record: DteDocumentRecord,
     metadata?: unknown
-  ): Promise<void> {
+  ): Promise<boolean> {
     await this.repo.createAuditIfAbsent({
       action: "DTE_ACCEPTED",
       entityType: "dte_document",
@@ -632,7 +651,17 @@ export class IssuancePipeline {
       }
     }
 
-    await this.emailReceipt(record);
+    if (!(await this.emailReceipt(record))) {
+      return false;
+    }
+
+    await this.repo.createAuditIfAbsent({
+      action: "DTE_ACCEPTED_FINALIZED",
+      entityType: "dte_document",
+      entityId: record.id,
+      summary: "Finalización post-aceptación completada"
+    });
+    return true;
   }
 
   private async ensureIntentCompletionAudit(intentId: string, documentId: string): Promise<void> {
@@ -645,37 +674,41 @@ export class IssuancePipeline {
     });
   }
 
-  private async emailReceipt(record: DteDocumentRecord): Promise<void> {
+  private async emailReceipt(record: DteDocumentRecord): Promise<boolean> {
     if (!record.donor_email) {
-      await this.repo.createAudit({
+      await this.repo.createAuditIfAbsent({
         action: "EMAIL_SKIPPED",
         entityType: "dte_document",
         entityId: record.id,
         summary: "Documento sin correo del donante"
       });
-      return;
+      return true;
     }
     const emailType =
       record.status === "SIGNED" && record.transmission_deferred_at
         ? "dteReceiptTransitorio"
         : "dteReceipt";
-    const deliveryClaimId = await this.repo.claimEmailDelivery({
+    const deliveryClaim = await this.repo.claimEmailDelivery({
       documentId: record.id,
       toEmail: record.donor_email,
       emailType,
       documentStatusAtSend: record.status
     });
-    if (!deliveryClaimId) {
-      return;
+    if (!deliveryClaim) {
+      return this.repo.hasSentEmail(record.id, emailType);
     }
 
     let response: EmailDeliveryResult;
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(this.repo, this.env);
-      response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
+      response = await new EmailService(this.env, templates, branding).sendReceipt(
+        record,
+        record.donor_email,
+        deliveryClaim.idempotencyKey
+      );
     } catch (error) {
-      await this.repo.finalizeEmailDeliveryClaim(deliveryClaimId, {
+      await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, {
         status: "FAILED",
         providerResponse: { error: error instanceof Error ? error.message : String(error) },
         emailType,
@@ -687,10 +720,10 @@ export class IssuancePipeline {
         entityId: record.id,
         summary: error instanceof Error ? error.message : String(error)
       });
-      return;
+      return false;
     }
 
-    await this.repo.finalizeEmailDeliveryClaim(deliveryClaimId, {
+    await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, {
       status: "SENT",
       providerResponse: response.providerResponse,
       emailType: response.emailType,
@@ -708,6 +741,7 @@ export class IssuancePipeline {
       summary: `Comprobante enviado a ${record.donor_email}`,
       metadata: response
     });
+    return true;
   }
 }
 
