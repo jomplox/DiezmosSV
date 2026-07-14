@@ -67,6 +67,8 @@ describe("client display text", () => {
     expect(auditActionLabel("ISSUANCE_DEAD_LETTERED")).toBe("Emisión agotó reintentos en cola");
     expect(auditActionLabel("WOMPI_EVENT_REQUEUED")).toBe("Evento Wompi reencolado");
     expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
+    expect(auditActionLabel("WOMPI_ISSUANCE_FAILED")).toBe("CDE no creado");
+    expect(auditActionLabel("WOMPI_ISSUANCE_RETRY_QUEUED")).toBe("Reintento de creación en cola");
     expect(auditActionLabel("ALERT_EMAIL_UPDATED")).toBe("Correo de alertas actualizado");
     expect(auditActionLabel("DTE_TRANSMISSION_DEFERRED")).toBe("Transmisión diferida");
     expect(auditActionLabel("ALERT_SENT:MH_UNAVAILABLE")).toBe("Alerta enviada: Hacienda no disponible");

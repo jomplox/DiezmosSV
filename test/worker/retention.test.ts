@@ -471,6 +471,55 @@ describe("runRetentionExport", () => {
     expect(archive.putCalls.at(-1)?.key).toBe(manifestKey);
   });
 
+  it("retains Wompi issuance lifecycle evidence with a valid manifest count and digest", async () => {
+    const db = new InMemoryRetentionD1();
+    db.wompiEvents.push(
+      row({
+        id: "wompi_failed_1",
+        created_at: undefined,
+        received_at: "2026-06-15T12:00:00.000Z",
+        issuance_status: "FAILED",
+        control_prefix: "DTE-15-M001P004",
+        control_sequence: 42,
+        reserved_numero_control: "DTE-15-M001P004-000000000000042",
+        reserved_codigo_generacion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+        issuance_attempt_count: 3,
+        issuance_error_code: "invalid_donor_document",
+        issuance_error_message: "El documento del donante no es válido.",
+        issuance_last_attempt_at: "2026-06-15T12:03:00.000Z",
+        issuance_failed_at: "2026-06-15T12:03:00.000Z",
+        issuance_dead_lettered_at: null
+      })
+    );
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    const wompiKey = "retention/2026/2026-06/wompi_events.ndjson";
+    const wompiBody = archive.objects.get(wompiKey)!.body;
+    const exportedRows = new TextDecoder().decode(wompiBody).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    expect(exportedRows).toHaveLength(1);
+    expect(exportedRows[0]).toMatchObject({
+      issuance_status: "FAILED",
+      control_prefix: "DTE-15-M001P004",
+      control_sequence: 42,
+      reserved_numero_control: "DTE-15-M001P004-000000000000042",
+      reserved_codigo_generacion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+      issuance_attempt_count: 3,
+      issuance_error_code: "invalid_donor_document",
+      issuance_error_message: "El documento del donante no es válido.",
+      issuance_last_attempt_at: "2026-06-15T12:03:00.000Z",
+      issuance_failed_at: "2026-06-15T12:03:00.000Z",
+      issuance_dead_lettered_at: null
+    });
+
+    const manifest = JSON.parse(
+      new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)
+    ) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    expect(manifest.tables.wompi_events.rowCount).toBe(1);
+    expect(manifest.tables.wompi_events.sha256).toBe(await sha256Hex(wompiBody));
+  });
+
   it("windows donation_intents into the manifest by created_at like the other windowed tables", async () => {
     const db = new InMemoryRetentionD1();
     db.donationIntents.push(
