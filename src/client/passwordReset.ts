@@ -1,7 +1,7 @@
 import { passwordPolicyError } from "../shared/passwordPolicy";
 
-export function resetTokenFromSearch(search: string): string | null {
-  const token = new URLSearchParams(search).get("reset")?.trim();
+export function resetTokenFromHash(hash: string): string | null {
+  const token = new URLSearchParams(hash.startsWith("#") ? hash.slice(1) : hash).get("reset")?.trim();
   return token ? token : null;
 }
 

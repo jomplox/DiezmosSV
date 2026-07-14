@@ -33,17 +33,22 @@ describe("audit audience projection", () => {
     expect(projected).toEqual([userRow]);
   });
 
-  it.each(["VIEWER", "OPERATOR"] as const)("redacts transport telemetry for every %s row", (role) => {
+  it.each(["VIEWER", "OPERATOR"] as const)("projects every %s row from an explicit safe field set", (role) => {
     const [projected] = projectAuditRows([documentRow], role);
-    expect(projected).toMatchObject({
+    expect(projected).toEqual({
+      id: "audit_document",
+      actor_type: "USER",
+      actor_id: null,
+      actor_name: null,
       actor_email: null,
       actor_ip: null,
       actor_context: null,
-      actor_id: "owner_1",
-      actor_name: "Owner Name",
+      action: "DTE_ACCEPTED",
+      entity_type: "dte_document",
       entity_id: "doc_1",
-      summary: "DTE accepted",
-      metadata_json: "{\"status\":\"PROCESADO\"}"
+      summary: "Actividad registrada",
+      metadata_json: "{}",
+      created_at: userRow.created_at
     });
   });
 
@@ -66,5 +71,17 @@ describe("audit audience projection", () => {
   it("uses a fixed fallback summary for an unknown user action", () => {
     const [projected] = projectAuditRows([{ ...userRow, action: "FUTURE_USER_ACTION", summary: "secret" }], "VIEWER");
     expect(projected.summary).toBe("Actividad de cuenta registrada");
+  });
+
+  it("does not expose newly added storage fields to lower roles", () => {
+    const [projected] = projectAuditRows(
+      [{ ...documentRow, donor_email: "donor@example.org", provider_secret: "provider-token" }],
+      "VIEWER"
+    );
+
+    expect(projected).not.toHaveProperty("donor_email");
+    expect(projected).not.toHaveProperty("provider_secret");
+    expect(JSON.stringify(projected)).not.toContain("example.org");
+    expect(JSON.stringify(projected)).not.toContain("provider-token");
   });
 });

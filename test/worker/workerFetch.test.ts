@@ -88,6 +88,61 @@ describe("Worker fetch error handling", () => {
   });
 });
 
+describe("static document security policy", () => {
+  it("adds anti-framing and no-referrer headers without changing the asset response", async () => {
+    const db = new InMemoryD1();
+    const assetResponse = new Response("<!doctype html><title>DiezmosSV</title>", {
+      status: 202,
+      statusText: "Asset response",
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=60",
+        ETag: '"asset-v1"',
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors https://legacy.example; script-src 'self'"
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/admin"),
+      env(db, {
+        ASSETS: { fetch: () => Promise.resolve(assetResponse) } as unknown as Fetcher
+      })
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.statusText).toBe("Asset response");
+    await expect(response.text()).resolves.toBe("<!doctype html><title>DiezmosSV</title>");
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(response.headers.get("ETag")).toBe('"asset-v1"');
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    const csp = response.headers.get("Content-Security-Policy") ?? "";
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp.match(/frame-ancestors/gi)).toHaveLength(1);
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain("legacy.example");
+  });
+
+  it("leaves non-document asset responses unchanged", async () => {
+    const db = new InMemoryD1();
+    const assetResponse = new Response("console.log('ok')", {
+      headers: { "Content-Type": "application/javascript", ETag: '"script-v1"' }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/assets/app.js"),
+      env(db, {
+        ASSETS: { fetch: () => Promise.resolve(assetResponse) } as unknown as Fetcher
+      })
+    );
+
+    expect(response).toBe(assetResponse);
+    expect(response.headers.has("X-Frame-Options")).toBe(false);
+    expect(response.headers.get("ETag")).toBe('"script-v1"');
+  });
+});
+
 describe("request body limits", () => {
   it("rejects an oversized login body before authentication or throttling", async () => {
     const db = new InMemoryD1();
@@ -448,11 +503,57 @@ describe("auth rate limiting", () => {
       }
     });
 
+    it("enforces the shared security-claim limit with the production SQLite statement", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        )`);
+        const repo = new Repository(sqliteD1(sqlite));
+        const accepted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimSecurityRateLimit(
+              "donation_intent",
+              "hashed-client-ip",
+              "2026-07-04T12:00:00.000Z",
+              "2026-07-04T11:45:00.000Z",
+              "2026-07-04T12:15:00.000Z",
+              5
+            )
+          )
+        );
+
+        expect(accepted.filter(Boolean)).toHaveLength(5);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM security_rate_limit_claims
+                WHERE scope = ? AND key_hash = ?`
+            )
+            .get("donation_intent", "hashed-client-ip")
+        ).toEqual({ count: 5 });
+      } finally {
+        sqlite.close();
+      }
+    });
+
     it("keeps aggregate login buckets independent and deletes expired buckets during scheduled cleanup", async () => {
       const db = new InMemoryD1();
       db.loginRateLimits.set("expired-hash", {
         window_started_at: "2026-07-04T11:00:00.000Z",
         attempt_count: 60,
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+      db.securityRateLimitClaims.push({
+        id: "expired-claim",
+        scope: "password_reset",
+        key_hash: "expired-hash",
+        claimed_at: "2026-07-04T11:00:00.000Z",
         expires_at: "2026-07-04T11:15:00.000Z"
       });
 
@@ -475,6 +576,7 @@ describe("auth rate limiting", () => {
       );
       expect(db.loginRateLimits.has("expired-hash")).toBe(false);
       expect(db.loginRateLimits.size).toBe(1);
+      expect(db.securityRateLimitClaims).toHaveLength(0);
     });
 
     it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
@@ -646,8 +748,16 @@ describe("auth rate limiting", () => {
       disabled_at: ""
     });
     const sentMessages: unknown[] = [];
-    // Three recent reset requests inside the window — the next one must be throttled.
+    // Three accepted claims inside the window — the next one must be throttled.
+    const resetKeyHash = await sha256Hex(utf8Bytes("user_operator"));
     for (let i = 0; i < 3; i += 1) {
+      db.securityRateLimitClaims.push({
+        id: `reset_claim_${i}`,
+        scope: "password_reset",
+        key_hash: resetKeyHash,
+        claimed_at: `2026-07-04T11:5${i}:00.000Z`,
+        expires_at: `2026-07-04T12:0${5 + i}:00.000Z`
+      });
       seedAudit(db, "PASSWORD_RESET_REQUESTED", "user_operator", `2026-07-04T11:5${i}:00.000Z`);
     }
 
@@ -677,6 +787,51 @@ describe("auth rate limiting", () => {
     expect(sentMessages).toHaveLength(0);
     expect(db.audits).toHaveLength(auditCountBefore);
     expect(db.audits.some((row) => row.action === "PASSWORD_RESET_THROTTLED")).toBe(false);
+  });
+});
+
+describe("session logout", () => {
+  it("revokes the presented bearer on the server and remains idempotent", async () => {
+    const db = new InMemoryD1();
+    const rawToken = "copied-session-token";
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Admin",
+      role: "ADMIN",
+      password_hash: "hash",
+      password_salt: "salt",
+      disabled_at: null
+    });
+    db.sessions.push({
+      id: "session_logout",
+      user_id: "user_admin",
+      token_hash: await sha256Hex(utf8Bytes(rawToken)),
+      expires_at: "2099-01-01T00:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      revoked_at: null
+    });
+    const runtime = env(db);
+    const authorization = { Authorization: `Bearer ${rawToken}` };
+
+    const before = await worker.fetch(new Request("https://example.org/api/users", { headers: authorization }), runtime);
+    const logout = await worker.fetch(
+      new Request("https://example.org/api/auth/logout", { method: "POST", headers: authorization }),
+      runtime
+    );
+    const after = await worker.fetch(new Request("https://example.org/api/users", { headers: authorization }), runtime);
+    const repeated = await worker.fetch(
+      new Request("https://example.org/api/auth/logout", { method: "POST", headers: authorization }),
+      runtime
+    );
+    const missing = await worker.fetch(new Request("https://example.org/api/auth/logout", { method: "POST" }), runtime);
+
+    expect(before.status).toBe(200);
+    expect(logout.status).toBe(204);
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(after.status).toBe(401);
+    expect(repeated.status).toBe(204);
+    expect(missing.status).toBe(401);
   });
 });
 
@@ -998,6 +1153,22 @@ describe("donation intents", () => {
     expect(metadata).not.toContain("04182769");
   });
 
+  it("atomically admits at most five overlapping intent creations from one IP", async () => {
+    const db = new InMemoryD1();
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => worker.fetch(intentRequest(validIntentBody()), env(db)))
+    );
+
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(5);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(15);
+    expect(db.donationIntents).toHaveLength(5);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(5);
+    const [claim] = db.securityRateLimitClaims;
+    expect(claim.key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(claim.key_hash).not.toContain("203.0.113.7");
+  });
+
   it("rejects an oversized public intent body with 413 before any persistence", async () => {
     // A body over the 16 KiB cap is refused up front, so oversized spam never
     // reaches validation or D1 (the per-IP throttle counts only persisted rows).
@@ -1299,6 +1470,13 @@ describe("donation intents", () => {
           expires_at: "2026-07-04T13:00:00.000Z",
           created_at: `2026-07-04T11:5${i}:00.000Z`
         });
+        db.securityRateLimitClaims.push({
+          id: `donation_claim_${i}`,
+          scope: "donation_intent",
+          key_hash: await sha256Hex(utf8Bytes("203.0.113.7")),
+          claimed_at: `2026-07-04T11:5${i}:00.000Z`,
+          expires_at: `2026-07-04T12:0${5 + i}:00.000Z`
+        });
       }
 
       const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
@@ -1578,6 +1756,13 @@ describe("donation intents", () => {
       const db = new InMemoryD1();
       for (let i = 0; i < 5; i += 1) {
         db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+        db.securityRateLimitClaims.push({
+          id: `draft_claim_${i}`,
+          scope: "donation_intent",
+          key_hash: await sha256Hex(utf8Bytes("203.0.113.7")),
+          claimed_at: "2026-07-04T12:00:00.000Z",
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
       }
       vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
       try {
@@ -1949,9 +2134,9 @@ describe("password reset", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
     expect(db.resetTokens).toHaveLength(1);
     expect(sentMessages).toHaveLength(1);
-    const link = /https:\/\/example\.org\/\?reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
+    const link = /https:\/\/example\.org\/#reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
     expect(link).toBeTruthy();
-    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/?reset=${link![1]}"`);
+    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/#reset=${link![1]}"`);
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
@@ -1986,9 +2171,9 @@ describe("password reset", () => {
 
     expect(response.status).toBe(200);
     expect(sentMessages).toHaveLength(1);
-    expect(sentMessages[0].text).toContain("https://app.example.org/?reset=");
-    expect(sentMessages[0].text).not.toContain("https://attacker.example/?reset=");
-    expect(sentMessages[0].html).toContain('href="https://app.example.org/?reset=');
+    expect(sentMessages[0].text).toContain("https://app.example.org/#reset=");
+    expect(sentMessages[0].text).not.toContain("https://attacker.example/#reset=");
+    expect(sentMessages[0].html).toContain('href="https://app.example.org/#reset=');
   });
 
   it("returns ok without creating tokens or sending email for unknown accounts", async () => {
@@ -2016,6 +2201,85 @@ describe("password reset", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
     expect(db.resetTokens).toHaveLength(0);
     expect(sentMessages).toHaveLength(0);
+  });
+
+  it("atomically admits only three overlapping reset requests for one account", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: `reset-${sentMessages.length}` };
+        }
+      } as SendEmail
+    });
+    const request = () =>
+      worker.fetch(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(3);
+    expect(db.resetTokens).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(1);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
+    expect(db.securityRateLimitClaims[0].key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(db.securityRateLimitClaims[0].key_hash).not.toContain("user_operator");
+  });
+
+  it("consumes reset quota and invalidates each exact token when delivery fails", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const send = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as unknown as SendEmail
+    });
+    const request = () =>
+      worker.fetch(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
+    expect(db.resetTokens).toHaveLength(3);
+    expect(db.resetTokens.every((token) => Boolean(token.used_at))).toBe(true);
+  });
+
+  it("supersedes an older unused reset token when a replacement is issued", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const runtime = env(db);
+    const auth = new AuthService(runtime);
+
+    const first = await auth.createPasswordResetToken("operator@example.org");
+    const second = await auth.createPasswordResetToken("operator@example.org");
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(db.resetTokens).toHaveLength(2);
+    expect(db.resetTokens[0].used_at).toBeTruthy();
+    expect(db.resetTokens[1].used_at).toBeNull();
   });
 
   it("resets the password, revokes sessions, and consumes the token", async () => {
@@ -2789,6 +3053,68 @@ describe("user administration", () => {
     expect(patch.status).toBe(403);
     await expect(patch.json()).resolves.toMatchObject({ error: "owner_target_protected" });
     expect(db.users[0].disabled_at).toBe("");
+  });
+
+  it("rejects an ADMIN password reset when the target is promoted to OWNER before the write", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null
+    });
+    db.beforeGuardedUserMutation = () => {
+      db.users[0].role = "OWNER";
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target/password", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "Fresh#Password2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0]).toMatchObject({ role: "OWNER", password_hash: "old-hash", password_salt: "old-salt" });
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects an ADMIN patch when the target is promoted to OWNER before the write", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null
+    });
+    db.beforeGuardedUserMutation = () => {
+      db.users[0].role = "OWNER";
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Hijacked Owner" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0]).toMatchObject({ role: "OWNER", name: "Target" });
+    expect(db.audits).toHaveLength(0);
   });
 
   it("lets an OWNER create and promote users to OWNER", async () => {
@@ -3775,6 +4101,37 @@ describe("document invalidation", () => {
     expect(document.status).toBe("ACCEPTED");
   });
 
+  it("rejects caller-supplied invalidation identity fields before signing", async () => {
+    const db = new InMemoryD1();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          tipoAnulacion: 2,
+          motivoAnulacion: "Prueba",
+          nombreResponsable: "Attacker",
+          tipDocResponsable: "13",
+          numDocResponsable: "00000000-0"
+        })
+      }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_invalidation_input" });
+    expect(db.dteEvents).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("emails an invalidation notice when MH accepts the invalidation event", async () => {
     const db = new InMemoryD1();
     const document = testDocument();
@@ -3869,6 +4226,17 @@ describe("document invalidation", () => {
       provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-invalidated" })
     }));
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_INVALIDATION_SENT", entity_id: "doc_1" }));
+    const invalidation = JSON.parse(String(db.dteEvents[0].plain_json)) as {
+      motivo: Record<string, string>;
+    };
+    expect(invalidation.motivo).toMatchObject({
+      nombreResponsable: "Example Person",
+      tipDocResponsable: "13",
+      numDocResponsable: "100000001",
+      nombreSolicita: "Example Person",
+      tipDocSolicita: "13",
+      numDocSolicita: "100000001"
+    });
   });
 
   it("returns a conflict when MH rejects the invalidation event", async () => {
@@ -9679,6 +10047,14 @@ interface LoginRateLimitRow {
   expires_at: string;
 }
 
+interface SecurityRateLimitClaimRow {
+  id: string;
+  scope: string;
+  key_hash: string;
+  claimed_at: string;
+  expires_at: string;
+}
+
 function sqliteD1(database: DatabaseSync): D1Database {
   return {
     prepare(query: string) {
@@ -9706,6 +10082,7 @@ class InMemoryD1 {
   readonly sessions: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
   readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
+  readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
   readonly analyticsQueryLimits: Array<{
@@ -9727,6 +10104,7 @@ class InMemoryD1 {
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
   beforePasswordResetBatch: (() => void | Promise<void>) | null = null;
+  beforeGuardedUserMutation: (() => void | Promise<void>) | null = null;
   beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
   beforeBindingAuditCount: (() => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
@@ -9752,6 +10130,11 @@ class InMemoryD1 {
         statement.sql.includes("UPDATE users") &&
         statement.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?")
     );
+    const guardedUserMutation = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE users") &&
+        statement.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')")
+    );
     const bindingQuarantine = statements.some(
       (statement) =>
         statement.sql.includes("INSERT INTO audit_logs") &&
@@ -9767,6 +10150,11 @@ class InMemoryD1 {
       const beforeBatch = this.beforePasswordResetBatch;
       this.beforePasswordResetBatch = null;
       await beforeBatch();
+    }
+    if (guardedUserMutation && this.beforeGuardedUserMutation) {
+      const beforeMutation = this.beforeGuardedUserMutation;
+      this.beforeGuardedUserMutation = null;
+      await beforeMutation();
     }
 
     const previous = this.batchTail;
@@ -9856,6 +10244,27 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes("INSERT INTO security_rate_limit_claims")) {
+      const [id, scope, keyHash, claimedAt, expiresAt, countScope, countKeyHash, cutoff, limitValue] = this.args;
+      const currentCount = this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === countScope &&
+          claim.key_hash === countKeyHash &&
+          claim.claimed_at >= String(cutoff)
+      ).length;
+      if (currentCount >= Number(limitValue)) {
+        return null;
+      }
+      const claim = {
+        id: String(id),
+        scope: String(scope),
+        key_hash: String(keyHash),
+        claimed_at: String(claimedAt),
+        expires_at: String(expiresAt)
+      };
+      this.db.securityRateLimitClaims.push(claim);
+      return { id: claim.id } as T;
+    }
     if (this.sql.includes("INSERT INTO login_rate_limits")) {
       const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
       const key = String(keyHash);
@@ -10475,6 +10884,15 @@ class Statement {
 
   async run(): Promise<StatementRunResult> {
     let changes = 0;
+    if (this.sql.includes("DELETE FROM security_rate_limit_claims")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.securityRateLimitClaims.length - 1; index >= 0; index -= 1) {
+        if (this.db.securityRateLimitClaims[index].expires_at <= now) {
+          this.db.securityRateLimitClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
     if (this.sql.includes("DELETE FROM login_rate_limits")) {
       const [now] = this.args.map(String);
       for (const [key, row] of this.db.loginRateLimits) {
@@ -10590,21 +11008,23 @@ class Statement {
     if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
       if (this.sql.includes("WHERE user_id = ?")) {
         const [usedAt, userId, markerUserId, expectedValue, expectedState, updatedAt] = this.args;
-        const marker = this.sql.includes("AND email = ?")
-          ? this.db.users.some(
-              (row) =>
-                row.id === markerUserId &&
-                row.email === expectedValue &&
-                (row.disabled_at ?? null) === (expectedState ?? null) &&
-                row.updated_at === updatedAt
-            )
-          : this.db.users.some(
-              (row) =>
-                row.id === markerUserId &&
-                row.password_hash === expectedValue &&
-                row.password_salt === expectedState &&
-                row.updated_at === updatedAt
-            );
+        const marker = !this.sql.includes("EXISTS (")
+          ? true
+          : this.sql.includes("AND email = ?")
+            ? this.db.users.some(
+                (row) =>
+                  row.id === markerUserId &&
+                  row.email === expectedValue &&
+                  (row.disabled_at ?? null) === (expectedState ?? null) &&
+                  row.updated_at === updatedAt
+              )
+            : this.db.users.some(
+                (row) =>
+                  row.id === markerUserId &&
+                  row.password_hash === expectedValue &&
+                  row.password_salt === expectedState &&
+                  row.updated_at === updatedAt
+              );
         if (marker) {
           for (const token of this.db.resetTokens.filter((row) => row.user_id === userId && !row.used_at)) {
             token.used_at = usedAt;
@@ -11044,8 +11464,19 @@ class Statement {
       }
     }
     if (this.sql.includes("SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?")) {
-      const [name, email, role, disabledAt, updatedAt, userId] = this.args;
-      const user = this.db.users.find((row) => row.id === userId);
+      if (this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") && this.db.beforeGuardedUserMutation) {
+        const beforeMutation = this.db.beforeGuardedUserMutation;
+        this.db.beforeGuardedUserMutation = null;
+        await beforeMutation();
+      }
+      const [name, email, role, disabledAt, updatedAt, userId, allowOwnerTarget] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          (!this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") ||
+            Number(allowOwnerTarget) === 1 ||
+            ["VIEWER", "OPERATOR", "ADMIN"].includes(String(row.role)))
+      );
       if (user) {
         user.name = name;
         user.email = email;
@@ -11060,8 +11491,22 @@ class Statement {
       this.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?") &&
       !this.sql.includes("RETURNING id")
     ) {
+      if (this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") && this.db.beforeGuardedUserMutation) {
+        const beforeMutation = this.db.beforeGuardedUserMutation;
+        this.db.beforeGuardedUserMutation = null;
+        await beforeMutation();
+      }
       const [passwordHash, passwordSalt, updatedAt, userId] = this.args;
-      const user = this.db.users.find((row) => row.id === userId);
+      const allowOwnerTarget = this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')")
+        ? this.args[4]
+        : 1;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          (!this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") ||
+            Number(allowOwnerTarget) === 1 ||
+            ["VIEWER", "OPERATOR", "ADMIN"].includes(String(row.role)))
+      );
       if (this.sql.includes("FROM password_reset_tokens")) {
         const [, , , , tokenUserId, tokenHash, expiresAfter] = this.args;
         const activeToken = this.db.resetTokens.some(
@@ -11081,6 +11526,20 @@ class Statement {
         user.password_hash = passwordHash;
         user.password_salt = passwordSalt;
         user.updated_at = updatedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE sessions") &&
+      this.sql.includes("SET revoked_at = ?") &&
+      this.sql.includes("WHERE token_hash = ?")
+    ) {
+      const [revokedAt, tokenHash] = this.args;
+      const session = this.db.sessions.find(
+        (row) => row.token_hash === tokenHash && !row.revoked_at
+      );
+      if (session) {
+        session.revoked_at = revokedAt;
         changes = 1;
       }
     }

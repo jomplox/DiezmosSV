@@ -69,9 +69,9 @@ export class AuthService {
     return publicUser(user);
   }
 
-  async resetUserPassword(userId: string, password: string): Promise<void> {
+  async resetUserPassword(userId: string, password: string, allowOwnerTarget = false): Promise<void> {
     const hashed = await hashForStorage(password);
-    if (!(await this.repo.setUserPassword(userId, hashed.hash, hashed.salt))) {
+    if (!(await this.repo.setUserPassword(userId, hashed.hash, hashed.salt, allowOwnerTarget))) {
       throw new UserNotFoundError("Usuario no encontrado");
     }
   }
@@ -122,15 +122,15 @@ export class AuthService {
     return { user: publicUser(row), token, expiresAt };
   }
 
-  async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; expiresAt: string } | null> {
+  async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; tokenId: string; expiresAt: string } | null> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
       return null;
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60_000).toISOString();
-    await this.repo.createPasswordResetToken(row.id, await sha256Hex(token), expiresAt);
-    return { user: publicUser(row), token, expiresAt };
+    const tokenId = await this.repo.createPasswordResetToken(row.id, await sha256Hex(token), expiresAt);
+    return { user: publicUser(row), token, tokenId, expiresAt };
   }
 
   async confirmPasswordReset(token: string, password: string): Promise<AuthUser> {
@@ -156,6 +156,15 @@ export class AuthService {
     const tokenHash = await sha256Hex(header.slice("Bearer ".length).trim());
     const row = await this.repo.getSessionUser(tokenHash);
     return row ? publicUser(row) : null;
+  }
+
+  async logout(request: Request): Promise<void> {
+    const header = request.headers.get("Authorization");
+    const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+    if (!token) {
+      throw new AuthError("Debe iniciar sesión", 401);
+    }
+    await this.repo.revokeSession(await sha256Hex(token));
   }
 }
 
