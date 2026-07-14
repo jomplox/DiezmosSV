@@ -77,7 +77,8 @@ describe("donation intents repository", () => {
       giftType: null,
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
-      datosTokenHash: null
+      datosTokenHash: null,
+      rateLimitClaimId: "rate_seed"
     });
 
     expect(created.id).toBe("di_seed");
@@ -97,9 +98,10 @@ describe("donation intents repository", () => {
     expect(insert!.args[5]).toBeNull();
     // donor_pais is bound null for a domestic intent (position 12, after complemento).
     expect(insert!.args[11]).toBeNull();
-    // gift_type stays at index 14; the capability hash is appended after it.
+    // The capability hash and admission provenance follow gift_type.
     expect(insert!.args[14]).toBeNull();
     expect(insert!.args[15]).toBeNull();
+    expect(insert!.args[16]).toBe("rate_seed");
   });
 
   it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
@@ -122,7 +124,8 @@ describe("donation intents repository", () => {
       giftType: "DIEZMO",
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
-      datosTokenHash: "a".repeat(64)
+      datosTokenHash: "a".repeat(64),
+      rateLimitClaimId: "rate_foreign"
     });
 
     const insert = db.calls.find((call) => call.sql.includes("INSERT INTO donation_intents"));
@@ -134,6 +137,7 @@ describe("donation intents repository", () => {
     expect(insert!.args).toContain("DIEZMO");
     expect(insert!.args[14]).toBe("DIEZMO");
     expect(insert!.args[15]).toBe("a".repeat(64));
+    expect(insert!.args[16]).toBe("rate_foreign");
   });
 
   it("consumes a datos capability with one guarded UPDATE RETURNING", async () => {
@@ -267,6 +271,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     document_id: null,
     client_ip: "203.0.113.9",
     datos_token_hash: null,
+    rate_limit_claim_id: null,
     paid_at: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",

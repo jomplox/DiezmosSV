@@ -517,7 +517,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     const claimNow = nowIso();
-    const admitted = await repo.claimDonationIntentRateLimit(
+    const rateLimitClaimId = await repo.claimDonationIntentRateLimit(
       await rateLimitKey(clientIp),
       clientIp,
       claimNow,
@@ -525,13 +525,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       intentThrottleExpiresIso(),
       INTENT_THROTTLE_LIMIT
     );
-    if (!admitted) {
+    if (!rateLimitClaimId) {
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     try {
       const created = draft
-        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp)
-        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp);
+        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
+        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
       return jsonResponse(created, { status: 201 });
     } catch (error) {
       if (error instanceof IntentLinkError) {
@@ -653,7 +653,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       const account = await repo.getUserForLogin(email);
       if (account && !account.disabled_at) {
         const claimNow = nowIso();
-        const admitted = await repo.claimPasswordResetRateLimit(
+        const rateLimitClaimId = await repo.claimPasswordResetRateLimit(
           await rateLimitKey(account.id),
           account.id,
           claimNow,
@@ -661,7 +661,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
           authThrottleExpiresIso(),
           PASSWORD_RESET_LIMIT
         );
-        if (!admitted) {
+        if (!rateLimitClaimId) {
           return jsonResponse({ ok: true });
         }
 
@@ -680,14 +680,21 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
               link,
               PASSWORD_RESET_TTL_MINUTES
             );
-            await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
+            await repo.createAudit({
+              action: "PASSWORD_RESET_REQUESTED",
+              entityType: "user",
+              entityId: created.user.id,
+              summary: created.user.email,
+              rateLimitClaimId
+            });
           } catch (error) {
             await repo.invalidatePasswordResetToken(created.tokenId);
             await repo.createAudit({
               action: "PASSWORD_RESET_EMAIL_FAILED",
               entityType: "user",
               entityId: created.user.id,
-              summary: error instanceof Error ? error.message : String(error)
+              summary: error instanceof Error ? error.message : String(error),
+              rateLimitClaimId
             });
           }
         }

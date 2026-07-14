@@ -350,7 +350,13 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
 // Orchestrates one full intent: persist PENDING with the donor's fiscal data, mint the
 // link, and return the three link fields (response shape unchanged). This is the
 // fallback path for a client without a usable premint draft.
-export async function createDonationIntent(env: Env, repo: Repository, input: ValidatedIntentInput, clientIp: string): Promise<CreatedIntent> {
+export async function createDonationIntent(
+  env: Env,
+  repo: Repository,
+  input: ValidatedIntentInput,
+  clientIp: string,
+  rateLimitClaimId: string
+): Promise<CreatedIntent> {
   const start = nowIso();
   const intent = await repo.createDonationIntent({
     id: newId("di"),
@@ -370,7 +376,8 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
     giftType: input.giftType,
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
-    datosTokenHash: null
+    datosTokenHash: null,
+    rateLimitClaimId
   });
 
   return mintLinkForIntent(env, repo, intent);
@@ -381,7 +388,13 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
 // (identificadorEnlaceComercio = intent id). The donor's fiscal data is attached later
 // via applyIntentDatos with a fast D1-only call, keeping the ~6 s Wompi mint off the
 // donor's Paso 2 submit.
-export async function createDraftDonationIntent(env: Env, repo: Repository, input: ValidatedDraftIntentInput, clientIp: string): Promise<CreatedIntent> {
+export async function createDraftDonationIntent(
+  env: Env,
+  repo: Repository,
+  input: ValidatedDraftIntentInput,
+  clientIp: string,
+  rateLimitClaimId: string
+): Promise<CreatedIntent> {
   const start = nowIso();
   const datosToken = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
   const datosTokenHash = await sha256Hex(utf8Bytes(datosToken));
@@ -402,7 +415,8 @@ export async function createDraftDonationIntent(env: Env, repo: Repository, inpu
     giftType: input.giftType,
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
-    datosTokenHash
+    datosTokenHash,
+    rateLimitClaimId
   });
 
   return mintLinkForIntent(env, repo, intent, datosToken);
