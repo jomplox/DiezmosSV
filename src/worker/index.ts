@@ -54,7 +54,7 @@ import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type A
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
-import { MhClient } from "./services/mhClient";
+import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import {
   IssuancePipeline,
   RejectedWompiRetryConflictError,
@@ -68,10 +68,11 @@ import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
-import { OwnerTargetProtectedError, Repository } from "./storage/repository";
+import { OwnerTargetProtectedError, Repository, UserMutationConflictError } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
+import { newId } from "./utils/ids";
 import {
   InvalidJsonBodyError,
   jsonResponse,
@@ -278,6 +279,11 @@ export default {
       await pipeline.retryDeferredTransmissions();
     } catch (error) {
       console.error("Deferred transmission retry failed", error);
+    }
+    try {
+      await pipeline.retryPendingPostAcceptFinalizations();
+    } catch (error) {
+      console.error("Post-accept finalization sweep failed", error);
     }
     try {
       await pipeline.sweepStalledWompiEvents();
@@ -543,12 +549,20 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   // Public datos completion: attaches the donor's fiscal data to a minted draft with a
-  // fast D1-only call (no Wompi). Same per-IP throttle as create (cheap but public).
+  // fast D1-only call (no Wompi). Its dedicated per-IP budget counts every attempt,
+  // including malformed bodies and failed capability guesses.
   const intentDatosMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/datos$/);
   if (intentDatosMatch && request.method === "POST") {
     const clientIp = clientIpFrom(request);
-    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
-    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
+    const claimNow = nowIso();
+    const rateLimitClaimId = await repo.claimDonationDatosRateLimit(
+      await rateLimitKey(clientIp),
+      claimNow,
+      intentThrottleSinceIso(),
+      intentThrottleExpiresIso(),
+      INTENT_THROTTLE_LIMIT
+    );
+    if (!rateLimitClaimId) {
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     let data;
@@ -654,8 +668,7 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       if (account && !account.disabled_at) {
         const claimNow = nowIso();
         const rateLimitClaimId = await repo.claimPasswordResetRateLimit(
-          await rateLimitKey(account.id),
-          account.id,
+          await rateLimitKey(`password-reset:${account.id}:${clientIpFrom(request)}`),
           claimNow,
           authThrottleSinceIso(),
           authThrottleExpiresIso(),
@@ -1248,6 +1261,9 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       if (error instanceof OwnerTargetProtectedError) {
         return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
       }
+      if (error instanceof UserMutationConflictError) {
+        return jsonResponse({ error: "user_update_conflict", message: error.message }, { status: 409 });
+      }
       throw error;
     }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
@@ -1675,7 +1691,10 @@ function mhRejectionMessage(result: MhResponse): string {
   return result.estado || "Invalidación rechazada por el Ministerio de Hacienda";
 }
 
-function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at">): boolean {
+function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at" | "fiscal_operation_claim_id">): boolean {
+  if (document.fiscal_operation_claim_id) {
+    return false;
+  }
   // Un CDE diferido (SIGNED + transmission_deferred_at) NO es reintetable manualmente:
   // el cron de 15 minutos es el único dueño del reintento, porque el camino manual
   // genérico no completa la intención ni envía el comprobante definitivo. Un SIGNED
@@ -1856,7 +1875,15 @@ async function handleDocumentRoute(
     if (!email) {
       return jsonResponse({ error: "invalid_email", message: "Ingrese un correo válido." }, { status: 400 });
     }
-    await repo.updateDocumentDonorEmail(document.id, email);
+    if (!(await repo.updateDocumentDonorEmail(document.id, email))) {
+      return jsonResponse(
+        {
+          error: "document_finalization_pending",
+          message: "El comprobante aceptado está finalizando; vuelva a intentar la corrección de correo al terminar."
+        },
+        { status: 409 }
+      );
+    }
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
@@ -1870,6 +1897,21 @@ async function handleDocumentRoute(
   }
 
   if (action === "resend" && request.method === "POST") {
+    if (document.status === "ACCEPTED" && !document.post_accept_finalized_at) {
+      return jsonResponse(
+        { error: "document_finalization_pending", message: "El comprobante aceptado aún está completando su registro y envío definitivo." },
+        { status: 409 }
+      );
+    }
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "El resultado fiscal está pendiente de conciliación; no se puede reenviar un comprobante potencialmente incorrecto."
+        },
+        { status: 409 }
+      );
+    }
     const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { email?: string };
     const toEmail = body.email ?? document.donor_email;
     if (!toEmail) {
@@ -1911,6 +1953,15 @@ async function handleDocumentRoute(
   }
 
   if (action === "retry" && request.method === "POST") {
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "MH pudo haber procesado la operación. Concilie el resultado antes de cualquier reintento."
+        },
+        { status: 409 }
+      );
+    }
     if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
@@ -1961,25 +2012,59 @@ async function handleDocumentRoute(
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }
-    const result = await new MhClient(env).transmitDte({
-      ambiente: document.environment,
-      version: 2,
-      tipoDte: document.tipo_dte,
-      codigoGeneracion: document.codigo_generacion,
-      signedJws: document.signed_jws
-    });
-    await repo.updateDocumentMhResult(document.id, {
+    const claimId = newId("fiscal");
+    const claimed = await repo.claimDocumentTransmission(document.id, document.status, document.signed_jws, claimId);
+    if (!claimed) {
+      return jsonResponse(
+        { error: "document_retry_in_progress", message: "Ya hay una operación fiscal en curso para este documento." },
+        { status: 409 }
+      );
+    }
+    // Once dispatch has started, a transport exception cannot prove that MH did
+    // not accept the document. Keep the durable claim so another retry cannot
+    // create a second fiscal side effect before reconciliation.
+    let result;
+    try {
+      result = await new MhClient(env).transmitDte({
+        ambiente: document.environment,
+        version: 2,
+        tipoDte: document.tipo_dte,
+        codigoGeneracion: document.codigo_generacion,
+        signedJws: document.signed_jws
+      });
+    } catch (error) {
+      if (error instanceof MhPreDispatchError) {
+        await repo.releaseDocumentFiscalOperation(document.id, claimId);
+      }
+      throw error;
+    }
+    const completed = await repo.completeDocumentTransmission(document.id, claimId, {
       status: result.accepted ? "ACCEPTED" : "REJECTED",
       sello: result.selloRecibido,
       mhEstado: result.estado,
       observaciones: result.observaciones,
       acceptedAt: result.accepted ? nowIso() : null
     });
+    if (!completed) {
+      return jsonResponse(
+        { error: "document_retry_in_progress", message: "La operación fiscal ya no pertenece a este reintento." },
+        { status: 409 }
+      );
+    }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRIED", entityType: "dte_document", entityId: document.id, summary: result.estado, metadata: result.raw });
     return jsonResponse({ ok: true, result });
   }
 
   if (action === "invalidate" && request.method === "POST") {
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "MH pudo haber procesado la operación. Concilie el resultado antes de otra invalidación."
+        },
+        { status: 409 }
+      );
+    }
     if (document.status !== "ACCEPTED" || !document.sello_recibido || !document.accepted_at) {
       return jsonResponse({ error: "document_not_accepted" }, { status: 409 });
     }
@@ -2010,28 +2095,56 @@ async function handleDocumentRoute(
     };
     const eventDocument = buildInvalidacionEvent(document, config, input);
     const signedJws = await signMhDocument(eventDocument, getMhCertificateXml(env), requireSecret(env, "MH_CERT_PASSWORD"));
-    const eventId = await repo.createDteEvent({
+    const claimId = newId("fiscal");
+    if (!(await repo.claimDocumentInvalidation(document.id, claimId))) {
+      return jsonResponse(
+        { error: "document_fiscal_operation_in_progress", message: "Ya hay una operación fiscal en curso para este documento." },
+        { status: 409 }
+      );
+    }
+    let eventId: string;
+    try {
+      eventId = await repo.createAndAttachDocumentInvalidationEvent({
+        documentId: document.id,
+        claimId,
+        environment: document.environment,
+        codigoGeneracion: (eventDocument.identificacion as { codigoGeneracion: string }).codigoGeneracion,
+        plainJson: eventDocument,
+        signedJws,
+        legalDeadlineAt: deadline,
+        createdBy: actor.id
+      });
+    } catch (error) {
+      await repo.releaseDocumentFiscalOperation(document.id, claimId);
+      throw error;
+    }
+    let result;
+    try {
+      result = await new MhClient(env).transmitInvalidacion({ ambiente: document.environment, version: 3, signedJws });
+    } catch (error) {
+      if (error instanceof MhPreDispatchError) {
+        await repo.releaseDocumentInvalidationBeforeDispatch(document.id, claimId, eventId, error.message);
+      }
+      throw error;
+    }
+    const completed = await repo.completeDocumentInvalidation({
       documentId: document.id,
-      eventType: "INVALIDACION",
-      environment: document.environment,
-      codigoGeneracion: (eventDocument.identificacion as { codigoGeneracion: string }).codigoGeneracion,
-      plainJson: eventDocument,
-      signedJws,
-      legalDeadlineAt: deadline,
-      createdBy: actor.id
-    });
-    const result = await new MhClient(env).transmitInvalidacion({ ambiente: document.environment, version: 3, signedJws });
-    await repo.updateDteEventResult(eventId, {
-      status: result.accepted ? "ACCEPTED" : "REJECTED",
+      claimId,
+      eventId,
+      accepted: result.accepted,
       sello: result.selloRecibido,
       mhEstado: result.estado,
       observaciones: result.observaciones,
-      acceptedAt: result.accepted ? nowIso() : null
+      acceptedAt: result.accepted ? nowIso() : null,
+      actorId: actor.id,
+      raw: result.raw
     });
+    if (!completed) {
+      throw new Error("La invalidación no pudo completar atómicamente su evento y documento");
+    }
     let emailSent = false;
     let emailError: string | undefined;
     if (result.accepted) {
-      await repo.markDocumentInvalidated(document.id);
       const invalidatedDocument = (await repo.getDteDocument(document.id)) ?? { ...document, status: "INVALIDATED" };
       if (invalidatedDocument.donor_email) {
         try {
@@ -2076,15 +2189,6 @@ async function handleDocumentRoute(
         }
       }
     }
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: result.accepted ? "DTE_INVALIDATED" : "DTE_INVALIDATION_REJECTED",
-      entityType: "dte_document",
-      entityId: document.id,
-      summary: result.estado,
-      metadata: result.raw
-    });
     const responseBody = { accepted: result.accepted, eventId, deadline, result, emailSent, ...(emailError ? { emailError } : {}) };
     if (!result.accepted) {
       return jsonResponse(

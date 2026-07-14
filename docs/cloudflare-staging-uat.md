@@ -41,8 +41,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npx wrangler secret put MH_USER_TEST --env staging
    npx wrangler secret put MH_PASSWORD_TEST --env staging
    npx wrangler secret put EMAIL_FROM --env staging
-   npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned fallback
-   npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
+   npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
+   npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
    npx wrangler secret put EMISOR_CONFIG_JSON --env staging
    ```
 
@@ -58,8 +58,11 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    `EMAIL_FROM` to an address on that domain. If Cloudflare returns `destination address is not a
    verified address`, the Worker is reaching Email Service but the account/domain is still limited to
    verified destination addresses rather than arbitrary donor recipients. Configure
-   `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` for a transactional fallback provider if donor delivery must work
-   before Cloudflare Email Sending is enabled for arbitrary recipients.
+   `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` for a transactional alternative if donor delivery must work
+   before Cloudflare Email Sending is enabled for arbitrary recipients. With both providers configured,
+   `EMAIL_ARBITRARY_RECIPIENTS=true` selects Cloudflare and an unset marker selects HTTP; a sole Cloudflare
+   binding remains the only dispatch path. The Worker never retries the same receipt through the other
+   provider after an attempted send.
 
    `EMAIL_PROVIDER_URL` is deployment-owned. It must be an absolute HTTPS URL without embedded
    credentials. Set it with Wrangler or the Cloudflare deployment configuration, not from the
@@ -70,8 +73,12 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 6. Apply the schema and deploy:
 
    ```bash
+   # First block all mutating Worker traffic and drain every old HTTP/queue/cron
+   # invocation exactly as documented in docs/fiscal-claim-cutover.md.
+   export FISCAL_CUTOVER_QUIESCED=1
    npm run cf:migrate:staging
    npm run cf:deploy:staging
+   unset FISCAL_CUTOVER_QUIESCED
    ```
 
 ## Edge Smoke Test
@@ -125,7 +132,7 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
    - The staging Worker name and app environment are visible.
    - Only the MH TEST lane is available; signer, issuer, Wompi, and email statuses show configured or pending.
    - Correo shows the Cloudflare `EMAIL` binding and `EMAIL_FROM` as configured.
-   - If Cloudflare Email Service is still destination-limited, Correo shows the fallback email
+   - If Cloudflare Email Service is still destination-limited, Correo shows the alternative email
      provider as configured.
    - Blank fields are understood as "leave unchanged".
    - If the Cloudflare writer token is not configured, the save action fails visibly instead of

@@ -146,6 +146,14 @@ export interface DteDocumentRecord {
   // (no hay valor nuevo en el CHECK de status — D1 no puede reconstruir tablas
   // padre de FK). Se conserva tras la resolución como evidencia histórica.
   transmission_deferred_at: string | null;
+  fiscal_operation_claim_id?: string | null;
+  fiscal_operation_claimed_at?: string | null;
+  fiscal_operation_kind?: "TRANSMISSION" | "INVALIDATION" | null;
+  fiscal_operation_event_id?: string | null;
+  post_accept_finalized_at?: string | null;
+  post_accept_finalization_claim_id?: string | null;
+  post_accept_finalization_claimed_at?: string | null;
+  post_accept_email_dispatch_started_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -281,6 +289,8 @@ export interface WompiEventRecord {
   received_at: string;
   processed_at: string | null;
   created_document_id: string | null;
+  issuance_claim_id?: string | null;
+  issuance_claimed_at?: string | null;
 }
 
 export interface MhResponse {

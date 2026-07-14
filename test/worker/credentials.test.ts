@@ -52,7 +52,7 @@ describe("credential status", () => {
     });
     expect(status.groups.email.items).toContainEqual({
       name: "EMAIL_PROVIDER_URL",
-      label: "Endpoint POST JSON de respaldo administrado por el despliegue",
+      label: "Endpoint POST JSON alternativo administrado por el despliegue",
       configured: true,
       displayValue: "https://mail.example/send"
     });
@@ -82,6 +82,21 @@ describe("credential status", () => {
     }));
 
     expect(status.groups.email.ready).toBe(false);
+  });
+
+  it("requires the Cloudflare binding as well as the arbitrary-recipient marker", () => {
+    const withoutBinding = credentialStatus(env({
+      EMAIL_ARBITRARY_RECIPIENTS: "true",
+      EMAIL_FROM: "dte@example.org"
+    }));
+    const withBinding = credentialStatus(env({
+      EMAIL: { send: async () => ({ messageId: "message-1" }) } as SendEmail,
+      EMAIL_ARBITRARY_RECIPIENTS: "true",
+      EMAIL_FROM: "dte@example.org"
+    }));
+
+    expect(withoutBinding.groups.email.ready).toBe(false);
+    expect(withBinding.groups.email.ready).toBe(true);
   });
 
   it("exposes only the production MH credential lane on a production deployment", () => {

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { createHmac, randomBytes, randomUUID } from "node:crypto";
-import { lstatSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { loadEnvFile } from "node:process";
+import { assertPrivateEnvFile } from "./assert-private-env-file.mjs";
 
 const help = `
 DiezmosSV Cloudflare staging smoke test
@@ -49,17 +49,10 @@ const configuredEnvFile = process.env.DIEZMOSSV_ENV_FILE?.trim();
 const envFile = configuredEnvFile
   ? (isAbsolute(configuredEnvFile) ? configuredEnvFile : resolve(process.cwd(), configuredEnvFile))
   : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "env", "staging-smoke.env");
-let envFileStat;
 try {
-  envFileStat = lstatSync(envFile);
+  assertPrivateEnvFile(envFile);
 } catch (error) {
-  if (error?.code === "ENOENT") {
-    fail(`Environment file not found: ${envFile}`);
-  }
-  throw error;
-}
-if (!envFileStat.isFile() || envFileStat.isSymbolicLink()) {
-  fail(`Environment path must be a regular non-symlink file: ${envFile}`);
+  fail(error instanceof Error ? error.message : String(error));
 }
 loadEnvFile(envFile);
 

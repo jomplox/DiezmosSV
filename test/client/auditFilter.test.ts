@@ -39,7 +39,7 @@ describe("audit entry filtering", () => {
   it("pages the audit trail with a keyset cursor and a Cargar más control", () => {
     const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
     // First page + cursor on refresh; older pages append via the cursor param.
-    expect(appSource).toContain('api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50"');
+    expect(appSource).toContain('accountApi<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50"');
     expect(appSource).toContain("cursor=${encodeURIComponent(auditCursor)}");
     expect(appSource).toContain("Cargar más");
     // The filter hint clarifies it searches the LOADED rows.

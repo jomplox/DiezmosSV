@@ -77,12 +77,14 @@ export function credentialStatus(env: Env): CredentialStatus {
   const wompi = group("Webhook entrante de Wompi", [
     protectedItem(env, "WOMPI_API_SECRET", "Firma del webhook entrante")
   ]);
-  const emailProviderUrl = visibleItem(env, "EMAIL_PROVIDER_URL", "Endpoint POST JSON de respaldo administrado por el despliegue");
-  const emailApiKey = protectedItem(env, "EMAIL_API_KEY", "Token bearer de respaldo");
+  const emailProviderUrl = visibleItem(env, "EMAIL_PROVIDER_URL", "Endpoint POST JSON alternativo administrado por el despliegue");
+  const emailApiKey = protectedItem(env, "EMAIL_API_KEY", "Token bearer alternativo");
   const emailFrom = visibleItem(env, "EMAIL_FROM", "Remitente");
   const email = {
     label: "Correo",
-    ready: emailFrom.configured && (isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) || hasHttpProvider(env)),
+    ready: emailFrom.configured && (
+      (Boolean(env.EMAIL) && isTrue(env.EMAIL_ARBITRARY_RECIPIENTS)) || hasHttpProvider(env)
+    ),
     items: [
       { name: "EMAIL", label: "Vinculación de correo Cloudflare", configured: Boolean(env.EMAIL) },
       { name: "EMAIL_ARBITRARY_RECIPIENTS", label: "Cloudflare a donantes externos", configured: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS), displayValue: isTrue(env.EMAIL_ARBITRARY_RECIPIENTS) ? "true" : undefined },
