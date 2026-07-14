@@ -479,12 +479,12 @@ describe("runRetentionExport", () => {
         created_at: undefined,
         received_at: "2026-06-15T12:00:00.000Z",
         issuance_status: "FAILED",
-        control_prefix: "DTE-15-M001P004",
+        control_prefix: "M001P004",
         control_sequence: 42,
         reserved_numero_control: "DTE-15-M001P004-000000000000042",
         reserved_codigo_generacion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
         issuance_attempt_count: 3,
-        issuance_error_code: "invalid_donor_document",
+        issuance_error_code: "CDE_SCHEMA",
         issuance_error_message: "El documento del donante no es válido.",
         issuance_last_attempt_at: "2026-06-15T12:03:00.000Z",
         issuance_failed_at: "2026-06-15T12:03:00.000Z",
@@ -501,17 +501,21 @@ describe("runRetentionExport", () => {
     expect(exportedRows).toHaveLength(1);
     expect(exportedRows[0]).toMatchObject({
       issuance_status: "FAILED",
-      control_prefix: "DTE-15-M001P004",
+      control_prefix: "M001P004",
       control_sequence: 42,
       reserved_numero_control: "DTE-15-M001P004-000000000000042",
       reserved_codigo_generacion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
       issuance_attempt_count: 3,
-      issuance_error_code: "invalid_donor_document",
+      issuance_error_code: "CDE_SCHEMA",
       issuance_error_message: "El documento del donante no es válido.",
       issuance_last_attempt_at: "2026-06-15T12:03:00.000Z",
       issuance_failed_at: "2026-06-15T12:03:00.000Z",
       issuance_dead_lettered_at: null
     });
+    expect(exportedRows[0].reserved_numero_control).toBe(
+      `DTE-15-${exportedRows[0].control_prefix}-${String(exportedRows[0].control_sequence).padStart(15, "0")}`
+    );
+    expect(exportedRows[0].issuance_error_code).toMatch(/^[A-Z][A-Z0-9_]*$/);
 
     const manifest = JSON.parse(
       new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)

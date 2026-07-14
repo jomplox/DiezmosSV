@@ -251,7 +251,7 @@ recibirá automáticamente avisos cuando algo necesite atención:
 | Alerta | Qué significa |
 |---|---|
 | **Hacienda no disponible** | Hay CDE **En trámite** desde hace más de una hora porque Hacienda no responde. Los donantes ya tienen su comprobante transitorio; el sistema sigue reintentando cada 15 minutos. |
-| **Mensaje de emisión agotó reintentos** | Un pago no logró crear su CDE tras varios intentos automáticos. Abra su tarjeta **CDE NO CREADO** en **Fallos**, revise el error exacto guardado y pulse **Reintentar creación**. Si el mismo error de validación se repite, contacte a soporte en vez de seguir reintentando. |
+| **Mensaje de emisión agotó reintentos** | El caso agotó sus intentos automáticos. Si corresponde a un evento o pago de Wompi sin documento, abra **Fallos → CDE NO CREADO**, revise el error exacto guardado (sin datos sensibles) y pulse **Reintentar creación**. Si corresponde a un CDE avanzado o ya existente, abra ese CDE fallido en **Fallos** y revise el error del documento. En ambos casos, si el mismo error de validación se repite, contacte a soporte en vez de seguir reintentando. |
 | **Evento Wompi sin procesar** | Un pago de Wompi quedó estancado; el sistema intenta recuperarlo, pero conviene revisarlo. |
 | **Certificado del firmador por vencer** | El certificado de firma de Hacienda está por vencer (avisos a 30, 14 y 3 días). Coordine su renovación con soporte técnico. |
 
