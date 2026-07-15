@@ -1795,6 +1795,19 @@ export class Repository {
     return row?.count ?? 0;
   }
 
+  async createInitialOwner(input: { email: string; name: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown> | null> {
+    const id = newId("user");
+    return this.db
+      .prepare(
+        `INSERT INTO users (id, email, name, role, password_hash, password_salt)
+         SELECT ?, ?, ?, 'OWNER', ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM users)
+         RETURNING id, email, name, role, disabled_at, created_at, updated_at`
+      )
+      .bind(id, input.email.toLowerCase(), input.name, input.passwordHash, input.passwordSalt)
+      .first<Record<string, unknown>>();
+  }
+
   async createUser(input: { email: string; name: string; role: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown>> {
     const id = newId("user");
     await this.db

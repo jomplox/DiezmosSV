@@ -205,13 +205,19 @@ npm run dev          # Vite UI, proxies /api and /webhooks to the Worker
 
 Open the Vite URL and use **`Crear owner`** on first run to bootstrap the initial admin account.
 The setup form requires the `BOOTSTRAP_OWNER_TOKEN` value from your private local operator env file.
+Generate a fresh 32-byte base64url token; the Worker accepts only the `bt_` prefix followed by the
+43-character encoded value:
+
+```bash
+printf 'bt_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+```
 
 A starter operator env looks like this. Local execution is locked to MH TEST (`ambiente=00`), so do
 not place production API credentials in the local file:
 
 ```bash
 WOMPI_API_SECRET="..."
-BOOTSTRAP_OWNER_TOKEN="..."
+BOOTSTRAP_OWNER_TOKEN="bt_<43-character-base64url-value>"
 CLOUDFLARE_ACCOUNT_ID="..."
 CLOUDFLARE_API_TOKEN="..."
 MH_CERT_PASSWORD="..."
@@ -371,7 +377,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | Variable | Purpose |
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
-| `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. Rotate or remove it after the owner account exists. |
+| `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. It must be generated from 32 random bytes and formatted as `bt_` plus 43 base64url characters. Rotate or remove it after the owner account exists. |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account target used by the OWNER-only credential UI when saving Worker secrets. |
 | `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token used by the OWNER-only credential UI to call the Worker secret bulk-update endpoint. |
 | `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). Works locally and remotely only when it fits Cloudflare's 5 KB Worker variable limit. |

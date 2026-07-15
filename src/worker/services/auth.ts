@@ -28,11 +28,14 @@ const PASSWORD_PBKDF2_ITERATIONS = 100_000;
 // deployed fallback count is safe to try.
 const LEGACY_PASSWORD_PBKDF2_ITERATIONS: number[] = [];
 const PASSWORD_HASH_SCHEME = "pbkdf2";
+const DUMMY_PASSWORD_SALT = "diezmossv-login-dummy-v1";
+const DUMMY_PASSWORD_HASH = "pbkdf2$100000$0ddb41b59abcc01d672e58d326a2a4462301ea4f27009e0cb9e9b7c67a8947cb";
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
 export class PasswordResetError extends Error {}
 export class PasswordPolicyError extends Error {}
 export class UserNotFoundError extends Error {}
+export class BootstrapUnavailableError extends Error {}
 
 export class AuthService {
   private readonly repo: Repository;
@@ -42,18 +45,16 @@ export class AuthService {
   }
 
   async bootstrapOwner(input: { email: string; name: string; password: string }): Promise<AuthUser> {
-    const count = await this.repo.countUsers();
-    if (count > 0) {
-      throw new Error("La creación del propietario inicial solo está disponible antes de que exista el primer usuario");
-    }
     const hashed = await hashForStorage(input.password);
-    const user = await this.repo.createUser({
+    const user = await this.repo.createInitialOwner({
       email: input.email,
       name: input.name,
-      role: "OWNER",
       passwordHash: hashed.hash,
       passwordSalt: hashed.salt
     });
+    if (!user) {
+      throw new BootstrapUnavailableError("La creación del propietario inicial ya no está disponible");
+    }
     return publicUser(user);
   }
 
@@ -79,11 +80,12 @@ export class AuthService {
   async login(email: string, password: string): Promise<{ user: AuthUser; token: string; expiresAt: string }> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
-      throw new Error("Credenciales inválidas");
+      await verifyPassword(password, DUMMY_PASSWORD_SALT, DUMMY_PASSWORD_HASH);
+      throw invalidCredentialsError();
     }
     const verified = await verifyPassword(password, row.password_salt, row.password_hash);
     if (!verified.valid) {
-      throw new Error("Credenciales inválidas");
+      throw invalidCredentialsError();
     }
     let expectedPasswordHash = row.password_hash;
     let expectedPasswordSalt = row.password_salt;
@@ -102,7 +104,7 @@ export class AuthService {
         // The password row changed after verification (for example, a concurrent
         // reset). Do not create a session for a credential that may no longer be
         // current.
-        throw new Error("Credenciales inválidas");
+        throw invalidCredentialsError();
       }
       expectedPasswordHash = upgraded.hash;
       expectedPasswordSalt = upgraded.salt;
@@ -119,7 +121,7 @@ export class AuthService {
       expiresAt
     });
     if (!created) {
-      throw new Error("Credenciales inválidas");
+      throw invalidCredentialsError();
     }
     return { user: publicUser(row), token, expiresAt };
   }
@@ -195,6 +197,10 @@ export class AuthError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
   }
+}
+
+function invalidCredentialsError(): AuthError {
+  return new AuthError("Credenciales inválidas", 401);
 }
 
 export async function hashPassword(

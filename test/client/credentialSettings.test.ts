@@ -173,6 +173,12 @@ describe("Emisor code field helper text (source contract)", () => {
     expect(appSource).toContain("Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.");
     expect(appSource).toContain("Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.");
   });
+
+  test("treats the active issuer configuration as replacement-only", () => {
+    expect(appSource).not.toContain('credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue');
+    expect(appSource).not.toContain("Datos activos cargados en campos editables");
+    expect(appSource).toContain("Configuración protegida; complete todos los campos para reemplazarla");
+  });
 });
 
 describe("Correo alert recipients (source contract)", () => {

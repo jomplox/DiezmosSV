@@ -4,7 +4,7 @@ import type { CredentialUpdateInput } from "../../src/worker/services/credential
 import type { Env } from "../../src/worker/types";
 
 describe("credential status", () => {
-  it("reports readiness, exposes inspectable config values, and protects secrets", () => {
+  it("reports readiness, exposes allowlisted operational values, and keeps deployment credentials write-only", () => {
     const status = credentialStatus(env({
       APP_ENV: "staging",
       CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
@@ -42,13 +42,13 @@ describe("credential status", () => {
       name: "MH_USER_TEST",
       label: "Usuario API TEST",
       configured: true,
-      displayValue: "0614"
+      protected: true
     });
     expect(status.groups.issuer.items).toContainEqual({
       name: "EMISOR_CONFIG_JSON",
       label: "Configuración JSON",
       configured: true,
-      displayValue: "{\"nombre\":\"Iglesia Ejemplo\"}"
+      protected: true
     });
     expect(status.groups.email.items).toContainEqual({
       name: "EMAIL_PROVIDER_URL",
@@ -68,6 +68,8 @@ describe("credential status", () => {
     expect(JSON.stringify(status)).not.toContain("<CertificadoMH>");
     expect(JSON.stringify(status)).not.toContain("wompi-secret");
     expect(JSON.stringify(status)).not.toContain("email-key");
+    expect(JSON.stringify(status)).not.toContain("0614");
+    expect(JSON.stringify(status)).not.toContain("Iglesia Ejemplo");
   });
 
   it.each([
