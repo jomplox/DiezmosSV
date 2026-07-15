@@ -13,17 +13,8 @@ collectExact("WompiWebhookSample.json");
 collectExact("node_modules/.cache/wrangler/wrangler-account.json");
 collectExact("node_modules/.mf/cf.json");
 
-for (const entry of safeReadDir(join(root, "DTE"))) {
-  if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-  if (/\.(?:csv|xlsx|pdf)$/i.test(entry.name) || /_OCR\.md$/i.test(entry.name) || /_by_PaddleOCR.*\.md$/i.test(entry.name)) {
-    violations.add(`DTE/${entry.name}`);
-  }
-}
-
-for (const entry of safeReadDir(join(root, "examples"))) {
-  if ((!entry.isFile() && !entry.isSymbolicLink()) || !/^DTE-.*\.(?:json|pdf)$/i.test(entry.name)) continue;
-  violations.add(`examples/${entry.name}`);
-}
+collectMatchingTree("DTE", (name) => /\.(?:csv|xlsx|pdf)$/i.test(name) || /_OCR\.md$/i.test(name) || /_by_PaddleOCR.*\.md$/i.test(name));
+collectMatchingTree("examples", (name) => /^DTE-.*\.(?:json|pdf)$/i.test(name));
 
 if (violations.size > 0) {
   console.error("Private artifacts must be moved outside the repository:");
@@ -69,6 +60,30 @@ function collectTree(path) {
     if (entry.isDirectory() && !entry.isSymbolicLink()) {
       collectTree(childPath);
     } else {
+      violations.add(childPath);
+    }
+  }
+}
+
+function collectMatchingTree(path, matches) {
+  const absolute = join(root, path);
+  let stat;
+  try {
+    stat = lstatSync(absolute);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    if (matches(path.split("/").at(-1) ?? "")) violations.add(normalize(path));
+    return;
+  }
+  for (const entry of safeReadDir(absolute)) {
+    const child = join(absolute, entry.name);
+    const childPath = normalize(relative(root, child));
+    if (entry.isDirectory() && !entry.isSymbolicLink()) {
+      collectMatchingTree(childPath, matches);
+    } else if (matches(entry.name)) {
       violations.add(childPath);
     }
   }

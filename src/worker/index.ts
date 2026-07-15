@@ -3,7 +3,7 @@ import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEven
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
-import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
+import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
   applyIntentDatos,
@@ -96,6 +96,8 @@ const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const LOGIN_IP_ATTEMPT_LIMIT = 60;
 const PASSWORD_RESET_LIMIT = 3;
+const BOOTSTRAP_ATTEMPT_LIMIT = 10;
+const BOOTSTRAP_TOKEN_PATTERN = /^bt_[A-Za-z0-9_-]{43}$/;
 
 // Public donation endpoints parse untrusted JSON before validation and rate-limit
 // admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
@@ -208,11 +210,11 @@ function documentResponseWithSecurityHeaders(response: Response): Response {
 }
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/")) {
-        return await handleApi(request, env, url);
+        return await handleApi(request, env, url, ctx);
       }
       if (url.pathname === "/webhooks/wompi") {
         return await handleWompiWebhook(request, env);
@@ -234,7 +236,8 @@ export default {
       if (error instanceof PaymentCollectionDisabledError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
       }
-      return jsonResponse({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      console.error("Unhandled Worker request error", error);
+      return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
     }
   },
 
@@ -466,7 +469,59 @@ async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook
   }
 }
 
-async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
+async function processPasswordResetRequest(
+  repo: Repository,
+  auth: AuthService,
+  env: Env,
+  url: URL,
+  email: string,
+  clientIp: string
+): Promise<void> {
+  const account = await repo.getUserForLogin(email);
+  if (!account || account.disabled_at) return;
+
+  const claimNow = nowIso();
+  const rateLimitClaimId = await repo.claimPasswordResetRateLimit(
+    await rateLimitKey(`password-reset:${account.id}:${clientIp}`),
+    claimNow,
+    authThrottleSinceIso(),
+    authThrottleExpiresIso(),
+    PASSWORD_RESET_LIMIT
+  );
+  if (!rateLimitClaimId) return;
+
+  const created = await auth.createPasswordResetToken(email);
+  if (!created) return;
+
+  const link = `${resolveAppOrigin(env, url)}/#reset=${created.token}`;
+  try {
+    const resetBranding = await loadEmailBranding(repo, env);
+    await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(
+      created.user.email,
+      created.user.name,
+      link,
+      PASSWORD_RESET_TTL_MINUTES
+    );
+    await repo.createAudit({
+      action: "PASSWORD_RESET_REQUESTED",
+      entityType: "user",
+      entityId: created.user.id,
+      summary: created.user.email,
+      rateLimitClaimId
+    });
+  } catch (error) {
+    await repo.invalidatePasswordResetToken(created.tokenId);
+    await repo.createAudit({
+      action: "PASSWORD_RESET_EMAIL_FAILED",
+      entityType: "user",
+      entityId: created.user.id,
+      summary: error instanceof Error ? error.message : String(error),
+      rateLimitClaimId
+    });
+  }
+}
+
+async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
   // every downstream repo.createAudit (route handlers reuse this same instance)
   // records the caller's IP and Cloudflare request context without per-call-site wiring.
@@ -479,7 +534,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
-    return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
+    const hasNoUsers = (await repo.countUsers()) === 0;
+    return jsonResponse({ bootstrapAvailable: isBootstrapOwnerTokenConfigured(env) && hasNoUsers });
   }
 
   // Public branding read: the login screen needs the display name, accent color, and
@@ -603,11 +659,33 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
-    if (!hasValidBootstrapOwnerToken(request, env)) {
+    if (!isBootstrapOwnerTokenConfigured(env)) {
+      return jsonResponse({ error: "bootstrap_configuration_invalid" }, { status: 503 });
+    }
+    const claimNow = nowIso();
+    const accepted = await repo.claimLoginAttempt(
+      await rateLimitKey(`bootstrap-owner:${clientIpFrom(request)}`),
+      claimNow,
+      authThrottleSinceIso(),
+      authThrottleExpiresIso(),
+      BOOTSTRAP_ATTEMPT_LIMIT
+    );
+    if (!accepted) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    if (!(await hasValidBootstrapOwnerToken(request, env))) {
       return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
     }
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; password: string };
-    const owner = await auth.bootstrapOwner(body);
+    let owner;
+    try {
+      owner = await auth.bootstrapOwner(body);
+    } catch (error) {
+      if (error instanceof BootstrapUnavailableError) {
+        return jsonResponse({ error: "bootstrap_unavailable", message: error.message }, { status: 409 });
+      }
+      throw error;
+    }
     await repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
     return jsonResponse({ user: owner }, { status: 201 });
   }
@@ -660,57 +738,12 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
     const email = String(body.email ?? "").trim();
     if (email) {
-      // Resolve the account first so the atomic throttle can key on its stable id and,
-      // crucially, run before any token is created.
-      // Unknown emails yield no account and fall through to the enumeration-safe
-      // 200 below without ever touching the rate limiter.
-      const account = await repo.getUserForLogin(email);
-      if (account && !account.disabled_at) {
-        const claimNow = nowIso();
-        const rateLimitClaimId = await repo.claimPasswordResetRateLimit(
-          await rateLimitKey(`password-reset:${account.id}:${clientIpFrom(request)}`),
-          claimNow,
-          authThrottleSinceIso(),
-          authThrottleExpiresIso(),
-          PASSWORD_RESET_LIMIT
-        );
-        if (!rateLimitClaimId) {
-          return jsonResponse({ ok: true });
-        }
-
-        const created = await auth.createPasswordResetToken(email);
-        if (created) {
-          const link = `${resolveAppOrigin(env, url)}/#reset=${created.token}`;
-          try {
-            const resetBranding = await loadEmailBranding(repo, env);
-            await new EmailService(
-              env,
-              DEFAULT_EMAIL_TEMPLATES,
-              resetBranding
-            ).sendPasswordReset(
-              created.user.email,
-              created.user.name,
-              link,
-              PASSWORD_RESET_TTL_MINUTES
-            );
-            await repo.createAudit({
-              action: "PASSWORD_RESET_REQUESTED",
-              entityType: "user",
-              entityId: created.user.id,
-              summary: created.user.email,
-              rateLimitClaimId
-            });
-          } catch (error) {
-            await repo.invalidatePasswordResetToken(created.tokenId);
-            await repo.createAudit({
-              action: "PASSWORD_RESET_EMAIL_FAILED",
-              entityType: "user",
-              entityId: created.user.id,
-              summary: error instanceof Error ? error.message : String(error),
-              rateLimitClaimId
-            });
-          }
-        }
+      const task = processPasswordResetRequest(repo, auth, env, url, email, clientIpFrom(request))
+        .catch((error) => console.error("Password reset request failed", error));
+      if (ctx) {
+        ctx.waitUntil(task);
+      } else {
+        void task;
       }
     }
     // Always report success so the endpoint cannot be used to probe which emails exist.
@@ -2229,8 +2262,12 @@ async function auditExport(repo: Repository, actor: AuthUser, action: string, fi
   });
 }
 
-function hasValidBootstrapOwnerToken(request: Request, env: Env): boolean {
-  const expected = env.BOOTSTRAP_OWNER_TOKEN?.trim();
-  const supplied = request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim();
-  return Boolean(expected && supplied && timingSafeEqual(supplied, expected));
+function isBootstrapOwnerTokenConfigured(env: Env): boolean {
+  return BOOTSTRAP_TOKEN_PATTERN.test(env.BOOTSTRAP_OWNER_TOKEN?.trim() ?? "");
+}
+
+async function hasValidBootstrapOwnerToken(request: Request, env: Env): Promise<boolean> {
+  const expected = env.BOOTSTRAP_OWNER_TOKEN?.trim() ?? "";
+  const supplied = request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim() ?? "";
+  return timingSafeEqual(await rateLimitKey(supplied), await rateLimitKey(expected));
 }

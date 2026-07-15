@@ -87,6 +87,25 @@ describe("Worker fetch error handling", () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ error: "auth_error" });
   });
+
+  it("logs unexpected failures without returning their raw message", async () => {
+    const sensitiveMessage = "D1 credential sentinel must stay server-side";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env({
+        prepare: () => {
+          throw new Error(sensitiveMessage);
+        }
+      } as unknown as InMemoryD1)
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload).toEqual({ error: "internal_error", message: "Ocurrió un error interno." });
+    expect(JSON.stringify(payload)).not.toContain(sensitiveMessage);
+    expect(errorSpy).toHaveBeenCalledWith("Unhandled Worker request error", expect.any(Error));
+  });
 });
 
 describe("static document security policy", () => {
@@ -275,12 +294,15 @@ describe("document route authorization order", () => {
   });
 });
 
+const VALID_BOOTSTRAP_TOKEN = `bt_${"A".repeat(43)}`;
+const OTHER_BOOTSTRAP_TOKEN = `bt_${"B".repeat(43)}`;
+
 describe("owner bootstrap", () => {
   it("reports bootstrap availability before the first user exists", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       new Request("https://example.org/api/auth/bootstrap-status"),
-      env(db)
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(200);
@@ -313,7 +335,7 @@ describe("owner bootstrap", () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       bootstrapRequest(),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(403);
@@ -325,7 +347,7 @@ describe("owner bootstrap", () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       bootstrapRequest({ token: "wrong-token" }),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(403);
@@ -333,11 +355,58 @@ describe("owner bootstrap", () => {
     expect(db.users).toHaveLength(0);
   });
 
+  it("fails closed when the configured setup token is not a generated token", async () => {
+    const db = new InMemoryD1();
+    const status = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+    const creation = await worker.fetch(
+      bootstrapRequest({ token: "setup-token" }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+
+    await expect(status.json()).resolves.toEqual({ bootstrapAvailable: false });
+    expect(creation.status).toBe(503);
+    await expect(creation.json()).resolves.toMatchObject({ error: "bootstrap_configuration_invalid" });
+    expect(db.users).toHaveLength(0);
+  });
+
+  it("limits every bootstrap-token guess from one source before parsing the owner body", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/bootstrap-owner", {
+          method: "POST",
+          headers: {
+            "CF-Connecting-IP": "203.0.113.88",
+            "X-Bootstrap-Owner-Token": `invalid-${attempt}`
+          },
+          body: "not-json"
+        }),
+        runtime
+      );
+      expect(response.status).toBe(403);
+    }
+
+    const denied = await worker.fetch(
+      bootstrapRequest({ token: OTHER_BOOTSTRAP_TOKEN }, "203.0.113.88"),
+      runtime
+    );
+
+    expect(denied.status).toBe(429);
+    await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+    expect(db.users).toHaveLength(0);
+    expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+    expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.88");
+  });
+
   it("creates the first owner when the setup token matches", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
-      bootstrapRequest({ token: "setup-token" }),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(201);
@@ -350,6 +419,58 @@ describe("owner bootstrap", () => {
     });
     expect(db.users).toHaveLength(1);
     expect(db.users[0].role).toBe("OWNER");
+  });
+
+  it("returns a closed-bootstrap conflict after the first owner is created", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN });
+
+    const first = await worker.fetch(bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }), runtime);
+    const second = await worker.fetch(bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }), runtime);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({ error: "bootstrap_unavailable" });
+    expect(db.users).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "OWNER_BOOTSTRAPPED")).toHaveLength(1);
+  });
+
+  it("uses one conditional insert to admit only one initial owner", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    try {
+      sqlite.exec(`CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        disabled_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )`);
+      const repo = new Repository(sqliteD1(sqlite));
+      const results = await Promise.all([
+        repo.createInitialOwner({
+          email: "owner-one@example.org",
+          name: "Owner One",
+          passwordHash: "hash-one",
+          passwordSalt: "salt-one"
+        }),
+        repo.createInitialOwner({
+          email: "owner-two@example.org",
+          name: "Owner Two",
+          passwordHash: "hash-two",
+          passwordSalt: "salt-two"
+        })
+      ]);
+
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()).toEqual({ count: 1 });
+      expect(sqlite.prepare("SELECT role FROM users").get()).toEqual({ role: "OWNER" });
+    } finally {
+      sqlite.close();
+    }
   });
 });
 
@@ -400,7 +521,7 @@ describe("auth rate limiting", () => {
           }),
           env(db)
         );
-        expect(response.status).toBe(500);
+        expect(response.status).toBe(401);
       }
 
       const auditsBeforeDenial = db.audits.length;
@@ -448,7 +569,7 @@ describe("auth rate limiting", () => {
         env(db)
       );
 
-      expect(response.status).toBe(500);
+      expect(response.status).toBe(401);
       expect(db.loginCredentialReads).toBe(1);
       expect(db.loginRateLimits.get(keyHash)).toEqual({
         window_started_at: "2026-07-04T12:00:00.000Z",
@@ -661,7 +782,7 @@ describe("auth rate limiting", () => {
         env(db)
       );
 
-      expect(otherIp.status).toBe(500);
+      expect(otherIp.status).toBe(401);
       await worker.scheduled(
         { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
         env(db)
@@ -682,7 +803,7 @@ describe("auth rate limiting", () => {
           }),
           env(db)
         );
-        expect(response.status).toBe(500);
+        expect(response.status).toBe(401);
       }
 
       const denied = await worker.fetch(
@@ -728,7 +849,7 @@ describe("auth rate limiting", () => {
     const response = await worker.fetch(loginRequest("olduser@example.org"), env(db));
 
     // No such user exists, so the credential error surfaces (not the throttle).
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     // A fresh LOGIN_FAILED audit is recorded for this attempt.
     const recent = db.audits.filter((audit) => audit.action === "LOGIN_FAILED");
@@ -741,7 +862,7 @@ describe("auth rate limiting", () => {
 
     const response = await worker.fetch(loginRequest("nobody@example.org"), env(db));
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "LOGIN_FAILED", entity_type: "user", entity_id: "nobody@example.org", summary: "Credenciales inválidas" })
@@ -862,7 +983,7 @@ describe("auth rate limiting", () => {
         }
       } as SendEmail
     });
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -877,6 +998,40 @@ describe("auth rate limiting", () => {
     expect(sentMessages).toHaveLength(0);
     expect(db.audits).toHaveLength(auditCountBefore);
     expect(db.audits.some((row) => row.action === "PASSWORD_RESET_THROTTLED")).toBe(false);
+  });
+
+  it.each([
+    ["active", true],
+    ["unknown", false]
+  ] as const)("schedules the same background reset unit for an %s account", async (_label, active) => {
+    const db = new InMemoryD1();
+    if (active) {
+      db.users.push({
+        id: "user_reset",
+        email: "candidate@example.org",
+        name: "Reset Candidate",
+        role: "ADMIN",
+        password_hash: "old-hash",
+        password_salt: "old-salt",
+        disabled_at: ""
+      });
+    }
+    const tasks: Promise<unknown>[] = [];
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.23" },
+        body: JSON.stringify({ email: "candidate@example.org" })
+      }),
+      env(db),
+      executionContextCapturing(tasks)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(tasks).toHaveLength(1);
+    await Promise.all(tasks);
+    expect(db.resetTokens).toHaveLength(active ? 1 : 0);
   });
 });
 
@@ -2303,7 +2458,7 @@ describe("password reset", () => {
     const sentMessages: Array<{ to: string; subject: string; text: string }> = [];
     db.users.push(knownUser());
 
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2345,7 +2500,7 @@ describe("password reset", () => {
     // Host-header poisoning: the request arrives via an attacker-controlled origin,
     // but the emailed reset link must use the canonical APP_ORIGIN so the token
     // cannot be captured by pointing the link at an attacker host.
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://attacker.example/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2375,7 +2530,7 @@ describe("password reset", () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
 
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2413,7 +2568,7 @@ describe("password reset", () => {
       } as SendEmail
     });
     const request = () =>
-      worker.fetch(
+      fetchAndWaitUntil(
         new Request("https://example.org/api/auth/password-reset/request", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2454,7 +2609,7 @@ describe("password reset", () => {
       } as SendEmail
     });
     const request = () =>
-      worker.fetch(
+      fetchAndWaitUntil(
         new Request("https://example.org/api/auth/password-reset/request", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2485,7 +2640,7 @@ describe("password reset", () => {
       } as SendEmail
     });
     const request = (callerIp: string) =>
-      worker.fetch(
+      fetchAndWaitUntil(
         new Request("https://example.org/api/auth/password-reset/request", {
           method: "POST",
           headers: { "Content-Type": "application/json", "cf-connecting-ip": callerIp },
@@ -2514,7 +2669,7 @@ describe("password reset", () => {
       EMAIL: { send } as unknown as SendEmail
     });
     const request = () =>
-      worker.fetch(
+      fetchAndWaitUntil(
         new Request("https://example.org/api/auth/password-reset/request", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -3222,7 +3377,7 @@ describe("user administration", () => {
       env(db)
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     expect(db.users[0].password_hash).toBe(reset.hash);
     expect(db.sessions).toHaveLength(0);
@@ -10066,7 +10221,7 @@ describe("audit actor context", () => {
 
     const response = await worker.fetch(request, env(db));
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
     expect(failure).toBeTruthy();
     expect(failure?.actor_ip).toBe("190.86.1.2");
@@ -10101,7 +10256,7 @@ describe("audit actor context", () => {
 
     const response = await worker.fetch(request, env(db));
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
     expect(failure).toBeTruthy();
     expect(utf8Bytes(String(failure?.actor_ip)).byteLength).toBeLessThanOrEqual(64);
@@ -11230,10 +11385,13 @@ describe("analytics endpoint (Wompi lane)", () => {
   });
 });
 
-function bootstrapRequest(options: { token?: string } = {}): Request {
+function bootstrapRequest(options: { token?: string } = {}, clientIp?: string): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
     headers.set("X-Bootstrap-Owner-Token", options.token);
+  }
+  if (clientIp) {
+    headers.set("CF-Connecting-IP", clientIp);
   }
   return new Request("https://example.org/api/auth/bootstrap-owner", {
     method: "POST",
@@ -11244,6 +11402,22 @@ function bootstrapRequest(options: { token?: string } = {}): Request {
       password: "Long-enough1!"
     })
   });
+}
+
+function executionContextCapturing(tasks: Promise<unknown>[]): ExecutionContext {
+  return {
+    waitUntil(promise: Promise<unknown>) {
+      tasks.push(promise);
+    },
+    passThroughOnException() {}
+  } as unknown as ExecutionContext;
+}
+
+async function fetchAndWaitUntil(request: Request, runtime: Env): Promise<Response> {
+  const tasks: Promise<unknown>[] = [];
+  const response = await worker.fetch(request, runtime, executionContextCapturing(tasks));
+  await Promise.all(tasks);
+  return response;
 }
 
 function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
@@ -11561,6 +11735,28 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("INSERT INTO users") &&
+      this.sql.includes("WHERE NOT EXISTS (SELECT 1 FROM users)") &&
+      this.sql.includes("RETURNING id, email, name, role")
+    ) {
+      if (this.db.users.length > 0) return null;
+      const [id, email, name, passwordHash, passwordSalt] = this.args;
+      const now = new Date().toISOString();
+      const user = {
+        id,
+        email,
+        name,
+        role: "OWNER",
+        password_hash: passwordHash,
+        password_salt: passwordSalt,
+        disabled_at: null,
+        created_at: now,
+        updated_at: now
+      };
+      this.db.users.push(user);
+      return user as T;
+    }
     if (
       this.sql.includes("UPDATE wompi_events") &&
       this.sql.includes("SET issuance_claim_id = ?, issuance_claimed_at = ?") &&

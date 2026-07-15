@@ -3,7 +3,8 @@ WOMPI_API_SECRET="replace-with-wompi-secret"
 # Obtain from the Wompi dashboard; used against https://id.wompi.sv/connect/token.
 # WOMPI_CLIENT_ID="replace-with-wompi-client-id"
 # WOMPI_CLIENT_SECRET="replace-with-wompi-client-secret"
-BOOTSTRAP_OWNER_TOKEN="replace-with-one-time-owner-bootstrap-token"
+# Replace this fixture with `bt_` plus 32 random base64url bytes (43 characters).
+BOOTSTRAP_OWNER_TOKEN="bt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 CLOUDFLARE_ACCOUNT_ID="replace-with-cloudflare-account-id-for-ui-secret-writes"
 CLOUDFLARE_API_TOKEN="replace-with-workers-secrets-edit-token-for-ui-secret-writes"
 MH_CERT_PASSWORD="replace-with-mh-private-key-password"

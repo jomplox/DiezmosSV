@@ -3292,8 +3292,7 @@ function IssuerConfigEditor({
   input: CredentialFormInput;
   onChange: (input: CredentialFormInput) => void;
 }) {
-  const activeJson = credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue ?? "";
-  const form = useMemo(() => issuerFormFromConfigJson(input.emisorConfigJson || activeJson), [activeJson, input.emisorConfigJson]);
+  const form = useMemo(() => issuerFormFromConfigJson(input.emisorConfigJson), [input.emisorConfigJson]);
   const municipalityOptions = getCat013Municipalities(form.departamento);
   const districtOptions = getCat008Districts(form.departamento);
   const configured = credentialConfigured(status, "EMISOR_CONFIG_JSON");
@@ -3321,7 +3320,7 @@ function IssuerConfigEditor({
       <CredentialFieldLabel label="Configuración del emisor" configured={configured} />
       <div className={configured ? "issuer-config-status ready" : "issuer-config-status"}>
         {configured ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-        <span>{configured ? "Datos activos cargados en campos editables" : "Complete los datos del emisor para habilitar emisión real"}</span>
+        <span>{configured ? "Configuración protegida; complete todos los campos para reemplazarla" : "Complete los datos del emisor para habilitar emisión real"}</span>
       </div>
       <div className="issuer-config-grid">
         <div className="credential-subsection span-2">

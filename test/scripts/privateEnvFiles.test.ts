@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -70,6 +70,33 @@ describe("private environment file permissions", () => {
     });
 
     expect(result.status).toBe(0);
+  });
+
+  it("redirects Wrangler connection metadata outside the repository", () => {
+    const directory = mkdtempSync(join(tmpdir(), "diezmos-worker-metadata-"));
+    const privateHome = mkdtempSync(join(tmpdir(), "diezmos-worker-home-"));
+    const envFile = join(directory, "local-operator.env");
+    const binDirectory = join(directory, "node_modules", ".bin");
+    const metadataPath = join(directory, "node_modules", ".mf", "cf.json");
+    const privateMetadataPath = join(privateHome, "Library", "Application Support", "DiezmosSV", "private", "cache", "miniflare", "cf.json");
+    mkdirSync(binDirectory, { recursive: true });
+    writeFileSync(envFile, "APP_ENV=local\n", { mode: 0o600 });
+    const wrangler = join(binDirectory, "wrangler");
+    writeFileSync(
+      wrangler,
+      "#!/bin/sh\n[ -n \"$MINIFLARE_CACHE_DIR\" ] || exit 7\ncase \"$MINIFLARE_CACHE_DIR\" in \"$PWD\"/*) exit 8;; esac\nmkdir -p \"$MINIFLARE_CACHE_DIR\"\nprintf private-metadata > \"$MINIFLARE_CACHE_DIR/cf.json\"\nexit 0\n",
+      { mode: 0o755 }
+    );
+
+    const result = spawnSync(process.execPath, [workerDevScript], {
+      cwd: directory,
+      encoding: "utf8",
+      env: { ...process.env, HOME: privateHome, MINIFLARE_CACHE_DIR: "", DIEZMOSSV_ENV_FILE: envFile }
+    });
+
+    expect(result.status).toBe(0);
+    expect(existsSync(metadataPath)).toBe(false);
+    expect(existsSync(privateMetadataPath)).toBe(true);
   });
 
   it("accepts only the exact checked-in non-secret CI fixture despite its Git-readable mode", () => {

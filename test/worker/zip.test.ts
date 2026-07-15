@@ -64,4 +64,15 @@ describe("zipStored", () => {
     expect(view.getUint32(0, true)).toBe(0x06054b50); // EOCD signature
     expect(view.getUint16(10, true)).toBe(0); // total central directory records
   });
+
+  it.each([
+    "../../outside.ndjson",
+    "nested/../outside.ndjson",
+    "/absolute.ndjson",
+    "\\windows\\outside.ndjson",
+    "",
+    "nul\0byte.ndjson"
+  ])("rejects an unsafe archive member name: %j", (name) => {
+    expect(() => zipStored([{ name, data: encode("sentinel\n") }])).toThrow(/safe relative path/i);
+  });
 });

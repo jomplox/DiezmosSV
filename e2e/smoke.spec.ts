@@ -29,7 +29,7 @@ const OWNER = {
   // Satisfies the password policy: 10+ chars, upper, lower, number, symbol.
   password: "CiSmoke2026!",
   // Matches BOOTSTRAP_OWNER_TOKEN in .dev.vars.ci.
-  setupToken: "ci-bootstrap-token"
+  setupToken: "bt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 };
 
 const DONOR = {

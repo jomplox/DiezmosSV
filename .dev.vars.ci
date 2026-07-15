@@ -7,7 +7,7 @@
 # with it, MH transmission + email are mocked and a quick CDE reaches ACEPTADO via
 # the local queue within a few seconds.
 MOCK_EXTERNAL_SERVICES="true"
-BOOTSTRAP_OWNER_TOKEN="ci-bootstrap-token"
+BOOTSTRAP_OWNER_TOKEN="bt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WOMPI_API_SECRET="ci-dummy-wompi-secret"
 WOMPI_CLIENT_ID="ci-dummy-wompi-client-id"
 WOMPI_CLIENT_SECRET="ci-dummy-wompi-client-secret"

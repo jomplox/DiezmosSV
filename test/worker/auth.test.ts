@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { hashPassword } from "../../src/worker/services/auth";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { AuthService, hashPassword } from "../../src/worker/services/auth";
 
 describe("auth password hashing", () => {
   it("hashes deterministically with an explicit salt", async () => {
@@ -41,5 +41,56 @@ describe("auth password hashing", () => {
 
   it("rejects passwords without a symbol", async () => {
     await expect(hashPassword("LongEnough12")).rejects.toThrow(/símbolo/);
+  });
+});
+
+describe("login failure work equivalence", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["missing", null],
+    ["disabled", { disabled_at: "2026-07-14T00:00:00.000Z" }]
+  ] as const)("performs one PBKDF2 derivation for a %s account", async (_label, accountPatch) => {
+    const nativeCrypto = crypto;
+    const stored = await hashPassword("Known#Password2026", "known-salt", {
+      enforcePolicy: false,
+      iterations: 100_000
+    });
+    const row = accountPatch === null ? null : {
+      id: "user_disabled",
+      email: "disabled@example.org",
+      name: "Disabled",
+      role: "ADMIN",
+      password_hash: `pbkdf2$100000$${stored.hash}`,
+      password_salt: "known-salt",
+      auth_generation: "0",
+      ...accountPatch
+    };
+    let deriveBitsCalls = 0;
+    vi.stubGlobal("crypto", {
+      getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto),
+      randomUUID: nativeCrypto.randomUUID.bind(nativeCrypto),
+      subtle: {
+        digest: nativeCrypto.subtle.digest.bind(nativeCrypto.subtle),
+        importKey: nativeCrypto.subtle.importKey.bind(nativeCrypto.subtle),
+        deriveBits: async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
+          deriveBitsCalls += 1;
+          return nativeCrypto.subtle.deriveBits(...args);
+        }
+      }
+    });
+
+    const service = new AuthService({
+      DB: {
+        prepare: () => ({
+          bind: () => ({ first: async () => row })
+        })
+      } as unknown as D1Database
+    } as never);
+
+    await expect(service.login("candidate@example.org", "Wrong#Password2026")).rejects.toThrow("Credenciales inválidas");
+    expect(deriveBitsCalls).toBe(1);
   });
 });

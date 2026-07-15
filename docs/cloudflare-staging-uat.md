@@ -28,7 +28,9 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 
 4. Put the returned D1 id in `wrangler.toml` under `[[env.staging.d1_databases]]`.
 
-5. Set staging secrets. Do not commit these values:
+5. Set staging secrets. Do not commit these values. Generate the bootstrap token with
+   `printf 'bt_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"` and paste that
+   value when Wrangler prompts for `BOOTSTRAP_OWNER_TOKEN`:
 
    ```bash
    npx wrangler secret put WOMPI_API_SECRET --env staging
