@@ -1,6 +1,7 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
 import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
+import { DocumentSchemaValidationError } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
@@ -147,6 +148,9 @@ export class IssuancePipeline {
       }
       return existing;
     }
+    if (event.processed_at) {
+      return null;
+    }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     if (!isApprovedDonation(payload)) {
       await this.repo.createAudit({
@@ -184,6 +188,28 @@ export class IssuancePipeline {
       await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
     }
+    const issuedAt = new Date(payload.FechaTransaccion);
+    try {
+      // Validate every deterministic CDE field before the durable sequence mutation.
+      // The preview number is never persisted; the real build below uses the allocated
+      // sequence and the same business timestamp after this complete schema check passes.
+      buildCdeDocument(payload, config, {
+        sequence: 1,
+        environment,
+        donorOverride,
+        issuedAt
+      });
+    } catch (error) {
+      if (!(error instanceof DocumentSchemaValidationError)) throw error;
+      await this.repo.createAudit({
+        action: "WOMPI_INVALID_CDE_INPUT",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary: error.message
+      });
+      await this.repo.markWompiEventProcessed(wompiEventId);
+      return null;
+    }
     const issuanceClaimId = newId("wompi_issue");
     if (!(await this.repo.claimWompiEventIssuance(wompiEventId, issuanceClaimId))) {
       return (await this.repo.getDteDocumentByWompiEvent(wompiEventId)) ?? null;
@@ -194,7 +220,12 @@ export class IssuancePipeline {
     let record: DteDocumentRecord;
     try {
       const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-      normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
+      normalDocument = buildCdeDocument(payload, config, {
+        sequence,
+        environment,
+        donorOverride,
+        issuedAt
+      });
       identifiers = extractCdeIdentifiers(normalDocument);
       // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook:
       // for an empresa intent the receptor name is its razón social, while natural-person

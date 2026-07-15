@@ -66,7 +66,13 @@ class RecordingStatement {
   async first<T>(): Promise<T | null> {
     this.db.calls.push({ sql: this.sql, args: this.args });
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("RETURNING id")) {
-      return (this.db.intentDatosUpdateSucceeds ? { id: String(this.args.at(-3)) } : null) as T | null;
+      return (this.db.intentDatosUpdateSucceeds
+        ? {
+            id: String(this.args.at(-3)),
+            wompi_url_enlace: "https://s.wompi.sv/987654",
+            wompi_url_enlace_largo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+          }
+        : null) as T | null;
     }
     if (this.sql.includes("FROM donation_intents WHERE id = ?")) {
       return (this.db.intents.get(String(this.args[0])) ?? null) as T | null;
@@ -192,7 +198,11 @@ describe("donation intents repository", () => {
       donorPais: null
     });
 
-    expect(updated).toBe(true);
+    expect(updated).toEqual({
+      id: "di_1",
+      urlEnlace: "https://s.wompi.sv/987654",
+      urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+    });
     const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("RETURNING id"));
     expect(update).toBeTruthy();
     expect(update!.sql).toContain("datos_token_hash = NULL");

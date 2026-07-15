@@ -494,6 +494,49 @@ describe("runRetentionExport", () => {
     expect(manifest.tables.donation_intents.rowCount).toBe(1);
   });
 
+  it("redacts historical alert-email values before audit rows enter R2", async () => {
+    const db = new InMemoryRetentionD1();
+    db.auditLogs.push(
+      row({
+        id: "audit_alert_email",
+        action: "ALERT_EMAIL_UPDATED",
+        entity_type: "app_setting",
+        entity_id: "alert_email",
+        summary: "Correo de alertas configurado a owner@example.org",
+        metadata_json: JSON.stringify({ alertEmail: "owner@example.org" })
+      }),
+      row({
+        id: "audit_unrelated",
+        action: "USER_UPDATED",
+        entity_type: "user",
+        entity_id: "user_operator",
+        summary: "Usuario actualizado",
+        metadata_json: JSON.stringify({ role: "OPERATOR" })
+      })
+    );
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    const key = "retention/2026/2026-06/audit_logs.ndjson";
+    const records = new TextDecoder()
+      .decode(archive.objects.get(key)!.body)
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records).toContainEqual(expect.objectContaining({
+      id: "audit_alert_email",
+      summary: "Correo de alertas actualizado",
+      metadata_json: "{}"
+    }));
+    expect(JSON.stringify(records)).not.toContain("owner@example.org");
+    expect(records).toContainEqual(expect.objectContaining({
+      id: "audit_unrelated",
+      summary: "Usuario actualizado",
+      metadata_json: JSON.stringify({ role: "OPERATOR" })
+    }));
+  });
+
   it("audits RETENTION_EXPORT_COMPLETED with month and total rows", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_1", created_at: "2026-06-10T00:00:00.000Z" }));

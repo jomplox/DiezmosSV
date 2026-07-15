@@ -714,13 +714,14 @@ describe("auth rate limiting", () => {
       }
     });
 
-    it("keeps the source-keyed reset ledger independent from legacy account audits", async () => {
+    it("atomically composes reset pair and account budgets across the legacy cutover", async () => {
       const sqlite = new DatabaseSync(":memory:");
       try {
         sqlite.exec(`CREATE TABLE security_rate_limit_claims (
           id TEXT PRIMARY KEY,
           scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
           key_hash TEXT NOT NULL,
+          subject_key_hash TEXT,
           claimed_at TEXT NOT NULL,
           expires_at TEXT NOT NULL
         );
@@ -739,17 +740,30 @@ describe("auth rate limiting", () => {
 
         const admitted = await Promise.all(
           Array.from({ length: 20 }, () =>
-            repo.claimPasswordResetRateLimit(
+            repo.claimPasswordResetBudgets(
               "hashed-source-account",
+              "hashed-account",
+              "user_operator",
               "2026-07-04T12:02:00.000Z",
               "2026-07-04T11:47:00.000Z",
               "2026-07-04T12:17:00.000Z",
+              3,
               3
             )
           )
         );
 
         expect(admitted.filter(Boolean)).toHaveLength(2);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM security_rate_limit_claims
+                WHERE scope = 'password_reset'
+                  AND subject_key_hash = ?`
+            )
+            .get("hashed-account")
+        ).toEqual({ count: 2 });
       } finally {
         sqlite.close();
       }
@@ -2021,17 +2035,24 @@ describe("donation intents", () => {
       const response = await worker.fetch(draftRequest({ amount: "25.50", giftType: "DIEZMO" }), env(db));
 
       expect(response.status).toBe(201);
-      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string; datosToken?: string };
-      // Response shape is unchanged from the full create, and the link is minted with
-      // identificadorEnlaceComercio = intent id (mock echoes the id into the URL).
+      const payload = (await response.json()) as {
+        intentId: string;
+        datosToken?: string;
+        urlEnlace?: string;
+        urlEnlaceLargo?: string;
+      };
+      // Preminting remains an internal latency optimization. The payment capability
+      // stays server-side until /datos atomically commits the fiscal fields.
       expect(payload.intentId).toMatch(/^di_/);
-      expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
-      expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
       expect(payload.datosToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(payload).not.toHaveProperty("urlEnlace");
+      expect(payload).not.toHaveProperty("urlEnlaceLargo");
 
       expect(db.donationIntents).toHaveLength(1);
       const intent = db.donationIntents[0];
       expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.wompi_url_enlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
+      expect(intent.wompi_url_enlace_largo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
       expect(intent.amount_cents).toBe(2550);
       expect(intent.gift_type).toBe("DIEZMO");
       // The draft marker: donor document + address stay NULL until the datos call.
@@ -2042,6 +2063,56 @@ describe("donation intents", () => {
       expect(intent.client_ip).toBe("203.0.113.7");
       expect(String(intent.datos_token_hash)).toMatch(/^[a-f0-9]{64}$/);
       expect(intent.datos_token_hash).not.toBe(payload.datosToken);
+    });
+
+    it("rejects cross-site simple and mismatched-origin JSON before any side effect", async () => {
+      const db = new InMemoryD1();
+      const simpleResponse = await worker.fetch(
+        new Request("https://example.org/api/donations/intent", {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain;charset=UTF-8",
+            Origin: "https://attacker.example",
+            "Sec-Fetch-Site": "cross-site",
+            "cf-connecting-ip": "203.0.113.7"
+          },
+          body: JSON.stringify({ amount: "25.50", giftType: "DIEZMO" })
+        }),
+        env(db)
+      );
+      const mismatchedOriginResponse = await worker.fetch(
+        new Request("https://example.org/api/donations/intent", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://attacker.example",
+            "Sec-Fetch-Site": "same-site",
+            "cf-connecting-ip": "203.0.113.7"
+          },
+          body: JSON.stringify({ amount: "25.50", giftType: "DIEZMO" })
+        }),
+        env(db)
+      );
+
+      expect(simpleResponse.status).toBe(415);
+      expect(mismatchedOriginResponse.status).toBe(403);
+      expect(db.securityRateLimitClaims).toHaveLength(0);
+      expect(db.donationIntents).toHaveLength(0);
+      expect(db.audits).toHaveLength(0);
+    });
+
+    it("accepts same-origin JSON through the public mutation admission check", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(
+        draftRequest(
+          { amount: "25.50", giftType: "DIEZMO" },
+          { Origin: "https://example.org", "Sec-Fetch-Site": "same-origin" }
+        ),
+        env(db)
+      );
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
     });
 
     it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
@@ -2171,7 +2242,11 @@ describe("donation intents", () => {
       const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
 
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ ok: true });
+      await expect(response.json()).resolves.toEqual({
+        intentId: "di_draft_1",
+        urlEnlace: "https://mock.wompi.sv/enlace/di_draft_1",
+        urlEnlaceLargo: "https://mock.wompi.sv/enlace-largo/di_draft_1"
+      });
       // No outbound HTTP: datos is D1-only.
       expect(fetchSpy).not.toHaveBeenCalled();
 
@@ -2588,7 +2663,7 @@ describe("password reset", () => {
     expect(db.securityRateLimitClaims[0].key_hash).not.toContain("user_operator");
   });
 
-  it("does not let another source's legacy account audit consume this caller's reset budget", async () => {
+  it("counts a pre-migration account audit against the account-wide reset budget", async () => {
     const db = new InMemoryD1();
     db.users.push(knownUser());
     db.audits.push({
@@ -2621,11 +2696,11 @@ describe("password reset", () => {
     const responses = await Promise.all(Array.from({ length: 20 }, request));
 
     expect(responses.every((response) => response.status === 200)).toBe(true);
-    expect(sentMessages).toHaveLength(3);
-    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
+    expect(sentMessages).toHaveLength(2);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(2);
   });
 
-  it("does not let one source exhaust password reset issuance for another source", async () => {
+  it("does not let rotating sources multiply one account's reset budget", async () => {
     const db = new InMemoryD1();
     db.users.push(knownUser());
     const sentMessages: unknown[] = [];
@@ -2649,14 +2724,19 @@ describe("password reset", () => {
         runtime
       );
 
-    for (let index = 0; index < 3; index += 1) {
-      expect((await request("203.0.113.10")).status).toBe(200);
-    }
-    expect((await request("198.51.100.24")).status).toBe(200);
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, index) => request(`198.51.100.${index + 1}`))
+    );
 
-    expect(sentMessages).toHaveLength(4);
-    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(4);
-    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(4);
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(3);
+    const claims = db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset");
+    expect(claims).toHaveLength(3);
+    expect(new Set(claims.map((claim) => claim.key_hash)).size).toBe(3);
+    expect(new Set(claims.map((claim) => claim.subject_key_hash)).size).toBe(1);
+    expect(claims[0].subject_key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(claims[0].subject_key_hash).not.toContain("user_operator");
   });
 
   it("consumes reset quota and invalidates each exact token when delivery fails", async () => {
@@ -7662,6 +7742,33 @@ describe("donation intent correlation", () => {
     expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
   });
 
+  it("rejects deterministic CDE schema failures before allocating a control sequence", async () => {
+    const db = new InMemoryD1();
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      EnlacePago: undefined,
+      IdTransaccion: "wompi_oversized_email_tx",
+      cliente: {
+        DocumentoIdentidad: "",
+        Nombre: "Correo",
+        Apellidos: "Extenso",
+        EMail: `${"a".repeat(90)}@example.org`,
+        CodigoPais: "SV"
+      }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+
+    const first = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    const second = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+    expect(db.audits.filter((audit) => audit.action === "WOMPI_INVALID_CDE_INPUT")).toHaveLength(1);
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+  });
+
   it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
@@ -11510,6 +11617,7 @@ interface SecurityRateLimitClaimRow {
   id: string;
   scope: string;
   key_hash: string;
+  subject_key_hash?: string | null;
   claimed_at: string;
   expires_at: string;
 }
@@ -12022,6 +12130,61 @@ class Statement {
         : this.sql.includes("'donation_datos'")
           ? "donation_datos"
           : "password_reset";
+      if (scope === "password_reset" && this.sql.includes("subject_key_hash")) {
+        const [
+          id,
+          pairKeyHash,
+          accountKeyHash,
+          claimedAt,
+          expiresAt,
+          countPairKeyHash,
+          pairCutoff,
+          pairLimit,
+          countAccountKeyHash,
+          accountCutoff,
+          accountId,
+          legacyCutoff,
+          accountLimit
+        ] = this.args;
+        const pairCount = this.db.securityRateLimitClaims.filter(
+          (claim) =>
+            claim.scope === scope &&
+            claim.key_hash === countPairKeyHash &&
+            claim.claimed_at >= String(pairCutoff)
+        ).length;
+        const accountCount = this.db.securityRateLimitClaims.filter(
+          (claim) =>
+            claim.scope === scope &&
+            claim.subject_key_hash === countAccountKeyHash &&
+            claim.claimed_at >= String(accountCutoff)
+        ).length;
+        const legacyCount = this.db.audits.filter((audit) => {
+          if (
+            audit.entity_id !== accountId ||
+            !["PASSWORD_RESET_REQUESTED", "PASSWORD_RESET_EMAIL_FAILED"].includes(String(audit.action)) ||
+            String(audit.created_at) < String(legacyCutoff)
+          ) {
+            return false;
+          }
+          const linkedClaim = this.db.securityRateLimitClaims.find(
+            (claim) => claim.id === audit.rate_limit_claim_id
+          );
+          return audit.rate_limit_claim_id == null || linkedClaim?.subject_key_hash == null;
+        }).length;
+        if (pairCount >= Number(pairLimit) || accountCount + legacyCount >= Number(accountLimit)) {
+          return null;
+        }
+        const claim = {
+          id: String(id),
+          scope,
+          key_hash: String(pairKeyHash),
+          subject_key_hash: String(accountKeyHash),
+          claimed_at: String(claimedAt),
+          expires_at: String(expiresAt)
+        };
+        this.db.securityRateLimitClaims.push(claim);
+        return { id: claim.id } as T;
+      }
       const [id, keyHash, claimedAt, expiresAt, countKeyHash, cutoff] = this.args;
       const legacyKey = scope === "donation_intent" ? this.args[6] : null;
       const legacyCutoff = scope === "donation_intent" ? this.args[7] : null;
@@ -12466,7 +12629,11 @@ class Statement {
       intent.donor_pais = donorPais == null ? null : String(donorPais);
       intent.datos_token_hash = null;
       intent.updated_at = String(updatedAt);
-      return { id: String(id) } as T;
+      return {
+        id: String(id),
+        wompi_url_enlace: intent.wompi_url_enlace,
+        wompi_url_enlace_largo: intent.wompi_url_enlace_largo
+      } as T;
     }
     if (this.sql.includes("FROM donation_intents WHERE document_id = ?") && this.sql.includes("status = 'COMPLETED'")) {
       const documentId = String(this.args[0]);

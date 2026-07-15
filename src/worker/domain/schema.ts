@@ -14,6 +14,16 @@ const validators = {
   invalidacion: ajv.compile(invalidacionSchema)
 };
 
+export class DocumentSchemaValidationError extends Error {
+  constructor(
+    readonly documentLabel: string,
+    readonly detail: string
+  ) {
+    super(`La validación del esquema ${documentLabel} falló: ${detail}`);
+    this.name = "DocumentSchemaValidationError";
+  }
+}
+
 export function validateCde(document: unknown): void {
   assertValid("CDE", validators.cde(document), validators.cde.errors);
 }
@@ -30,5 +40,5 @@ function assertValid(label: string, valid: boolean, errors: ErrorObject[] | null
     .slice(0, 8)
     .map((error) => `${error.instancePath || "/"} ${error.message ?? ""}`.trim())
     .join("; ");
-  throw new Error(`La validación del esquema ${label} falló: ${detail}`);
+  throw new DocumentSchemaValidationError(label, detail);
 }

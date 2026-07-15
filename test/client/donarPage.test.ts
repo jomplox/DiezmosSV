@@ -451,10 +451,12 @@ describe("donar premint source contract", () => {
   });
 
   it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
-    // Fast path: a matching draft → datos call, reuse its link, advance immediately.
+    // Fast path: a matching draft → datos call, receive the server-held link only
+    // after fiscal data commits, then advance immediately.
     expect(donarSource).toContain("draftMatchesForm(draftIntent, form)");
     expect(donarSource).toContain("donarDatosPath(draftIntent.intent.intentId)");
     expect(donarSource).toContain("donationDatosBody(form)");
+    expect(donarSource).toContain("created = await donarApi<DonarIntent>");
     // Fallback: no usable draft → the existing full-body POST still works.
     expect(donarSource).toContain("donationIntentBody(form)");
   });
@@ -548,6 +550,19 @@ describe("donar thank-you page", () => {
     expect(DONAR_THANK_YOU_BODY).toBe(
       "Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme."
     );
+  });
+
+  it("keeps redirect state neutral until the server confirms payment", () => {
+    const graciasStart = donarSource.indexOf("export function DonarGraciasPage");
+    expect(graciasStart).toBeGreaterThan(-1);
+    const graciasBlock = donarSource.slice(graciasStart);
+    expect(graciasBlock).toContain("identificadorEnlaceComercio");
+    expect(graciasBlock).toContain("/status");
+    expect(graciasBlock).toContain("result.paid");
+    expect(graciasBlock).toContain('result.status === "COMPLETED"');
+    expect(graciasBlock).toContain('verification === "verified"');
+    expect(graciasBlock).not.toContain("display.monto");
+    expect(graciasBlock).not.toContain("<DonarThankYou monto=");
   });
 });
 
