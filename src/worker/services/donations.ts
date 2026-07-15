@@ -299,7 +299,11 @@ export interface CreatedIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
-  datosToken?: string;
+}
+
+export interface CreatedDraftIntent {
+  intentId: string;
+  datosToken: string;
 }
 
 // Signals that the Wompi API rejected link creation; the route maps this to a 502
@@ -324,7 +328,7 @@ const DRAFT_DOCUMENT_TYPE: DonationIntentDocumentType = "13";
 // document number. Throws IntentLinkError if Wompi fails, after the PENDING row is
 // already persisted so it can expire on the cron sweep. Shared by the full create and
 // the background draft create so both mint links identically.
-async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord, datosToken?: string): Promise<CreatedIntent> {
+async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
   let link;
   try {
     link = await new WompiApiService(env).createPaymentLink(intent);
@@ -347,8 +351,7 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
   return {
     intentId: intent.id,
     urlEnlace: link.urlEnlace,
-    urlEnlaceLargo: link.urlEnlaceLargo,
-    ...(datosToken ? { datosToken } : {})
+    urlEnlaceLargo: link.urlEnlaceLargo
   };
 }
 
@@ -399,7 +402,7 @@ export async function createDraftDonationIntent(
   input: ValidatedDraftIntentInput,
   clientIp: string,
   rateLimitClaimId: string
-): Promise<CreatedIntent> {
+): Promise<CreatedDraftIntent> {
   const start = nowIso();
   const datosToken = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
   const datosTokenHash = await sha256Hex(utf8Bytes(datosToken));
@@ -424,7 +427,8 @@ export async function createDraftDonationIntent(
     rateLimitClaimId
   });
 
-  return mintLinkForIntent(env, repo, intent, datosToken);
+  const created = await mintLinkForIntent(env, repo, intent);
+  return { intentId: created.intentId, datosToken };
 }
 
 // Signals that /datos either targets an unknown id (404) or failed the generic
@@ -444,10 +448,15 @@ export class IntentDatosError extends Error {
 // Attaches the donor's fiscal data to a minted draft (fast D1-only, no Wompi call). It
 // NEVER changes amount or gift type — those were locked when the link was minted.
 // Only an unpaid, unpopulated LINK_CREATED row with the one-time capability can change.
-export async function applyIntentDatos(repo: Repository, intentId: string, datosToken: string, data: ValidatedDonorData): Promise<void> {
+export async function applyIntentDatos(
+  repo: Repository,
+  intentId: string,
+  datosToken: string,
+  data: ValidatedDonorData
+): Promise<CreatedIntent> {
   const datosTokenHash = await sha256Hex(utf8Bytes(datosToken.trim()));
-  const updated = await repo.applyIntentDatosWithCapability(intentId, datosTokenHash, data);
-  if (!updated) {
+  const completed = await repo.applyIntentDatosWithCapability(intentId, datosTokenHash, data);
+  if (!completed) {
     const intent = await repo.getDonationIntent(intentId);
     if (!intent) {
       throw new IntentDatosError("intent_not_found", 404, "No se encontró la intención de donación.");
@@ -461,4 +470,9 @@ export async function applyIntentDatos(repo: Repository, intentId: string, datos
     summary: `Datos fiscales adjuntados a la intención ${intentId}`,
     metadata: { donorDocumentType: data.donorDocumentType }
   });
+  return {
+    intentId: completed.id,
+    urlEnlace: completed.urlEnlace,
+    urlEnlaceLargo: completed.urlEnlaceLargo
+  };
 }

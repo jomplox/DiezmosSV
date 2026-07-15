@@ -129,6 +129,56 @@ describe("migration 0021 security lifecycle guards", () => {
   });
 });
 
+describe("migration 0022 security boundary guards", () => {
+  it("adds account-aware reset claims and removes legacy alert-email values", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+    for (const filename of migrationFiles().filter((name) => name < "0022_")) {
+      database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
+    }
+    database.prepare(
+      `INSERT INTO security_rate_limit_claims (id, scope, key_hash, claimed_at, expires_at)
+       VALUES (?, 'password_reset', ?, ?, ?)`
+    ).run(
+      "legacy_reset_claim",
+      "legacy-pair-hash",
+      "2026-07-14T12:00:00.000Z",
+      "2026-07-14T12:15:00.000Z"
+    );
+    database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary, metadata_json, created_at
+       ) VALUES (?, 'USER', 'ALERT_EMAIL_UPDATED', 'app_setting', 'alert_email', ?, ?, ?)`
+    ).run(
+      "audit_legacy_alert",
+      "Correo de alertas configurado a owner@example.org",
+      JSON.stringify({ alertEmail: "owner@example.org" }),
+      "2026-07-05T12:00:00.000Z"
+    );
+
+    database.exec(readFileSync(resolve(migrationsDirectory, "0022_security_boundary_guards.sql"), "utf8"));
+
+    const claimColumns = database.prepare("PRAGMA table_info(security_rate_limit_claims)").all() as Array<{ name: string }>;
+    expect(claimColumns.map((column) => column.name)).toContain("subject_key_hash");
+    expect(database.prepare(
+      "SELECT id, key_hash, subject_key_hash FROM security_rate_limit_claims WHERE id = ?"
+    ).get("legacy_reset_claim")).toEqual({
+      id: "legacy_reset_claim",
+      key_hash: "legacy-pair-hash",
+      subject_key_hash: null
+    });
+    const limiterIndexes = database.prepare("PRAGMA index_list(security_rate_limit_claims)").all() as Array<{ name: string }>;
+    expect(limiterIndexes.map((index) => index.name)).toContain("idx_security_rate_limit_claims_scope_subject_claimed");
+    expect(database.prepare(
+      "SELECT summary, metadata_json FROM audit_logs WHERE id = ?"
+    ).get("audit_legacy_alert")).toEqual({
+      summary: "Correo de alertas actualizado",
+      metadata_json: "{}"
+    });
+    database.close();
+  });
+});
+
 function migrationFiles(): string[] {
   return readdirSync(migrationsDirectory)
     .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))

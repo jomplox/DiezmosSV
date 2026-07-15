@@ -151,7 +151,11 @@ interface DonarIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
-  datosToken?: string;
+}
+
+interface DonarDraftCapability {
+  intentId: string;
+  datosToken: string;
 }
 
 // A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
@@ -159,7 +163,7 @@ interface DonarIntent {
 // tell whether the donor edited either (stale → full POST) or left the retained link near
 // expiry (aged out → full POST). See draftMatchesForm / DONAR_DRAFT_REUSE_WINDOW_MS.
 interface DonarDraftIntent {
-  intent: DonarIntent;
+  intent: DonarDraftCapability;
   amount: string;
   giftType: DonarGiftType | "";
   mintedAt: number;
@@ -619,7 +623,7 @@ export function DonarPage() {
     const generation = draftGenerationRef.current + 1;
     draftGenerationRef.current = generation;
     setDraftIntent(null);
-    void donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+    void donarApi<DonarDraftCapability>(DONAR_INTENT_PATH, {
       method: "POST",
       body: donationDraftBody({ amount, giftType })
     })
@@ -656,13 +660,13 @@ export function DonarPage() {
     try {
       let created: DonarIntent;
       if (draftIntent && draftMatchesForm(draftIntent, form)) {
-        // Fast path: the draft link is valid; only attach the donor data (no Wompi call).
-        await donarApi<{ ok: true }>(donarDatosPath(draftIntent.intent.intentId), {
+        // Fast path: attach donor data, then receive the already-minted payment URLs.
+        // The server never releases those capabilities while the draft is incomplete.
+        created = await donarApi<DonarIntent>(donarDatosPath(draftIntent.intent.intentId), {
           method: "POST",
           headers: { "X-Donation-Datos-Token": draftIntent.intent.datosToken ?? "" },
           body: donationDatosBody(form)
         });
-        created = draftIntent.intent;
       } else {
         // No usable draft (missing/failed/stale): the full POST mints the link inline.
         created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
@@ -1114,19 +1118,75 @@ export function DonarThankYou({ monto }: { monto?: string }) {
   );
 }
 
-// Landing for the redirect fallback and Wompi's per-link redirect. Reads the query
-// string for DISPLAY ONLY (no trust decisions). If it is running inside the widget
-// iframe modal, it postMessages the parent so /donar can show the thank-you state.
+type GraciasVerification = "checking" | "verified" | "unverified";
+
+function DonarGraciasNeutral({ checking }: { checking: boolean }) {
+  return (
+    <div className="donar-screen">
+      <div className="donar-card card donar-thanks">
+        <div className="donar-glyph">
+          <ShieldCheck size={56} />
+        </div>
+        <h1>{checking ? "Verificando su entrega…" : "No pudimos verificar su entrega todavía."}</h1>
+        <p className="donar-intro">{DONAR_FALLBACK_MESSAGE}</p>
+        <DonarSupport />
+      </div>
+    </div>
+  );
+}
+
+// Landing for Wompi's redirect. Query values identify the intent to check, but only
+// server-held webhook state may select the success UI or notify the parent frame.
 export function DonarGraciasPage() {
   const display = useMemo(() => graciasDisplayFromSearch(window.location.search), []);
+  const [verification, setVerification] = useState<GraciasVerification>("checking");
 
   useEffect(() => {
-    if (window.parent !== window) {
+    const intentId = display.identificadorEnlaceComercio;
+    if (!intentId) {
+      setVerification("unverified");
+      return;
+    }
+
+    let cancelled = false;
+    let retry: number | null = null;
+    const deadline = Date.now() + DONAR_POLL_TIMEOUT_MS;
+    const check = async (): Promise<void> => {
+      try {
+        const result = await donarApi<{ status: string; paid: boolean }>(
+          `${DONAR_INTENT_PATH}/${encodeURIComponent(intentId)}/status`
+        );
+        if (cancelled) return;
+        if (result.paid || result.status === "COMPLETED") {
+          setVerification("verified");
+          return;
+        }
+      } catch {
+        if (cancelled) return;
+      }
+
+      if (Date.now() >= deadline) {
+        setVerification("unverified");
+        return;
+      }
+      retry = window.setTimeout(() => void check(), DONAR_POLL_INTERVAL_MS);
+    };
+    void check();
+
+    return () => {
+      cancelled = true;
+      if (retry !== null) window.clearTimeout(retry);
+    };
+  }, [display.identificadorEnlaceComercio]);
+
+  useEffect(() => {
+    if (verification === "verified" && window.parent !== window) {
       // Parent and child share the origin; scope the message to it so an unexpected
       // intermediate frame never receives the completion signal.
       window.parent.postMessage(DONAR_COMPLETED_MESSAGE, window.location.origin);
     }
-  }, []);
+  }, [verification]);
 
-  return <DonarThankYou monto={display.monto || undefined} />;
+  if (verification === "verified") return <DonarThankYou />;
+  return <DonarGraciasNeutral checking={verification === "checking"} />;
 }

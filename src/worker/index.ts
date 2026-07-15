@@ -95,7 +95,8 @@ const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
 const LOGIN_IP_ATTEMPT_LIMIT = 60;
-const PASSWORD_RESET_LIMIT = 3;
+const PASSWORD_RESET_PAIR_LIMIT = 3;
+const PASSWORD_RESET_ACCOUNT_LIMIT = 3;
 const BOOTSTRAP_ATTEMPT_LIMIT = 10;
 const BOOTSTRAP_TOKEN_PATTERN = /^bt_[A-Za-z0-9_-]{43}$/;
 
@@ -186,6 +187,35 @@ function resolveAppOrigin(env: Env, url: URL): string {
     return new URL(configured).origin;
   }
   return url.origin;
+}
+
+// A cross-origin browser can send a CORS-simple text/plain POST even when it cannot
+// read the response. Reject that request before it can spend the visitor's IP quota,
+// write D1 state, or call Wompi. Direct server clients may omit Origin, but every
+// caller must use JSON; browser requests that do provide Origin must match APP_ORIGIN.
+function rejectUnsafePublicDonationMutation(request: Request, env: Env, url: URL): Response | null {
+  const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    return jsonResponse(
+      { error: "unsupported_media_type", message: "Use Content-Type: application/json." },
+      { status: 415 }
+    );
+  }
+  if (request.headers.get("sec-fetch-site")?.trim().toLowerCase() === "cross-site") {
+    return jsonResponse({ error: "cross_site_request", message: "Solicitud de origen no permitido." }, { status: 403 });
+  }
+  const suppliedOrigin = request.headers.get("origin");
+  if (suppliedOrigin === null) {
+    return null;
+  }
+  try {
+    if (new URL(suppliedOrigin).origin === resolveAppOrigin(env, url)) {
+      return null;
+    }
+  } catch {
+    // Invalid and opaque origins fail closed below.
+  }
+  return jsonResponse({ error: "cross_site_request", message: "Solicitud de origen no permitido." }, { status: 403 });
 }
 
 function documentResponseWithSecurityHeaders(response: Response): Response {
@@ -481,12 +511,15 @@ async function processPasswordResetRequest(
   if (!account || account.disabled_at) return;
 
   const claimNow = nowIso();
-  const rateLimitClaimId = await repo.claimPasswordResetRateLimit(
+  const rateLimitClaimId = await repo.claimPasswordResetBudgets(
     await rateLimitKey(`password-reset:${account.id}:${clientIp}`),
+    await rateLimitKey(`password-reset-account:${account.id}`),
+    account.id,
     claimNow,
     authThrottleSinceIso(),
     authThrottleExpiresIso(),
-    PASSWORD_RESET_LIMIT
+    PASSWORD_RESET_PAIR_LIMIT,
+    PASSWORD_RESET_ACCOUNT_LIMIT
   );
   if (!rateLimitClaimId) return;
 
@@ -557,6 +590,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   // background on Paso 1→2); a body carrying donor data is a full create (the fallback
   // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
+    const rejected = rejectUnsafePublicDonationMutation(request, env, url);
+    if (rejected) return rejected;
     assertDeploymentCanCollectPayments(env);
     const clientIp = clientIpFrom(request);
     let body: Record<string, unknown>;
@@ -635,8 +670,13 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
       throw error;
     }
     try {
-      await applyIntentDatos(repo, intentDatosMatch[1], request.headers.get("X-Donation-Datos-Token") ?? "", data);
-      return jsonResponse({ ok: true });
+      const completed = await applyIntentDatos(
+        repo,
+        intentDatosMatch[1],
+        request.headers.get("X-Donation-Datos-Token") ?? "",
+        data
+      );
+      return jsonResponse(completed);
     } catch (error) {
       if (error instanceof IntentDatosError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });

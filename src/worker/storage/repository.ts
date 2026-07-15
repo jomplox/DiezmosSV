@@ -302,7 +302,7 @@ export class Repository {
       direccionComplemento: string;
       donorPais: string | null;
     }
-  ): Promise<boolean> {
+  ): Promise<{ id: string; urlEnlace: string; urlEnlaceLargo: string } | null> {
     const changedAt = nowIso();
     const updated = await this.db
       .prepare(
@@ -316,7 +316,7 @@ export class Repository {
            AND paid_at IS NULL
            AND donor_document IS NULL
            AND expires_at > ?
-         RETURNING id`
+         RETURNING id, wompi_url_enlace, wompi_url_enlace_largo`
       )
       .bind(
         data.donorDocumentType,
@@ -333,8 +333,23 @@ export class Repository {
         datosTokenHash,
         changedAt
       )
-      .first<{ id: string }>();
-    return updated?.id === id;
+      .first<{
+        id: string;
+        wompi_url_enlace: string | null;
+        wompi_url_enlace_largo: string | null;
+      }>();
+    if (
+      updated?.id !== id ||
+      !updated.wompi_url_enlace ||
+      !updated.wompi_url_enlace_largo
+    ) {
+      return null;
+    }
+    return {
+      id: updated.id,
+      urlEnlace: updated.wompi_url_enlace,
+      urlEnlaceLargo: updated.wompi_url_enlace_largo
+    };
   }
 
   async markIntentCompleted(id: string, documentId: string): Promise<boolean> {
@@ -1898,20 +1913,23 @@ export class Repository {
     return row?.id ?? null;
   }
 
-  async claimPasswordResetRateLimit(
-    keyHash: string,
+  async claimPasswordResetBudgets(
+    pairKeyHash: string,
+    accountKeyHash: string,
+    accountId: string,
     now: string,
     cutoff: string,
     expiresAt: string,
-    limit: number
+    pairLimit: number,
+    accountLimit: number
   ): Promise<string | null> {
     const id = newId("rate");
     const row = await this.db
       .prepare(
         `INSERT INTO security_rate_limit_claims (
-           id, scope, key_hash, claimed_at, expires_at
+           id, scope, key_hash, subject_key_hash, claimed_at, expires_at
          )
-         SELECT ?, 'password_reset', ?, ?, ?
+         SELECT ?, 'password_reset', ?, ?, ?, ?
           WHERE (
             SELECT COUNT(*)
               FROM security_rate_limit_claims
@@ -1919,9 +1937,44 @@ export class Repository {
                AND key_hash = ?
                AND claimed_at >= ?
           ) < ?
+            AND (
+              (
+                SELECT COUNT(*)
+                  FROM security_rate_limit_claims
+                 WHERE scope = 'password_reset'
+                   AND subject_key_hash = ?
+                   AND claimed_at >= ?
+              ) + (
+                SELECT COUNT(*)
+                  FROM audit_logs AS audit
+                  LEFT JOIN security_rate_limit_claims AS legacy_claim
+                    ON legacy_claim.id = audit.rate_limit_claim_id
+                 WHERE audit.entity_id = ?
+                   AND audit.action IN ('PASSWORD_RESET_REQUESTED', 'PASSWORD_RESET_EMAIL_FAILED')
+                   AND audit.created_at >= ?
+                   AND (
+                     audit.rate_limit_claim_id IS NULL
+                     OR legacy_claim.subject_key_hash IS NULL
+                   )
+              )
+            ) < ?
          RETURNING id`
       )
-      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, limit)
+      .bind(
+        id,
+        pairKeyHash,
+        accountKeyHash,
+        now,
+        expiresAt,
+        pairKeyHash,
+        cutoff,
+        pairLimit,
+        accountKeyHash,
+        cutoff,
+        accountId,
+        cutoff,
+        accountLimit
+      )
       .first<{ id: string }>();
     return row?.id ?? null;
   }
@@ -2273,7 +2326,8 @@ export class Repository {
       .prepare(`SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ORDER BY ${column} ASC, id ASC LIMIT ?`)
       .bind(...bindings, limit)
       .all<Record<string, unknown>>();
-    return rows.results ?? [];
+    const results = rows.results ?? [];
+    return table === "audit_logs" ? redactSensitiveAuditRows(results) : results;
   }
 
   // Full-snapshot paged reads for the small contingency tables (no created_at
