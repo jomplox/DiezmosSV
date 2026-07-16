@@ -3,7 +3,7 @@ import { FAILURE_VIEW_STATUSES, documentListEmptyMessage, viewSubtitle } from ".
 
 describe("viewSubtitle", () => {
   it("gives the Fallos view a subtitle describing errors needing attention", () => {
-    expect(viewSubtitle("failures")).toBe("CDE con errores o rechazos que requieren su atención.");
+    expect(viewSubtitle("failures")).toBe("CDE con errores, rechazos o pagos sin comprobante que requieren su atención.");
   });
 
   it("gives the audit view a subtitle describing the action history", () => {
@@ -29,12 +29,16 @@ describe("viewSubtitle", () => {
 });
 
 describe("documentListEmptyMessage", () => {
+  it("does not claim everything is fine while pre-CDE failures are still loading", () => {
+    expect(documentListEmptyMessage("failures", "", true)).toBe("Revisando pagos sin CDE creado…");
+  });
+
   it("reassures the user in the failures view when there is no query", () => {
     expect(documentListEmptyMessage("failures", "")).toBe("Sin fallos pendientes. Todo en orden.");
   });
 
-  it("keeps the generic no-results message in the failures view when a query is active", () => {
-    expect(documentListEmptyMessage("failures", "abc")).toBe("No hay CDE que coincidan con la búsqueda o el filtro.");
+  it("mentions both issued CDEs and payments without a receipt when a Fallos query has no results", () => {
+    expect(documentListEmptyMessage("failures", "abc")).toBe("No hay CDE ni pagos sin comprobante que coincidan con la búsqueda.");
   });
 
   it("keeps the generic no-results message in the documents view regardless of query", () => {

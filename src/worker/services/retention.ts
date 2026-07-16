@@ -3,6 +3,7 @@ import {
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
   RETENTION_WINDOWED_TABLES,
+  type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
   type RetentionTable
@@ -89,6 +90,9 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
     }
+    const sequenceEntry = await exportDocumentSequences(env, repo, prefix);
+    manifest.tables.document_sequences = sequenceEntry;
+    totalRows += sequenceEntry.rowCount;
 
     // Manifest last: its existence is the idempotency/completion marker.
     await env.ARCHIVE.put(manifestKey, utf8Bytes(JSON.stringify(manifest, null, 2)));
@@ -131,25 +135,10 @@ async function exportWindowedTable(
   startIso: string,
   endIso: string
 ): Promise<TableManifestEntry> {
-  // wompi_events has no created_at column — it records received_at instead
-  // (migrations/0001_init.sql). Every other windowed table uses created_at.
-  const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
-  return streamRetentionTable(
+  return streamRetentionTable<RetentionCursor>(
     env,
     `${prefix}/${table}.ndjson`,
     (cursor) => repo.listRowsCreatedBetween(table, { startIso, endIso }, cursor, RETENTION_PAGE_SIZE),
-    (row) => ({
-      createdAt: String(row[cursorColumn]),
-      id: String(row.id)
-    })
-  );
-}
-
-async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
-  return streamRetentionTable(
-    env,
-    `${prefix}/${table}.ndjson`,
-    (cursor) => repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE),
     (row) => ({
       createdAt: String(row.created_at),
       id: String(row.id)
@@ -157,11 +146,40 @@ async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionS
   );
 }
 
-async function streamRetentionTable(
+async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
+  const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
+  return streamRetentionTable<RetentionCursor>(
+    env,
+    `${prefix}/${table}.ndjson`,
+    (cursor) => repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE),
+    (row) => ({
+      createdAt: String(row[cursorColumn]),
+      id: String(row.id)
+    })
+  );
+}
+
+async function exportDocumentSequences(
+  env: Env,
+  repo: Repository,
+  prefix: string
+): Promise<TableManifestEntry> {
+  return streamRetentionTable<DocumentSequenceRetentionCursor>(
+    env,
+    `${prefix}/document_sequences.ndjson`,
+    (cursor) => repo.listDocumentSequencesPaged(cursor, RETENTION_PAGE_SIZE),
+    (row) => ({
+      environment: String(row.environment),
+      controlPrefix: String(row.control_prefix)
+    })
+  );
+}
+
+async function streamRetentionTable<Cursor>(
   env: Env,
   key: string,
-  readPage: (cursor: RetentionCursor | null) => Promise<Array<Record<string, unknown>>>,
-  cursorFrom: (row: Record<string, unknown>) => RetentionCursor
+  readPage: (cursor: Cursor | null) => Promise<Array<Record<string, unknown>>>,
+  cursorFrom: (row: Record<string, unknown>) => Cursor
 ): Promise<TableManifestEntry> {
   const identity = new TransformStream<Uint8Array, Uint8Array>();
   const digest = new crypto.DigestStream("SHA-256");
@@ -173,7 +191,7 @@ async function streamRetentionTable(
   );
   const putPromise = env.ARCHIVE.put(key, identity.readable);
   void putPromise.catch((error) => bodyWriter.abort(error).catch(() => undefined));
-  let cursor: RetentionCursor | null = null;
+  let cursor: Cursor | null = null;
   let rowCount = 0;
 
   try {

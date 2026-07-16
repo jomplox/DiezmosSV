@@ -2,8 +2,12 @@ import Ajv, { type ErrorObject } from "ajv";
 import addFormats from "ajv-formats";
 import cdeSchema from "../../../DTE/svfe-json-schemas/v2/fe-cd-v2.json";
 import invalidacionSchema from "../../../DTE/svfe-json-schemas/v3/invalidacion-schema-v3.json";
+import { OperatorSafeIssuanceError } from "./operatorSafeIssuanceError";
 
-const ajv = new Ajv({ allErrors: true, strict: false });
+// JSON amounts such as 1.11 become binary floating-point values after parsing,
+// so exact division by the official MH schema's 0.01 multiple can leave a tiny
+// remainder. This Ajv tolerance prevents false rejections without changing MH's schema.
+const ajv = new Ajv({ allErrors: true, strict: false, multipleOfPrecision: 12 });
 addFormats(ajv);
 
 // El validador del evento de contingencia se eliminó junto con la emisión en
@@ -14,12 +18,15 @@ const validators = {
   invalidacion: ajv.compile(invalidacionSchema)
 };
 
-export class DocumentSchemaValidationError extends Error {
+export class DocumentSchemaValidationError extends OperatorSafeIssuanceError {
   constructor(
     readonly documentLabel: string,
     readonly detail: string
   ) {
-    super(`La validación del esquema ${documentLabel} falló: ${detail}`);
+    super(
+      documentLabel === "CDE" ? "CDE_SCHEMA" : "ISSUANCE_SCHEMA",
+      `La validación del esquema ${documentLabel} falló.`
+    );
     this.name = "DocumentSchemaValidationError";
   }
 }

@@ -61,6 +61,31 @@ export interface DocumentListPage {
   limit: number;
 }
 
+export type WompiIssuanceStatus =
+  | "PROCESSING"
+  | "FAILED"
+  | "DEAD_LETTERED"
+  | "RETRY_QUEUED"
+  | "DOCUMENT_CREATED"
+  | "IGNORED";
+
+export interface WompiIssuanceFailureItem {
+  id: string;
+  environment: "00" | "01";
+  amount_cents: number;
+  donor_name: string | null;
+  donor_email: string | null;
+  received_at: string;
+  issuance_status: WompiIssuanceStatus | null;
+  issuance_attempt_count: number;
+  issuance_error_code: string | null;
+  issuance_error_message: string | null;
+  issuance_last_attempt_at: string | null;
+  issuance_failed_at: string | null;
+  issuance_dead_lettered_at: string | null;
+  reserved_numero_control: string | null;
+}
+
 export interface User {
   id: string;
   email: string;
