@@ -14,7 +14,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Node](https://img.shields.io/badge/Node.js-%E2%89%A522.16.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Status](https://img.shields.io/badge/status-early%20release-orange)](#-project-status)
 
 </div>
@@ -73,12 +73,16 @@ auditable, and cheap to run.
 | 🏛️ **MH transmission** | Authenticates with MH, caches the token in D1, transmits to *Recepción*, and records the **Sello de recepción**. |
 | 📄 **Donor receipt** | Generates a PDF *representación gráfica* with a QR code and emails it (plus the signed JSON) through a configurable provider. |
 | 🌩️ **Resilient by design** | On an MH outage the CDE is signed normally, the donor gets an immediate **transitorio** receipt, and a 15-minute cron retries transmission until MH seals it (deferred transmission — the contingency evento excludes tipo 15 per the Anexo, field 35). A dead-letter queue plus a stalled-event sweep self-heal issuance messages that exhaust their retries. |
+| 🧷 **One legal submission, ever** | Every MH-facing transmission or invalidation first acquires a durable **fiscal operation claim**. An ambiguous outcome (timeout, interrupted isolate) freezes the document for operator reconciliation instead of risking a duplicate legal submission — every retry path fails closed while the claim is held. |
 | ⚖️ **Legal invalidation** | Supports signed invalidation events with the CDE legal-window check baked in, and emails the donor a branded notice when MH accepts the invalidation. |
-| 🖥️ **Admin panel** | React SPA for documents, failures, contingency history (read-only), audit log, users, exports, resend, retry, and invalidation. |
-| 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and rate-limited auth endpoints. |
-| 📬 **Branded email** | All donor email (receipt, invalidation notice, password reset) is sent as branded HTML with configurable templates. |
+| 🖥️ **Admin panel** | React SPA for documents, failures (CDE **and** pre-CDE), contingency history (read-only), audit log, analytics, users, exports, backups, resend, retry, and invalidation — no CLI-only operations. |
+| 📊 **Donation analytics** | The **Analítica** view charts Wompi-lane giving trends — amounts, counts, diezmo/ofrenda mix — bucketed in El Salvador time, with capacity-bounded queries. |
+| 🎁 **Donor care built in** | One-click **constancia anual** (annual donation-summary certificate) per donor or in bulk, plus a CRM-ready donor contact export. |
+| 🏷️ **White-label** | Rebrand the panel, donor pages, and donor email with your church's display name, accent color, and logos (stored in R2) from the **Marca** settings — no fork needed. |
+| 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and D1-backed rate limiting on login, password reset, and public donation endpoints — with per-claim audit provenance. |
+| 📬 **Branded email** | All donor email (receipt, invalidation notice, annual certificate, password reset) is sent as branded HTML with configurable templates. |
 | 🚨 **Operational alerting** | Emails a configurable address on emission failures, MH unavailability (deferred-transmission backlog), stalled events, and MH signer-certificate expiry (30/14/3-day warnings). |
-| 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. |
+| 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. The **Respaldos mensuales** panel browses, verifies, and downloads each month as a ZIP. |
 
 > 💸 **Run it before you have credentials.** The default (local) `wrangler.toml` config sets
 > `MOCK_EXTERNAL_SERVICES = "true"`, which stubs MH and the email provider — you can click through the
@@ -149,7 +153,7 @@ is set per environment for building absolute links (e.g. password-reset URLs).
 
 ## 🧰 Tech stack
 
-**Frontend** · React 19 · Vite 8 · TypeScript 6 · `lucide-react` icons · plain CSS
+**Frontend** · React 19 · Vite 8 · TypeScript 7 · `lucide-react` icons · plain CSS
 **Worker** · Cloudflare Workers · D1 (SQLite) · Queues · Cron Triggers · WebCrypto
 **Crypto & docs** · WebCrypto `RS512` JWS · `pdf-lib` · `qrcode`
 **Validation** · `ajv` + `ajv-formats` against bundled MH JSON schemas
@@ -166,14 +170,15 @@ DiezmosSV/
 │   │   ├── index.ts            # Entry: fetch() · queue() · scheduled()
 │   │   ├── config.ts           # Env parsing & validation
 │   │   ├── domain/             # wompi · dteBuilder · signer · schema
-│   │   ├── services/           # mhClient · pipeline · email · pdf · auth · alerts · retention · f960 · credentials
+│   │   ├── services/           # mhClient · pipeline · email · pdf · auth · alerts · retention · f960
+│   │   │                       # analytics · certificate · contacts · backups · branding · credentials
 │   │   ├── storage/            # repository.ts — raw D1 access (no ORM)
 │   │   └── utils/              # ids · dates · encoding · http
 │   ├── client/                 # React + Vite admin panel
 │   └── shared/                 # Catalogs, DUI, legal windows, password policy (client + worker)
-├── migrations/                 # D1 schema (incremental 0001…0008)
+├── migrations/                 # D1 schema (incremental 0001…0024)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
-├── docs/                       # Deployment/UAT runbooks · operator runbook · retention-restore
+├── docs/                       # Deploy/UAT · operator runbook · retention-restore · fiscal-claim cutover/reconciliation
 ├── examples/                   # wompi-webhook.sample.json (safe test payload)
 ├── test/                       # Vitest unit tests (client + worker)
 └── wrangler.toml               # Bindings, vars, queues, crons
@@ -425,9 +430,10 @@ configuration, not from the application credentials panel. After the release is 
 new binding is verified, delete the superseded email-endpoint secret left by earlier releases from
 each deployment. This repository change does not modify staging or production configuration.
 
-The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
+The admin UI includes an OWNER-only **Configuración** workspace for updating MH test/production API
 credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
-sender/alternative-provider token. It shows the deployment-owned alternative destination as read-only status.
+sender/alternative-provider token — plus emission environment, email templates, branding (Marca), and
+the alert address. It shows the deployment-owned alternative destination as read-only status.
 Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
@@ -459,6 +465,11 @@ ResultadoTransaccion = ExitosaAprobada
 
 The signed flag is stored as evidence, but it cannot widen a deployment: an incompatible event is
 audited and quarantined without paid marking or queueing.
+
+Every accepted webhook row also carries a **pre-CDE issuance lifecycle**
+(`PROCESSING → DOCUMENT_CREATED / FAILED / RETRY_QUEUED / DEAD_LETTERED / IGNORED`) with reserved
+control numbers, attempt counts, and error evidence — so a donation that fails before a CDE exists
+is visible and recoverable from the **Fallos** view instead of vanishing into queue history.
 
 ---
 
@@ -579,18 +590,33 @@ the donation capability contract, the staging/production invariant, and forbidde
 
 ## 👥 Admin panel & roles
 
-The React admin panel handles documents, failures, the read-only contingency history, the audit log, user
-management, F960 exports, per-document actions (resend, retry, invalidation), and — for owners — a
-**Configuración** workspace covering MH/Wompi/email credentials, the active emission environment,
-email templates, and the operational alert address. No CLI-only operations. The Spanish navigation
-reads: Documentos, Fallos, Contingencia, Auditoría, Usuarios, Exportar, Configuración.
+The React admin panel handles documents, failures, the read-only contingency history, the audit log,
+donation analytics, user management, exports, per-document actions (resend, retry, invalidation), and
+— for owners — a **Configuración** workspace. No CLI-only operations. The Spanish navigation reads:
+Documentos, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar, Configuración.
+
+- **Fallos** lists both CDE-level failures (`FAILED` and MH `REJECTED`) **and pre-CDE issuance
+  failures** — approved Wompi events that died before a document existed — with searchable error
+  evidence and guided recovery, so no approved donation is silently lost.
+- **Analítica** charts Wompi-lane trends (amounts, counts, diezmo/ofrenda mix) bucketed in
+  America/El_Salvador (fixed UTC-6). Hand-issued CDEs (quick/advanced) are excluded **by design** —
+  they carry no `wompi_event_id`. Responses are row- and byte-bounded, so an oversized date range
+  asks you to narrow it instead of melting the Worker.
+- **Exportar** bundles the reporting suite: F960 exports (JSON/CSV/XLSX), the last 50 online
+  donations, the **Constancia anual de donaciones** (send each donor a branded annual summary of
+  accepted donations — per donor or in bulk, every send audited), **Contactos para CRM** (aggregate
+  donor contact export for CRM import), and **Respaldos mensuales** (browse and verify the monthly
+  R2 legal snapshots, download a month as a ZIP up to 32 MiB).
+- **Configuración** is organized in sections: Ambiente, MH, Wompi, Emisor, Correo, Plantillas, and
+  **Marca** — white-label branding with a display name, accent color, support email, and two logos
+  (admin + donor-facing) stored in R2. Defaults keep the historical "ExamplePerson1" identity.
 
 | Role | Capabilities |
 |---|---|
-| `VIEWER` (Consulta) | Read documents, the contingency history, and the audit log. |
-| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures, initiate invalidation. |
-| `ADMIN` (Administrador) | Also: manage users and roles, and run F960 exports. |
-| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, alert address, and retention export. |
+| `VIEWER` (Consulta) | Read documents, the contingency history, the audit log, and Analítica. |
+| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), initiate invalidation. |
+| `ADMIN` (Administrador) | Also: manage users and roles, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
+| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, branding (Marca), alert address, and on-demand retention export. |
 
 > 📖 For a task-oriented walkthrough in Spanish, see the [operator runbook](./docs/runbook-operador.md).
 
@@ -602,32 +628,46 @@ Each CDE moves through an explicit status machine, recorded in D1:
 
 ```mermaid
 stateDiagram-v2
+    state "SIGNED · En trámite<br/>(transmission_deferred_at)" as Deferred
     [*] --> PENDING
     PENDING --> SIGNED
     SIGNED --> TRANSMITTED
+    SIGNED --> Deferred: MH unavailable
+    Deferred --> TRANSMITTED: 15-min cron retry
     TRANSMITTED --> ACCEPTED
     TRANSMITTED --> REJECTED
-    SIGNED --> CONTINGENCY_PENDING: MH unavailable
-    CONTINGENCY_PENDING --> ACCEPTED: cron sweep
     ACCEPTED --> INVALIDATED: within legal window
     PENDING --> FAILED
     SIGNED --> FAILED
     TRANSMITTED --> FAILED
 ```
 
+The deferred state is deliberately **not** a separate status value: it is `SIGNED` plus a
+`transmission_deferred_at` marker ("En trámite" in the panel). `dte_documents` is the FK parent of
+four tables and D1 cannot rebuild a referenced parent to widen the status `CHECK`, so the marker is
+kept — and preserved after resolution as historical evidence of the deferral.
+
+Around this machine sits the **fiscal operation claim**: transmission and invalidation each acquire
+a durable single-owner claim immediately before calling MH. If the call ends ambiguously, the claim
+is kept, the panel shows **"Resultado fiscal pendiente de conciliación"**, and queue redelivery,
+scheduled retry, manual retry, resend, invalidation, and status-dependent exports all fail closed
+until a deployment operator reconciles the true MH outcome per
+[`docs/fiscal-claim-reconciliation.md`](./docs/fiscal-claim-reconciliation.md).
+
 ---
 
 ## 🗄️ Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0008)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0024)</strong></summary>
 
 <br/>
 
 | Table | Purpose |
 |---|---|
-| `wompi_events` | Incoming Wompi webhooks; dedup by `transaction_id`. |
-| `dte_documents` | Issued CDEs: status, plain JSON, signed JWS, MH seal, donor info. |
+| `wompi_events` | Incoming Wompi webhooks; dedup by `transaction_id`. Carries the pre-CDE issuance lifecycle: status, reserved control numbers, attempt/error evidence. |
+| `dte_documents` | Issued CDEs: status, plain JSON, signed JWS, MH seal, donor info — plus the deferred-transmission marker, fiscal-operation claim, and post-accept finalization columns. |
+| `donation_intents` | `/donar` intents: donor document + catalog-coded address, Wompi link correlation, gift type (diezmo/ofrenda), status lifecycle, and the hashed `/datos` completion capability. |
 | `dte_events` | Invalidation events, plus historical contingency events (one-to-many with documents). |
 | `contingency_periods` | Historical MH-outage windows (read-only; new emissions defer instead). |
 | `audit_logs` | Immutable action log: actor, action, entity, metadata. |
@@ -635,8 +675,9 @@ stateDiagram-v2
 | `document_sequences` | Control-number counters per environment/prefix. |
 | `email_deliveries` | Email send records, provider responses, and PDF/JSON evidence hashes. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
-| `app_settings` | Runtime settings (emission environment, email templates, alert email). |
+| `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |
+| `login_rate_limits` · `security_rate_limit_claims` | D1-backed rate limiting for login, password reset, and public donation intents, with claim provenance recorded on the rows they admit. |
 
 Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 `src/worker/storage/repository.ts` — no ORM.
@@ -653,6 +694,12 @@ Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
   `TRANSMISSION_PENDING` ("En trámite"), the donor immediately receives a clearly-labeled
   **transitorio** receipt, and the 15-minute cron retries transmission; on acceptance the donor
   receives the definitive receipt with the Sello de Recepción.
+- Every MH-facing transmission or invalidation is guarded by a durable **fiscal operation claim** —
+  one owner per legal submission, acquired atomically before the call. Ambiguous outcomes freeze the
+  document for evidence-first reconciliation instead of authorizing a second submission
+  ([`docs/fiscal-claim-reconciliation.md`](./docs/fiscal-claim-reconciliation.md)). This is why the
+  deploy steps require the quiesced `FISCAL_CUTOVER_QUIESCED=1` window
+  ([`docs/fiscal-claim-cutover.md`](./docs/fiscal-claim-cutover.md)).
 - Invalidation is a **signed event**, not a database flag, and the donor is emailed a branded notice
   once MH accepts it.
 - CDE invalidation is only allowed through the **tenth business day of the month following the
