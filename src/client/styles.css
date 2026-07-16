@@ -3244,36 +3244,17 @@ pre {
   vertical-align: -0.08em;
 }
 
-/* Compact chrome for the working steps (Paso ≥2): the step's task is the H1 and
-   the brand demotes to a small line, so the first field starts near the top —
-   the full ceremonial header cost most of a phone's viewport on every step. */
-.donar-compact-head {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  padding: 12px 0 0;
-}
-
-.donar-compact-titles {
-  display: grid;
-  gap: 2px;
-  text-align: left;
-}
-
-.donar-card h1.donar-step-title {
-  font-size: 20px;
-  text-align: left;
-}
-
-/* Eyebrow above the step title: small caps-tracked brand line, Gotham-style. */
-.donar-brand-line {
-  margin: 0;
+/* Step label under the brand title on the working steps (Paso ≥2): a small
+   caps-tracked Gotham line ("SUS DATOS", "SU ENTREGA") that orients without
+   competing with the ceremonial header. #767676 clears WCAG AA (4.54:1). */
+.donar-step-label {
+  margin: -2px 0 0;
   font-size: 11px;
   font-weight: 500;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #595959;
+  color: #767676;
+  text-align: center;
 }
 
 /* Paso 1 assurance: names the legal document this door produces, right under the

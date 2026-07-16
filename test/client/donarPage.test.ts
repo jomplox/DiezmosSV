@@ -369,12 +369,15 @@ describe("donar per-field validation", () => {
   });
 });
 
-describe("donar compact step chrome", () => {
-  it("titles the working steps by their task — entrega framing, never 'pago'", () => {
+describe("donar step labels", () => {
+  it("labels the working steps under the brand title — entrega framing, never 'pago'", () => {
     expect(DONAR_STEP_TITLE_DATOS).toBe("Sus datos");
     expect(DONAR_STEP_TITLE_ENTREGA).toBe("Su entrega");
-    expect(donarSource).toContain("donar-compact-head");
-    expect(stylesSource).toContain(".donar-compact-head");
+    expect(donarSource).toContain("donar-step-label");
+    expect(stylesSource).toContain(".donar-step-label");
+    // The h1 stays the ceremonial brand title on every step; a brand-demoting
+    // compact header was tried and rolled back as a visual regression.
+    expect(donarSource).not.toContain("donar-compact-head");
   });
 });
 

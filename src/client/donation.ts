@@ -58,10 +58,9 @@ export function donarStepIndicator(step: number, total: number): string {
   return `Paso ${step} de ${total}`;
 }
 
-// Working-step titles (steps ≥2): the step's task takes the H1 and the brand
-// demotes to a small line, so the form starts near the top instead of below a
-// ~600px ceremonial header on a phone. "Su entrega" — never "pago" — per the
-// donor-facing wording rule.
+// Working-step labels (steps ≥2): a small caps-tracked line under the brand
+// title that orients the donor without competing with the ceremonial header.
+// "Su entrega" — never "pago" — per the donor-facing wording rule.
 export const DONAR_STEP_TITLE_DATOS = "Sus datos";
 export const DONAR_STEP_TITLE_ENTREGA = "Su entrega";
 

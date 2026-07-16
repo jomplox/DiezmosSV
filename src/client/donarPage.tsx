@@ -914,35 +914,22 @@ export function DonarPage() {
           <p className="donar-step-indicator">{donarStepIndicator(displayStep, stepCount)}</p>
         </div>
 
-        {/* Paso 1 keeps the full ceremonial header; the working steps get a compact
-            head where the step's task is the H1 and the brand demotes to a small
-            line — on a 375px phone the full header pushed the first field to the
-            fold on every step. The flag is an inline SVG badge (emoji render as a
-            blank box or bare "SV"/"US" letters on platforms without flag glyphs). */}
-        {step === 1 ? (
-          <>
-            <div className="donar-glyph">
-              <ShieldCheck size={28} />
-            </div>
-            <h1>
-              {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
-            </h1>
-          </>
-        ) : (
-          <div className="donar-compact-head">
-            <ShieldCheck size={18} aria-hidden="true" />
-            <div className="donar-compact-titles">
-              {/* Eyebrow order: the small persistent brand ABOVE, the step's task
-                  below as the big line — the other way around read as if the brand
-                  were a subtitle of "Sus datos". The h1 stays the step title. */}
-              <p className="donar-brand-line">
-                {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
-              </p>
-              <h1 className="donar-step-title">
-                {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
-              </h1>
-            </div>
-          </div>
+        {/* The ceremonial header is identical on every step — centered shield,
+            big brand title. The flag is an inline SVG badge (emoji render as a
+            blank box or bare "SV"/"US" letters on platforms without flag glyphs).
+            Working steps add a small caps-tracked step label UNDER the title for
+            orientation; a brand-demoting compact header was tried and read as a
+            regression (the brand looked like a fake subtitle of the step). */}
+        <div className="donar-glyph">
+          <ShieldCheck size={28} />
+        </div>
+        <h1>
+          {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
+        </h1>
+        {step > 1 && (
+          <p className="donar-step-label">
+            {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
+          </p>
         )}
 
         {/* Paso 1 assurance: right under the heading, name the legal document this
