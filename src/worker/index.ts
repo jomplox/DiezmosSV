@@ -192,8 +192,9 @@ function resolveAppOrigin(env: Env, url: URL): string {
 // A cross-origin browser can send a CORS-simple text/plain POST even when it cannot
 // read the response. Reject that request before it can spend the visitor's IP quota,
 // write D1 state, or call Wompi. Direct server clients may omit Origin, but every
-// caller must use JSON; browser requests that do provide Origin must match APP_ORIGIN.
-function rejectUnsafePublicDonationMutation(request: Request, env: Env, url: URL): Response | null {
+// caller must use JSON; browser requests that do provide Origin must match the URL
+// that received the request. APP_ORIGIN remains the canonical link-generation origin.
+function rejectUnsafePublicDonationMutation(request: Request, url: URL): Response | null {
   const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (mediaType !== "application/json") {
     return jsonResponse(
@@ -209,7 +210,7 @@ function rejectUnsafePublicDonationMutation(request: Request, env: Env, url: URL
     return null;
   }
   try {
-    if (new URL(suppliedOrigin).origin === resolveAppOrigin(env, url)) {
+    if (new URL(suppliedOrigin).origin === url.origin) {
       return null;
     }
   } catch {
@@ -590,7 +591,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   // background on Paso 1→2); a body carrying donor data is a full create (the fallback
   // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
-    const rejected = rejectUnsafePublicDonationMutation(request, env, url);
+    const rejected = rejectUnsafePublicDonationMutation(request, url);
     if (rejected) return rejected;
     assertDeploymentCanCollectPayments(env);
     const clientIp = clientIpFrom(request);

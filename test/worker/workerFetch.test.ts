@@ -2115,6 +2115,20 @@ describe("donation intents", () => {
       expect(db.donationIntents).toHaveLength(1);
     });
 
+    it("accepts the request origin when APP_ORIGIN names a different canonical host", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(
+        draftRequest(
+          { amount: "25.50", giftType: "DIEZMO" },
+          { Origin: "https://example.org", "Sec-Fetch-Site": "same-origin" }
+        ),
+        env(db, { APP_ORIGIN: "https://canonical.example.org" })
+      );
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
+    });
+
     it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
       const db = new InMemoryD1();
       const response = await worker.fetch(draftRequest({ amount: "10" }), env(db));
