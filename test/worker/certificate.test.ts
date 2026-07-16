@@ -347,6 +347,7 @@ function accepted(overrides: Partial<DteDocumentRecord>): DteDocumentRecord {
     accepted_at: "2025-01-01T10:01:00.000Z",
     contingency_period_id: null,
     transmission_deferred_at: null,
+    transmission_claim_id: null,
     created_at: "2025-01-01T10:00:00.000Z",
     updated_at: "2025-01-01T10:01:00.000Z",
     ...overrides

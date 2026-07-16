@@ -48,6 +48,7 @@ export interface Env {
 
 export interface IssuanceMessage {
   wompiEventId?: string;
+  issuanceAttemptId?: string;
   advancedDocumentId?: string;
 }
 
@@ -154,6 +155,7 @@ export interface DteDocumentRecord {
   post_accept_finalization_claim_id?: string | null;
   post_accept_finalization_claimed_at?: string | null;
   post_accept_email_dispatch_started_at?: string | null;
+  transmission_claim_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -276,6 +278,37 @@ export interface WompiPaymentLink {
   urlEnlaceLargo: string;
 }
 
+export type WompiIssuanceStatus =
+  | "PROCESSING"
+  | "FAILED"
+  | "DEAD_LETTERED"
+  | "RETRY_QUEUED"
+  | "DOCUMENT_CREATED"
+  | "IGNORED";
+
+export interface WompiIssuanceFailureItem {
+  id: string;
+  environment: Ambiente;
+  amount_cents: number;
+  donor_name: string | null;
+  donor_email: string | null;
+  received_at: string;
+  issuance_status: WompiIssuanceStatus | null;
+  issuance_attempt_count: number;
+  issuance_error_code: string | null;
+  issuance_error_message: string | null;
+  issuance_last_attempt_at: string | null;
+  issuance_failed_at: string | null;
+  issuance_dead_lettered_at: string | null;
+  reserved_numero_control: string | null;
+}
+
+export interface WompiDocumentIdentifiers {
+  sequence: number;
+  numeroControl: string;
+  codigoGeneracion: string;
+}
+
 export interface WompiEventRecord {
   id: string;
   transaction_id: string;
@@ -291,6 +324,18 @@ export interface WompiEventRecord {
   created_document_id: string | null;
   issuance_claim_id?: string | null;
   issuance_claimed_at?: string | null;
+  issuance_status: WompiIssuanceStatus | null;
+  control_prefix: string | null;
+  control_sequence: number | null;
+  reserved_numero_control: string | null;
+  reserved_codigo_generacion: string | null;
+  issuance_attempt_count: number;
+  issuance_attempt_id: string | null;
+  issuance_error_code: string | null;
+  issuance_error_message: string | null;
+  issuance_last_attempt_at: string | null;
+  issuance_failed_at: string | null;
+  issuance_dead_lettered_at: string | null;
 }
 
 export interface MhResponse {

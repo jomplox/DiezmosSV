@@ -119,6 +119,8 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   WOMPI_EVENT_REQUEUED: "Evento Wompi reencolado",
   WOMPI_EVENT_STALLED: "Evento Wompi sin procesar — revisar",
   WOMPI_IGNORED: "Wompi ignorado",
+  WOMPI_ISSUANCE_FAILED: "CDE no creado",
+  WOMPI_ISSUANCE_RETRY_QUEUED: "Reintento de creación en cola",
   WOMPI_RECEIVED: "Wompi recibido"
 };
 
