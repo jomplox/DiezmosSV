@@ -179,6 +179,51 @@ describe("migration 0022 security boundary guards", () => {
   });
 });
 
+
+describe("migration 0024 rate-limit claim ids", () => {
+  it("adds the missing columns without rebuilding deployed tables", () => {
+    const migration = readFileSync(
+      resolve(migrationsDirectory, "0024_add_rate_limit_claim_ids.sql"),
+      "utf8"
+    );
+
+    expect(migration).toContain("ALTER TABLE donation_intents ADD COLUMN rate_limit_claim_id TEXT;");
+    expect(migration).toContain("ALTER TABLE audit_logs ADD COLUMN rate_limit_claim_id TEXT;");
+    expect(migration).not.toMatch(/\b(?:RENAME|DROP) TABLE\b/i);
+  });
+
+  it("adds rate-limit provenance columns after a pre-fix 0019 schema", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+
+    for (const filename of migrationFiles().filter((name) => name < "0024_")) {
+      database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
+    }
+
+    database.exec(readFileSync(resolve(migrationsDirectory, "0024_add_rate_limit_claim_ids.sql"), "utf8"));
+
+    const donationColumns = database.prepare("PRAGMA table_info(donation_intents)").all() as Array<{ name: string }>;
+    const auditColumns = database.prepare("PRAGMA table_info(audit_logs)").all() as Array<{ name: string }>;
+    expect(donationColumns.map((column) => column.name)).toContain("rate_limit_claim_id");
+    expect(auditColumns.map((column) => column.name)).toContain("rate_limit_claim_id");
+
+    const donationIndexes = database.prepare("PRAGMA index_list(donation_intents)").all() as Array<{ name: string }>;
+    const auditIndexes = database.prepare("PRAGMA index_list(audit_logs)").all() as Array<{ name: string }>;
+    expect(donationIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+      "idx_donation_intents_status_expires_at",
+      "idx_donation_intents_created_at",
+      "idx_donation_intents_document_id",
+      "idx_donation_intents_client_ip_created_at"
+    ]));
+    expect(auditIndexes.map((index) => index.name)).toEqual(expect.arrayContaining([
+      "idx_audit_logs_entity",
+      "idx_audit_logs_action_entity"
+    ]));
+
+    database.close();
+  });
+});
+
 function migrationFiles(): string[] {
   return readdirSync(migrationsDirectory)
     .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))
