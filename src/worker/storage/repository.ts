@@ -1,9 +1,10 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiEventRecord, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { newId } from "../utils/ids";
+import { generationCode, newId, normalizeControlPrefix, numeroControl } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
+import { sha256Hex, utf8Bytes } from "../utils/encoding";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -56,11 +57,39 @@ const POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE = `(
     )
   )
 )`;
+export const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
 
-export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
+export async function emailDeliveryIdempotencyKey(
+  documentId: string,
+  emailType: string,
+  documentStatusAtSend: string
+): Promise<string> {
+  // Keep the established ACCEPTED key stable, while separating provisional or
+  // rejected receipts from the later definitive acceptance for the same document.
+  const evidenceType = documentStatusAtSend === "ACCEPTED"
+    ? emailType
+    : `${emailType}:${documentStatusAtSend}`;
+  const digest = await sha256Hex(utf8Bytes(`example-worker:receipt:v1:${documentId}:${evidenceType}`));
+  return `dsv-receipt-v1-${digest}`;
+}
+
+export const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
+export const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
+  "El mensaje de emisión agotó sus reintentos antes de crear el CDE.";
+
+export function legacyIssuanceAttemptId(wompiEventId: string): string {
+  return `legacy:${wompiEventId}`;
+}
+
+const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_name, donor_email,
+  received_at, issuance_status, issuance_attempt_count, issuance_error_code,
+  issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
+  issuance_dead_lettered_at, reserved_numero_control`;
+
+export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
-export const RETENTION_SNAPSHOT_TABLES = ["contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
+export const RETENTION_SNAPSHOT_TABLES = ["wompi_events", "contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
 export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
 
 export interface RetentionCursor {
@@ -68,9 +97,14 @@ export interface RetentionCursor {
   id: string;
 }
 
-// wompi_events has no created_at column — it records received_at instead
-// (migrations/0001_init.sql). Every other windowed retention table uses created_at.
-function retentionTimestampColumn(table: RetentionTable): "created_at" | "received_at" {
+export interface DocumentSequenceRetentionCursor {
+  environment: string;
+  controlPrefix: string;
+}
+
+function retentionSnapshotTimestampColumn(
+  table: RetentionSnapshotTable
+): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
 }
 
@@ -205,6 +239,348 @@ export class Repository {
       .bind(id, claimId)
       .first<{ id: string }>();
     return Boolean(row);
+  }
+
+  async listWompiIssuanceFailures(limit = 100): Promise<WompiIssuanceFailureItem[]> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
+    const rows = await this.db
+      .prepare(
+        `SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}
+         FROM wompi_events
+         WHERE created_document_id IS NULL
+           AND issuance_error_message IS NOT NULL
+           AND issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')
+         ORDER BY issuance_failed_at DESC, id DESC
+         LIMIT ?`
+      )
+      .bind(safeLimit)
+      .all<WompiIssuanceFailureItem>();
+    return rows.results ?? [];
+  }
+
+  async getWompiIssuanceFailureById(wompiEventId: string): Promise<WompiIssuanceFailureItem | null> {
+    return this.db
+      .prepare(`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS} FROM wompi_events WHERE id = ?`)
+      .bind(wompiEventId)
+      .first<WompiIssuanceFailureItem>();
+  }
+
+  async claimInitialWompiIssuanceAttempt(wompiEventId: string): Promise<string | null> {
+    const attemptId = newId("issuance_attempt");
+    const queuedAt = nowIso();
+    const result = await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'RETRY_QUEUED',
+             issuance_attempt_id = ?,
+             issuance_last_attempt_at = ?
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND issuance_attempt_id IS NULL
+           AND issuance_status IS NULL`
+      )
+      .bind(attemptId, queuedAt, wompiEventId)
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async claimWompiIssuanceRetry(wompiEventId: string, actorId: string): Promise<string | null> {
+    const attemptId = newId("issuance_attempt");
+    const retryQueuedAt = nowIso();
+    const actorIp = normalizeAuditIp(this.auditContext?.ip ?? null);
+    const actorContext = serializeAuditContext(this.auditContext?.context);
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_status IN ('FAILED', 'DEAD_LETTERED')`
+        )
+        .bind(attemptId, retryQueuedAt, wompiEventId),
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'USER', ?, 'WOMPI_ISSUANCE_RETRY_QUEUED',
+                  'wompi_event', id, ?, ?, ?, ?
+           FROM wompi_events
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_status = 'RETRY_QUEUED'
+             AND issuance_attempt_id = ?`
+        )
+        .bind(
+          newId("audit"),
+          actorId,
+          "Reintento de creación de CDE en cola",
+          JSON.stringify({ attemptId }),
+          actorIp,
+          actorContext,
+          wompiEventId,
+          attemptId
+        )
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async claimStalledWompiIssuanceAttempt(
+    wompiEventId: string,
+    currentAttemptId: string | null,
+    staleBefore: string
+  ): Promise<string | null> {
+    const attemptId = newId("issuance_attempt");
+    const queuedAt = nowIso();
+    // Operator retries from DEAD_LETTERED keep processed_at as historical evidence,
+    // so tokenized work is fenced by attempt + eligible status. Only the legacy
+    // null-token path also requires processed_at to remain null.
+    const statement = currentAttemptId
+      ? this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+        ).bind(attemptId, queuedAt, wompiEventId, currentAttemptId, staleBefore)
+      : this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'RETRY_QUEUED',
+               issuance_attempt_id = ?,
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id IS NULL
+             AND processed_at IS NULL
+             AND issuance_status IS NULL
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+        ).bind(attemptId, queuedAt, wompiEventId, staleBefore);
+    const result = await statement.run();
+    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+  }
+
+  async createWompiAttemptAudit(input: {
+    wompiEventId: string;
+    attemptId: string;
+    action: string;
+    summary: string;
+    metadata?: unknown;
+  }): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `INSERT INTO audit_logs (
+           id, actor_type, actor_id, action, entity_type, entity_id,
+           summary, metadata_json, actor_ip, actor_context
+         )
+         SELECT ?, 'SYSTEM', NULL, ?, 'wompi_event', id, ?, ?, NULL, NULL
+         FROM wompi_events
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND issuance_attempt_id = ?`
+      )
+      .bind(
+        newId("audit"),
+        input.action,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+        input.wompiEventId,
+        input.attemptId
+      )
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1;
+  }
+
+  async reserveWompiDocumentIdentifiers(
+    wompiEventId: string,
+    environment: Ambiente,
+    controlPrefix: string
+  ): Promise<WompiDocumentIdentifiers> {
+    const normalizedPrefix = normalizeControlPrefix(controlPrefix);
+
+    const event = await this.getWompiEventById(wompiEventId);
+    if (!event) {
+      throw new Error("No se encontró el evento Wompi para reservar identificadores");
+    }
+    if (event.environment !== environment) {
+      throw new Error("El ambiente del evento Wompi no coincide con la reserva");
+    }
+
+    const existing = wompiDocumentIdentifiersForPrefix(event, normalizedPrefix);
+    if (existing) {
+      return existing;
+    }
+
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET control_prefix = ?, reserved_codigo_generacion = ?
+         WHERE id = ?
+           AND environment = ?
+           AND control_prefix IS NULL
+           AND control_sequence IS NULL
+           AND reserved_numero_control IS NULL
+           AND reserved_codigo_generacion IS NULL`
+      )
+      .bind(normalizedPrefix, generationCode(), wompiEventId, environment)
+      .run();
+
+    const reservedEvent = await this.getWompiEventById(wompiEventId);
+    if (!reservedEvent || reservedEvent.environment !== environment) {
+      throw new Error("No se pudo leer la reserva de identificadores Wompi");
+    }
+    const reserved = wompiDocumentIdentifiersForPrefix(reservedEvent, normalizedPrefix);
+    if (!reserved) {
+      throw new Error("No se pudo reservar los identificadores del documento Wompi");
+    }
+    return reserved;
+  }
+
+  async markWompiIssuanceProcessing(
+    wompiEventId: string,
+    attemptId: string,
+    legacyMessage = false
+  ): Promise<boolean> {
+    const attemptedAt = nowIso();
+    const statement = legacyMessage
+      ? this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'PROCESSING',
+               issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
+               issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND (issuance_attempt_id IS NULL OR issuance_attempt_id = ?)
+             AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
+           RETURNING id`
+        ).bind(attemptId, attemptedAt, wompiEventId, attemptId)
+      : this.db.prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'PROCESSING', issuance_last_attempt_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED')
+           RETURNING id`
+        ).bind(attemptedAt, wompiEventId, attemptId);
+    return (await statement.first<{ id: string }>()) !== null;
+  }
+
+  async recordWompiIssuanceFailure(
+    wompiEventId: string,
+    attemptId: string,
+    evidence: { code: string; message: string }
+  ): Promise<boolean> {
+    const failedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+           SET issuance_status = 'FAILED',
+               issuance_attempt_count = issuance_attempt_count + 1,
+               issuance_error_code = ?,
+               issuance_error_message = ?,
+               issuance_last_attempt_at = ?,
+               issuance_failed_at = ?
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_attempt_id = ?
+             AND issuance_status = 'PROCESSING'`
+        )
+        .bind(
+          evidence.code,
+          evidence.message,
+          failedAt,
+          failedAt,
+          wompiEventId,
+          attemptId
+        ),
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'SYSTEM', NULL, 'WOMPI_ISSUANCE_FAILED',
+                  'wompi_event', id, ?, ?, NULL, NULL
+           FROM wompi_events
+           WHERE id = ?
+             AND created_document_id IS NULL
+             AND issuance_failed_at = ?
+             AND issuance_attempt_id = ?
+             AND issuance_status = 'FAILED'`
+        )
+        .bind(
+          newId("audit"),
+          evidence.message,
+          JSON.stringify({ code: evidence.code }),
+          wompiEventId,
+          failedAt,
+          attemptId
+        )
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1;
+  }
+
+  async markWompiIssuanceDeadLettered(
+    wompiEventId: string,
+    attemptId: string,
+    legacyMessage = false
+  ): Promise<boolean> {
+    const deadLetteredAt = nowIso();
+    const attemptPredicate = legacyMessage
+      ? "(issuance_attempt_id IS NULL OR issuance_attempt_id = ?)"
+      : "issuance_attempt_id = ?";
+    const row = await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'DEAD_LETTERED',
+             issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
+             issuance_error_code = CASE
+               WHEN issuance_error_message IS NULL THEN ?
+               ELSE COALESCE(issuance_error_code, ?)
+             END,
+             issuance_error_message = COALESCE(issuance_error_message, ?),
+             issuance_dead_lettered_at = ?,
+             processed_at = COALESCE(processed_at, ?)
+         WHERE id = ?
+           AND created_document_id IS NULL
+           AND ${attemptPredicate}
+           AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
+         RETURNING id`
+      )
+      .bind(
+        attemptId,
+        ISSUANCE_RETRIES_EXHAUSTED_CODE,
+        ISSUANCE_RETRIES_EXHAUSTED_CODE,
+        ISSUANCE_RETRIES_EXHAUSTED_MESSAGE,
+        deadLetteredAt,
+        deadLetteredAt,
+        wompiEventId,
+        attemptId
+      )
+      .first<{ id: string }>();
+    return row !== null;
+  }
+
+  async markWompiIssuanceIgnored(wompiEventId: string): Promise<void> {
+    const processedAt = nowIso();
+    await this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'IGNORED',
+             processed_at = COALESCE(processed_at, ?)
+         WHERE id = ? AND created_document_id IS NULL`
+      )
+      .bind(processedAt, wompiEventId)
+      .run();
   }
 
   async createDonationIntent(input: {
@@ -499,13 +875,14 @@ export class Repository {
   }
 
   async nextControlSequence(environment: Ambiente, controlPrefix: string): Promise<number> {
+    const normalizedPrefix = normalizeControlPrefix(controlPrefix);
     await this.db
       .prepare("INSERT OR IGNORE INTO document_sequences (environment, control_prefix, next_value) VALUES (?, ?, 1)")
-      .bind(environment, controlPrefix)
+      .bind(environment, normalizedPrefix)
       .run();
     const row = await this.db
       .prepare("UPDATE document_sequences SET next_value = next_value + 1 WHERE environment = ? AND control_prefix = ? RETURNING next_value - 1 AS value")
-      .bind(environment, controlPrefix)
+      .bind(environment, normalizedPrefix)
       .first<{ value: number }>();
     if (!row) {
       throw new Error("No se pudo asignar la secuencia de control");
@@ -527,7 +904,7 @@ export class Repository {
     contingencyPeriodId?: string | null;
   }): Promise<DteDocumentRecord> {
     const id = newId("dte");
-    await this.db
+    const insert = this.db
       .prepare(
         `INSERT INTO dte_documents (
           id, wompi_event_id, environment, codigo_generacion, numero_control, status, plain_json,
@@ -547,10 +924,14 @@ export class Repository {
         input.amountCents,
         input.issuedAt,
         input.contingencyPeriodId ?? null
-      )
-      .run();
+      );
     if (input.wompiEventId) {
-      await this.db.prepare("UPDATE wompi_events SET created_document_id = ?, processed_at = ? WHERE id = ?").bind(id, nowIso(), input.wompiEventId).run();
+      await this.db.batch([
+        insert,
+        this.wompiDocumentCreatedStatement(input.wompiEventId, id, nowIso())
+      ]);
+    } else {
+      await insert.run();
     }
     const record = await this.getDteDocument(id);
     if (!record) {
@@ -579,6 +960,7 @@ export class Repository {
         .prepare(
           `UPDATE wompi_events
               SET created_document_id = ?, processed_at = ?,
+                  issuance_status = 'DOCUMENT_CREATED',
                   issuance_claim_id = NULL, issuance_claimed_at = NULL
             WHERE id = ? AND issuance_claim_id = ?
               AND processed_at IS NULL AND created_document_id IS NULL`
@@ -617,6 +999,26 @@ export class Repository {
     }
     await this.indexDteDocument(record);
     return record;
+  }
+
+  async markWompiDocumentCreated(wompiEventId: string, documentId: string): Promise<void> {
+    await this.wompiDocumentCreatedStatement(wompiEventId, documentId, nowIso()).run();
+  }
+
+  private wompiDocumentCreatedStatement(
+    wompiEventId: string,
+    documentId: string,
+    processedAt: string
+  ) {
+    return this.db
+      .prepare(
+        `UPDATE wompi_events
+         SET created_document_id = ?,
+             processed_at = ?,
+             issuance_status = 'DOCUMENT_CREATED'
+         WHERE id = ?`
+      )
+      .bind(documentId, processedAt, wompiEventId);
   }
 
   async markWompiEventProcessed(id: string): Promise<void> {
@@ -1379,12 +1781,33 @@ export class Repository {
     return Boolean(row);
   }
 
-  // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
-  // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
+  // CDE con transmisión diferida (MH no disponible al emitir) y reconstrucciones
+  // Wompi que pudieron quedar SIGNED antes de transmitir: el cron de 15 minutos los
+  // recupera en orden de emisión. Lee por el índice idx_dte_documents_status.
   async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
       .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL AND fiscal_operation_claim_id IS NULL ORDER BY created_at ASC LIMIT ?")
       .bind("SIGNED", Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .all<DteDocumentRecord>()
+      .then((result) => result.results ?? []);
+  }
+
+  async listAcceptedWompiDocumentsMissingFinalization(limit = 100): Promise<DteDocumentRecord[]> {
+    return this.db
+      .prepare(
+        `SELECT d.* FROM dte_documents d
+         WHERE d.status = 'ACCEPTED'
+           AND d.wompi_event_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM audit_logs a
+             WHERE a.action = 'DTE_ACCEPTED_FINALIZED'
+               AND a.entity_type = 'dte_document'
+               AND a.entity_id = d.id
+           )
+         ORDER BY COALESCE(d.accepted_at, d.created_at) ASC, d.id ASC
+         LIMIT ?`
+      )
+      .bind(Math.min(Math.max(Math.trunc(limit), 1), 500))
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
   }
@@ -1626,6 +2049,54 @@ export class Repository {
     return Boolean(row);
   }
 
+  // Idempotent lifecycle evidence. The existence check and insert live in one
+  // SQLite/D1 statement so concurrent queue deliveries cannot both observe an
+  // absent logical audit key and append duplicate evidence.
+  async createAuditIfAbsent(input: {
+    actorType?: "SYSTEM" | "USER";
+    actorId?: string | null;
+    action: string;
+    entityType: string;
+    entityId: string;
+    summary: string;
+    metadata?: unknown;
+    actorIp?: string | null;
+    actorContext?: unknown;
+  }): Promise<boolean> {
+    const actorIp = normalizeAuditIp(
+      input.actorIp ?? this.auditContext?.ip ?? null
+    );
+    const actorContext = serializeAuditContext(
+      input.actorContext ?? this.auditContext?.context
+    );
+    const result = await this.db
+      .prepare(
+        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM audit_logs
+           WHERE action = ? AND entity_type = ? AND entity_id = ?
+         )`
+      )
+      .bind(
+        newId("audit"),
+        input.actorType ?? "SYSTEM",
+        input.actorId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+        actorIp,
+        actorContext,
+        input.action,
+        input.entityType,
+        input.entityId
+      )
+      .run();
+    return Number(result.meta?.changes ?? 0) === 1;
+  }
+
   async listAudit(entityType?: string, entityId?: string): Promise<Array<Record<string, unknown>>> {
     // LEFT JOIN users on actor_id so USER rows resolve to a display name/email while
     // SYSTEM rows (and USER rows whose account was later deleted) fall through to NULL.
@@ -1789,6 +2260,131 @@ export class Repository {
         input.providerDeliveryId ?? null
       )
       .run();
+  }
+
+  // Claim one receipt type before contacting the external provider. A current
+  // PENDING claim and SENT evidence both block a competing delivery. FAILED or
+  // lease-expired PENDING work reuses the same row and provider identity. Legacy
+  // PENDING rows have no attempt timestamp and deliberately remain blocked for
+  // manual review: we cannot know whether their provider request succeeded.
+  async claimEmailDelivery(input: {
+    documentId: string;
+    toEmail: string;
+    emailType: string;
+    documentStatusAtSend: string;
+  }): Promise<{ id: string; idempotencyKey: string; claimToken: string } | null> {
+    const id = newId("email");
+    const claimToken = newId("email_claim");
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - EMAIL_DELIVERY_CLAIM_LEASE_MS).toISOString();
+    const idempotencyKey = await emailDeliveryIdempotencyKey(
+      input.documentId,
+      input.emailType,
+      input.documentStatusAtSend
+    );
+    const row = await this.db
+      .prepare(
+        `INSERT INTO email_deliveries (
+           id, document_id, to_email, status, provider_response_json,
+           email_type, document_status_at_send, claim_attempted_at,
+           idempotency_key, claim_token
+         )
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?
+         WHERE NOT EXISTS (
+           SELECT 1 FROM email_deliveries
+           WHERE document_id = ? AND email_type = ? AND document_status_at_send = ?
+             AND (
+               status = 'SENT'
+               OR (
+                 status = 'PENDING'
+                 AND (claim_attempted_at IS NULL OR claim_attempted_at >= ?)
+               )
+             )
+         )
+         ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL
+         DO UPDATE SET
+           to_email = excluded.to_email,
+           status = 'PENDING',
+           provider_response_json = '{}',
+           document_status_at_send = excluded.document_status_at_send,
+           claim_attempted_at = excluded.claim_attempted_at,
+           claim_token = excluded.claim_token
+         WHERE email_deliveries.status = 'FAILED'
+            OR (
+              email_deliveries.status = 'PENDING'
+              AND email_deliveries.claim_attempted_at IS NOT NULL
+              AND email_deliveries.claim_attempted_at < ?
+            )
+         RETURNING id, idempotency_key, claim_token`
+      )
+      .bind(
+        id,
+        input.documentId,
+        input.toEmail,
+        input.emailType,
+        input.documentStatusAtSend,
+        claimedAt,
+        idempotencyKey,
+        claimToken,
+        input.documentId,
+        input.emailType,
+        input.documentStatusAtSend,
+        staleBefore,
+        staleBefore
+      )
+      .first<{ id: string; idempotency_key: string; claim_token: string }>();
+    return row ? {
+      id: row.id,
+      idempotencyKey: row.idempotency_key,
+      claimToken: row.claim_token
+    } : null;
+  }
+
+  // Finalize the exact PENDING row won above. This deliberately updates instead of
+  // appending a second delivery row, keeping the claim and its outcome one evidence
+  // record even when the provider fails.
+  async finalizeEmailDeliveryClaim(
+    id: string,
+    claimToken: string,
+    input: {
+      status: "SENT" | "FAILED";
+      providerResponse?: unknown;
+      emailType: string;
+      documentStatusAtSend: string;
+      templateVersion?: string | null;
+      pdfRendererVersion?: string | null;
+      pdfSha256?: string | null;
+      dteJsonSha256?: string | null;
+      providerDeliveryId?: string | null;
+    }
+  ): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE email_deliveries
+         SET status = ?, provider_response_json = ?, sent_at = ?,
+             email_type = ?, document_status_at_send = ?, template_version = ?,
+             pdf_renderer_version = ?, pdf_sha256 = ?, dte_json_sha256 = ?,
+             provider_delivery_id = ?
+         WHERE id = ? AND status = 'PENDING' AND claim_token = ?`
+      )
+      .bind(
+        input.status,
+        JSON.stringify(input.providerResponse ?? {}),
+        input.status === "SENT" ? nowIso() : null,
+        input.emailType,
+        input.documentStatusAtSend,
+        input.templateVersion ?? null,
+        input.pdfRendererVersion ?? null,
+        input.pdfSha256 ?? null,
+        input.dteJsonSha256 ?? null,
+        input.providerDeliveryId ?? null,
+        id,
+        claimToken
+      )
+      .run();
+    if (Number(result.meta?.changes ?? 0) !== 1) {
+      throw new Error(`La reserva de correo ${id} ya no está pendiente`);
+    }
   }
 
   // Rol del usuario objetivo para los guards de gestión de usuarios (un ADMIN nunca
@@ -2261,13 +2857,22 @@ export class Repository {
     // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
     const rows = await this.db
       .prepare(
-        `SELECT id, transaction_id, environment, received_at FROM wompi_events
+        `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at FROM wompi_events
          WHERE created_document_id IS NULL
-           AND processed_at IS NULL
            AND result = 'ExitosaAprobada'
-           AND received_at < ?`
+           AND (
+             (
+               processed_at IS NULL
+               AND issuance_status IS NULL
+               AND received_at < ?
+             )
+             OR (
+               issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+               AND COALESCE(issuance_last_attempt_at, received_at) < ?
+             )
+           )`
       )
-      .bind(cutoffIso)
+      .bind(cutoffIso, cutoffIso)
       .all<Record<string, unknown>>();
     return rows.results ?? [];
   }
@@ -2306,16 +2911,15 @@ export class Repository {
   // most `limit` rows via a (timestamp, id) keyset cursor so a month with more rows
   // than fit in memory at once is still read in bounded chunks — never an unpaged
   // full-table scan. `cursor` is the (timestamp, id) of the last row from the
-  // previous page, or null for the first page. The timestamp column is per-table:
-  // wompi_events has no created_at column, only received_at (migrations/0001_init.sql);
-  // every other windowed table uses created_at.
+  // previous page, or null for the first page. Mutable wompi_events are intentionally
+  // excluded from this received-month path and exported as a full snapshot below.
   async listRowsCreatedBetween(
     table: RetentionTable,
     range: { startIso: string; endIso: string },
     cursor: RetentionCursor | null,
     limit = RETENTION_PAGE_SIZE
   ): Promise<Array<Record<string, unknown>>> {
-    const column = retentionTimestampColumn(table);
+    const column = "created_at";
     const conditions = [`${column} >= ?`, `${column} < ?`];
     const bindings: Array<string | number> = [range.startIso, range.endIso];
     if (cursor) {
@@ -2330,18 +2934,42 @@ export class Repository {
     return table === "audit_logs" ? redactSensitiveAuditRows(results) : results;
   }
 
-  // Full-snapshot paged reads for the small contingency tables (no created_at
-  // window — the brief asks for a full snapshot, simpler than windowing).
+  // Full-snapshot paged reads for mutable Wompi lifecycle state and the small
+  // contingency tables. Wompi has received_at rather than created_at, but retains
+  // the same bounded (timestamp, id) cursor shape.
   async listAllRowsPaged(table: RetentionSnapshotTable, cursor: RetentionCursor | null, limit = RETENTION_PAGE_SIZE): Promise<Array<Record<string, unknown>>> {
+    const column = retentionSnapshotTimestampColumn(table);
     const conditions: string[] = [];
     const bindings: Array<string | number> = [];
     if (cursor) {
-      conditions.push("(created_at, id) > (?, ?)");
+      conditions.push(`(${column}, id) > (?, ?)`);
       bindings.push(cursor.createdAt, cursor.id);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const rows = await this.db
-      .prepare(`SELECT * FROM ${table} ${where} ORDER BY created_at ASC, id ASC LIMIT ?`)
+      .prepare(`SELECT * FROM ${table} ${where} ORDER BY ${column} ASC, id ASC LIMIT ?`)
+      .bind(...bindings, limit)
+      .all<Record<string, unknown>>();
+    return rows.results ?? [];
+  }
+
+  async listDocumentSequencesPaged(
+    cursor: DocumentSequenceRetentionCursor | null,
+    limit = RETENTION_PAGE_SIZE
+  ): Promise<Array<Record<string, unknown>>> {
+    const conditions: string[] = [];
+    const bindings: Array<string | number> = [];
+    if (cursor) {
+      conditions.push("(environment, control_prefix) > (?, ?)");
+      bindings.push(cursor.environment, cursor.controlPrefix);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = await this.db
+      .prepare(
+        `SELECT environment, control_prefix, next_value
+         FROM document_sequences ${where}
+         ORDER BY environment ASC, control_prefix ASC LIMIT ?`
+      )
       .bind(...bindings, limit)
       .all<Record<string, unknown>>();
     return rows.results ?? [];
@@ -2546,6 +3174,51 @@ export class Repository {
       .first<{ id: string }>();
     return Boolean(updated);
   }
+}
+
+function wompiDocumentIdentifiers(event: WompiEventRecord): WompiDocumentIdentifiers | null {
+  const reservation = [
+    event.control_prefix,
+    event.control_sequence,
+    event.reserved_numero_control,
+    event.reserved_codigo_generacion
+  ];
+  if (reservation.every((value) => value === null)) {
+    return null;
+  }
+  if (reservation.some((value) => value === null)) {
+    throw new Error("El evento Wompi contiene una reserva parcial de identificadores");
+  }
+
+  const sequence = event.control_sequence as number;
+  const prefix = event.control_prefix as string;
+  const expectedNumeroControl = numeroControl(prefix, sequence);
+  if (event.reserved_numero_control !== expectedNumeroControl) {
+    throw new Error("La reserva Wompi contiene un número de control inconsistente");
+  }
+
+  return {
+    sequence,
+    numeroControl: expectedNumeroControl,
+    codigoGeneracion: event.reserved_codigo_generacion as string
+  };
+}
+
+function wompiDocumentIdentifiersForPrefix(
+  event: WompiEventRecord,
+  requestedPrefix: string
+): WompiDocumentIdentifiers | null {
+  const identifiers = wompiDocumentIdentifiers(event);
+  if (!identifiers) {
+    return null;
+  }
+  if (
+    event.control_prefix !== requestedPrefix ||
+    identifiers.numeroControl !== numeroControl(requestedPrefix, identifiers.sequence)
+  ) {
+    throw new Error("El prefijo de control solicitado no coincide con la reserva Wompi existente");
+  }
+  return identifiers;
 }
 
 function normalizeDocumentListLimit(value: number | undefined): number {

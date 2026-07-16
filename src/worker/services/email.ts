@@ -251,6 +251,7 @@ export class EmailService {
         from: payload.from,
         to: payload.to,
         subject: payload.subject,
+        ...(payload.idempotencyKey ? { headers: providerIdentityHeaders(payload.idempotencyKey) } : {}),
         text: payload.text,
         ...(payload.html ? { html: payload.html } : {}),
         ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
@@ -300,6 +301,13 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unk
   return {
     provider: "http-email",
     response: parsed
+  };
+}
+
+function providerIdentityHeaders(idempotencyKey: string): Record<string, string> {
+  return {
+    "Idempotency-Key": idempotencyKey,
+    "Message-ID": `<${idempotencyKey}@example-worker.invalid>`
   };
 }
 

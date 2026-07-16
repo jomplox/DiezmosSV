@@ -5,13 +5,13 @@ import { DocumentSchemaValidationError } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
-import { Repository } from "../storage/repository";
+import { legacyIssuanceAttemptId, Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
-import { EmailService } from "./email";
+import { EmailService, type EmailDeliveryResult } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
@@ -44,9 +44,7 @@ export class WompiIntentQuarantinedError extends Error {
   readonly code = "wompi_intent_quarantined";
 
   constructor() {
-    super(
-      "El evento Wompi está en cuarentena porque no coincide con una intención lista."
-    );
+    super(WOMPI_INTENT_QUARANTINED_MESSAGE);
     this.name = "WompiIntentQuarantinedError";
   }
 }
@@ -57,6 +55,11 @@ class PostAcceptFinalizationOwnershipError extends Error {
     this.name = "PostAcceptFinalizationOwnershipError";
   }
 }
+
+const WOMPI_INTENT_QUARANTINED_MESSAGE =
+  "El evento Wompi está en cuarentena porque no coincide con una intención lista.";
+const WOMPI_INVALID_DONOR_DUI_MESSAGE =
+  "Los datos del donante contienen un DUI inválido.";
 
 // Estados TERMINALES de un CDE: un veredicto de MH ya sellado (ACCEPTED/REJECTED) o una
 // invalidación. Una reentrega de cola NUNCA debe re-firmar/re-transmitir un documento en
@@ -100,7 +103,12 @@ export class IssuancePipeline {
         }
         throw error;
       }
-      const requeues = await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
+      const issuanceEpoch = typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
+        ? event.issuance_last_attempt_at
+        : null;
+      const requeues = issuanceEpoch
+        ? await this.repo.countAuditEntriesSince("WOMPI_EVENT_REQUEUED", eventId, issuanceEpoch)
+        : await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
         if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
@@ -124,35 +132,54 @@ export class IssuancePipeline {
         });
         continue;
       }
-      await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId });
-      await this.repo.createAudit({
+      const attemptId = await this.repo.claimStalledWompiIssuanceAttempt(
+        eventId,
+        typeof event.issuance_attempt_id === "string" ? event.issuance_attempt_id : null,
+        cutoff
+      );
+      if (!attemptId) {
+        continue;
+      }
+      await this.env.ISSUANCE_QUEUE.send({ wompiEventId: eventId, issuanceAttemptId: attemptId });
+      await this.repo.createWompiAttemptAudit({
+        wompiEventId: eventId,
+        attemptId,
         action: "WOMPI_EVENT_REQUEUED",
-        entityType: "wompi_event",
-        entityId: eventId,
         summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora"
       });
     }
   }
 
-  async processWompiEvent(wompiEventId: string): Promise<DteDocumentRecord | null> {
+  async processWompiEvent(
+    wompiEventId: string,
+    issuanceAttemptId?: string
+  ): Promise<DteDocumentRecord | null> {
     const event = await this.repo.getWompiEventById(wompiEventId);
     if (!event) {
       throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
     }
+    const activeAttemptId = issuanceAttemptId
+      ?? event.issuance_attempt_id
+      ?? legacyIssuanceAttemptId(wompiEventId);
+    if (!issuanceAttemptId) {
+      await this.repo.markWompiIssuanceProcessing(
+        wompiEventId,
+        activeAttemptId,
+        event.issuance_attempt_id === null
+      );
+    }
     assertDeploymentAllowsAmbiente(this.env, event.environment);
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
-      if (existing.status === "ACCEPTED" && !existing.post_accept_finalized_at) {
-        await this.finalizeAcceptedDocument(existing);
-        return (await this.repo.getDteDocument(existing.id)) ?? existing;
-      }
-      return existing;
+      await this.repo.markWompiDocumentCreated(wompiEventId, existing.id);
+      return this.processDteDocument(existing.id);
     }
     if (event.processed_at) {
       return null;
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     if (!isApprovedDonation(payload)) {
+      await this.repo.markWompiIssuanceIgnored(wompiEventId);
       await this.repo.createAudit({
         action: "WOMPI_IGNORED",
         entityType: "wompi_event",
@@ -167,6 +194,10 @@ export class IssuancePipeline {
     const correlation = await this.correlateIntent(payload);
     if (correlation.kind === "quarantined") {
       await this.quarantineWompiEvent(wompiEventId, correlation);
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
+        code: "WOMPI_INTENT_QUARANTINED",
+        message: WOMPI_INTENT_QUARANTINED_MESSAGE
+      });
       return null;
     }
     const intent = correlation.kind === "ready" ? correlation.intent : null;
@@ -183,7 +214,11 @@ export class IssuancePipeline {
         action: "WOMPI_INVALID_DONOR_DUI",
         entityType: "wompi_event",
         entityId: wompiEventId,
-        summary: duiReason
+        summary: WOMPI_INVALID_DONOR_DUI_MESSAGE
+      });
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
+        code: "WOMPI_INVALID_DONOR_DUI",
+        message: WOMPI_INVALID_DONOR_DUI_MESSAGE
       });
       await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
@@ -207,6 +242,10 @@ export class IssuancePipeline {
         entityId: wompiEventId,
         summary: error.message
       });
+      await this.repo.recordWompiIssuanceFailure(wompiEventId, activeAttemptId, {
+        code: error.evidenceCode,
+        message: error.evidenceMessage
+      });
       await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
     }
@@ -215,18 +254,21 @@ export class IssuancePipeline {
       return (await this.repo.getDteDocumentByWompiEvent(wompiEventId)) ?? null;
     }
 
-    let normalDocument: Record<string, unknown>;
-    let identifiers: { codigoGeneracion: string; numeroControl: string };
     let record: DteDocumentRecord;
     try {
-      const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-      normalDocument = buildCdeDocument(payload, config, {
-        sequence,
+      const reserved = await this.repo.reserveWompiDocumentIdentifiers(
+        wompiEventId,
+        environment,
+        config.controlPrefix
+      );
+      const normalDocument = buildCdeDocument(payload, config, {
+        sequence: reserved.sequence,
+        codigoGeneracion: reserved.codigoGeneracion,
         environment,
         donorOverride,
         issuedAt
       });
-      identifiers = extractCdeIdentifiers(normalDocument);
+      const identifiers = extractCdeIdentifiers(normalDocument);
       // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook:
       // for an empresa intent the receptor name is its razón social, while natural-person
       // name/email remain the webhook values.
@@ -252,99 +294,7 @@ export class IssuancePipeline {
       await this.repo.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
       throw error;
     }
-
-    let claimId: string | null = null;
-    try {
-      assertCdeIssuerMatchesConfig(normalDocument, config);
-      const signedJws = await signMhDocument(normalDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      if (!(await this.repo.updateDocumentSigned(record.id, signedJws, record.status))) {
-        return (await this.repo.getDteDocument(record.id)) ?? record;
-      }
-      claimId = newId("fiscal");
-      if (!(await this.repo.claimDocumentTransmission(record.id, "SIGNED", signedJws, claimId))) {
-        return (await this.repo.getDteDocument(record.id)) ?? record;
-      }
-      const mhResult = await this.mh.transmitDte({
-        ambiente: environment,
-        version: 2,
-        tipoDte: "15",
-        codigoGeneracion: identifiers.codigoGeneracion,
-        signedJws
-      });
-      const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
-        status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-        sello: mhResult.selloRecibido,
-        mhEstado: mhResult.estado,
-        observaciones: mhResult.observaciones,
-        acceptedAt: mhResult.accepted ? nowIso() : null
-      });
-      if (!completed) {
-        return (await this.repo.getDteDocument(record.id)) ?? record;
-      }
-      record = (await this.repo.getDteDocument(record.id)) ?? record;
-      if (mhResult.accepted) {
-        await this.finalizeAcceptedDocument(record, {
-          intent,
-          auditAction: "DTE_ACCEPTED",
-          auditSummary: `${record.numero_control} ${mhResult.estado}`,
-          auditMetadata: mhResult.raw
-        });
-      } else {
-        await this.repo.createAudit({
-          action: "DTE_REJECTED",
-          entityType: "dte_document",
-          entityId: record.id,
-          summary: `${record.numero_control} ${mhResult.estado}`,
-          metadata: mhResult.raw
-        });
-      }
-      return record;
-    } catch (error) {
-      if (error instanceof MhPreDispatchError && claimId) {
-        // El documento ya quedó firmado con forma NORMAL antes del intento de
-        // transmisión: se difiere tal cual (nunca se reconstruye en contingencia).
-        return this.deferTransmission(record.id, claimId, String(error.message));
-      }
-      const latest = await this.repo.getDteDocument(record.id);
-      if (latest?.status === "ACCEPTED" && !latest.post_accept_finalized_at) {
-        // The fiscal verdict is durable but the intent/receipt/audit outbox is not.
-        // Propagate so queue redelivery (and the scheduled pending sweep) retries only
-        // local finalization; the terminal guard above prevents another MH dispatch.
-        throw error;
-      }
-      if (latest && isTerminalDteStatus(latest.status)) {
-        return latest;
-      }
-      if (claimId) {
-        // Dispatch began but no verdict was durable. The non-null claim is the
-        // reconciliation marker; clearing it or writing FAILED would authorize a
-        // fresh submission whose external outcome may duplicate this one.
-        throw error;
-      }
-      const failed = await this.repo.markDocumentFailed(record.id, claimId, {
-        mhEstado: "PIPELINE_ERROR",
-        observaciones: [error instanceof Error ? error.message : String(error)]
-      });
-      if (!failed) {
-        const current = await this.repo.getDteDocument(record.id);
-        if (current) return current;
-      }
-      const failureMessage = error instanceof Error ? error.message : String(error);
-      await this.repo.createAudit({
-        action: "DTE_FAILED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: failureMessage
-      });
-      await sendOperationalAlert(this.env, this.repo, {
-        kind: "DTE_FAILED",
-        title: "Fallo al emitir DTE",
-        detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
-        entityType: "dte_document",
-        entityId: record.id
-      });
-      throw error;
-    }
+    return this.processDteDocument(record.id);
   }
 
   // A REJECTED verdict is MH's judgment on the document CONTENT: retransmitting
@@ -483,6 +433,7 @@ export class IssuancePipeline {
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
+    const wompiBacked = Boolean(record.wompi_event_id);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
     let claimId: string | null = null;
     try {
@@ -520,20 +471,20 @@ export class IssuancePipeline {
       record = (await this.repo.getDteDocument(record.id)) ?? record;
       if (mhResult.accepted) {
         await this.finalizeAcceptedDocument(record, {
-          auditAction: "ADVANCED_CDE_ACCEPTED",
+          auditAction: wompiBacked ? "DTE_ACCEPTED" : "ADVANCED_CDE_ACCEPTED",
           auditSummary: `${record.numero_control} ${mhResult.estado}`,
           auditMetadata: mhResult.raw
         });
       } else {
         await this.repo.createAudit({
-          action: "ADVANCED_CDE_REJECTED",
+          action: wompiBacked ? "DTE_REJECTED" : "ADVANCED_CDE_REJECTED",
           entityType: "dte_document",
           entityId: record.id,
           summary: `${record.numero_control} ${mhResult.estado}`,
           metadata: mhResult.raw
         });
       }
-      return record;
+      return (await this.repo.getDteDocument(record.id)) ?? record;
     } catch (error) {
       if (error instanceof MhPreDispatchError && claimId) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
@@ -548,6 +499,9 @@ export class IssuancePipeline {
         throw error;
       }
       if (latest && isTerminalDteStatus(latest.status)) {
+        if (wompiBacked && latest.status === "ACCEPTED") {
+          throw error;
+        }
         return latest;
       }
       if (claimId) {
@@ -555,7 +509,13 @@ export class IssuancePipeline {
         // the row, but it must stop before another MH request is issued.
         throw error;
       }
-      const failed = await this.repo.markDocumentFailed(record.id, claimId, {
+      // A deferred row whose local validation/signing still cannot proceed must
+      // remain in the deferred sweep. Configuration can be corrected without
+      // converting the recoverable CDE into an operator-facing FAILED record.
+      if (record.status === "SIGNED" && record.transmission_deferred_at) {
+        throw error;
+      }
+      const failed = await this.repo.markDocumentFailed(record.id, null, {
         mhEstado: "ADVANCED_PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
@@ -565,14 +525,14 @@ export class IssuancePipeline {
       }
       const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
-        action: "ADVANCED_CDE_FAILED",
+        action: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
         summary: failureMessage
       });
       await sendOperationalAlert(this.env, this.repo, {
-        kind: "ADVANCED_CDE_FAILED",
-        title: "Fallo al emitir CDE avanzado",
+        kind: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
+        title: wompiBacked ? "Fallo al emitir DTE" : "Fallo al emitir CDE avanzado",
         detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
         entityType: "dte_document",
         entityId: record.id
@@ -698,6 +658,25 @@ export class IssuancePipeline {
     return { finalized, failed };
   }
 
+  async retryAcceptedWompiFinalizations(): Promise<{ finalized: number; pending: number }> {
+    const documents = await this.repo.listAcceptedWompiDocumentsMissingFinalization();
+    let finalized = 0;
+    let pending = 0;
+    for (const record of documents) {
+      try {
+        if (await this.finalizeAcceptedDocument(record)) {
+          finalized += 1;
+        } else {
+          pending += 1;
+        }
+      } catch (error) {
+        console.error("Finalización de CDE aceptado falló", record.id, error);
+        pending += 1;
+      }
+    }
+    return { finalized, pending };
+  }
+
   // Alerta operativa MH_UNAVAILABLE cuando algún CDE diferido lleva más de una hora
   // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
   // del documento más antiguo la dispara UNA sola vez por atasco.
@@ -730,7 +709,7 @@ export class IssuancePipeline {
     if (!deferred) {
       return updated;
     }
-    await this.repo.createAudit({
+    await this.repo.createAuditIfAbsent({
       action: "DTE_TRANSMISSION_DEFERRED",
       entityType: "dte_document",
       entityId: updated.id,
@@ -761,7 +740,6 @@ export class IssuancePipeline {
     if (!(await this.repo.claimDocumentPostAcceptFinalization(record.id, claimId))) {
       return false;
     }
-
     let emailDispatchStarted = false;
     try {
       const claimedRecord = await this.repo.getDteDocument(record.id);
@@ -868,6 +846,20 @@ export class IssuancePipeline {
         );
       }
 
+      if (record.wompi_event_id && !(await this.repo.ensurePostAcceptAudit({
+          auditId: `audit_post_accept_finalized_${record.id}`,
+          documentId: record.id,
+          claimId,
+          action: "DTE_ACCEPTED_FINALIZED",
+          entityType: "dte_document",
+          entityId: record.id,
+          summary: "Finalización post-aceptación completada"
+        }))) {
+        throw new PostAcceptFinalizationOwnershipError(
+          `El CDE aceptado ${record.id} perdió la propiedad antes de auditar su finalización`
+        );
+      }
+
       if (!(await this.repo.markDocumentPostAcceptFinalized(record.id, claimId))) {
         const current = await this.repo.getDteDocument(record.id);
         if (!current?.post_accept_finalized_at) {
@@ -947,53 +939,45 @@ export class IssuancePipeline {
   private async emailReceipt(
     record: DteDocumentRecord,
     beforeProviderDispatch?: () => void | Promise<void>
-  ): Promise<void> {
+  ): Promise<boolean> {
     if (!record.donor_email) {
-      await this.repo.createAudit({
+      await this.repo.createAuditIfAbsent({
         action: "EMAIL_SKIPPED",
         entityType: "dte_document",
         entityId: record.id,
         summary: "Documento sin correo del donante"
       });
-      return;
+      return true;
     }
-    const emailType = record.status === "SIGNED" && record.transmission_deferred_at ? "dteReceiptTransitorio" : "dteReceipt";
+    const emailType =
+      record.status === "SIGNED" && record.transmission_deferred_at
+        ? "dteReceiptTransitorio"
+        : "dteReceipt";
+    const deliveryClaim = await this.repo.claimEmailDelivery({
+      documentId: record.id,
+      toEmail: record.donor_email,
+      emailType,
+      documentStatusAtSend: record.status
+    });
+    if (!deliveryClaim) {
+      return this.repo.hasSentEmail(record.id, emailType);
+    }
+
+    let response: EmailDeliveryResult;
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(this.repo, this.env);
-      const response = await new EmailService(this.env, templates, branding).sendReceipt(
+      response = await new EmailService(this.env, templates, branding).sendReceipt(
         record,
         record.donor_email,
-        `dte-email:${record.id}:${emailType}`,
+        deliveryClaim.idempotencyKey,
         beforeProviderDispatch
       );
-      await this.repo.recordEmailDelivery({
-        documentId: record.id,
-        toEmail: record.donor_email,
-        status: "SENT",
-        providerResponse: response.providerResponse,
-        emailType: response.emailType,
-        documentStatusAtSend: response.documentStatusAtSend,
-        templateVersion: response.templateVersion,
-        pdfRendererVersion: response.pdfRendererVersion,
-        pdfSha256: response.pdfSha256,
-        dteJsonSha256: response.dteJsonSha256,
-        providerDeliveryId: response.providerDeliveryId
-      });
-      await this.repo.createAudit({
-        action: "EMAIL_SENT",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `Comprobante enviado a ${record.donor_email}`,
-        metadata: response
-      });
     } catch (error) {
       if (error instanceof PostAcceptFinalizationOwnershipError) {
         throw error;
       }
-      await this.repo.recordEmailDelivery({
-        documentId: record.id,
-        toEmail: record.donor_email,
+      await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
         status: "FAILED",
         providerResponse: { error: error instanceof Error ? error.message : String(error) },
         emailType,
@@ -1005,7 +989,34 @@ export class IssuancePipeline {
         entityId: record.id,
         summary: error instanceof Error ? error.message : String(error)
       });
+      return false;
     }
+
+    await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
+      status: "SENT",
+      providerResponse: response.providerResponse,
+      emailType: response.emailType,
+      documentStatusAtSend: response.documentStatusAtSend,
+      templateVersion: response.templateVersion,
+      pdfRendererVersion: response.pdfRendererVersion,
+      pdfSha256: response.pdfSha256,
+      dteJsonSha256: response.dteJsonSha256,
+      providerDeliveryId: response.providerDeliveryId
+    });
+    try {
+      await this.repo.createAudit({
+        action: "EMAIL_SENT",
+        entityType: "dte_document",
+        entityId: record.id,
+        summary: `Comprobante enviado a ${record.donor_email}`,
+        metadata: response
+      });
+    } catch (error) {
+      // The durable SENT delivery is the side-effect authority. A secondary audit
+      // failure must not turn an accepted fiscal document into retryable work.
+      console.error("Receipt delivery audit failed", record.id, error);
+    }
+    return true;
   }
 }
 

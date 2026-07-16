@@ -35,11 +35,12 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User, WompiIssuanceFailureItem } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
+import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
@@ -218,6 +219,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const renderAccountStateVersion = accountStateGuardRef.current.capture();
   const [view, setView] = useState<View>("documents");
   const [documents, setDocuments] = useState<DteDocument[]>([]);
+  const [preCdeFailures, setPreCdeFailures] = useState<WompiIssuanceFailureItem[]>([]);
+  const [preCdeFailuresError, setPreCdeFailuresError] = useState("");
+  const [preCdeFailuresLoading, setPreCdeFailuresLoading] = useState(false);
+  const preCdeFailureRequests = useRef(createLatestRequestGate());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   // Keyset cursor for the audit trail ("<created_at>|<id>"); null = no older pages.
@@ -302,6 +307,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const selected = useMemo(() => documents.find((document) => document.id === selectedId) ?? documents[0], [documents, selectedId]);
   const selectedUser = useMemo(() => users.find((candidate) => candidate.id === selectedUserId) ?? null, [users, selectedUserId]);
   const pendingInvalidation = useMemo(() => documents.find((document) => document.id === pendingInvalidationId) ?? null, [documents, pendingInvalidationId]);
+  const visiblePreCdeFailures = useMemo(
+    () => view === "failures" ? filterPreCdeFailures(preCdeFailures, debouncedQuery) : [],
+    [view, preCdeFailures, debouncedQuery]
+  );
   const filteredStatus = view === "failures" ? FAILURE_VIEW_STATUSES : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
 
@@ -354,6 +363,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     const handle = window.setTimeout(() => setDebouncedQuery(query.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [query]);
+
+  useEffect(() => {
+    if (view !== "failures") {
+      clearPreCdeFailures();
+    }
+  }, [view]);
 
   useEffect(() => {
     const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
@@ -512,8 +527,40 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return page;
   }
 
+  function clearPreCdeFailures() {
+    preCdeFailureRequests.current.invalidate();
+    setPreCdeFailures([]);
+    setPreCdeFailuresError("");
+    setPreCdeFailuresLoading(false);
+  }
+
+  async function fetchPreCdeFailures() {
+    const request = preCdeFailureRequests.current.start();
+    request.commit(() => {
+      setPreCdeFailuresError("");
+      setPreCdeFailuresLoading(true);
+    });
+    try {
+      const result = await api<{ failures: WompiIssuanceFailureItem[] }>("/api/wompi-events/issuance-failures", token);
+      request.commit(() => {
+        setPreCdeFailures(result.failures);
+        setPreCdeFailuresError("");
+        setPreCdeFailuresLoading(false);
+      });
+    } catch (error) {
+      request.commit(() => {
+        setPreCdeFailures([]);
+        setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+        setPreCdeFailuresLoading(false);
+      });
+    }
+  }
+
   async function refresh() {
-    await fetchDocumentPage();
+    await Promise.all([
+      fetchDocumentPage(),
+      view === "failures" ? fetchPreCdeFailures() : Promise.resolve()
+    ]);
     if (view === "audit") {
       const auditPage = await accountApi<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50");
       setAudit(auditPage.audit);
@@ -567,6 +614,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     accountStateGuardRef.current.advance();
     setView("documents");
     setDocuments([]);
+    clearPreCdeFailures();
     setSelectedId(null);
     setAudit([]);
     setAuditCursor(null);
@@ -677,6 +725,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setToken("");
     setUser(null);
     setAuthNotice("");
+  }
+
+  async function retryPreCdeFailure(id: string) {
+    await runAction(`pre-cde-retry:${id}`, async () => {
+      await api(`/api/wompi-events/${id}/retry`, token, { method: "POST", body: {} });
+      setToast("Reintento de creación en cola");
+      await refresh();
+    });
   }
 
   async function createTestDte() {
@@ -1158,6 +1214,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
+  function changeView(nextView: View) {
+    if (nextView === "failures" && view !== "failures") {
+      setPreCdeFailuresLoading(true);
+    }
+    if (nextView !== "failures") {
+      clearPreCdeFailures();
+    }
+    setView(nextView);
+  }
+
   return (
     <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
       <aside className={sidebarCollapsed ? "sidebar collapsed" : "sidebar"}>
@@ -1187,7 +1253,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
-              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => setView(item.id)} aria-label={item.label} title={item.label}>
+              <button key={item.id} className={view === item.id ? "active" : ""} onClick={() => changeView(item.id)} aria-label={item.label} title={item.label}>
                 <Icon size={18} />
                 <span className="nav-label">{item.label}</span>
               </button>
@@ -1253,14 +1319,28 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                   <RefreshCw size={17} />
                 </button>
               </div>
-              <Stats documents={documents} onlyFailed={view === "failures"} />
+              {view === "failures" && (
+                <PreCdeFailuresPanel
+                  items={visiblePreCdeFailures}
+                  error={preCdeFailuresError}
+                  loading={preCdeFailuresLoading}
+                  busy={busy}
+                  canRetry={can(user, "OPERATOR")}
+                  onRetry={retryPreCdeFailure}
+                />
+              )}
+              <Stats documents={documents} onlyFailed={view === "failures"} preCdeFailureCount={visiblePreCdeFailures.length} />
               <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
               <DocumentListFooter
                 count={documents.length}
                 hasMore={documentsHasMore}
                 loading={documentsLoadingMore}
                 onLoadMore={loadMoreDocuments}
-                emptyMessage={documentListEmptyMessage(view === "failures" ? "failures" : "documents", query)}
+                emptyMessage={
+                  view === "failures" && (visiblePreCdeFailures.length > 0 || preCdeFailuresError)
+                    ? "Sin CDE emitidos fallidos o rechazados"
+                    : documentListEmptyMessage(view === "failures" ? "failures" : "documents", query, preCdeFailuresLoading)
+                }
               />
             </div>
               <DetailPanel
@@ -4137,9 +4217,82 @@ function AuthScreen({
   );
 }
 
-function Stats({ documents, onlyFailed }: { documents: DteDocument[]; onlyFailed?: boolean }) {
+function PreCdeFailuresPanel({
+  items,
+  error,
+  loading,
+  busy,
+  canRetry,
+  onRetry
+}: {
+  items: WompiIssuanceFailureItem[];
+  error: string;
+  loading: boolean;
+  busy: string;
+  canRetry: boolean;
+  onRetry: (id: string) => Promise<void>;
+}) {
+  if (items.length === 0 && !error && !loading) {
+    return null;
+  }
+
+  return (
+    <section className="pre-cde-failures" aria-labelledby="pre-cde-failures-title" aria-busy={loading}>
+      <div className="pre-cde-failures-heading">
+        <h2 id="pre-cde-failures-title">Pagos sin CDE creado</h2>
+        <p>Estos registros todavía no son comprobantes emitidos.</p>
+      </div>
+      {loading && <p className="pre-cde-failure-loading" role="status">Revisando pagos sin CDE creado…</p>}
+      {error && <p className="error pre-cde-failure-error" role="alert">{error}</p>}
+      {items.length > 0 && (
+        <div className="pre-cde-failure-grid">
+          {items.map((item) => {
+            const retryQueued = item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING";
+            return (
+              <article className="pre-cde-failure-card" key={item.id}>
+                <span className="status pre-cde">CDE NO CREADO</span>
+                <strong>{item.donor_name ?? "Donante sin nombre"}</strong>
+                <span>{item.donor_email ?? "Correo no disponible"}</span>
+                <div className="pre-cde-failure-meta">
+                  <span>${(item.amount_cents / 100).toFixed(2)}</span>
+                  <span>Pago recibido: {formatDateTime(item.received_at)}</span>
+                  <span>Intentos: {item.issuance_attempt_count}</span>
+                </div>
+                <p>{item.issuance_error_message}</p>
+                <span>
+                  {item.reserved_numero_control
+                    ? `Número reservado: ${item.reserved_numero_control}`
+                    : "Número aún no asignado"}
+                </span>
+                {canRetry && (
+                  <button
+                    type="button"
+                    disabled={retryQueued || busy === `pre-cde-retry:${item.id}`}
+                    onClick={() => void onRetry(item.id)}
+                  >
+                    {retryQueued ? "Reintento en cola" : "Reintentar creación"}
+                  </button>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function Stats({
+  documents,
+  onlyFailed,
+  preCdeFailureCount = 0
+}: {
+  documents: DteDocument[];
+  onlyFailed?: boolean;
+  preCdeFailureCount?: number;
+}) {
   const counts = countByStatus(documents);
-  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0)} tone="bad" />;
+  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + preCdeFailureCount} tone="bad" />;
   if (onlyFailed) {
     return (
       <>
@@ -4878,7 +5031,7 @@ function delay(ms: number): Promise<void> {
 
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
-  failures: "CDE con errores o rechazos que requieren su atención.",
+  failures: "CDE con errores, rechazos o pagos sin comprobante que requieren su atención.",
   contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",
   audit: "Historial de todas las acciones realizadas en el panel.",
   analytics: "Tendencias de las donaciones en línea (carril Wompi).",
@@ -4891,8 +5044,14 @@ export function viewSubtitle(view: View): string {
   return VIEW_SUBTITLES[view];
 }
 
-export function documentListEmptyMessage(view: "documents" | "failures", query: string): string {
+export function documentListEmptyMessage(
+  view: "documents" | "failures",
+  query: string,
+  preCdeFailuresLoading = false
+): string {
+  if (view === "failures" && preCdeFailuresLoading) return "Revisando pagos sin CDE creado…";
   if (view === "failures" && query.trim() === "") return "Sin fallos pendientes. Todo en orden.";
+  if (view === "failures") return "No hay CDE ni pagos sin comprobante que coincidan con la búsqueda.";
   return "No hay CDE que coincidan con la búsqueda o el filtro.";
 }
 

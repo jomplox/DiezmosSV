@@ -32,6 +32,32 @@ describe("DTE builders", () => {
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
   });
 
+  it("uses a reserved generation code for a Wompi CDE", () => {
+    const document = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
+      sequence: 31,
+      codigoGeneracion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    });
+
+    expect((document.identificacion as Record<string, unknown>).codigoGeneracion)
+      .toBe("AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA");
+  });
+
+  it("builds a schema-valid CDE for cent amounts that are not binary-exact", () => {
+    const document = buildCdeDocument(
+      { ...wompiSample, Monto: "1.11" } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-07-13T16:06:23.4101468-06:00")
+      }
+    ) as Record<string, any>;
+
+    expect(document.cuerpoDocumento[0].valorUni).toBe(1.11);
+    expect(document.cuerpoDocumento[0].valor).toBe(1.11);
+    expect(document.resumen.valorTotal).toBe(1.11);
+    expect(document.resumen.pagos[0].montoPago).toBe(1.11);
+  });
+
   it("pins the CDE descripcion to DONACIÓN even when the Wompi link carries a product name", () => {
     const document = buildCdeDocument(
       { ...wompiSample, EnlacePago: { ...wompiSample.EnlacePago, NombreProducto: "Testing" } } as WompiWebhook,
@@ -51,6 +77,28 @@ describe("DTE builders", () => {
     ) as Record<string, any>;
 
     expect(document.cuerpoDocumento[0].descripcion).toBe("DONACIÓN");
+  });
+
+  it("bypasses final validation only for direct template previews", () => {
+    const invalidInput = {
+      donorName: "Vista previa",
+      donorDocument: "SIN-DOCUMENTO",
+      donorDocumentType: "99",
+      amount: "1.11"
+    };
+    const options = {
+      sequence: 3,
+      environment: "00" as const,
+      issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+    };
+
+    const preview = buildDirectCdeDocument(invalidInput, emisorConfig, {
+      ...options,
+      templatePreview: true
+    }) as Record<string, any>;
+
+    expect(preview.receptor.tipoDocumento).toBe("99");
+    expect(() => buildDirectCdeDocument(invalidInput, emisorConfig, options)).toThrow(/CAT-022/i);
   });
 
   it("builds a CDE for real payment-link payloads without document or address", () => {
@@ -536,7 +584,8 @@ describe("DTE builders", () => {
       issued_at: "2026-06-02T20:05:20.742Z",
       accepted_at: "2026-06-02T20:06:20.742Z",
       contingency_period_id: null,
-    transmission_deferred_at: null,
+      transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-02T20:05:20.742Z",
       updated_at: "2026-06-02T20:06:20.742Z"
     } satisfies DteDocumentRecord;

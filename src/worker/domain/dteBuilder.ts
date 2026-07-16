@@ -18,6 +18,7 @@ import {
 import { assertValidDui, cleanDui, formatDui, isDuiDocumentType } from "../../shared/dui";
 import { validateCde, validateInvalidacion } from "./schema";
 import { amountCents, ambienteFromWompi, donorName } from "./wompi";
+import { OperatorSafeIssuanceError } from "./operatorSafeIssuanceError";
 
 // Receptor fields lifted from a correlated donation intent (donor-checkout). When
 // present they replace the fallback receptor derived from the raw Wompi payload,
@@ -61,6 +62,7 @@ const GIFT_TYPE_APENDICE_LABEL: Record<DonationGiftType, string> = {
 
 interface CdeBuildOptions {
   sequence: number;
+  codigoGeneracion?: string;
   environment?: Ambiente;
   issuedAt?: Date;
   donorOverride?: IntentDonorOverride;
@@ -176,7 +178,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       ambiente,
       tipoDte: "15",
       numeroControl: numeroControl(config.controlPrefix, options.sequence),
-      codigoGeneracion: generationCode(),
+      codigoGeneracion: options.codigoGeneracion ?? generationCode(),
       // Siempre modelo 1 (previo): el CDE no participa del evento de contingencia
       // (Anexo, campo 35), así que el modelo diferido (2) nunca aplica al tipo 15.
       tipoModelo: 1,
@@ -252,9 +254,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
         : [])
     ]
   };
-  validateCdeDui(document);
-  validateCdeCatalogs(document);
-  validateCde(document);
+  validateBuiltCde(document);
   return document;
 }
 
@@ -342,9 +342,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
     ]
   };
   if (!options.templatePreview) {
-    validateCdeDui(document);
-    validateCdeCatalogs(document);
-    validateCde(document);
+    validateBuiltCde(document);
   }
   return document;
 }
@@ -374,9 +372,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     tipoMoneda: "USD"
   };
   document.emisor = cdeEmisorFromConfig(config);
-  validateCdeDui(document);
-  validateCdeCatalogs(document);
-  validateCde(document);
+  validateBuiltCde(document);
   return document;
 }
 
@@ -495,6 +491,12 @@ function intentReceptorDireccion(
   return null;
 }
 
+function validateBuiltCde(document: Record<string, unknown>): void {
+  validateCdeDui(document);
+  validateCdeCatalogs(document);
+  validateCde(document);
+}
+
 function validateCdeDui(document: Record<string, unknown>): void {
   const receptor = isRecord(document.receptor) ? document.receptor : {};
   if (isDuiDocumentType(receptor.tipoDocumento)) {
@@ -536,7 +538,10 @@ function validateCdeCatalogs(document: Record<string, unknown>): void {
 
 function assertCatalogField(label: string, catalogName: string, value: unknown, isValid: (value: unknown) => boolean): void {
   if (!isValid(value)) {
-    throw new Error(`CDE ${label} debe existir en el catálogo ${catalogName}: ${displayValue(value)}`);
+    throw new OperatorSafeIssuanceError(
+      "ISSUANCE_ERROR",
+      `CDE ${label} debe existir en el catálogo ${catalogName}.`
+    );
   }
 }
 
@@ -549,10 +554,6 @@ function assertOptionalCatalogField(label: string, catalogName: string, value: u
 
 function firstArrayRecord(value: unknown): Record<string, unknown> | null {
   return Array.isArray(value) && isRecord(value[0]) ? value[0] : null;
-}
-
-function displayValue(value: unknown): string {
-  return value == null ? "missing" : String(value);
 }
 
 function centsToAmount(cents: number): number {

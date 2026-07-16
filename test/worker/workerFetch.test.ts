@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import wompiSample from "../../examples/wompi-webhook.sample.json";
+import { buildCdeDocument } from "../../src/worker/domain/dteBuilder";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import {
@@ -12,11 +14,12 @@ import {
   WompiIntentQuarantinedError
 } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
+import { EmailService } from "../../src/worker/services/email";
 import { MhClient } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
-import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
+import type { DteDocumentRecord, Env, IssuanceMessage, WompiWebhook } from "../../src/worker/types";
 
 const nativeCrypto = crypto;
 
@@ -160,6 +163,402 @@ describe("static document security policy", () => {
     expect(response).toBe(assetResponse);
     expect(response.headers.has("X-Frame-Options")).toBe(false);
     expect(response.headers.get("ETag")).toBe('"script-v1"');
+  });
+});
+
+describe("Wompi document identifier reservation", () => {
+  it("returns the same identifiers without consuming a second sequence", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const identifiers = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+    const repeated = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+
+    expect(identifiers).toMatchObject({
+      sequence: 1,
+      numeroControl: "DTE-15-M001P004-000000000000001"
+    });
+    expect(repeated).toEqual(identifiers);
+    expect(db.nextSequence).toBe(2);
+  });
+
+  it("normalizes a lowercase punctuated control prefix before reserving", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const identifiers = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "m001-p004");
+
+    expect(identifiers.numeroControl).toBe("DTE-15-M001P004-000000000000001");
+  });
+
+  it("normalizes the direct allocator prefix identically", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(db as unknown as D1Database);
+
+    await repo.nextControlSequence("00", "m001-p004");
+
+    expect(db.sequencePrefixes).toEqual(["M001P004"]);
+  });
+
+  it("rejects prefix drift after identifiers have already been reserved", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    const reserved = await repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004");
+
+    await expect(
+      repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P005")
+    ).rejects.toThrow(/prefijo/i);
+    await expect(
+      repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "m001-p004")
+    ).resolves.toEqual(reserved);
+    expect(db.wompiEvents[0]).toMatchObject({
+      control_prefix: "M001P004",
+      reserved_numero_control: reserved.numeroControl,
+      reserved_codigo_generacion: reserved.codigoGeneracion
+    });
+    expect(db.nextSequence).toBe(2);
+  });
+
+  it("rejects a control prefix that does not normalize to eight characters", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "short")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+
+  it("rejects an environment that differs from the Wompi event", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation());
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "01", "M001P004")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+
+  it("rejects a partial identifier reservation", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation({ control_prefix: "M001P004" }));
+    const repo = new Repository(db as unknown as D1Database);
+
+    await expect(repo.reserveWompiDocumentIdentifiers("wompi_1", "00", "M001P004")).rejects.toThrow();
+    expect(db.nextSequence).toBe(1);
+  });
+});
+
+describe("Wompi issuance failure recovery API", () => {
+  const authorization = { Authorization: "Bearer test-token" };
+  const safeOperationalError = {
+    error: "wompi_issuance_operation_failed",
+    message: "No se pudo completar la operación de emisión. Intente de nuevo."
+  };
+
+  function unsafeOperationalError(): Error {
+    return new Error(
+      `FORBIDDEN_SENTINEL Bearer sk-live-secret https://internal.example/retry\n${"x".repeat(1_200)}\n    at retryIssuance (worker.ts:1:1)`
+    );
+  }
+
+  function failedWompiEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return wompiEventForReservation({
+      id: "wompi_failed",
+      transaction_id: "transaction_failed",
+      amount_cents: 111,
+      donor_name: "Example Person",
+      donor_email: "donor@example.org",
+      raw_body: JSON.stringify({ donorDocument: "secret" }),
+      headers_json: JSON.stringify({ authorization: "secret" }),
+      received_at: "2026-07-13T22:06:32.756Z",
+      processed_at: "2026-07-13T22:06:52.000Z",
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_count: 4,
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
+      issuance_failed_at: "2026-07-13T22:06:49.000Z",
+      issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
+      reserved_numero_control: "DTE-15-M001P004-000000000000031",
+      ...overrides
+    });
+  }
+
+  function expectedFailureItem(
+    status = "DEAD_LETTERED",
+    overrides: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      id: "wompi_failed",
+      environment: "00",
+      amount_cents: 111,
+      donor_name: "Example Person",
+      donor_email: "donor@example.org",
+      received_at: "2026-07-13T22:06:32.756Z",
+      issuance_status: status,
+      issuance_attempt_count: 4,
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
+      issuance_failed_at: "2026-07-13T22:06:49.000Z",
+      issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
+      reserved_numero_control: "DTE-15-M001P004-000000000000031",
+      ...overrides
+    };
+  }
+
+  it("requires authentication before listing or looking up a retry target", async () => {
+    const db = new InMemoryD1();
+    db.wompiEvents.push(failedWompiEvent());
+
+    const list = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures"),
+      env(db)
+    );
+    const retry = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", { method: "POST" }),
+      env(db)
+    );
+
+    expect(list.status).toBe(401);
+    expect(retry.status).toBe(401);
+    expect(db.wompiIssuanceFailureLookupCount).toBe(0);
+    expect(db.wompiIssuanceRetryClaimCount).toBe(0);
+  });
+
+  it("lets a VIEWER list only the exact allowlisted unresolved failure shape", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.wompiEvents.push(failedWompiEvent());
+    db.wompiEvents.push(failedWompiEvent({
+      id: "wompi_created",
+      created_document_id: "dte_created",
+      issuance_status: "DOCUMENT_CREATED"
+    }));
+    db.wompiEvents.push(failedWompiEvent({ id: "wompi_ignored", issuance_status: "IGNORED" }));
+    db.wompiEvents.push(failedWompiEvent({ id: "wompi_without_error", issuance_error_message: null }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", { headers: authorization }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as { failures: Array<Record<string, unknown>> };
+    expect(body.failures).toHaveLength(1);
+    expect(body.failures[0]).toEqual(expectedFailureItem());
+    expect(JSON.stringify(body.failures[0])).not.toContain("raw_body");
+    expect(JSON.stringify(body.failures[0])).not.toContain("headers_json");
+  });
+
+  it("orders failures newest-first and caps an oversized repository limit at 100", async () => {
+    const db = new InMemoryD1();
+    for (let index = 0; index < 101; index += 1) {
+      const failedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+      db.wompiEvents.push(failedWompiEvent({
+        id: `wompi_failed_${String(index).padStart(3, "0")}`,
+        issuance_status: "FAILED",
+        issuance_failed_at: failedAt,
+        issuance_last_attempt_at: failedAt,
+        issuance_dead_lettered_at: null
+      }));
+    }
+    const repo = new Repository(db as unknown as D1Database);
+
+    const failures = await repo.listWompiIssuanceFailures(1_000);
+
+    expect(failures).toHaveLength(100);
+    expect(failures[0].id).toBe("wompi_failed_100");
+    expect(failures.at(-1)?.id).toBe("wompi_failed_001");
+  });
+
+  it("rejects a VIEWER retry before looking up either an existing or missing event", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.wompiEvents.push(failedWompiEvent());
+    const init = { method: "POST", headers: authorization };
+
+    const existing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", init),
+      env(db)
+    );
+    const missing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_missing/retry", init),
+      env(db)
+    );
+
+    expect(existing.status).toBe(403);
+    expect(missing.status).toBe(403);
+    expect(db.wompiIssuanceFailureLookupCount).toBe(0);
+    expect(db.wompiIssuanceRetryClaimCount).toBe(0);
+  });
+
+  it("lets an OPERATOR claim before queueing the same event id and audits the retry", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({ issuance_status: "FAILED", processed_at: null }));
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => {
+            expect(db.wompiEvents[0].issuance_status).toBe("RETRY_QUEUED");
+            queued.push(message);
+          }
+        } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ ok: true, queued: true });
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_failed",
+      issuanceAttemptId: expect.any(String)
+    }]);
+    expect(db.wompiEvents[0].issuance_last_attempt_at).not.toBe("2026-07-13T22:06:49.000Z");
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      actor_id: "user_operator",
+      action: "WOMPI_ISSUANCE_RETRY_QUEUED",
+      entity_type: "wompi_event",
+      entity_id: "wompi_failed"
+    }));
+  });
+
+  it("allows only one concurrent retry claim and returns the safe current state to the loser", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent());
+    const queued: IssuanceMessage[] = [];
+    const workerEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+    const retryRequest = () => new Request(
+      "https://example.org/api/wompi-events/wompi_failed/retry",
+      { method: "POST", headers: authorization }
+    );
+
+    const responses = await Promise.all([
+      worker.fetch(retryRequest(), workerEnv),
+      worker.fetch(retryRequest(), workerEnv)
+    ]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 202]);
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_failed",
+      issuanceAttemptId: expect.any(String)
+    }]);
+    expect(db.audits.filter((audit) => audit.action === "WOMPI_ISSUANCE_RETRY_QUEUED")).toHaveLength(1);
+    const loser = responses.find((response) => response.status === 200);
+    await expect(loser?.json()).resolves.toEqual({
+      queued: false,
+      failure: expectedFailureItem("RETRY_QUEUED", {
+        issuance_last_attempt_at: db.wompiEvents[0].issuance_last_attempt_at
+      })
+    });
+  });
+
+  it("returns conflict for a created event and not-found for an unknown id without queueing", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({
+      created_document_id: "dte_created",
+      issuance_status: "DOCUMENT_CREATED"
+    }));
+    const queued: IssuanceMessage[] = [];
+    const workerEnv = env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    });
+    const init = { method: "POST", headers: authorization };
+
+    const created = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", init),
+      workerEnv
+    );
+    const missing = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_missing/retry", init),
+      workerEnv
+    );
+
+    expect(created.status).toBe(409);
+    expect(missing.status).toBe(404);
+    expect(queued).toHaveLength(0);
+    expect(JSON.stringify(await created.json())).not.toContain("raw_body");
+    expect(JSON.stringify(await missing.json())).not.toContain("headers_json");
+  });
+
+  it("returns a stable generic error when retry queueing fails without leaking failure detail", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({ issuance_status: "FAILED", processed_at: null }));
+    const failure = unsafeOperationalError();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: { send: async () => { throw failure; } } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toEqual(safeOperationalError);
+    expect(responseText).not.toContain("FORBIDDEN_SENTINEL");
+    expect(responseText).not.toContain("https://");
+    expect(responseText).not.toContain("Bearer");
+    expect(responseText).not.toContain("sk-live");
+    expect(responseText).not.toContain("at retryIssuance");
+    expect(responseText.length).toBeLessThan(256);
+    expect(db.wompiEvents[0].issuance_status).toBe("RETRY_QUEUED");
+    expect(db.wompiEvents[0].issuance_attempt_id).toEqual(expect.any(String));
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      actor_id: "user_operator",
+      action: "WOMPI_ISSUANCE_RETRY_QUEUED",
+      entity_id: "wompi_failed"
+    }));
+    expect(consoleError).toHaveBeenCalledWith("Wompi issuance retry failed", failure);
+  });
+
+  it("returns the same stable generic error when the failure list query rejects", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const failure = unsafeOperationalError();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const realPrepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (sql.includes("issuance_error_message IS NOT NULL")) {
+        statement.all = async () => { throw failure; };
+      }
+      return statement;
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", { headers: authorization }),
+      env(db)
+    );
+
+    expect(response.status).toBe(500);
+    const responseText = await response.text();
+    expect(JSON.parse(responseText)).toEqual(safeOperationalError);
+    expect(responseText).not.toContain("FORBIDDEN_SENTINEL");
+    expect(responseText).not.toContain("https://");
+    expect(responseText).not.toContain("Bearer");
+    expect(responseText).not.toContain("sk-live");
+    expect(responseText).not.toContain("at retryIssuance");
+    expect(responseText.length).toBeLessThan(256);
+    expect(consoleError).toHaveBeenCalledWith("Wompi issuance failure list failed", failure);
   });
 });
 
@@ -4238,6 +4637,30 @@ describe("document email resend", () => {
     }));
   });
 
+  it("passes a receipt claim's stable provider identity to the HTTP provider", async () => {
+    const db = new InMemoryD1();
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_http_stable" }), { status: 202 })
+    );
+    const idempotencyKey = `dsv-receipt-v1-${"a".repeat(64)}`;
+
+    await new EmailService(env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    })).sendReceipt(testDocument(), "legacy-contact-2@example.com", idempotencyKey);
+
+    expect(providerFetch).toHaveBeenCalledWith(
+      "https://mail.example/send",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "Idempotency-Key": idempotencyKey
+        })
+      })
+    );
+  });
+
   it.each([
     "http://mail.example/send",
     "https://user:password@mail.example/send",
@@ -6542,7 +6965,10 @@ describe("Wompi webhook integration", () => {
       donor_email: "donor@example.org",
       donor_name: "Example Person"
     });
-    expect(queued).toEqual([{ wompiEventId: db.wompiEvents[0].id }]);
+    expect(queued).toEqual([{
+      wompiEventId: db.wompiEvents[0].id,
+      issuanceAttemptId: expect.any(String)
+    }]);
   });
 
   it("stores but quarantines a signed webhook whose ambiente is incompatible with the deployment", async () => {
@@ -7086,6 +7512,12 @@ describe("donation intent correlation", () => {
     expect(
       db.wompiEvents.find((row) => row.id === eventId)?.processed_at
     ).toBeTruthy();
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_attempt_count: 1,
+      issuance_error_code: "WOMPI_INTENT_QUARANTINED",
+      issuance_error_message: expect.stringContaining("intención")
+    });
     const audits = db.audits.filter(
       (row) =>
         row.action === "DONATION_INTENT_BINDING_REJECTED" &&
@@ -7104,6 +7536,26 @@ describe("donation intent correlation", () => {
     ).toHaveLength(1);
     expect(db.documents).toHaveLength(0);
   }
+
+  it("marks a non-approved Wompi event as ignored", async () => {
+    const db = new InMemoryD1();
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_not_approved_tx",
+      ResultadoTransaccion: "Fallida"
+    });
+    const eventId = seedWompiEvent(db, webhook, "wompi_not_approved");
+
+    const result = await new IssuancePipeline(env(db)).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      issuance_status: "IGNORED",
+      issuance_attempt_count: 0,
+      processed_at: expect.any(String)
+    });
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+  });
 
   it("correlates a LINK_CREATED intent: identity + address from the intent, nombre/correo from the webhook", async () => {
     const db = new InMemoryD1();
@@ -7166,6 +7618,266 @@ describe("donation intent correlation", () => {
     expect(db.documents[0].status).toBe("ACCEPTED");
     expect(db.nextSequence).toBe(sequenceBefore + 1);
     expect(transmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries accepted Wompi bookkeeping and finalizes it without retransmitting", async () => {
+    const db = new InMemoryD1();
+    const intent = seedIntentRow(db);
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_post_acceptance_retry_tx"
+    });
+    const eventId = seedWompiEvent(db, webhook, "wompi_post_acceptance_retry");
+    const codigoGeneracion = "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB";
+    const numeroControl = "DTE-15-M001P004-000000000000031";
+    const plainDocument = buildCdeDocument(webhook as unknown as WompiWebhook, emisorConfig(), {
+      sequence: 31,
+      codigoGeneracion,
+      environment: "00",
+      issuedAt: new Date("2026-07-13T11:00:00-06:00")
+    });
+    db.documents.push(testDocument({
+      id: "dte_post_acceptance_retry",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: numeroControl,
+      status: "SIGNED",
+      plain_json: JSON.stringify(plainDocument),
+      signed_jws: "stored-signed-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null,
+      donor_email: "fallback@example.org",
+      post_accept_finalized_at: null
+    }));
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-POST-ACCEPTANCE",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const realPrepare = db.prepare.bind(db);
+    let failAcceptedAudit = true;
+    let failIntentLookup = true;
+    let intentCompletedBeforeReceipt = false;
+    db.prepare = (sql: string) => {
+      const statement = realPrepare(sql);
+      if (sql.includes("INSERT INTO audit_logs") && failAcceptedAudit) {
+        failAcceptedAudit = false;
+        statement.run = async () => {
+          throw new Error("transient accepted-audit failure");
+        };
+      }
+      if (sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
+        const first = statement.first.bind(statement);
+        statement.first = async <T>() => {
+          if (failIntentLookup) {
+            failIntentLookup = false;
+            throw new Error("transient intent-correlation failure");
+          }
+          return first<T>();
+        };
+      }
+      if (sql.includes("INSERT INTO email_deliveries")) {
+        const run = statement.run.bind(statement);
+        const first = statement.first.bind(statement);
+        statement.run = async () => {
+          intentCompletedBeforeReceipt = intent.status === "COMPLETED";
+          return run();
+        };
+        statement.first = async <T>() => {
+          intentCompletedBeforeReceipt = intent.status === "COMPLETED";
+          return first<T>();
+        };
+      }
+      return statement;
+    };
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = await pipelineEnv(db);
+    const queueBatch = () => {
+      const ack = vi.fn();
+      const retry = vi.fn();
+      const batch = {
+        queue: "diezmossv-staging-issuance-example",
+        messages: [{
+          id: crypto.randomUUID(),
+          timestamp: new Date(),
+          body: { wompiEventId: eventId },
+          attempts: 1,
+          ack,
+          retry
+        }],
+        ackAll: vi.fn(),
+        retryAll: vi.fn()
+      } as unknown as MessageBatch<IssuanceMessage>;
+      return { batch, ack, retry };
+    };
+
+    const first = queueBatch();
+    await worker.queue(first.batch, runtime);
+
+    expect(first.ack).not.toHaveBeenCalled();
+    expect(first.retry).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-POST-ACCEPTANCE"
+    });
+    expect(intent.status).toBe("LINK_CREATED");
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(0);
+    expect(transmit).toHaveBeenCalledTimes(1);
+
+    const second = queueBatch();
+    await worker.queue(second.batch, runtime);
+
+    expect(second.ack).toHaveBeenCalledTimes(1);
+    expect(second.retry).not.toHaveBeenCalled();
+    expect(intent).toMatchObject({
+      status: "COMPLETED",
+      document_id: "dte_post_acceptance_retry"
+    });
+    expect(intentCompletedBeforeReceipt).toBe(true);
+    expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+
+    const third = queueBatch();
+    await worker.queue(third.batch, runtime);
+
+    expect(third.ack).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries.filter((row) => row.status === "SENT")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("finalizes concurrent deliveries of one accepted Wompi CDE exactly once", async () => {
+    const db = new InMemoryD1();
+    const intent = seedIntentRow(db);
+    const webhook = correlationWebhook({
+      IdTransaccion: "wompi_concurrent_finalization_tx"
+    });
+    const eventId = seedWompiEvent(
+      db,
+      webhook,
+      "wompi_concurrent_finalization"
+    );
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const plainDocument = buildCdeDocument(
+      webhook as unknown as WompiWebhook,
+      emisorConfig(),
+      {
+        sequence: 32,
+        codigoGeneracion,
+        environment: "00",
+        issuedAt: new Date("2026-07-13T11:30:00-06:00")
+      }
+    );
+    db.documents.push(testDocument({
+      id: "dte_concurrent_finalization",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000032",
+      status: "ACCEPTED",
+      plain_json: JSON.stringify(plainDocument),
+      signed_jws: "stored-concurrent-signed-jws",
+      sello_recibido: "SELLO-CONCURRENT-FINALIZATION",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T17:30:05.000Z",
+      donor_email: "fallback@example.org",
+      post_accept_finalized_at: null
+    }));
+
+    const pairBarrier = () => {
+      let arrivals = 0;
+      let release!: () => void;
+      const bothArrived = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return async () => {
+        arrivals += 1;
+        if (arrivals === 2) {
+          release();
+        }
+        await bothArrived;
+      };
+    };
+    const acceptedAuditCount = pairBarrier();
+    const completedAuditCount = pairBarrier();
+    db.beforeAuditCount = async (action, entityId) => {
+      if (action === "DTE_ACCEPTED" && entityId === "dte_concurrent_finalization") {
+        await acceptedAuditCount();
+      }
+      if (action === "DONATION_INTENT_COMPLETED" && entityId === "di_corr_1") {
+        await completedAuditCount();
+      }
+    };
+
+    const sent: unknown[] = [];
+    const intentCompletedAtSend: boolean[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      EMAIL_FROM: "comprobantes@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          intentCompletedAtSend.push(intent.status === "COMPLETED");
+          sent.push(message);
+          return { messageId: `concurrent-receipt-${sent.length}` };
+        }
+      } as SendEmail
+    });
+    const transmit = vi
+      .spyOn(MhClient.prototype, "transmitDte")
+      .mockRejectedValue(new Error("an accepted CDE must not be retransmitted"));
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).processWompiEvent(eventId),
+      new IssuancePipeline(runtime).processWompiEvent(eventId)
+    ]);
+
+    expect(results.map((record) => record?.status)).toEqual(["ACCEPTED", "ACCEPTED"]);
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-CONCURRENT-FINALIZATION"
+    });
+    expect(intent).toMatchObject({
+      status: "COMPLETED",
+      document_id: "dte_concurrent_finalization"
+    });
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED")).toHaveLength(1);
+    expect(
+      db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")
+    ).toHaveLength(1);
+    expect(
+      db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")
+    ).toHaveLength(1);
+    expect(intentCompletedAtSend).toEqual([true]);
+    expect(sent).toHaveLength(1);
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      document_id: "dte_concurrent_finalization",
+      status: "SENT",
+      email_type: "dteReceipt",
+      document_status_at_send: "ACCEPTED",
+      provider_delivery_id: "concurrent-receipt-1"
+    });
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("SELECT COUNT(*) AS count FROM audit_logs")
+      )
+    ).toBe(false);
+    expect(
+      db.preparedSql.some(
+        (sql) =>
+          sql.includes("INSERT INTO email_deliveries") &&
+          sql.includes("WHERE NOT EXISTS")
+      )
+    ).toBe(true);
   });
 
   it("keeps the payload-derived codPais/codDomiciliado for a domestic intent", async () => {
@@ -7592,6 +8304,7 @@ describe("donation intent correlation", () => {
       accepted_at: null,
       contingency_period_id: null,
       transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -7634,6 +8347,7 @@ describe("donation intent correlation", () => {
       accepted_at: null,
       contingency_period_id: null,
       transmission_deferred_at: null,
+      transmission_claim_id: null,
       created_at: "2026-06-26T01:46:47.015Z",
       updated_at: "2026-06-26T01:46:47.015Z"
     });
@@ -7753,7 +8467,20 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "WOMPI_INVALID_DONOR_DUI", entity_type: "wompi_event", entity_id: eventId })
     );
-    expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+    const invalidDuiAudit = db.audits.find(
+      (audit) => audit.action === "WOMPI_INVALID_DONOR_DUI" && audit.entity_id === eventId
+    );
+    expect(invalidDuiAudit?.summary).toBe("Los datos del donante contienen un DUI inválido.");
+    expect(invalidDuiAudit?.summary).not.toContain("12345678-9");
+    expect(db.wompiEvents.find((event) => event.id === eventId)).toMatchObject({
+      processed_at: expect.any(String),
+      issuance_status: "FAILED",
+      issuance_attempt_count: 1,
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: expect.stringContaining("DUI")
+    });
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.issuance_error_message)
+      .not.toContain("12345678-9");
   });
 
   it("rejects deterministic CDE schema failures before allocating a control sequence", async () => {
@@ -7948,7 +8675,14 @@ describe("donation intent correlation", () => {
 
     expect(result).toEqual({ finalized: 0, failed: 1 });
     expect(send).not.toHaveBeenCalled();
-    expect(db.emailDeliveries).toEqual([]);
+    expect(db.emailDeliveries).toEqual([
+      expect.objectContaining({
+        document_id: "doc_1",
+        status: "PENDING",
+        email_type: "dteReceipt",
+        document_status_at_send: "ACCEPTED"
+      })
+    ]);
     expect(db.documents[0]).toMatchObject({
       post_accept_finalized_at: null,
       post_accept_finalization_claim_id: "stolen_owner"
@@ -8334,6 +9068,83 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_defer_1" })
     );
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED_FINALIZED", entity_type: "dte_document", entity_id: deferred!.id })
+    );
+  });
+
+  it("records a deferred post-accept email timeout once without a second provider or MH send", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, deferWebhook({
+      IdTransaccion: "wompi_deferred_finalization_recovery_tx"
+    }), "wompi_deferred_finalization_recovery");
+    const sent: Array<{
+      subject: string;
+      to: string;
+      text: string;
+      headers?: Record<string, string>;
+    }> = [];
+    const runtime = await deferredEnv(db, sent);
+    let definitiveAttempts = 0;
+    runtime.EMAIL = {
+      send: async (message: unknown) => {
+        const outbound = message as (typeof sent)[number];
+        sent.push(outbound);
+        if (!outbound.subject.includes("(en trámite)")) {
+          definitiveAttempts += 1;
+          if (definitiveAttempts === 1) {
+            throw new Error("provider timeout after accepting the message");
+          }
+        }
+        return { messageId: `deferred-finalization-${sent.length}` };
+      }
+    } as SendEmail;
+
+    stubMhAuthUnavailable();
+    const deferred = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    expect(deferred?.status).toBe("SIGNED");
+    expect(sent).toHaveLength(1);
+
+    const mhRecoveryFetch = stubMhFetch(() => jsonResponse({
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-DEFERRED-FINALIZATION",
+      observaciones: []
+    }));
+    await new IssuancePipeline(runtime).retryDeferredTransmissions();
+
+    expect(db.documents.find((row) => row.id === deferred!.id)?.status).toBe("ACCEPTED");
+    expect(db.donationIntents.find((row) => row.id === "di_defer_1")?.status).toBe("COMPLETED");
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
+    const failedDelivery = db.emailDeliveries.find(
+      (row) => row.document_id === deferred!.id && row.email_type === "dteReceipt"
+    );
+    expect(failedDelivery).toMatchObject({
+      status: "FAILED",
+      idempotency_key: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/),
+      claim_attempted_at: expect.any(String)
+    });
+    expect(sent[1].headers).toMatchObject({
+      "Idempotency-Key": failedDelivery!.idempotency_key,
+      "Message-ID": `<${failedDelivery!.idempotency_key}@example-worker.invalid>`
+    });
+
+    const result = await new IssuancePipeline(runtime).retryAcceptedWompiFinalizations();
+
+    expect(result).toEqual({ finalized: 0, pending: 0 });
+    expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED_FINALIZED")).toHaveLength(1);
+    expect(db.emailDeliveries.filter(
+      (row) => row.document_id === deferred!.id && row.email_type === "dteReceipt"
+    )).toHaveLength(1);
+    expect(failedDelivery).toMatchObject({
+      status: "FAILED",
+      idempotency_key: expect.stringMatching(/^dsv-receipt-v1-[a-f0-9]{64}$/),
+      provider_delivery_id: null
+    });
+    expect(sent).toHaveLength(2);
+    expect(
+      mhRecoveryFetch.mock.calls.filter(([input]) => String(input).includes("recepciondte"))
+    ).toHaveLength(1);
   });
 
   it("does not redispatch a deferred CDE after an ambiguous transport failure", async () => {
@@ -8421,10 +9232,19 @@ describe("deferred transmission when MH is unavailable", () => {
 
   it("runs the deferred-transmission retry on the 15-minute cron tick", async () => {
     const db = new InMemoryD1();
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const document = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 73, codigoGeneracion, environment: "00" }
+    );
     db.documents.push({
       ...testDocument(),
       id: "doc_sched_defer",
       wompi_event_id: null,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000073",
+      plain_json: JSON.stringify(document),
       status: "SIGNED",
       transmission_deferred_at: "2026-06-26T01:49:00.000Z",
       signed_jws: "signed-jws",
@@ -8438,6 +9258,42 @@ describe("deferred transmission when MH is unavailable", () => {
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent, env(db));
 
     expect(db.documents.find((row) => row.id === "doc_sched_defer")?.status).toBe("ACCEPTED");
+  });
+
+  it("finalizes an accepted Wompi CDE missing its completion marker on the 15-minute cron without retransmitting", async () => {
+    const db = new InMemoryD1();
+    const eventId = seedWompiEvent(db, deferWebhook({
+      IdTransaccion: "wompi_scheduled_finalization_tx",
+      IdExterno: undefined,
+      EnlacePago: undefined
+    }), "wompi_scheduled_finalization");
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_scheduled_finalization",
+      wompi_event_id: eventId,
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-SCHEDULED-FINALIZATION",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T18:00:00.000Z",
+      donor_email: null,
+      post_accept_finalized_at: null
+    });
+    const transmit = vi
+      .spyOn(MhClient.prototype, "transmitDte")
+      .mockRejectedValue(new Error("accepted finalization sweep must not call MH"));
+
+    await worker.scheduled(
+      { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+      env(db)
+    );
+
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.audits.filter(
+      (row) => row.action === "DTE_ACCEPTED_FINALIZED" && row.entity_id === "doc_scheduled_finalization"
+    )).toHaveLength(1);
+    expect(db.audits.filter(
+      (row) => row.action === "EMAIL_SKIPPED" && row.entity_id === "doc_scheduled_finalization"
+    )).toHaveLength(1);
   });
 
   it("lists FAILED and REJECTED under the combined Fallos filter while a deferred SIGNED doc stays out", async () => {
@@ -9071,6 +9927,168 @@ describe("advanced DTE queue idempotency", () => {
   });
 });
 
+describe("DTE transmission claim", () => {
+  it("lets only one of two nonterminal deliveries call MH", async () => {
+    const db = new InMemoryD1();
+    const codigoGeneracion = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const document = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 71, codigoGeneracion, environment: "00" }
+    );
+    db.documents.push(testDocument({
+      id: "dte_concurrent_transmission",
+      wompi_event_id: null,
+      codigo_generacion: codigoGeneracion,
+      numero_control: "DTE-15-M001P004-000000000000071",
+      plain_json: JSON.stringify(document),
+      status: "SIGNED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null
+    }));
+    let release!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockImplementation(async () => {
+      await providerGate;
+      return {
+        accepted: true,
+        estado: "PROCESADO",
+        selloRecibido: "SELLO-CONCURRENT-CLAIM",
+        observaciones: [],
+        raw: { estado: "PROCESADO" }
+      };
+    });
+    const runtime = env(db, { MOCK_EXTERNAL_SERVICES: "true" });
+
+    const processing = Promise.all([
+      new IssuancePipeline(runtime).processDteDocument("dte_concurrent_transmission"),
+      new IssuancePipeline(runtime).processDteDocument("dte_concurrent_transmission")
+    ]);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const callsBeforeRelease = transmit.mock.calls.length;
+    release();
+    await processing;
+
+    expect(callsBeforeRelease).toBe(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-CONCURRENT-CLAIM"
+    });
+  });
+
+  it("does not let a late divergent result replace a terminal verdict or seal", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({
+      id: "dte_terminal_result_guard",
+      status: "SIGNED",
+      signed_jws: "stable-signed-jws",
+      sello_recibido: null,
+      accepted_at: null
+    }));
+    const repo = new Repository(db as unknown as D1Database);
+
+    const claimId = "fiscal-terminal-winner";
+    await expect(repo.claimDocumentTransmission(
+      "dte_terminal_result_guard",
+      "SIGNED",
+      "stable-signed-jws",
+      claimId
+    )).resolves.toBe(true);
+    await expect(repo.completeDocumentTransmission("dte_terminal_result_guard", claimId, {
+      status: "ACCEPTED",
+      sello: "SELLO-WINNER",
+      mhEstado: "PROCESADO",
+      observaciones: [],
+      acceptedAt: "2026-07-13T20:05:00.000Z"
+    })).resolves.toBe(true);
+    await expect(repo.completeDocumentTransmission("dte_terminal_result_guard", claimId, {
+      status: "REJECTED",
+      sello: null,
+      mhEstado: "RECHAZADO",
+      observaciones: ["late loser"],
+      acceptedAt: null
+    })).resolves.toBe(false);
+
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      sello_recibido: "SELLO-WINNER",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-13T20:05:00.000Z"
+    });
+  });
+
+  it("does not auto-transmit a rebuilt Wompi row whose fiscal outcome needs reconciliation", async () => {
+    const db = new InMemoryD1();
+    const wompiEventId = "wompi_rebuild_crash_gap";
+    const codigoGeneracion = "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC";
+    const rebuilt = buildCdeDocument(
+      wompiSample as unknown as WompiWebhook,
+      emisorConfig(),
+      { sequence: 73, codigoGeneracion, environment: "00" }
+    );
+    db.wompiEvents.push(wompiEventForReservation({
+      id: wompiEventId,
+      transaction_id: "transaction_rebuild_crash_gap",
+      raw_body: JSON.stringify(wompiSample)
+    }));
+    db.documents.push(testDocument({
+      id: "dte_rebuild_crash_gap",
+      wompi_event_id: wompiEventId,
+      status: "REJECTED",
+      signed_jws: null,
+      sello_recibido: null,
+      accepted_at: null,
+      donor_email: null
+    }));
+    const repo = new Repository(db as unknown as D1Database);
+    const claimId = "fiscal-rebuild-crash";
+
+    await expect(repo.claimRejectedWompiRetry(
+      "dte_rebuild_crash_gap",
+      wompiEventId,
+      claimId
+    )).resolves.toBe(true);
+    await expect(repo.prepareClaimedRejectedWompiRebuild(
+      "dte_rebuild_crash_gap",
+      wompiEventId,
+      claimId,
+      {
+        codigoGeneracion,
+        numeroControl: "DTE-15-M001P004-000000000000073",
+        plainJson: rebuilt,
+        signedJws: "rebuilt-signed-jws"
+      }
+    )).resolves.toBe(true);
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      transmission_deferred_at: null
+    });
+
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-REBUILT-SWEEP",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const result = await new IssuancePipeline(env(db, {
+      MOCK_EXTERNAL_SERVICES: "true"
+    })).retryDeferredTransmissions();
+
+    expect(result).toEqual({ transmitted: 0, rejected: 0, pending: 0 });
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      sello_recibido: null,
+      fiscal_operation_claim_id: claimId
+    });
+  });
+});
+
 describe("issuance dead-letter and stalled-event sweep", () => {
   function deadLetterBatch(body: IssuanceMessage, queueName: string) {
     const ack = vi.fn();
@@ -9101,8 +10119,189 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     };
   }
 
+  it("persists four pre-CDE failures before dead-lettering the reserved identifiers", async () => {
+    const db = new InMemoryD1();
+    db.nextSequence = 31;
+    const eventId = "wompi_bad_country";
+    const webhook = {
+      ...wompiSample,
+      IdTransaccion: "wompi_bad_country_tx",
+      Cliente: {
+        ...wompiSample.Cliente,
+        CodigoPais: "ZZ"
+      }
+    };
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: webhook.IdTransaccion,
+      raw_body: JSON.stringify(webhook)
+    }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    for (let attempt = 1; attempt <= 4; attempt += 1) {
+      const { batch, ack, retry } = deadLetterBatch(
+        { wompiEventId: eventId },
+        "diezmossv-staging-issuance-example"
+      );
+
+      await worker.queue(batch, runtime);
+
+      expect(ack).not.toHaveBeenCalled();
+      expect(retry).toHaveBeenCalledTimes(1);
+    }
+
+    const { batch: deadLetter, ack } = deadLetterBatch(
+      { wompiEventId: eventId },
+      "diezmossv-staging-issuance-example-dlq"
+    );
+    await worker.queue(deadLetter, runtime);
+
+    const event = db.wompiEvents.find((row) => row.id === eventId);
+    expect(event).toMatchObject({
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_count: 4,
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: expect.stringContaining("CAT-020 País")
+    });
+    expect(event?.control_sequence).toBeNull();
+    expect(db.nextSequence).toBe(31);
+    expect(db.audits.filter((row) => row.action === "WOMPI_ISSUANCE_FAILED" && row.entity_id === eventId)).toHaveLength(4);
+    expect(ack).toHaveBeenCalledTimes(1);
+  });
+
+  it("never persists or exposes arbitrary secret-bearing queue errors", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const eventId = "wompi_unsafe_failure";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_unsafe_failure_tx"
+    }));
+    const unsafe = new Error(
+      "Bearer sk-live-secret private-victim@example.net $123.45 " +
+      "https://internal.example/retry\n    at retryIssuance (worker.ts:1:1)"
+    );
+    vi.spyOn(IssuancePipeline.prototype, "processWompiEvent").mockRejectedValue(unsafe);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { batch, retry } = deadLetterBatch(
+      { wompiEventId: eventId },
+      "diezmossv-staging-issuance-example"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    const event = db.wompiEvents.find((row) => row.id === eventId);
+    expect(event).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: "Fallo de emisión sin detalle"
+    });
+    const audit = db.audits.find(
+      (row) => row.action === "WOMPI_ISSUANCE_FAILED" && row.entity_id === eventId
+    );
+    expect(audit).toMatchObject({
+      summary: "Fallo de emisión sin detalle",
+      metadata_json: JSON.stringify({ code: "ISSUANCE_ERROR" })
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    expect(response.status).toBe(200);
+    const responseText = await response.text();
+    expect(responseText).not.toContain("sk-live-secret");
+    expect(responseText).not.toContain("private-victim@example.net");
+    expect(responseText).not.toContain("$123.45");
+    expect(responseText).not.toContain("https://internal.example");
+    expect(responseText).not.toContain("retryIssuance");
+    expect(responseText).toContain("Fallo de emisión sin detalle");
+  });
+
+  it("resumes a stored nonterminal Wompi document without changing its identifiers or JSON", async () => {
+    const db = new InMemoryD1();
+    db.nextSequence = 32;
+    const eventId = "wompi_resume_stored";
+    const codigoGeneracion = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const numeroControl = "DTE-15-M001P004-000000000000031";
+    const webhook = {
+      ...wompiSample,
+      IdTransaccion: "wompi_resume_stored_tx",
+      IdExterno: undefined,
+      EnlacePago: undefined
+    } as WompiWebhook;
+    const plainDocument = buildCdeDocument(webhook, emisorConfig(), {
+      sequence: 31,
+      codigoGeneracion,
+      environment: "00",
+      issuedAt: new Date("2026-07-13T10:00:00-06:00")
+    });
+    const plainJson = JSON.stringify(plainDocument);
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: webhook.IdTransaccion,
+      raw_body: JSON.stringify(webhook),
+      issuance_status: "FAILED",
+      control_prefix: "M001P004",
+      control_sequence: 31,
+      reserved_numero_control: numeroControl,
+      reserved_codigo_generacion: codigoGeneracion
+    }));
+    db.documents.push(testDocument({
+      id: "dte_resume_stored",
+      wompi_event_id: eventId,
+      codigo_generacion: codigoGeneracion,
+      numero_control: numeroControl,
+      status: "SIGNED",
+      plain_json: plainJson,
+      signed_jws: "stored-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      donor_email: null,
+      accepted_at: null
+    }));
+
+    const record = await new IssuancePipeline(env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+    })).processWompiEvent(eventId);
+
+    expect(record).toMatchObject({
+      id: "dte_resume_stored",
+      status: "ACCEPTED",
+      numero_control: numeroControl,
+      codigo_generacion: codigoGeneracion,
+      plain_json: plainJson
+    });
+    expect(db.documents).toHaveLength(1);
+    expect(db.nextSequence).toBe(32);
+    expect(db.wompiEvents.find((row) => row.id === eventId)).toMatchObject({
+      created_document_id: "dte_resume_stored",
+      issuance_status: "DOCUMENT_CREATED"
+    });
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "DTE_ACCEPTED", entity_id: "dte_resume_stored" })
+    );
+    expect(db.audits).not.toContainEqual(
+      expect.objectContaining({ action: "ADVANCED_CDE_ACCEPTED", entity_id: "dte_resume_stored" })
+    );
+  });
+
   it("audits and acks dead-lettered issuance messages", async () => {
     const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation({
+      id: "wompi_dead",
+      transaction_id: "wompi_dead_tx",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: null
+    }));
     const { batch, ack, retry } = deadLetterBatch({ wompiEventId: "wompi_dead" }, "diezmossv-staging-issuance-example-dlq");
 
     await worker.queue(batch, env(db));
@@ -9114,9 +10313,194 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     );
   });
 
+  it("ignores a delayed DLQ from an older attempt without overwriting the current retry", async () => {
+    const db = new InMemoryD1();
+    const eventId = "wompi_stale_dlq";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_stale_dlq_tx",
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_last_attempt_at: "2026-07-13T22:10:00.000Z",
+      issuance_failed_at: "2026-07-13T22:00:00.000Z"
+    }));
+    const { batch, ack } = deadLetterBatch(
+      { wompiEventId: eventId, issuanceAttemptId: "attempt-old" } as IssuanceMessage,
+      "diezmossv-staging-issuance-example-dlq"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "La validación del esquema CDE falló",
+      issuance_dead_lettered_at: null
+    });
+    expect(db.audits).not.toContainEqual(expect.objectContaining({
+      action: "ISSUANCE_DEAD_LETTERED",
+      entity_id: eventId
+    }));
+  });
+
+  it("records bounded fallback evidence when the current attempt hard-terminates without an error", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const eventId = "wompi_hard_termination";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_hard_termination_tx",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_code: null,
+      issuance_error_message: null,
+      issuance_last_attempt_at: "2026-07-13T22:10:00.000Z"
+    }));
+    const { batch, ack } = deadLetterBatch(
+      { wompiEventId: eventId, issuanceAttemptId: "attempt-current" } as IssuanceMessage,
+      "diezmossv-staging-issuance-example-dlq"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "DEAD_LETTERED",
+      issuance_attempt_id: "attempt-current",
+      issuance_error_code: "ISSUANCE_RETRIES_EXHAUSTED",
+      issuance_error_message: "El mensaje de emisión agotó sus reintentos antes de crear el CDE."
+    });
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+    const body = await response.json() as { failures: Array<Record<string, unknown>> };
+    expect(body.failures).toContainEqual(expect.objectContaining({
+      id: eventId,
+      issuance_status: "DEAD_LETTERED",
+      issuance_error_code: "ISSUANCE_RETRIES_EXHAUSTED"
+    }));
+  });
+
+  it("claims tokenless legacy deliveries into one deterministic legacy attempt", async () => {
+    const db = new InMemoryD1();
+    const eventId = "wompi_legacy_message";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_legacy_message_tx",
+      issuance_status: null,
+      issuance_attempt_id: null
+    }));
+    vi.spyOn(IssuancePipeline.prototype, "processWompiEvent")
+      .mockRejectedValue(new Error("legacy failure"));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { batch, retry } = deadLetterBatch(
+      { wompiEventId: eventId },
+      "diezmossv-staging-issuance-example"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(retry).toHaveBeenCalledTimes(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_attempt_id: `legacy:${eventId}`,
+      issuance_error_code: "ISSUANCE_ERROR"
+    });
+  });
+
+  it("acks a failure from an attempt that became stale while processing", async () => {
+    const db = new InMemoryD1();
+    const eventId = "wompi_stale_failure";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_stale_failure_tx",
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-old",
+      issuance_error_code: "CDE_SCHEMA",
+      issuance_error_message: "Error anterior"
+    }));
+    vi.spyOn(IssuancePipeline.prototype, "processWompiEvent").mockImplementation(async () => {
+      db.wompiEvents[0].issuance_status = "RETRY_QUEUED";
+      db.wompiEvents[0].issuance_attempt_id = "attempt-new";
+      throw new Error("late old failure");
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const { batch, ack, retry } = deadLetterBatch(
+      { wompiEventId: eventId, issuanceAttemptId: "attempt-old" },
+      "diezmossv-staging-issuance-example"
+    );
+
+    await worker.queue(batch, env(db));
+
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-new",
+      issuance_error_message: "Error anterior"
+    });
+    expect(db.audits).not.toContainEqual(expect.objectContaining({
+      action: "WOMPI_ISSUANCE_FAILED",
+      entity_id: eventId
+    }));
+  });
+
+  it("emits dead-letter audit and alert only for the winning current transition", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const eventId = "wompi_current_dlq_once";
+    db.wompiEvents.push(wompiEventForReservation({
+      id: eventId,
+      transaction_id: "wompi_current_dlq_once_tx",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-current"
+    }));
+    const sentAlerts: Array<{ to: string; subject: string }> = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentAlerts.push(message as { to: string; subject: string });
+          return { messageId: "alert-current-dlq" };
+        }
+      } as SendEmail
+    });
+
+    for (let delivery = 0; delivery < 2; delivery += 1) {
+      const { batch, ack } = deadLetterBatch(
+        { wompiEventId: eventId, issuanceAttemptId: "attempt-current" },
+        "diezmossv-staging-issuance-example-dlq"
+      );
+      await worker.queue(batch, runtime);
+      expect(ack).toHaveBeenCalledTimes(1);
+    }
+
+    expect(db.audits.filter(
+      (row) => row.action === "ISSUANCE_DEAD_LETTERED" && row.entity_id === eventId
+    )).toHaveLength(1);
+    expect(db.audits.filter(
+      (row) => row.action === "ALERT_SENT:ISSUANCE_DEAD_LETTERED" && row.entity_id === eventId
+    )).toHaveLength(1);
+    expect(sentAlerts).toHaveLength(1);
+  });
+
   it("sends an operational alert for a dead-lettered issuance message", async () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.wompiEvents.push(wompiEventForReservation({
+      id: "wompi_dead_alert",
+      transaction_id: "wompi_dead_alert_tx",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: null
+    }));
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     const { batch } = deadLetterBatch({ wompiEventId: "wompi_dead_alert" }, "diezmossv-staging-issuance-example-dlq");
 
@@ -9150,7 +10534,10 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
     }));
 
-    expect(queued).toEqual([{ wompiEventId: "wompi_stalled" }]);
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_stalled",
+      issuanceAttemptId: expect.any(String)
+    }]);
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "WOMPI_EVENT_REQUEUED", entity_id: "wompi_stalled" })
     );
@@ -9168,6 +10555,115 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     }));
 
     expect(queued).toHaveLength(0);
+  });
+
+  it("recovers stale queued or processing retries using the last-attempt cutoff", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_retry_stale",
+      processed_at: "2026-01-01T00:05:00.000Z",
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-retry-stale",
+      issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
+    }));
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_processing_stale",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-processing-stale",
+      issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
+    }));
+    db.wompiEvents.push(stalledWompiEvent({
+      id: "wompi_retry_fresh",
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-retry-fresh",
+      issuance_last_attempt_at: new Date().toISOString()
+    }));
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toHaveLength(2);
+    expect(queued).toEqual(expect.arrayContaining([
+      { wompiEventId: "wompi_retry_stale", issuanceAttemptId: expect.any(String) },
+      { wompiEventId: "wompi_processing_stale", issuanceAttemptId: expect.any(String) }
+    ]));
+    expect(queued).not.toContainEqual({ wompiEventId: "wompi_retry_fresh" });
+  });
+
+  it("ignores historical requeue audits from before the current retry epoch", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    const eventId = "wompi_retry_new_epoch";
+    db.wompiEvents.push(stalledWompiEvent({
+      id: eventId,
+      processed_at: "2026-06-01T00:00:00.000Z",
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "attempt-new-epoch",
+      issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
+    }));
+    for (let index = 0; index < 3; index += 1) {
+      db.audits.push({
+        id: `audit_historical_${index}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_REQUEUED",
+        entity_type: "wompi_event",
+        entity_id: eventId,
+        summary: "",
+        metadata_json: "{}",
+        created_at: `2026-05-0${index + 1}T00:00:00.000Z`
+      });
+    }
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toEqual([{
+      wompiEventId: eventId,
+      issuanceAttemptId: expect.any(String)
+    }]);
+    expect(db.audits.filter(
+      (audit) => audit.action === "WOMPI_EVENT_REQUEUED" && audit.entity_id === eventId
+    )).toHaveLength(4);
+  });
+
+  it("caps three requeues from the current retry epoch and raises the stalled alert", async () => {
+    const db = new InMemoryD1();
+    const queued: IssuanceMessage[] = [];
+    const eventId = "wompi_retry_current_epoch";
+    db.wompiEvents.push(stalledWompiEvent({
+      id: eventId,
+      processed_at: "2026-06-01T00:00:00.000Z",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "attempt-current-epoch",
+      issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
+    }));
+    for (let index = 0; index < 3; index += 1) {
+      db.audits.push({
+        id: `audit_current_${index}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_REQUEUED",
+        entity_type: "wompi_event",
+        entity_id: eventId,
+        summary: "",
+        metadata_json: "{}",
+        created_at: `2026-06-0${index + 1}T00:00:00.000Z`
+      });
+    }
+
+    await worker.scheduled({} as ScheduledEvent, env(db, {
+      ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
+    }));
+
+    expect(queued).toHaveLength(0);
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "WOMPI_EVENT_STALLED",
+      entity_id: eventId
+    }));
   });
 
   it("gives up after three requeues and flags the event exactly once", async () => {
@@ -9305,7 +10801,10 @@ describe("scheduled cron dispatch", () => {
 
     await worker.scheduled({ cron: "*/15 * * * *", scheduledTime: new Date("2026-07-01T09:15:00.000Z").getTime() } as ScheduledEvent, scheduledEnv);
 
-    expect(queued).toEqual([{ wompiEventId: "wompi_stalled" }]);
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_stalled",
+      issuanceAttemptId: expect.any(String)
+    }]);
     expect(archive.putCalls).toHaveLength(0);
     expect(db.audits.some((audit) => String(audit.action).startsWith("RETENTION_EXPORT_"))).toBe(false);
   });
@@ -10462,6 +11961,12 @@ describe("audit actor context", () => {
 
   it("leaves cron/queue (SYSTEM) audits without actor IP or context", async () => {
     const db = new InMemoryD1();
+    db.wompiEvents.push(wompiEventForReservation({
+      id: "wompi_1",
+      transaction_id: "wompi_1_tx",
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: null
+    }));
     // A dead-letter batch runs in the queue handler with no incoming Request.
     await worker.queue(
       {
@@ -11636,6 +13141,77 @@ interface SecurityRateLimitClaimRow {
   expires_at: string;
 }
 
+function wompiEventForReservation(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: "wompi_1",
+    transaction_id: "transaction_1",
+    environment: "00",
+    result: "ExitosaAprobada",
+    amount_cents: 1000,
+    donor_email: "donor@example.org",
+    donor_name: "Donante",
+    raw_body: "{}",
+    headers_json: "{}",
+    received_at: "2026-07-13T12:00:00.000Z",
+    processed_at: null,
+    created_document_id: null,
+    issuance_status: null,
+    control_prefix: null,
+    control_sequence: null,
+    reserved_numero_control: null,
+    reserved_codigo_generacion: null,
+    issuance_attempt_count: 0,
+    issuance_error_code: null,
+    issuance_error_message: null,
+    issuance_last_attempt_at: null,
+    issuance_failed_at: null,
+    issuance_dead_lettered_at: null,
+    ...overrides
+  };
+}
+
+function withWompiIssuanceDefaults(
+  event: Record<string, unknown> | undefined
+): Record<string, unknown> | undefined {
+  if (!event) return undefined;
+  event.issuance_status ??= null;
+  event.control_prefix ??= null;
+  event.control_sequence ??= null;
+  event.reserved_numero_control ??= null;
+  event.reserved_codigo_generacion ??= null;
+  event.issuance_attempt_count ??= 0;
+  event.issuance_attempt_id ??= null;
+  event.issuance_error_code ??= null;
+  event.issuance_error_message ??= null;
+  event.issuance_last_attempt_at ??= null;
+  event.issuance_failed_at ??= null;
+  event.issuance_dead_lettered_at ??= null;
+  return event;
+}
+
+const WOMPI_ISSUANCE_FAILURE_FIELDS = [
+  "id",
+  "environment",
+  "amount_cents",
+  "donor_name",
+  "donor_email",
+  "received_at",
+  "issuance_status",
+  "issuance_attempt_count",
+  "issuance_error_code",
+  "issuance_error_message",
+  "issuance_last_attempt_at",
+  "issuance_failed_at",
+  "issuance_dead_lettered_at",
+  "reserved_numero_control"
+] as const;
+
+function wompiIssuanceFailureProjection(event: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    WOMPI_ISSUANCE_FAILURE_FIELDS.map((field) => [field, event[field] ?? null])
+  );
+}
+
 function sqliteD1(database: DatabaseSync): D1Database {
   return {
     prepare(query: string) {
@@ -11666,6 +13242,7 @@ class InMemoryD1 {
   readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
+  readonly sequencePrefixes: string[] = [];
   readonly analyticsQueryLimits: Array<{
     reader: "documents" | "intents" | "emails";
     limit: number;
@@ -11680,6 +13257,8 @@ class InMemoryD1 {
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
+  wompiIssuanceFailureLookupCount = 0;
+  wompiIssuanceRetryClaimCount = 0;
   loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
@@ -11695,6 +13274,8 @@ class InMemoryD1 {
   beforeWompiIssuanceClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptFinalizationClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
+  beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
+  beforeSentEmailLookup: ((documentId: string, emailType: string) => Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
   failBindingQuarantineBatchAfterStatement: number | null = null;
   failInvalidationCompletionBatchAfterStatement: number | null = null;
@@ -12230,6 +13811,82 @@ class Statement {
       this.db.securityRateLimitClaims.push(claim);
       return { id: claim.id } as T;
     }
+    if (
+      this.sql.includes("INSERT INTO email_deliveries") &&
+      this.sql.includes("ON CONFLICT(idempotency_key)") &&
+      this.sql.includes("RETURNING id, idempotency_key, claim_token")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend,
+        claimAttemptedAt,
+        idempotencyKey,
+        claimToken,
+        ,
+        ,
+        blockerDocumentStatus,
+        staleBefore
+      ] = this.args.map(String);
+      const blocker = this.db.emailDeliveries.find(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === emailType &&
+          delivery.document_status_at_send === blockerDocumentStatus &&
+          (
+            delivery.status === "SENT" ||
+            (
+              delivery.status === "PENDING" &&
+              (
+                delivery.claim_attempted_at == null ||
+                String(delivery.claim_attempted_at) >= staleBefore
+              )
+            )
+          )
+      );
+      if (blocker) return null;
+
+      const existing = this.db.emailDeliveries.find(
+        (delivery) => delivery.idempotency_key === idempotencyKey
+      );
+      if (existing) {
+        const reclaimable = existing.status === "FAILED" || (
+          existing.status === "PENDING" &&
+          existing.claim_attempted_at != null &&
+          String(existing.claim_attempted_at) < staleBefore
+        );
+        if (!reclaimable) return null;
+        existing.to_email = toEmail;
+        existing.status = "PENDING";
+        existing.provider_response_json = "{}";
+        existing.document_status_at_send = documentStatusAtSend;
+        existing.claim_attempted_at = claimAttemptedAt;
+        existing.claim_token = claimToken;
+        return { id: String(existing.id), idempotency_key: idempotencyKey, claim_token: claimToken } as T;
+      }
+
+      this.db.emailDeliveries.push({
+        id,
+        document_id: documentId,
+        to_email: toEmail,
+        status: "PENDING",
+        provider_response_json: "{}",
+        sent_at: null,
+        email_type: emailType,
+        document_status_at_send: documentStatusAtSend,
+        template_version: null,
+        pdf_renderer_version: null,
+        pdf_sha256: null,
+        dte_json_sha256: null,
+        provider_delivery_id: null,
+        claim_attempted_at: claimAttemptedAt,
+        idempotency_key: idempotencyKey,
+        claim_token: claimToken
+      });
+      return { id, idempotency_key: idempotencyKey, claim_token: claimToken } as T;
+    }
     if (this.sql.includes("INSERT INTO login_rate_limits")) {
       const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
       const key = String(keyHash);
@@ -12247,6 +13904,84 @@ class Statement {
       if (current.attempt_count >= limit) return null;
       current.attempt_count += 1;
       return { attempt_count: current.attempt_count } as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'PROCESSING'") &&
+      this.sql.includes("issuance_attempt_id") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const legacyMessage = this.sql.includes("COALESCE(issuance_attempt_id, ?)");
+      const [attemptId, attemptedAt, wompiEventId] = legacyMessage
+        ? [String(this.args[0]), String(this.args[1]), String(this.args[2])]
+        : [String(this.args[2]), String(this.args[0]), String(this.args[1])];
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      const currentAttempt = event?.issuance_attempt_id ?? null;
+      const attemptMatches = legacyMessage
+        ? currentAttempt === null || currentAttempt === attemptId
+        : currentAttempt === attemptId;
+      const statusMatches = event?.issuance_status == null ||
+        ["RETRY_QUEUED", "PROCESSING", "FAILED"].includes(String(event.issuance_status));
+      if (!event || event.created_document_id != null || !attemptMatches || !statusMatches) {
+        return null;
+      }
+      event.issuance_status = "PROCESSING";
+      event.issuance_attempt_id ??= attemptId;
+      event.issuance_last_attempt_at = attemptedAt;
+      return { id: wompiEventId } as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'DEAD_LETTERED'") &&
+      this.sql.includes("issuance_attempt_id") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [attemptId, fallbackCode, , fallbackMessage, deadLetteredAt, processedAt, rawWompiEventId] = this.args;
+      const wompiEventId = String(rawWompiEventId);
+      const legacyMessage = this.sql.includes("issuance_attempt_id IS NULL OR issuance_attempt_id = ?");
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      const currentAttempt = event?.issuance_attempt_id ?? null;
+      const attemptMatches = legacyMessage
+        ? currentAttempt === null || currentAttempt === attemptId
+        : currentAttempt === attemptId;
+      const statusMatches = event?.issuance_status == null ||
+        ["RETRY_QUEUED", "PROCESSING", "FAILED"].includes(String(event.issuance_status));
+      if (!event || event.created_document_id != null || !attemptMatches || !statusMatches) {
+        return null;
+      }
+      event.issuance_status = "DEAD_LETTERED";
+      event.issuance_attempt_id ??= String(attemptId);
+      if (event.issuance_error_message == null) {
+        event.issuance_error_code = String(fallbackCode);
+        event.issuance_error_message = String(fallbackMessage);
+      } else {
+        event.issuance_error_code ??= String(fallbackCode);
+      }
+      event.issuance_dead_lettered_at = String(deadLetteredAt);
+      event.processed_at ??= String(processedAt);
+      return { id: wompiEventId } as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      this.db.wompiIssuanceRetryClaimCount += 1;
+      const [retryQueuedAt, rawWompiEventId] = this.args;
+      const wompiEventId = String(rawWompiEventId);
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id == null &&
+          (row.issuance_status === "FAILED" || row.issuance_status === "DEAD_LETTERED")
+      );
+      if (!event) {
+        return null;
+      }
+      event.issuance_status = "RETRY_QUEUED";
+      event.issuance_last_attempt_at = String(retryQueuedAt);
+      return { id: wompiEventId } as T;
     }
     if (
       this.sql.includes("UPDATE users") &&
@@ -12568,6 +14303,9 @@ class Statement {
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
       if (
         action === "DONATION_INTENT_BINDING_REJECTED" &&
         this.db.beforeBindingAuditCount
@@ -12598,6 +14336,9 @@ class Statement {
       await this.db.beforeDocumentRead?.();
       const document = this.db.documents.find((candidate) => candidate.id === this.args[0]);
       return (document ? structuredClone(document) : null) as T | null;
+    }
+    if (this.sql.includes("SELECT * FROM dte_documents WHERE wompi_event_id = ?")) {
+      return (this.db.documents.find((document) => document.wompi_event_id === this.args[0]) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
       return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
@@ -12653,11 +14394,35 @@ class Statement {
       const documentId = String(this.args[0]);
       return (this.db.donationIntents.find((intent) => intent.document_id === documentId && intent.status === "COMPLETED") ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents") && this.sql.includes("client_ip = ?")) {
+      const [clientIp, sinceIso] = this.args.map(String);
+      return {
+        count: this.db.donationIntents.filter(
+          (intent) => intent.client_ip === clientIp && String(intent.created_at) >= sinceIso
+        ).length
+      } as T;
+    }
+    if (
+      this.sql.includes("FROM wompi_events") &&
+      this.sql.includes("issuance_dead_lettered_at") &&
+      this.sql.includes("WHERE id = ?") &&
+      !this.sql.includes("SELECT *")
+    ) {
+      this.db.wompiIssuanceFailureLookupCount += 1;
+      const event = withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((row) => row.id === this.args[0])
+      );
+      return (event ? wompiIssuanceFailureProjection(event) : null) as T | null;
+    }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
-      return (this.db.wompiEvents.find((event) => event.id === this.args[0]) ?? null) as T | null;
+      return (withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((event) => event.id === this.args[0])
+      ) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE transaction_id = ?")) {
-      return (this.db.wompiEvents.find((event) => event.transaction_id === this.args[0]) ?? null) as T | null;
+      return (withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((event) => event.transaction_id === this.args[0])
+      ) ?? null) as T | null;
     }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
@@ -12668,6 +14433,9 @@ class Statement {
       const allowedStatuses = this.sql.includes("status IN ('SENT', 'FAILED')")
         ? new Set(["SENT", "FAILED"])
         : new Set(["SENT"]);
+      if (this.db.beforeSentEmailLookup) {
+        await this.db.beforeSentEmailLookup(documentId, emailType);
+      }
       return (this.db.emailDeliveries.find(
         (row) =>
           row.document_id === documentId &&
@@ -12729,6 +14497,32 @@ class Statement {
         .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)))
         .slice(0, limit)
         .map((document) => ({ ...document }));
+      return { results: documents as T[] };
+    }
+    if (
+      this.sql.includes("SELECT d.* FROM dte_documents d") &&
+      this.sql.includes("DTE_ACCEPTED_FINALIZED")
+    ) {
+      const limit = Number(this.args.at(-1));
+      const documents = this.db.documents
+        .filter(
+          (document) =>
+            document.status === "ACCEPTED" &&
+            document.wompi_event_id != null &&
+            !this.db.audits.some(
+              (audit) =>
+                audit.action === "DTE_ACCEPTED_FINALIZED" &&
+                audit.entity_type === "dte_document" &&
+                audit.entity_id === document.id
+            )
+        )
+        .sort(
+          (left, right) =>
+            String(left.accepted_at ?? left.created_at).localeCompare(
+              String(right.accepted_at ?? right.created_at)
+            ) || left.id.localeCompare(right.id)
+        )
+        .slice(0, limit);
       return { results: documents as T[] };
     }
     // ----- Analítica (carril Wompi) -----
@@ -12887,6 +14681,29 @@ class Statement {
         return { results: rows.slice(0, limit) as T[] };
       }
     }
+    if (
+      this.sql.includes("FROM wompi_events") &&
+      this.sql.includes("issuance_error_message IS NOT NULL") &&
+      this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')")
+    ) {
+      const limit = Number(this.args.at(-1));
+      const failures = this.db.wompiEvents
+        .filter(
+          (event) =>
+            event.created_document_id == null &&
+            event.issuance_error_message != null &&
+            ["FAILED", "DEAD_LETTERED", "RETRY_QUEUED", "PROCESSING"].includes(String(event.issuance_status))
+        )
+        .sort(
+          (left, right) =>
+            String(right.issuance_failed_at ?? right.received_at).localeCompare(
+              String(left.issuance_failed_at ?? left.received_at)
+            ) || String(right.id).localeCompare(String(left.id))
+        )
+        .slice(0, limit)
+        .map((event) => wompiIssuanceFailureProjection(withWompiIssuanceDefaults(event)!));
+      return { results: failures as T[] };
+    }
     if (this.sql.includes("FROM wompi_events") && this.sql.includes("created_document_id IS NULL")) {
       // The real wompi_events schema has no created_at column (only received_at) —
       // require the query to reference the column that actually exists, so a
@@ -12895,13 +14712,25 @@ class Statement {
       if (!this.sql.includes("received_at < ?") || this.sql.includes("created_at < ?")) {
         throw new Error(`SQLITE_ERROR: no such column: created_at (simulated) for SQL: ${this.sql}`);
       }
-      const cutoff = String(this.args[0]);
+      if (!this.sql.includes("COALESCE(issuance_last_attempt_at, received_at) < ?")) {
+        throw new Error(`Stalled Wompi SQL must use the last-attempt cutoff: ${this.sql}`);
+      }
+      const [receivedCutoff, retryCutoff] = this.args.map(String);
       const stalled = this.db.wompiEvents.filter(
         (event) =>
-          !event.created_document_id &&
-          !event.processed_at &&
+          event.created_document_id == null &&
           event.result === "ExitosaAprobada" &&
-          String(event.received_at) < cutoff
+          (
+            (
+              !event.processed_at &&
+              event.issuance_status == null &&
+              String(event.received_at) < receivedCutoff
+            ) ||
+            (
+              (event.issuance_status === "RETRY_QUEUED" || event.issuance_status === "PROCESSING") &&
+              String(event.issuance_last_attempt_at ?? event.received_at) < retryCutoff
+            )
+          )
       );
       return { results: stalled as T[] };
     }
@@ -12995,6 +14824,25 @@ class Statement {
     }
     if (this.sql.includes("FROM dte_documents")) {
       let documents = [...this.db.documents];
+      if (
+        this.sql.includes("status = 'SIGNED' AND (transmission_deferred_at IS NOT NULL OR wompi_event_id IS NOT NULL)") &&
+        this.sql.includes("status = 'TRANSMITTED'") &&
+        this.sql.includes("updated_at < ?")
+      ) {
+        const staleBefore = String(this.args[0]);
+        const limit = Number(this.args[1] ?? 100);
+        documents = documents.filter((document) =>
+          (
+            document.status === "SIGNED" &&
+            (document.transmission_deferred_at != null || document.wompi_event_id != null)
+          ) ||
+          (document.status === "TRANSMITTED" && document.sello_recibido == null && document.updated_at < staleBefore)
+        );
+        documents.sort((left, right) =>
+          String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id))
+        );
+        return { results: documents.slice(0, limit) as T[] };
+      }
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
         let argIndex = 0;
         if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
@@ -13305,6 +15153,9 @@ class Statement {
         }
       }
     }
+    if (this.sql.includes("INSERT OR IGNORE INTO document_sequences")) {
+      this.db.sequencePrefixes.push(String(this.args[1]));
+    }
     if (this.sql.includes("DELETE FROM login_rate_limits")) {
       const [now] = this.args.map(String);
       for (const [key, row] of this.db.loginRateLimits) {
@@ -13525,6 +15376,130 @@ class Statement {
         });
         changes = 1;
       }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("WOMPI_ISSUANCE_RETRY_QUEUED") &&
+      this.sql.includes("issuance_attempt_id = ?")
+    ) {
+      const [id, actorId, summary, metadataJson, actorIp, actorContext, eventId, attemptId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.created_document_id == null &&
+          row.issuance_status === "RETRY_QUEUED" &&
+          row.issuance_attempt_id === attemptId
+      );
+      if (event) {
+        this.db.audits.push({
+          id,
+          actor_type: "USER",
+          actor_id: actorId,
+          action: "WOMPI_ISSUANCE_RETRY_QUEUED",
+          entity_type: "wompi_event",
+          entity_id: eventId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: actorIp ?? null,
+          actor_context: actorContext ?? null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("WOMPI_ISSUANCE_FAILED")
+    ) {
+      const [id, summary, metadataJson, eventId, failedAt, attemptId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.created_document_id == null &&
+          row.issuance_failed_at === failedAt &&
+          row.issuance_attempt_id === attemptId &&
+          row.issuance_status === "FAILED"
+      );
+      if (event) {
+        this.db.audits.push({
+          id,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "WOMPI_ISSUANCE_FAILED",
+          entity_type: "wompi_event",
+          entity_id: event.id,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("FROM wompi_events") &&
+      this.sql.includes("issuance_attempt_id = ?")
+    ) {
+      const [id, action, summary, metadataJson, eventId, attemptId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.created_document_id == null &&
+          row.issuance_attempt_id === attemptId
+      );
+      if (event) {
+        this.db.audits.push({
+          id,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action,
+          entity_type: "wompi_event",
+          entity_id: eventId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        actorType,
+        actorId,
+        action,
+        entityType,
+        entityId,
+        summary,
+        metadataJson,
+        actorIp,
+        actorContext
+      ] = this.args;
+      const exists = this.db.audits.some(
+        (audit) =>
+          audit.action === action &&
+          audit.entity_type === entityType &&
+          audit.entity_id === entityId
+      );
+      if (!exists) {
+        this.db.audits.push({
+          id,
+          actor_type: actorType,
+          actor_id: actorId,
+          action,
+          entity_type: entityType,
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: actorIp ?? null,
+          actor_context: actorContext ?? null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
     } else if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext, rateLimitClaimId] = this.args;
       if (this.db.failNextAuditAction === action) {
@@ -13557,7 +15532,42 @@ class Statement {
         this.db.settings.push({ key, value, updated_by: updatedBy, updated_at: updatedAt });
       }
     }
-    if (this.sql.includes("INSERT INTO email_deliveries")) {
+    if (
+      this.sql.includes("INSERT INTO email_deliveries") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend
+      ] = this.args;
+      const exists = this.db.emailDeliveries.some(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === emailType &&
+          (delivery.status === "PENDING" || delivery.status === "SENT")
+      );
+      if (!exists) {
+        this.db.emailDeliveries.push({
+          id,
+          document_id: documentId,
+          to_email: toEmail,
+          status: "PENDING",
+          provider_response_json: "{}",
+          sent_at: null,
+          email_type: emailType,
+          document_status_at_send: documentStatusAtSend,
+          template_version: null,
+          pdf_renderer_version: null,
+          pdf_sha256: null,
+          dte_json_sha256: null,
+          provider_delivery_id: null
+        });
+        changes = 1;
+      }
+    } else if (this.sql.includes("INSERT INTO email_deliveries")) {
       const [
         id,
         documentId,
@@ -13588,6 +15598,45 @@ class Statement {
         dte_json_sha256: dteJsonSha256,
         provider_delivery_id: providerDeliveryId
       });
+      changes = 1;
+    }
+    if (
+      this.sql.includes("UPDATE email_deliveries") &&
+      this.sql.includes("status = 'PENDING'")
+    ) {
+      const [
+        status,
+        providerResponseJson,
+        sentAt,
+        emailType,
+        documentStatusAtSend,
+        templateVersion,
+        pdfRendererVersion,
+        pdfSha256,
+        dteJsonSha256,
+        providerDeliveryId,
+        id,
+        claimToken
+      ] = this.args;
+      const delivery = this.db.emailDeliveries.find(
+        (row) =>
+          row.id === id &&
+          row.status === "PENDING" &&
+          row.claim_token === claimToken
+      );
+      if (delivery) {
+        delivery.status = status;
+        delivery.provider_response_json = providerResponseJson;
+        delivery.sent_at = sentAt;
+        delivery.email_type = emailType;
+        delivery.document_status_at_send = documentStatusAtSend;
+        delivery.template_version = templateVersion;
+        delivery.pdf_renderer_version = pdfRendererVersion;
+        delivery.pdf_sha256 = pdfSha256;
+        delivery.dte_json_sha256 = dteJsonSha256;
+        delivery.provider_delivery_id = providerDeliveryId;
+        changes = 1;
+      }
     }
     if (this.sql.includes("INSERT INTO wompi_events")) {
       const [id, transactionId, environment, result, amountCents, donorEmail, donorName, rawBody, headersJson] = this.args;
@@ -13785,6 +15834,7 @@ class Statement {
           accepted_at: null,
           contingency_period_id: null,
           transmission_deferred_at: null,
+          transmission_claim_id: null,
           created_at: String(issuedAt),
           updated_at: String(issuedAt)
         });
@@ -13812,6 +15862,7 @@ class Statement {
         accepted_at: null,
         contingency_period_id: contingencyPeriodId === null ? null : String(contingencyPeriodId),
         transmission_deferred_at: null,
+        transmission_claim_id: null,
         created_at: String(issuedAt),
         updated_at: String(issuedAt)
       });
@@ -13911,11 +15962,156 @@ class Statement {
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+        event.issuance_status = "DOCUMENT_CREATED";
         event.issuance_claim_id = null;
         event.issuance_claimed_at = null;
         changes = 1;
       }
-    } else if (
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET control_prefix = ?, reserved_codigo_generacion = ?")
+    ) {
+      const [controlPrefix, codigoGeneracion, wompiEventId, environment] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.environment === environment &&
+          row.control_prefix == null &&
+          row.control_sequence == null &&
+          row.reserved_numero_control == null &&
+          row.reserved_codigo_generacion == null
+      );
+      if (event) {
+        const sequence = this.db.nextSequence;
+        this.db.nextSequence += 1;
+        event.control_prefix = String(controlPrefix);
+        event.control_sequence = sequence;
+        event.reserved_numero_control = `DTE-15-${String(controlPrefix)}-${String(sequence).padStart(15, "0")}`;
+        event.reserved_codigo_generacion = String(codigoGeneracion);
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status IS NULL") &&
+      !this.sql.includes("COALESCE(issuance_last_attempt_at")
+    ) {
+      const [attemptId, queuedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id == null &&
+          row.issuance_attempt_id == null &&
+          row.issuance_status == null
+      );
+      if (event) {
+        event.issuance_status = "RETRY_QUEUED";
+        event.issuance_attempt_id = String(attemptId);
+        event.issuance_last_attempt_at = String(queuedAt);
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
+    ) {
+      const [attemptId, queuedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id == null &&
+          (row.issuance_status === "FAILED" || row.issuance_status === "DEAD_LETTERED")
+      );
+      if (event) {
+        event.issuance_status = "RETRY_QUEUED";
+        event.issuance_attempt_id = String(attemptId);
+        event.issuance_last_attempt_at = String(queuedAt);
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("COALESCE(issuance_last_attempt_at, received_at) < ?")
+    ) {
+      const guardsExistingAttempt = this.sql.includes("AND issuance_attempt_id = ?");
+      const [attemptId, queuedAt, wompiEventId, expectedAttempt, staleBefore] = guardsExistingAttempt
+        ? [
+            String(this.args[0]),
+            String(this.args[1]),
+            String(this.args[2]),
+            String(this.args[3]),
+            String(this.args[4])
+          ]
+        : [
+            String(this.args[0]),
+            String(this.args[1]),
+            String(this.args[2]),
+            null,
+            String(this.args[3])
+          ];
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      const attemptMatches = guardsExistingAttempt
+        ? event?.issuance_attempt_id === expectedAttempt
+        : event?.issuance_attempt_id == null;
+      const statusEligible = guardsExistingAttempt
+        ? event?.issuance_status === "RETRY_QUEUED" || event?.issuance_status === "PROCESSING"
+        : event?.issuance_status == null;
+      if (
+        event &&
+        event.created_document_id == null &&
+        attemptMatches &&
+        (guardsExistingAttempt || event.processed_at == null) &&
+        statusEligible &&
+        String(event.issuance_last_attempt_at ?? event.received_at) < staleBefore
+      ) {
+        event.issuance_status = "RETRY_QUEUED";
+        event.issuance_attempt_id = attemptId;
+        event.issuance_last_attempt_at = queuedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'FAILED'")
+    ) {
+      const [code, message, lastAttemptAt, failedAt, wompiEventId, attemptId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id == null &&
+          row.issuance_attempt_id === attemptId &&
+          row.issuance_status === "PROCESSING"
+      );
+      if (event) {
+        event.issuance_status = "FAILED";
+        event.issuance_attempt_count = Number(event.issuance_attempt_count ?? 0) + 1;
+        event.issuance_error_code = code;
+        event.issuance_error_message = message;
+        event.issuance_last_attempt_at = lastAttemptAt;
+        event.issuance_failed_at = failedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("issuance_status = 'IGNORED'")
+    ) {
+      const [processedAt, wompiEventId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === wompiEventId && row.created_document_id == null
+      );
+      if (event) {
+        event.issuance_status = "IGNORED";
+        event.issuance_attempt_count ??= 0;
+        event.processed_at ??= processedAt;
+        changes = 1;
+      }
+    }
+    if (
       this.sql.includes("UPDATE wompi_events") &&
       this.sql.includes("SET processed_at = ?")
     ) {
@@ -13936,21 +16132,28 @@ class Statement {
         changes = 1;
       }
     }
-    if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("created_document_id = ?")
+    ) {
       const [documentId, processedAt, wompiEventId] = this.args;
       const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
       if (event) {
         event.created_document_id = documentId;
         event.processed_at = processedAt;
+        if (this.sql.includes("issuance_status = 'DOCUMENT_CREATED'")) {
+          event.issuance_status = "DOCUMENT_CREATED";
+        }
+        changes = 1;
       }
     }
-    if (this.sql.includes("transmission_deferred_at = ?")) {
+    if (this.sql.includes("transmission_deferred_at = COALESCE(transmission_deferred_at, ?)")) {
       // markDocumentTransmissionDeferred: SIGNED + deferral marker + MH_NO_DISPONIBLE.
       const [deferredAt, mhEstado, observacionesJson, updatedAt, documentId] = this.args;
       const document = this.db.documents.find((row) => row.id === documentId);
       if (document) {
         document.status = "SIGNED";
-        document.transmission_deferred_at = String(deferredAt);
+        document.transmission_deferred_at ??= String(deferredAt);
         document.sello_recibido = null;
         document.mh_estado = String(mhEstado);
         document.mh_observaciones_json = String(observacionesJson);
@@ -14292,6 +16495,8 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
     wompi_event_id: null,
     status: "PENDING",
     signed_jws: null,
+    sello_recibido: null,
+    accepted_at: null,
     plain_json: JSON.stringify({
       emisor: advancedCdeDraft().emisor,
       receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
@@ -14407,6 +16612,7 @@ function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRe
     contingency_period_id: null,
     transmission_deferred_at: null,
     post_accept_finalized_at: "2026-06-26T01:46:49.000Z",
+    transmission_claim_id: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z",
     ...overrides

@@ -4,6 +4,8 @@ import { nowIso } from "../utils/dates";
 import { generationCode } from "../utils/ids";
 import { assertDeploymentAllowsAmbiente } from "./environmentPolicy";
 
+const MH_REQUEST_TIMEOUT_MS = 60 * 1000;
+
 export class MhClient {
   constructor(private readonly env: Env) {}
 
@@ -13,7 +15,7 @@ export class MhClient {
       return mockAccepted(input.codigoGeneracion);
     }
     const token = await this.getPreDispatchToken(input.ambiente);
-    const response = await fetch(mhEndpoint(this.env, "recepcion", input.ambiente), {
+    const response = await fetchMh(mhEndpoint(this.env, "recepcion", input.ambiente), {
       method: "POST",
       headers: this.jsonHeaders(token),
       body: JSON.stringify({
@@ -34,7 +36,7 @@ export class MhClient {
       return mockAccepted(generationCode());
     }
     const token = await this.getPreDispatchToken(input.ambiente);
-    const response = await fetch(mhEndpoint(this.env, "anulacion", input.ambiente), {
+    const response = await fetchMh(mhEndpoint(this.env, "anulacion", input.ambiente), {
       method: "POST",
       headers: this.jsonHeaders(token),
       body: JSON.stringify({
@@ -101,7 +103,7 @@ export class MhClient {
     const form = new URLSearchParams();
     form.set("user", credentials.user);
     form.set("pwd", credentials.password);
-    const response = await fetch(url, {
+    const response = await fetchMh(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -134,6 +136,23 @@ export class MhClient {
       user: requireSecret(this.env, "MH_USER_TEST"),
       password: requireSecret(this.env, "MH_PASSWORD_TEST")
     };
+  }
+}
+
+async function fetchMh(url: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: AbortSignal.timeout(MH_REQUEST_TIMEOUT_MS)
+    });
+  } catch (error) {
+    const name = error && typeof error === "object" && "name" in error
+      ? String(error.name)
+      : "";
+    if (name === "AbortError" || name === "TimeoutError") {
+      throw new MhUnavailableError("Ministerio de Hacienda no disponible: tiempo de espera agotado");
+    }
+    throw error;
   }
 }
 
