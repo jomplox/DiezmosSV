@@ -200,6 +200,15 @@ campo 35 — no admite el tipo 15), así que el sistema ya no abre periodos ni t
 lotes de contingencia; los periodos antiguos siguen visibles para consulta. Si allí queda
 algún CDE del modelo anterior sin sello, contacte a soporte técnico para reemitirlo.
 
+### Resultado fiscal pendiente de conciliación
+
+Esta advertencia significa que Hacienda pudo haber recibido una transmisión aunque la
+respuesta no llegó al sistema. **No reintente, invalide ni reenvíe ese CDE.** Los botones y
+las exportaciones que dependen de un estado fiscal definitivo quedan bloqueados para evitar
+una segunda operación legal o un comprobante incorrecto. Anote el código de generación y
+contacte a la persona que despliega la aplicación; debe seguir el procedimiento técnico
+de [conciliación fiscal](fiscal-claim-reconciliation.md) con evidencia oficial de MH.
+
 ---
 
 ## 8. Cómo y cuándo invalidar un CDE

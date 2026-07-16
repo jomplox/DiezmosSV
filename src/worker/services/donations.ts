@@ -18,9 +18,11 @@ import { WompiApiError, WompiApiService } from "./wompiApi";
 // are stored as integer cents; the DTE side already rounds the same way.
 const MIN_AMOUNT_CENTS = 100; // $1.00
 const MAX_AMOUNT_CENTS = 500_000; // $5,000.00
-const MAX_FREE_DOCUMENT = 50;
+const MAX_FREE_DOCUMENT = 20;
 const MIN_IDENTITY_DOCUMENT = 5; // pasaporte (03) / carnet de residente (02)
-const MAX_IDENTITY_DOCUMENT = 30;
+const MAX_IDENTITY_DOCUMENT = 20;
+const MIN_PHONE = 8;
+const MAX_PHONE = 30;
 const MAX_RAZON_SOCIAL = 200;
 // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters. The intent
 // limit must never exceed it: a longer complemento would pass here, take the
@@ -170,12 +172,12 @@ export function validateDonorData(body: Record<string, unknown>): ValidatedDonor
     donorDocument = formatNit(rawDocument); // stored canonically as XXXX-XXXXXX-XXX-X
   } else if (donorDocumentType === "03" || donorDocumentType === "02") {
     if (rawDocument.length < MIN_IDENTITY_DOCUMENT || rawDocument.length > MAX_IDENTITY_DOCUMENT) {
-      throw new IntentValidationError("invalid_identity_document", "Ingrese su documento (entre 5 y 30 caracteres).");
+      throw new IntentValidationError("invalid_identity_document", "Ingrese su documento (entre 5 y 20 caracteres).");
     }
     donorDocument = rawDocument.toUpperCase(); // stored uppercase
   } else {
     if (!rawDocument || rawDocument.length > MAX_FREE_DOCUMENT) {
-      throw new IntentValidationError("invalid_document", "Ingrese el documento del donante (máximo 50 caracteres).");
+      throw new IntentValidationError("invalid_document", "Ingrese el documento del donante (máximo 20 caracteres).");
     }
     donorDocument = rawDocument;
   }
@@ -193,6 +195,9 @@ export function validateDonorData(body: Record<string, unknown>): ValidatedDonor
   }
 
   const donorPhone = requireString(body.donorPhone) || null;
+  if (donorPhone && (donorPhone.length < MIN_PHONE || donorPhone.length > MAX_PHONE)) {
+    throw new IntentValidationError("invalid_phone", "Ingrese un teléfono de 8 a 30 caracteres.");
+  }
 
   const direccionDepartamento = requireString(body.departamento);
   if (!isCat012DepartmentCode(direccionDepartamento)) {
@@ -294,7 +299,11 @@ export interface CreatedIntent {
   intentId: string;
   urlEnlace: string;
   urlEnlaceLargo: string;
-  datosToken?: string;
+}
+
+export interface CreatedDraftIntent {
+  intentId: string;
+  datosToken: string;
 }
 
 // Signals that the Wompi API rejected link creation; the route maps this to a 502
@@ -319,7 +328,7 @@ const DRAFT_DOCUMENT_TYPE: DonationIntentDocumentType = "13";
 // document number. Throws IntentLinkError if Wompi fails, after the PENDING row is
 // already persisted so it can expire on the cron sweep. Shared by the full create and
 // the background draft create so both mint links identically.
-async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord, datosToken?: string): Promise<CreatedIntent> {
+async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationIntentRecord): Promise<CreatedIntent> {
   let link;
   try {
     link = await new WompiApiService(env).createPaymentLink(intent);
@@ -342,15 +351,20 @@ async function mintLinkForIntent(env: Env, repo: Repository, intent: DonationInt
   return {
     intentId: intent.id,
     urlEnlace: link.urlEnlace,
-    urlEnlaceLargo: link.urlEnlaceLargo,
-    ...(datosToken ? { datosToken } : {})
+    urlEnlaceLargo: link.urlEnlaceLargo
   };
 }
 
 // Orchestrates one full intent: persist PENDING with the donor's fiscal data, mint the
 // link, and return the three link fields (response shape unchanged). This is the
 // fallback path for a client without a usable premint draft.
-export async function createDonationIntent(env: Env, repo: Repository, input: ValidatedIntentInput, clientIp: string): Promise<CreatedIntent> {
+export async function createDonationIntent(
+  env: Env,
+  repo: Repository,
+  input: ValidatedIntentInput,
+  clientIp: string,
+  rateLimitClaimId: string
+): Promise<CreatedIntent> {
   const start = nowIso();
   const intent = await repo.createDonationIntent({
     id: newId("di"),
@@ -370,7 +384,8 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
     giftType: input.giftType,
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
-    datosTokenHash: null
+    datosTokenHash: null,
+    rateLimitClaimId
   });
 
   return mintLinkForIntent(env, repo, intent);
@@ -381,7 +396,13 @@ export async function createDonationIntent(env: Env, repo: Repository, input: Va
 // (identificadorEnlaceComercio = intent id). The donor's fiscal data is attached later
 // via applyIntentDatos with a fast D1-only call, keeping the ~6 s Wompi mint off the
 // donor's Paso 2 submit.
-export async function createDraftDonationIntent(env: Env, repo: Repository, input: ValidatedDraftIntentInput, clientIp: string): Promise<CreatedIntent> {
+export async function createDraftDonationIntent(
+  env: Env,
+  repo: Repository,
+  input: ValidatedDraftIntentInput,
+  clientIp: string,
+  rateLimitClaimId: string
+): Promise<CreatedDraftIntent> {
   const start = nowIso();
   const datosToken = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
   const datosTokenHash = await sha256Hex(utf8Bytes(datosToken));
@@ -402,10 +423,12 @@ export async function createDraftDonationIntent(env: Env, repo: Repository, inpu
     giftType: input.giftType,
     clientIp,
     expiresAt: addHours(start, INTENT_VALIDITY_HOURS),
-    datosTokenHash
+    datosTokenHash,
+    rateLimitClaimId
   });
 
-  return mintLinkForIntent(env, repo, intent, datosToken);
+  const created = await mintLinkForIntent(env, repo, intent);
+  return { intentId: created.intentId, datosToken };
 }
 
 // Signals that /datos either targets an unknown id (404) or failed the generic
@@ -425,10 +448,15 @@ export class IntentDatosError extends Error {
 // Attaches the donor's fiscal data to a minted draft (fast D1-only, no Wompi call). It
 // NEVER changes amount or gift type — those were locked when the link was minted.
 // Only an unpaid, unpopulated LINK_CREATED row with the one-time capability can change.
-export async function applyIntentDatos(repo: Repository, intentId: string, datosToken: string, data: ValidatedDonorData): Promise<void> {
+export async function applyIntentDatos(
+  repo: Repository,
+  intentId: string,
+  datosToken: string,
+  data: ValidatedDonorData
+): Promise<CreatedIntent> {
   const datosTokenHash = await sha256Hex(utf8Bytes(datosToken.trim()));
-  const updated = await repo.applyIntentDatosWithCapability(intentId, datosTokenHash, data);
-  if (!updated) {
+  const completed = await repo.applyIntentDatosWithCapability(intentId, datosTokenHash, data);
+  if (!completed) {
     const intent = await repo.getDonationIntent(intentId);
     if (!intent) {
       throw new IntentDatosError("intent_not_found", 404, "No se encontró la intención de donación.");
@@ -442,4 +470,9 @@ export async function applyIntentDatos(repo: Repository, intentId: string, datos
     summary: `Datos fiscales adjuntados a la intención ${intentId}`,
     metadata: { donorDocumentType: data.donorDocumentType }
   });
+  return {
+    intentId: completed.id,
+    urlEnlace: completed.urlEnlace,
+    urlEnlaceLargo: completed.urlEnlaceLargo
+  };
 }

@@ -1,12 +1,14 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
+  normalizeEmailTemplateSettings,
   renderEmailTemplate,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
+import { EmailService } from "../../src/worker/services/email";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
-import type { DteDocumentRecord } from "../../src/worker/types";
+import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 function fakeRecord(): DteDocumentRecord {
   return {
@@ -129,6 +131,100 @@ describe("email template defaults", () => {
 
     expect(invalidation?.defaultBody).toContain("ante el Ministerio de Hacienda");
     expect(invalidation?.defaultBody).not.toContain("ante MH");
+  });
+});
+
+describe("email subject boundary", () => {
+  it("rejects control characters when an operator saves a subject", () => {
+    expect(() =>
+      normalizeEmailTemplateSettings({
+        dteReceipt: { subject: "Receipt\r\nBcc: attacker@example.org", body: "Body" },
+        dteInvalidation: { ...DEFAULT_EMAIL_TEMPLATES.dteInvalidation }
+      })
+    ).toThrow(/asunto/i);
+    expect(() =>
+      normalizeEmailTemplateSettings({
+        dteReceipt: { subject: `Receipt${String.fromCharCode(0x85)}hidden`, body: "Body" },
+        dteInvalidation: { ...DEFAULT_EMAIL_TEMPLATES.dteInvalidation }
+      })
+    ).toThrow(/asunto/i);
+  });
+
+  it("rejects donor control characters after placeholder rendering", () => {
+    expect(() =>
+      renderEmailTemplate(
+        { subject: "Receipt for {{donante}}", body: "Body" },
+        { ...fakeRecord(), donor_name: "Ana\r\nBcc: attacker@example.org" }
+      )
+    ).toThrow(/asunto/i);
+  });
+
+  it("rejects unsafe subjects at the common dispatch boundary before a provider call", async () => {
+    const send = vi.fn();
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    await expect(
+      service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert\r\nBcc: attacker@example.org",
+        text: "Body",
+        html: "<p>Body</p>"
+      })
+    ).rejects.toThrow(/asunto/i);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("uses caller-scoped HTTP idempotency without suppressing manual resends", async () => {
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ id: "email_http_1" }), { status: 202 })
+    );
+    vi.stubGlobal("fetch", providerFetch);
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await service.sendReceipt(fakeRecord(), "ana@example.org", "dte-email:doc_1:dteReceipt");
+      await service.sendReceipt(fakeRecord(), "ana@example.org");
+
+      const firstHeaders = providerFetch.mock.calls[0][1]?.headers as Record<string, string>;
+      const secondHeaders = providerFetch.mock.calls[1][1]?.headers as Record<string, string>;
+      expect(firstHeaders["Idempotency-Key"]).toBe("dte-email:doc_1:dteReceipt");
+      expect(secondHeaders).not.toHaveProperty("Idempotency-Key");
+      expect(JSON.parse(String(providerFetch.mock.calls[0][1]?.body))).not.toHaveProperty("idempotencyKey");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("runs the receipt hook after preparation and before the provider side effect", async () => {
+    const send = vi.fn(async () => ({ messageId: "must-not-send" }));
+    const beforeProviderDispatch = vi.fn(async () => {
+      throw new Error("simulated worker stop at provider boundary");
+    });
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    await expect(
+      service.sendReceipt(
+        fakeRecord(),
+        "ana@example.org",
+        "dte-email:doc_1:dteReceipt",
+        beforeProviderDispatch
+      )
+    ).rejects.toThrow("simulated worker stop at provider boundary");
+    expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
   });
 });
 

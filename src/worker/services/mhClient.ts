@@ -12,7 +12,7 @@ export class MhClient {
     if (isMockMode(this.env)) {
       return mockAccepted(input.codigoGeneracion);
     }
-    const token = await this.getToken(input.ambiente);
+    const token = await this.getPreDispatchToken(input.ambiente);
     const response = await fetch(mhEndpoint(this.env, "recepcion", input.ambiente), {
       method: "POST",
       headers: this.jsonHeaders(token),
@@ -33,7 +33,7 @@ export class MhClient {
     if (isMockMode(this.env)) {
       return mockAccepted(generationCode());
     }
-    const token = await this.getToken(input.ambiente);
+    const token = await this.getPreDispatchToken(input.ambiente);
     const response = await fetch(mhEndpoint(this.env, "anulacion", input.ambiente), {
       method: "POST",
       headers: this.jsonHeaders(token),
@@ -87,6 +87,14 @@ export class MhClient {
       .bind(ambiente, token, data.tokenType ?? "Bearer", expiresAt, nowIso())
       .run();
     return token;
+  }
+
+  private async getPreDispatchToken(ambiente: Ambiente): Promise<string> {
+    try {
+      return await this.getToken(ambiente);
+    } catch (error) {
+      throw new MhPreDispatchError(error instanceof Error ? error.message : String(error), error);
+    }
   }
 
   private async authenticate(url: string, credentials: { user: string; password: string }): Promise<MhAuthResponse> {
@@ -144,24 +152,36 @@ function isInvalidCredentials(data: MhAuthResponse): boolean {
 
 async function parseMhResponse(response: Response): Promise<MhResponse> {
   const raw = await safeJson(response);
-  if (!response.ok) {
-    if ([408, 429, 500, 502, 503, 504].includes(response.status)) {
-      throw new MhUnavailableError(`Ministerio de Hacienda no disponible: ${response.status}`);
-    }
-    return {
-      accepted: false,
-      estado: `HTTP_${response.status}`,
-      selloRecibido: null,
-      observaciones: [JSON.stringify(raw)],
-      raw
-    };
-  }
   const body = raw as Record<string, unknown>;
   const estado = String(body.estado ?? body.status ?? "RECIBIDO");
-  const selloRecibido = typeof body.selloRecibido === "string" ? body.selloRecibido : null;
+  const rawSeal = typeof body.selloRecibido === "string" ? body.selloRecibido.trim() : "";
+  const selloRecibido = rawSeal || null;
   const observaciones = Array.isArray(body.observaciones) ? body.observaciones.map(String) : [];
+  const normalizedEstado = estado.trim().toUpperCase();
+  const accepted = (normalizedEstado === "PROCESADO" || normalizedEstado === "ACEPTADO") && selloRecibido !== null;
+  const rejected = normalizedEstado === "RECHAZADO" && selloRecibido === null;
+  if (!response.ok) {
+    if (response.status === 408 || response.status === 429 || (response.status >= 500 && response.status < 600)) {
+      throw new MhUnavailableError(`Ministerio de Hacienda no disponible: ${response.status}`);
+    }
+    // A 3xx/4xx transport status is terminal only when MH supplies its exact,
+    // internally consistent rejection verdict. Empty, malformed, accepted-on-error,
+    // and contradictory bodies leave the already-dispatched fiscal outcome unknown.
+    if (!rejected) {
+      throw new MhUnavailableError(
+        `Ministerio de Hacienda devolvió un resultado no definitivo: ${estado} (HTTP ${response.status})`
+      );
+    }
+  }
+  if (!accepted && !rejected) {
+    // A successful HTTP transport is not itself a terminal fiscal verdict. Empty,
+    // malformed, contradictory, substring-like (for example NO PROCESADO),
+    // intermediate, and undocumented 2xx bodies leave the external outcome unknown.
+    // A positive verdict without its required seal is equally non-definitive.
+    throw new MhUnavailableError(`Ministerio de Hacienda devolvió un resultado no definitivo: ${estado}`);
+  }
   return {
-    accepted: estado.toUpperCase().includes("PROCESADO") || estado.toUpperCase().includes("ACEPTADO") || Boolean(selloRecibido),
+    accepted: response.ok && accepted,
     estado,
     selloRecibido,
     observaciones,
@@ -195,4 +215,15 @@ function mockAccepted(codigoGeneracion: string): MhResponse {
 
 export class MhUnavailableError extends Error {
   name = "MhUnavailableError";
+}
+
+// Only this error proves that the fiscal POST was never attempted. Once fetch()
+// starts, transport failures and retryable HTTP responses are outcome-ambiguous:
+// MH may have processed the legal document, so callers must retain their claim.
+export class MhPreDispatchError extends Error {
+  name = "MhPreDispatchError";
+
+  constructor(message: string, readonly cause: unknown) {
+    super(message);
+  }
 }

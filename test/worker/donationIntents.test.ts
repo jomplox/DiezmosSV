@@ -1,6 +1,45 @@
 import { describe, expect, it } from "vitest";
+import { validateDonorData } from "../../src/worker/services/donations";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import type { DonationIntentRecord } from "../../src/worker/types";
+
+const validDonorData = {
+  donorDocumentType: "03",
+  donorDocument: "P1234567",
+  donorPhone: "70001122",
+  departamento: "06",
+  municipio: "23",
+  distrito: "14",
+  complemento: "Colonia Escalón"
+};
+
+function expectDonorValidationCode(body: Record<string, unknown>, code: string): void {
+  try {
+    validateDonorData(body);
+    throw new Error("Expected donor validation to fail");
+  } catch (error) {
+    expect(error).toMatchObject({ code });
+  }
+}
+
+describe("donor data DTE schema boundaries", () => {
+  it.each(["02", "03", "37"])("caps document type %s at the schema maximum of 20 characters", (donorDocumentType) => {
+    expect(() => validateDonorData({ ...validDonorData, donorDocumentType, donorDocument: "A".repeat(20) })).not.toThrow();
+    expectDonorValidationCode(
+      { ...validDonorData, donorDocumentType, donorDocument: "A".repeat(21) },
+      donorDocumentType === "37" ? "invalid_document" : "invalid_identity_document"
+    );
+  });
+
+  it("accepts an absent phone or 8-30 characters and rejects values outside the schema range", () => {
+    for (const donorPhone of [undefined, "1".repeat(8), "1".repeat(30)]) {
+      expect(() => validateDonorData({ ...validDonorData, donorPhone })).not.toThrow();
+    }
+    for (const donorPhone of ["1".repeat(7), "1".repeat(31)]) {
+      expectDonorValidationCode({ ...validDonorData, donorPhone }, "invalid_phone");
+    }
+  });
+});
 
 // Lightweight D1 fake: records every prepared SQL + bindings and serves rows from
 // a seeded map, so we can assert the SQL shapes of the donation-intent methods
@@ -27,13 +66,16 @@ class RecordingStatement {
   async first<T>(): Promise<T | null> {
     this.db.calls.push({ sql: this.sql, args: this.args });
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("RETURNING id")) {
-      return (this.db.intentDatosUpdateSucceeds ? { id: String(this.args.at(-3)) } : null) as T | null;
+      return (this.db.intentDatosUpdateSucceeds
+        ? {
+            id: String(this.args.at(-3)),
+            wompi_url_enlace: "https://s.wompi.sv/987654",
+            wompi_url_enlace_largo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+          }
+        : null) as T | null;
     }
     if (this.sql.includes("FROM donation_intents WHERE id = ?")) {
       return (this.db.intents.get(String(this.args[0])) ?? null) as T | null;
-    }
-    if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents")) {
-      return { count: 0 } as T;
     }
     return null;
   }
@@ -77,7 +119,8 @@ describe("donation intents repository", () => {
       giftType: null,
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
-      datosTokenHash: null
+      datosTokenHash: null,
+      rateLimitClaimId: "rate_seed"
     });
 
     expect(created.id).toBe("di_seed");
@@ -97,9 +140,10 @@ describe("donation intents repository", () => {
     expect(insert!.args[5]).toBeNull();
     // donor_pais is bound null for a domestic intent (position 12, after complemento).
     expect(insert!.args[11]).toBeNull();
-    // gift_type stays at index 14; the capability hash is appended after it.
+    // The capability hash and admission provenance follow gift_type.
     expect(insert!.args[14]).toBeNull();
     expect(insert!.args[15]).toBeNull();
+    expect(insert!.args[16]).toBe("rate_seed");
   });
 
   it("binds the razón social and país when the intent carries them (NIT / foreign path)", async () => {
@@ -122,7 +166,8 @@ describe("donation intents repository", () => {
       giftType: "DIEZMO",
       clientIp: "203.0.113.9",
       expiresAt: "2026-07-05T13:00:00.000Z",
-      datosTokenHash: "a".repeat(64)
+      datosTokenHash: "a".repeat(64),
+      rateLimitClaimId: "rate_foreign"
     });
 
     const insert = db.calls.find((call) => call.sql.includes("INSERT INTO donation_intents"));
@@ -134,6 +179,7 @@ describe("donation intents repository", () => {
     expect(insert!.args).toContain("DIEZMO");
     expect(insert!.args[14]).toBe("DIEZMO");
     expect(insert!.args[15]).toBe("a".repeat(64));
+    expect(insert!.args[16]).toBe("rate_foreign");
   });
 
   it("consumes a datos capability with one guarded UPDATE RETURNING", async () => {
@@ -152,7 +198,11 @@ describe("donation intents repository", () => {
       donorPais: null
     });
 
-    expect(updated).toBe(true);
+    expect(updated).toEqual({
+      id: "di_1",
+      urlEnlace: "https://s.wompi.sv/987654",
+      urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=773b3c29-abc"
+    });
     const update = db.calls.find((call) => call.sql.includes("UPDATE donation_intents") && call.sql.includes("RETURNING id"));
     expect(update).toBeTruthy();
     expect(update!.sql).toContain("datos_token_hash = NULL");
@@ -231,18 +281,6 @@ describe("donation intents repository", () => {
     expect(update!.args).toEqual(["2026-07-05T13:00:00.000Z", "di_old", "di_older"]);
   });
 
-  it("counts recent intents by client IP within a window for throttling", async () => {
-    const { repository, db } = repo();
-
-    const count = await repository.countRecentIntentsByIp("203.0.113.9", "2026-07-05T11:00:00.000Z");
-    expect(count).toBe(0);
-
-    const select = db.calls.find((call) => call.sql.includes("SELECT COUNT(*) AS count FROM donation_intents"));
-    expect(select).toBeTruthy();
-    expect(select!.sql).toContain("client_ip = ?");
-    expect(select!.sql).toContain("created_at >= ?");
-    expect(select!.args).toEqual(["203.0.113.9", "2026-07-05T11:00:00.000Z"]);
-  });
 });
 
 function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
@@ -267,6 +305,7 @@ function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationInte
     document_id: null,
     client_ip: "203.0.113.9",
     datos_token_hash: null,
+    rate_limit_claim_id: null,
     paid_at: null,
     created_at: "2026-07-05T12:00:00.000Z",
     updated_at: "2026-07-05T12:00:00.000Z",

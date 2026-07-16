@@ -1,3 +1,5 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 // Playwright drives a REAL local Cloudflare Worker (SPA + API in one process),
@@ -13,6 +15,10 @@ import { defineConfig, devices } from "@playwright/test";
 const isCI = !!process.env.CI;
 const persistTo = process.env.PW_PERSIST_TO;
 const persistFlag = persistTo ? ` --persist-to ${persistTo}` : "";
+const miniflareCacheDir = process.env.MINIFLARE_CACHE_DIR
+  ?? (persistTo
+    ? join(persistTo, "miniflare-cache")
+    : join(homedir(), "Library", "Application Support", "DiezmosSV", "private", "cache", "miniflare"));
 
 const migrateCommand = `npx wrangler d1 migrations apply diezmossv-local-db-example --local${persistFlag}`;
 const devCommand = `npm run dev:worker -- --port 8787 --ip 127.0.0.1${persistFlag}`;
@@ -42,6 +48,7 @@ export default defineConfig({
     url: "http://127.0.0.1:8787/",
     reuseExistingServer: !isCI,
     timeout: 180_000,
+    env: { MINIFLARE_CACHE_DIR: miniflareCacheDir },
     stdout: "pipe",
     stderr: "pipe"
   }

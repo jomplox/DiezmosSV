@@ -173,6 +173,12 @@ describe("Emisor code field helper text (source contract)", () => {
     expect(appSource).toContain("Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.");
     expect(appSource).toContain("Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.");
   });
+
+  test("treats the active issuer configuration as replacement-only", () => {
+    expect(appSource).not.toContain('credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue');
+    expect(appSource).not.toContain("Datos activos cargados en campos editables");
+    expect(appSource).toContain("Configuración protegida; complete todos los campos para reemplazarla");
+  });
 });
 
 describe("Correo alert recipients (source contract)", () => {
@@ -183,6 +189,15 @@ describe("Correo alert recipients (source contract)", () => {
     expect(appSource).toContain("multiple");
     expect(appSource).toContain("Separe varios correos con una sola coma (,).");
     expect(appSource).toContain("Guardar correos de alertas");
+  });
+});
+
+describe("Correo provider destination authority (source contract)", () => {
+  test("shows the provider destination as deployment-managed and not editable", () => {
+    expect(appSource).toContain("EMAIL_PROVIDER_URL");
+    expect(appSource).toContain("Administrado por el despliegue");
+    expect(appSource).not.toContain("input.emailApiUrl");
+    expect(appSource).not.toContain("EMAIL_API_URL");
   });
 });
 

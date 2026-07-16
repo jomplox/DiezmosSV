@@ -1,10 +1,11 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const checker = resolve(import.meta.dirname, "../../scripts/check-private-boundary.mjs");
+const gitIgnore = resolve(import.meta.dirname, "../../.gitignore");
 const sentinel = "SENTINEL_PRIVATE_VALUE_MUST_NOT_APPEAR";
 
 describe("private artifact boundary checker", () => {
@@ -16,7 +17,13 @@ describe("private artifact boundary checker", () => {
     "DTE/Credentials/live.key",
     "WompiWebhookSample.json",
     "DTE/F960_private.csv",
+    "DTE/exports/2026/F960_private.xlsx",
+    "DTE/exports/private.pdf",
+    "DTE/exports/page_OCR.md",
+    "DTE/exports/page_by_PaddleOCR-v3.md",
     "examples/DTE-private.json",
+    "examples/archive/DTE-private.json",
+    "examples/archive/deeper/DTE-private.pdf",
     "node_modules/.cache/wrangler/wrangler-account.json",
     "node_modules/.mf/cf.json"
   ])("rejects %s without printing its contents", (path) => {
@@ -42,7 +49,34 @@ describe("private artifact boundary checker", () => {
   });
 
   it("passes a clean checkout fixture", () => {
-    expect(run(fixture({ "README.md": "safe" })).status).toBe(0);
+    expect(run(fixture({
+      "README.md": "safe",
+      "DTE/reference/schema.json": "safe",
+      "examples/archive/public-sample.json": "safe"
+    })).status).toBe(0);
+  });
+
+  it.each([
+    "DTE/private.csv",
+    "DTE/exports/2026/private.csv",
+    "DTE/exports/private.xlsx",
+    "DTE/exports/private.pdf",
+    "DTE/exports/page_OCR.md",
+    "DTE/exports/page_by_PaddleOCR-v3.md",
+    "examples/DTE-private.json",
+    "examples/archive/DTE-private.json",
+    "examples/archive/deeper/DTE-private.pdf"
+  ])("keeps Git ignore coverage aligned at every depth: %s", (path) => {
+    const cwd = fixture({ [path]: sentinel });
+    copyFileSync(gitIgnore, join(cwd, ".gitignore"));
+    expect(spawnSync("git", ["init", "--quiet"], { cwd, encoding: "utf8" }).status).toBe(0);
+
+    const ignored = spawnSync("git", ["check-ignore", "--no-index", "--", path], {
+      cwd,
+      encoding: "utf8"
+    });
+
+    expect(ignored.status).toBe(0);
   });
 });
 

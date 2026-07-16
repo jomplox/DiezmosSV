@@ -28,11 +28,14 @@ const PASSWORD_PBKDF2_ITERATIONS = 100_000;
 // deployed fallback count is safe to try.
 const LEGACY_PASSWORD_PBKDF2_ITERATIONS: number[] = [];
 const PASSWORD_HASH_SCHEME = "pbkdf2";
+const DUMMY_PASSWORD_SALT = "diezmossv-login-dummy-v1";
+const DUMMY_PASSWORD_HASH = "pbkdf2$100000$0ddb41b59abcc01d672e58d326a2a4462301ea4f27009e0cb9e9b7c67a8947cb";
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
 export class PasswordResetError extends Error {}
 export class PasswordPolicyError extends Error {}
 export class UserNotFoundError extends Error {}
+export class BootstrapUnavailableError extends Error {}
 
 export class AuthService {
   private readonly repo: Repository;
@@ -42,18 +45,16 @@ export class AuthService {
   }
 
   async bootstrapOwner(input: { email: string; name: string; password: string }): Promise<AuthUser> {
-    const count = await this.repo.countUsers();
-    if (count > 0) {
-      throw new Error("La creación del propietario inicial solo está disponible antes de que exista el primer usuario");
-    }
     const hashed = await hashForStorage(input.password);
-    const user = await this.repo.createUser({
+    const user = await this.repo.createInitialOwner({
       email: input.email,
       name: input.name,
-      role: "OWNER",
       passwordHash: hashed.hash,
       passwordSalt: hashed.salt
     });
+    if (!user) {
+      throw new BootstrapUnavailableError("La creación del propietario inicial ya no está disponible");
+    }
     return publicUser(user);
   }
 
@@ -69,9 +70,9 @@ export class AuthService {
     return publicUser(user);
   }
 
-  async resetUserPassword(userId: string, password: string): Promise<void> {
+  async resetUserPassword(userId: string, password: string, allowOwnerTarget = false): Promise<void> {
     const hashed = await hashForStorage(password);
-    if (!(await this.repo.setUserPassword(userId, hashed.hash, hashed.salt))) {
+    if (!(await this.repo.setUserPassword(userId, hashed.hash, hashed.salt, allowOwnerTarget))) {
       throw new UserNotFoundError("Usuario no encontrado");
     }
   }
@@ -79,12 +80,15 @@ export class AuthService {
   async login(email: string, password: string): Promise<{ user: AuthUser; token: string; expiresAt: string }> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
-      throw new Error("Credenciales inválidas");
+      await verifyPassword(password, DUMMY_PASSWORD_SALT, DUMMY_PASSWORD_HASH);
+      throw invalidCredentialsError();
     }
     const verified = await verifyPassword(password, row.password_salt, row.password_hash);
     if (!verified.valid) {
-      throw new Error("Credenciales inválidas");
+      throw invalidCredentialsError();
     }
+    let expectedPasswordHash = row.password_hash;
+    let expectedPasswordSalt = row.password_salt;
     if (verified.needsRehash) {
       // Verify-then-upgrade: rehash the just-proven password into the current versioned
       // format. No policy check — an existing password may predate the current policy.
@@ -100,24 +104,48 @@ export class AuthService {
         // The password row changed after verification (for example, a concurrent
         // reset). Do not create a session for a credential that may no longer be
         // current.
-        throw new Error("Credenciales inválidas");
+        throw invalidCredentialsError();
       }
+      expectedPasswordHash = upgraded.hash;
+      expectedPasswordSalt = upgraded.salt;
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = addDays(new Date().toISOString(), 1);
-    await this.repo.createSession(row.id, await sha256Hex(token), expiresAt);
+    const created = await this.repo.createSessionIfCredentialsCurrent({
+      userId: row.id,
+      expectedPasswordHash,
+      expectedPasswordSalt,
+      expectedEmail: row.email,
+      expectedAuthGeneration: Number(row.auth_generation ?? 0),
+      tokenHash: await sha256Hex(token),
+      expiresAt
+    });
+    if (!created) {
+      throw invalidCredentialsError();
+    }
     return { user: publicUser(row), token, expiresAt };
   }
 
-  async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; expiresAt: string } | null> {
+  async createPasswordResetToken(email: string): Promise<{ user: AuthUser; token: string; tokenId: string; expiresAt: string } | null> {
     const row = await this.repo.getUserForLogin(email);
     if (!row || row.disabled_at) {
       return null;
     }
     const token = base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(32)));
     const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60_000).toISOString();
-    await this.repo.createPasswordResetToken(row.id, await sha256Hex(token), expiresAt);
-    return { user: publicUser(row), token, expiresAt };
+    const tokenId = await this.repo.createPasswordResetToken(
+      row.id,
+      await sha256Hex(token),
+      expiresAt,
+      row.email,
+      Number(row.auth_generation ?? 0),
+      row.password_hash,
+      row.password_salt
+    );
+    if (!tokenId) {
+      return null;
+    }
+    return { user: publicUser(row), token, tokenId, expiresAt };
   }
 
   async confirmPasswordReset(token: string, password: string): Promise<AuthUser> {
@@ -144,6 +172,15 @@ export class AuthService {
     const row = await this.repo.getSessionUser(tokenHash);
     return row ? publicUser(row) : null;
   }
+
+  async logout(request: Request): Promise<void> {
+    const header = request.headers.get("Authorization");
+    const token = header?.startsWith("Bearer ") ? header.slice("Bearer ".length).trim() : "";
+    if (!token) {
+      throw new AuthError("Debe iniciar sesión", 401);
+    }
+    await this.repo.revokeSession(await sha256Hex(token));
+  }
 }
 
 export function requireRole(user: AuthUser | null, role: Role): AuthUser {
@@ -160,6 +197,10 @@ export class AuthError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
   }
+}
+
+function invalidCredentialsError(): AuthError {
+  return new AuthError("Credenciales inválidas", 401);
 }
 
 export async function hashPassword(

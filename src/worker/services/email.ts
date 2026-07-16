@@ -2,7 +2,7 @@ import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
-import { DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
+import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
 export interface EmailDeliveryResult {
@@ -58,14 +58,19 @@ export class EmailService {
     return this.env.EMAIL_FROM;
   }
 
-  async sendReceipt(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
+  async sendReceipt(
+    record: DteDocumentRecord,
+    toEmail: string,
+    idempotencyKey?: string,
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<EmailDeliveryResult> {
     // Documento diferido (MH no disponible): SIEMPRE la copy fija transitoria, sin
     // importar la plantilla del operador — el PDF adjunto lleva sello TRANSITORIO y
     // el correo debe enmarcarlo como provisional, no como comprobante definitivo.
     // Diferido = SIGNED + transmission_deferred_at; un documento ya ACCEPTED conserva
     // el marcador como historia y cae al comprobante definitivo de abajo.
     if (record.status === "SIGNED" && record.transmission_deferred_at) {
-      return this.sendDteEmail(record, toEmail, "dteReceiptTransitorio", TRANSITORIO_RECEIPT_TEMPLATE, renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, record));
+      return this.sendDteEmail(record, toEmail, "dteReceiptTransitorio", TRANSITORIO_RECEIPT_TEMPLATE, renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, record), idempotencyKey, beforeProviderDispatch);
     }
     const message = renderEmailTemplate(this.templates.dteReceipt, record);
     if (record.status === "CONTINGENCY_PENDING" && this.templates.dteReceipt.subject === DEFAULT_EMAIL_TEMPLATES.dteReceipt.subject) {
@@ -73,15 +78,30 @@ export class EmailService {
       // campo 35 — el CDE no participa del evento de contingencia).
       message.subject = "Comprobante transitorio de su donación";
     }
-    return this.sendDteEmail(record, toEmail, "dteReceipt", this.templates.dteReceipt, message);
+    return this.sendDteEmail(record, toEmail, "dteReceipt", this.templates.dteReceipt, message, idempotencyKey, beforeProviderDispatch);
   }
 
   async sendInvalidationNotice(record: DteDocumentRecord, toEmail: string): Promise<EmailDeliveryResult> {
     const invalidatedRecord = { ...record, status: "INVALIDATED" };
-    return this.sendDteEmail(invalidatedRecord, toEmail, "dteInvalidation", this.templates.dteInvalidation, renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord));
+    return this.sendDteEmail(
+      invalidatedRecord,
+      toEmail,
+      "dteInvalidation",
+      this.templates.dteInvalidation,
+      renderEmailTemplate(this.templates.dteInvalidation, invalidatedRecord),
+      `dte-email:${record.id}:dteInvalidation`
+    );
   }
 
-  private async sendDteEmail(record: DteDocumentRecord, toEmail: string, emailType: EmailEvidenceType, template: EmailTemplateValue, message: EmailMessage): Promise<EmailDeliveryResult> {
+  private async sendDteEmail(
+    record: DteDocumentRecord,
+    toEmail: string,
+    emailType: EmailEvidenceType,
+    template: EmailTemplateValue,
+    message: EmailMessage,
+    idempotencyKey?: string,
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<EmailDeliveryResult> {
     const pdfBytes = await renderDtePdf(record);
     // Prefer the signed JWS — the cryptographically signed, legally meaningful artifact —
     // over the unsigned plain_json. The pipeline signs and persists a JWS before emailing
@@ -110,6 +130,7 @@ export class EmailService {
     const payload = {
       from,
       to: toEmail,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
       subject: message.subject,
       text: message.text,
       html: dteEmailHtml(record, message.text, {
@@ -145,7 +166,7 @@ export class EmailService {
         disposition: "attachment",
         content: dteAttachmentBytes
       }
-    ]);
+    ], beforeProviderDispatch);
     return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
   }
 
@@ -206,29 +227,38 @@ export class EmailService {
     return this.dispatch(payload, []);
   }
 
-  private async dispatch(payload: EmailPayload, cfAttachments: CloudflareEmailAttachment[]): Promise<unknown> {
+  private async dispatch(
+    payload: EmailPayload,
+    cfAttachments: CloudflareEmailAttachment[],
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<unknown> {
+    assertSafeEmailSubject(payload.subject);
     if (isMockMode(this.env)) {
       return { mock: true, toEmail: payload.to, subject: payload.subject };
     }
-    if (this.env.EMAIL) {
-      try {
-        const result = await this.env.EMAIL.send({
-          from: payload.from,
-          to: payload.to,
-          subject: payload.subject,
-          text: payload.text,
-          ...(payload.html ? { html: payload.html } : {}),
-          ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
-        });
-        return { provider: "cloudflare-email", messageId: result.messageId };
-      } catch (error) {
-        if (hasHttpProvider(this.env)) {
-          return sendViaHttpProvider(this.env, payload, error);
-        }
-        throw error;
-      }
+    const httpProviderConfigured = hasHttpProvider(this.env);
+    const cloudflareSelected = Boolean(
+      this.env.EMAIL &&
+      (this.env.EMAIL_ARBITRARY_RECIPIENTS?.trim().toLowerCase() === "true" || !httpProviderConfigured)
+    );
+    if (cloudflareSelected && this.env.EMAIL) {
+      await beforeProviderDispatch?.();
+      // Once Cloudflare Email is invoked, a rejected promise is outcome-ambiguous:
+      // the provider may already have accepted the message. Crossing to the HTTP
+      // provider here could deliver the same receipt twice, so recovery remains on
+      // this provider's durable FAILED evidence instead of automatic fallback.
+      const result = await this.env.EMAIL.send({
+        from: payload.from,
+        to: payload.to,
+        subject: payload.subject,
+        text: payload.text,
+        ...(payload.html ? { html: payload.html } : {}),
+        ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
+      });
+      return { provider: "cloudflare-email", messageId: result.messageId };
     }
-    if (hasHttpProvider(this.env)) {
+    if (httpProviderConfigured) {
+      await beforeProviderDispatch?.();
       return sendViaHttpProvider(this.env, payload);
     }
     throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
@@ -247,14 +277,20 @@ interface EmailMessage {
   text: string;
 }
 
-async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareError?: unknown): Promise<unknown> {
-  const response = await fetch(env.EMAIL_API_URL!, {
+async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unknown> {
+  const providerUrl = emailProviderUrl(env);
+  if (!providerUrl || !env.EMAIL_API_KEY?.trim()) {
+    throw new Error("Configure un endpoint HTTPS de correo administrado por el despliegue.");
+  }
+  const response = await fetch(providerUrl.toString(), {
     method: "POST",
+    redirect: "error",
     headers: {
       Authorization: `Bearer ${env.EMAIL_API_KEY}`,
-      "Content-Type": "application/json"
+      "Content-Type": "application/json",
+      ...(payload.idempotencyKey ? { "Idempotency-Key": payload.idempotencyKey } : {})
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify(providerPayload(payload))
   });
   const responseBody = await response.text();
   const parsed = parseProviderResponse(responseBody);
@@ -263,7 +299,6 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareEr
   }
   return {
     provider: "http-email",
-    ...(cloudflareError ? { fallbackFrom: "cloudflare-email", cloudflareError: errorMessage(cloudflareError) } : {}),
     response: parsed
   };
 }
@@ -271,6 +306,7 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload, cloudflareEr
 interface EmailPayload {
   from: string;
   to: string;
+  idempotencyKey?: string;
   subject: string;
   text: string;
   html?: string;
@@ -279,6 +315,11 @@ interface EmailPayload {
     contentType: string;
     contentBase64: string;
   }>;
+}
+
+function providerPayload(payload: EmailPayload): Omit<EmailPayload, "idempotencyKey"> {
+  const { idempotencyKey: _idempotencyKey, ...body } = payload;
+  return body;
 }
 
 function organizationName(env: Env): string {
@@ -293,11 +334,21 @@ function organizationName(env: Env): string {
 }
 
 function hasHttpProvider(env: Env): boolean {
-  return Boolean(env.EMAIL_API_URL?.trim() && env.EMAIL_API_KEY?.trim());
+  return Boolean(emailProviderUrl(env) && env.EMAIL_API_KEY?.trim());
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function emailProviderUrl(env: Env): URL | null {
+  const raw = env.EMAIL_PROVIDER_URL?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || url.username !== "" || url.password !== "") {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 function parseProviderResponse(responseBody: string): unknown {

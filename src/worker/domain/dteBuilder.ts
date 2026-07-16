@@ -101,6 +101,58 @@ export interface InvalidationInput {
   codigoGeneracionR?: string | null;
 }
 
+export function cdeEmisorFromConfig(
+  config: EmisorConfig
+): Record<string, unknown> {
+  return {
+    tipoDocumento: config.tipoDocumento,
+    numDocumento: config.numDocumento,
+    nrc: config.nrc ?? null,
+    nombre: config.nombre,
+    codActividad: config.codActividad,
+    descActividad: config.descActividad,
+    nombreComercial: config.nombreComercial ?? null,
+    direccion: {
+      departamento: config.direccion.departamento,
+      municipio: config.direccion.municipio,
+      distrito: config.direccion.distrito,
+      complemento: config.direccion.complemento
+    },
+    telefono: config.telefono,
+    correo: config.correo,
+    codEstable: config.codEstable ?? null,
+    codPuntoVenta: config.codPuntoVenta ?? null
+  };
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map(
+        (key) =>
+          `${JSON.stringify(key)}:${stableJson(value[key])}`
+      )
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+export function assertCdeIssuerMatchesConfig(
+  document: Record<string, unknown>,
+  config: EmisorConfig
+): void {
+  const expected = cdeEmisorFromConfig(config);
+  if (stableJson(document.emisor) !== stableJson(expected)) {
+    throw new Error(
+      "El emisor del CDE no coincide con la configuración del despliegue."
+    );
+  }
+}
+
 export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, options: CdeBuildOptions): Record<string, unknown> {
   const issuedAt = options.issuedAt ?? new Date(payload.FechaTransaccion);
   const { date, time } = mhDateTime(issuedAt);
@@ -133,20 +185,7 @@ export function buildCdeDocument(payload: WompiWebhook, config: EmisorConfig, op
       horEmi: time,
       tipoMoneda: "USD"
     },
-    emisor: {
-      tipoDocumento: config.tipoDocumento,
-      numDocumento: config.numDocumento,
-      nrc: config.nrc,
-      nombre: config.nombre,
-      codActividad: config.codActividad,
-      descActividad: config.descActividad,
-      nombreComercial: config.nombreComercial,
-      direccion: config.direccion,
-      telefono: config.telefono,
-      correo: config.correo,
-      codEstable: config.codEstable,
-      codPuntoVenta: config.codPuntoVenta
-    },
+    emisor: cdeEmisorFromConfig(config),
     receptor: {
       tipoDocumento: override ? override.tipoDocumento : donorDocumentType,
       numDocumento: override ? override.numDocumento : donorDocument,
@@ -247,20 +286,7 @@ export function buildDirectCdeDocument(input: DirectCdeInput, config: EmisorConf
       horEmi: time,
       tipoMoneda: "USD"
     },
-    emisor: {
-      tipoDocumento: config.tipoDocumento,
-      numDocumento: config.numDocumento,
-      nrc: config.nrc,
-      nombre: config.nombre,
-      codActividad: config.codActividad,
-      descActividad: config.descActividad,
-      nombreComercial: config.nombreComercial,
-      direccion: config.direccion,
-      telefono: config.telefono,
-      correo: config.correo,
-      codEstable: config.codEstable,
-      codPuntoVenta: config.codPuntoVenta
-    },
+    emisor: cdeEmisorFromConfig(config),
     receptor: {
       tipoDocumento: donorDocumentType,
       numDocumento: donorDocument ?? "",
@@ -347,6 +373,7 @@ export function buildAdvancedCdeDocument(draft: unknown, config: EmisorConfig, o
     horEmi: time,
     tipoMoneda: "USD"
   };
+  document.emisor = cdeEmisorFromConfig(config);
   validateCdeDui(document);
   validateCdeCatalogs(document);
   validateCde(document);

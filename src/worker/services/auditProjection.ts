@@ -1,6 +1,7 @@
 import type { Role } from "./auth";
 
-const USER_ACTION_SUMMARIES: Record<string, string> = {
+const SAFE_ACTION_SUMMARIES: Record<string, string> = {
+  ALERT_EMAIL_UPDATED: "Correo de alertas actualizado",
   OWNER_BOOTSTRAPPED: "Cuenta propietaria creada",
   LOGIN: "Inicio de sesión",
   LOGIN_FAILED: "Intento de inicio de sesión fallido",
@@ -17,20 +18,21 @@ export function projectAuditRows(rows: Array<Record<string, unknown>>, role: Rol
   if (role === "ADMIN" || role === "OWNER") {
     return rows;
   }
-  return rows.map((row) => {
-    const projected: Record<string, unknown> = {
-      ...row,
-      actor_email: null,
-      actor_ip: null,
-      actor_context: null
-    };
-    if (row.entity_type === "user") {
-      projected.actor_id = null;
-      projected.actor_name = null;
-      projected.entity_id = null;
-      projected.summary = USER_ACTION_SUMMARIES[String(row.action)] ?? "Actividad de cuenta registrada";
-      projected.metadata_json = "{}";
-    }
-    return projected;
-  });
+  return rows.map((row) => ({
+    id: row.id,
+    actor_type: row.actor_type,
+    actor_id: null,
+    actor_name: null,
+    actor_email: null,
+    actor_ip: null,
+    actor_context: null,
+    action: row.action,
+    entity_type: row.entity_type,
+    entity_id: row.entity_type === "user" ? null : row.entity_id,
+    summary:
+      SAFE_ACTION_SUMMARIES[String(row.action)] ??
+      (row.entity_type === "user" ? "Actividad de cuenta registrada" : "Actividad registrada"),
+    metadata_json: "{}",
+    created_at: row.created_at
+  }));
 }

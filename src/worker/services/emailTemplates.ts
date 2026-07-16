@@ -32,6 +32,14 @@ export interface EmailTemplateResponse {
 
 export class EmailTemplateValidationError extends Error {}
 
+const EMAIL_SUBJECT_CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/u;
+
+export function assertSafeEmailSubject(subject: string): void {
+  if (EMAIL_SUBJECT_CONTROL_PATTERN.test(subject)) {
+    throw new EmailTemplateValidationError("El asunto del correo contiene caracteres no permitidos.");
+  }
+}
+
 export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
   {
     type: "dteReceipt",
@@ -118,7 +126,9 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
     if (!isRecord(rawTemplate)) {
       throw new EmailTemplateValidationError(`Complete la plantilla: ${definition.label}.`);
     }
-    const subject = stringValue(rawTemplate.subject).trim();
+    const rawSubject = stringValue(rawTemplate.subject);
+    assertSafeEmailSubject(rawSubject);
+    const subject = rawSubject.trim();
     const body = stringValue(rawTemplate.body).trim();
     if (!subject || !body) {
       throw new EmailTemplateValidationError(`Complete asunto y cuerpo para: ${definition.label}.`);
@@ -130,8 +140,10 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
 
 export function renderEmailTemplate(template: EmailTemplateValue, record: DteDocumentRecord): { subject: string; text: string } {
   const values = placeholderValues(record);
+  const subject = replacePlaceholders(template.subject, values);
+  assertSafeEmailSubject(subject);
   return {
-    subject: replacePlaceholders(template.subject, values),
+    subject,
     text: replacePlaceholders(template.body, values)
   };
 }
@@ -144,7 +156,9 @@ function mergeEmailTemplates(input: unknown): EmailTemplateSettings {
   for (const definition of EMAIL_TEMPLATE_DEFINITIONS) {
     const rawTemplate = input[definition.type];
     if (!isRecord(rawTemplate)) continue;
-    const subject = stringValue(rawTemplate.subject).trim();
+    const rawSubject = stringValue(rawTemplate.subject);
+    assertSafeEmailSubject(rawSubject);
+    const subject = rawSubject.trim();
     const body = stringValue(rawTemplate.body).trim();
     defaults[definition.type] = {
       subject: subject || defaults[definition.type].subject,

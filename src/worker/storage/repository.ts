@@ -2,7 +2,7 @@ import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, Dona
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
-import type { AuditRequestContext } from "../services/requestContext";
+import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
 
 export interface DteDocumentListPage {
@@ -19,11 +19,43 @@ interface DteDocumentCursor {
 
 export const RETENTION_PAGE_SIZE = 500;
 
+export class OwnerTargetProtectedError extends Error {
+  constructor() {
+    super("Solo un propietario puede modificar a otro propietario");
+    this.name = "OwnerTargetProtectedError";
+  }
+}
+
+export class UserMutationConflictError extends Error {
+  constructor() {
+    super("El usuario cambió mientras se procesaba la solicitud; vuelva a cargar e intente de nuevo");
+    this.name = "UserMutationConflictError";
+  }
+}
+
 // Rows one cron sweep may expire (and deactivate the Wompi links of) per tick. Caps
 // the outbound Wompi fanout so attacker-created expired intents cannot translate into
 // an unbounded burst of API calls in a single invocation; the remainder is picked up
 // by the next tick.
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+const POST_ACCEPT_FINALIZATION_STALE_MS = 15 * 60 * 1000;
+const WOMPI_ISSUANCE_CLAIM_STALE_MS = 15 * 60 * 1000;
+const POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE = `(
+  post_accept_finalization_claim_id IS NULL
+  OR (
+    post_accept_finalization_claimed_at < ?
+    AND (
+      donor_email IS NULL
+      OR post_accept_email_dispatch_started_at IS NULL
+      OR EXISTS (
+        SELECT 1 FROM email_deliveries
+         WHERE document_id = dte_documents.id
+           AND email_type = 'dteReceipt' AND status IN ('SENT', 'FAILED')
+           AND document_status_at_send = 'ACCEPTED'
+      )
+    )
+  )
+)`;
 
 export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
@@ -142,6 +174,39 @@ export class Repository {
     return this.db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
   }
 
+  async claimWompiEventIssuance(id: string, claimId: string): Promise<boolean> {
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - WOMPI_ISSUANCE_CLAIM_STALE_MS).toISOString();
+    const row = await this.db
+      .prepare(
+        `UPDATE wompi_events
+            SET issuance_claim_id = ?, issuance_claimed_at = ?
+          WHERE id = ? AND processed_at IS NULL AND created_document_id IS NULL
+            AND (
+              issuance_claim_id IS NULL
+              OR issuance_claimed_at < ?
+            )
+          RETURNING id`
+      )
+      .bind(claimId, claimedAt, id, staleBefore)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async releaseWompiEventIssuance(id: string, claimId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE wompi_events
+            SET issuance_claim_id = NULL, issuance_claimed_at = NULL
+          WHERE id = ? AND processed_at IS NULL AND created_document_id IS NULL
+            AND issuance_claim_id = ?
+          RETURNING id`
+      )
+      .bind(id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
   async createDonationIntent(input: {
     id: string;
     amountCents: number;
@@ -166,6 +231,7 @@ export class Repository {
     clientIp: string | null;
     expiresAt: string;
     datosTokenHash: string | null;
+    rateLimitClaimId: string;
   }): Promise<DonationIntentRecord> {
     // Capability hash is appended after gift_type so the established donor-field
     // bindings remain stable. Full creates pass NULL; only drafts receive a hash.
@@ -174,8 +240,8 @@ export class Repository {
         `INSERT INTO donation_intents (
           id, status, amount_cents, donor_name, donor_document_type, donor_document, donor_email, donor_phone,
           direccion_departamento, direccion_municipio, direccion_distrito, direccion_complemento, donor_pais, client_ip, expires_at, gift_type,
-          datos_token_hash
-        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          datos_token_hash, rate_limit_claim_id
+        ) VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         input.id,
@@ -193,7 +259,8 @@ export class Repository {
         input.clientIp,
         input.expiresAt,
         input.giftType,
-        input.datosTokenHash
+        input.datosTokenHash,
+        input.rateLimitClaimId
       )
       .run();
     const record = await this.getDonationIntent(input.id);
@@ -235,7 +302,7 @@ export class Repository {
       direccionComplemento: string;
       donorPais: string | null;
     }
-  ): Promise<boolean> {
+  ): Promise<{ id: string; urlEnlace: string; urlEnlaceLargo: string } | null> {
     const changedAt = nowIso();
     const updated = await this.db
       .prepare(
@@ -249,7 +316,7 @@ export class Repository {
            AND paid_at IS NULL
            AND donor_document IS NULL
            AND expires_at > ?
-         RETURNING id`
+         RETURNING id, wompi_url_enlace, wompi_url_enlace_largo`
       )
       .bind(
         data.donorDocumentType,
@@ -266,15 +333,68 @@ export class Repository {
         datosTokenHash,
         changedAt
       )
-      .first<{ id: string }>();
-    return updated?.id === id;
+      .first<{
+        id: string;
+        wompi_url_enlace: string | null;
+        wompi_url_enlace_largo: string | null;
+      }>();
+    if (
+      updated?.id !== id ||
+      !updated.wompi_url_enlace ||
+      !updated.wompi_url_enlace_largo
+    ) {
+      return null;
+    }
+    return {
+      id: updated.id,
+      urlEnlace: updated.wompi_url_enlace,
+      urlEnlaceLargo: updated.wompi_url_enlace_largo
+    };
   }
 
-  async markIntentCompleted(id: string, documentId: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE donation_intents SET status = 'COMPLETED', document_id = ?, updated_at = ? WHERE id = ?")
-      .bind(documentId, nowIso(), id)
+  async markIntentCompleted(id: string, documentId: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE donation_intents
+            SET status = 'COMPLETED', document_id = ?, updated_at = ?
+          WHERE id = ?
+            AND (
+              (status IN ('LINK_CREATED', 'EXPIRED') AND document_id IS NULL)
+              OR (status = 'COMPLETED' AND document_id = ?)
+            )`
+      )
+      .bind(documentId, nowIso(), id, documentId)
       .run();
+    return Number(result.meta?.changes ?? 0) === 1;
+  }
+
+  async completeIntentForPostAcceptOwner(
+    id: string,
+    documentId: string,
+    claimId: string
+  ): Promise<boolean> {
+    const updatedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE donation_intents
+            SET status = 'COMPLETED', document_id = ?, updated_at = ?
+          WHERE id = ?
+            AND (
+              (status IN ('LINK_CREATED', 'EXPIRED') AND document_id IS NULL)
+              OR (status = 'COMPLETED' AND document_id = ?)
+            )
+            AND EXISTS (
+              SELECT 1 FROM dte_documents
+               WHERE id = ? AND status = 'ACCEPTED'
+                 AND post_accept_finalized_at IS NULL
+                 AND fiscal_operation_claim_id IS NULL
+                 AND post_accept_finalization_claim_id = ?
+            )
+          RETURNING id`
+      )
+      .bind(documentId, updatedAt, id, documentId, documentId, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   // Stamp the donor's payment (migration 0016). Called by the Wompi webhook when an
@@ -329,15 +449,6 @@ export class Repository {
       .run();
   }
 
-  // Per-IP throttle: counts intents created by one client_ip at or after sinceIso.
-  async countRecentIntentsByIp(clientIp: string, sinceIso: string): Promise<number> {
-    const row = await this.db
-      .prepare("SELECT COUNT(*) AS count FROM donation_intents WHERE client_ip = ? AND created_at >= ?")
-      .bind(clientIp, sinceIso)
-      .first<{ count: number }>();
-    return Number(row?.count ?? 0);
-  }
-
   // Newest-first listing for the admin "Donaciones en línea" panel (Task 5). The
   // LEFT JOIN exposes the emitted CDE's numero_control AND its donor_name for
   // COMPLETED intents (which carry document_id) and leaves both null for every other
@@ -377,6 +488,14 @@ export class Repository {
       .prepare("SELECT id FROM donation_intents WHERE document_id = ? AND status = 'COMPLETED' LIMIT 1")
       .bind(documentId)
       .first<{ id: string }>();
+  }
+
+  async hasAuditAction(action: string, entityType: string, entityId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare("SELECT id FROM audit_logs WHERE action = ? AND entity_type = ? AND entity_id = ? LIMIT 1")
+      .bind(action, entityType, entityId)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   async nextControlSequence(environment: Ambiente, controlPrefix: string): Promise<number> {
@@ -441,8 +560,132 @@ export class Repository {
     return record;
   }
 
+  async createClaimedWompiDteDocument(input: {
+    wompiEventId: string;
+    issuanceClaimId: string;
+    environment: Ambiente;
+    codigoGeneracion: string;
+    numeroControl: string;
+    plainJson: Record<string, unknown>;
+    donorEmail: string | null;
+    donorName: string | null;
+    amountCents: number;
+    issuedAt: string;
+  }): Promise<DteDocumentRecord | null> {
+    const id = newId("dte");
+    const processedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+              SET created_document_id = ?, processed_at = ?,
+                  issuance_claim_id = NULL, issuance_claimed_at = NULL
+            WHERE id = ? AND issuance_claim_id = ?
+              AND processed_at IS NULL AND created_document_id IS NULL`
+        )
+        .bind(id, processedAt, input.wompiEventId, input.issuanceClaimId),
+      this.db
+        .prepare(
+          `INSERT INTO dte_documents (
+             id, wompi_event_id, environment, codigo_generacion, numero_control, status,
+             plain_json, donor_email, donor_name, amount_cents, issued_at, contingency_period_id
+           )
+           SELECT ?, id, ?, ?, ?, 'PENDING', ?, ?, ?, ?, ?, NULL
+             FROM wompi_events
+            WHERE id = ? AND created_document_id = ? AND issuance_claim_id IS NULL`
+        )
+        .bind(
+          id,
+          input.environment,
+          input.codigoGeneracion,
+          input.numeroControl,
+          JSON.stringify(input.plainJson),
+          input.donorEmail,
+          input.donorName,
+          input.amountCents,
+          input.issuedAt,
+          input.wompiEventId,
+          id
+        )
+    ]);
+    if (Number(results[0]?.meta?.changes ?? 0) !== 1 || Number(results[1]?.meta?.changes ?? 0) !== 1) {
+      return null;
+    }
+    const record = await this.getDteDocument(id);
+    if (!record) {
+      throw new Error("No se pudo leer el documento DTE Wompi creado");
+    }
+    await this.indexDteDocument(record);
+    return record;
+  }
+
   async markWompiEventProcessed(id: string): Promise<void> {
     await this.db.prepare("UPDATE wompi_events SET processed_at = ? WHERE id = ? AND processed_at IS NULL").bind(nowIso(), id).run();
+  }
+
+  async quarantineWompiIntentBinding(input: {
+    wompiEventId: string;
+    intentId: string;
+    reason: string;
+    expectedLinkId: number | null;
+    payloadLinkId: number | null;
+  }): Promise<void> {
+    const auditId = `audit_binding_rejected_${input.wompiEventId}`;
+    const summary = `La vinculación con la intención ${input.intentId} fue rechazada`;
+    const metadataJson = JSON.stringify({
+      intentId: input.intentId,
+      reason: input.reason,
+      expectedLinkId: input.expectedLinkId,
+      payloadLinkId: input.payloadLinkId
+    });
+    const processedAt = nowIso();
+
+    // D1 batch is transactional. The deterministic audit PK closes concurrent insert
+    // races, while NOT EXISTS also preserves any audit written by the older random-ID
+    // path. Both statements are guarded so an already-processed event gains no late
+    // audit, and processed_at advances only when the binding-rejected audit exists.
+    await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json, actor_ip, actor_context
+           )
+           SELECT ?, 'SYSTEM', NULL, 'DONATION_INTENT_BINDING_REJECTED',
+                  'wompi_event', ?, ?, ?, NULL, NULL
+            WHERE EXISTS (
+              SELECT 1 FROM wompi_events
+               WHERE id = ? AND processed_at IS NULL
+            )
+              AND NOT EXISTS (
+                SELECT 1 FROM audit_logs
+                 WHERE action = 'DONATION_INTENT_BINDING_REJECTED'
+                   AND entity_id = ?
+              )
+           ON CONFLICT(id) DO NOTHING`
+        )
+        .bind(
+          auditId,
+          input.wompiEventId,
+          summary,
+          metadataJson,
+          input.wompiEventId,
+          input.wompiEventId
+        ),
+      this.db
+        .prepare(
+          `UPDATE wompi_events
+              SET processed_at = ?
+            WHERE id = ?
+              AND processed_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM audit_logs
+                 WHERE action = 'DONATION_INTENT_BINDING_REJECTED'
+                   AND entity_id = ?
+              )`
+        )
+        .bind(processedAt, input.wompiEventId, input.wompiEventId)
+    ]);
   }
 
   async getDteDocument(id: string): Promise<DteDocumentRecord | null> {
@@ -513,7 +756,12 @@ export class Repository {
 
   async listAcceptedDteDocumentsForExport(): Promise<DteDocumentRecord[]> {
     return this.db
-      .prepare("SELECT * FROM dte_documents WHERE status = 'ACCEPTED' AND sello_recibido IS NOT NULL ORDER BY issued_at ASC")
+      .prepare(
+         `SELECT * FROM dte_documents
+         WHERE status = 'ACCEPTED' AND sello_recibido IS NOT NULL
+           AND fiscal_operation_claim_id IS NULL
+         ORDER BY issued_at ASC`
+      )
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
   }
@@ -528,7 +776,12 @@ export class Repository {
     cursor: { issuedAt: string; id: string } | null,
     limit = RETENTION_PAGE_SIZE
   ): Promise<DteDocumentRecord[]> {
-    const conditions = ["status = 'ACCEPTED'", "issued_at >= ?", "issued_at < ?"];
+    const conditions = [
+      "status = 'ACCEPTED'",
+      "fiscal_operation_claim_id IS NULL",
+      "issued_at >= ?",
+      "issued_at < ?"
+    ];
     const bindings: Array<string | number> = [range.startIso, range.endIso];
     if (cursor) {
       conditions.push("(issued_at, id) > (?, ?)");
@@ -556,6 +809,7 @@ export class Repository {
   ): Promise<ContactSourceRow[]> {
     const conditions = [
       "dte_documents.status = 'ACCEPTED'",
+      "dte_documents.fiscal_operation_claim_id IS NULL",
       "dte_documents.wompi_event_id IS NOT NULL",
       "dte_documents.environment = ?",
       "dte_documents.issued_at >= ?"
@@ -634,7 +888,13 @@ export class Repository {
       > & { direccion_departamento: string | null; donor_pais: string | null; gift_type: string | null }
     >
   > {
-    const conditions = ["d.wompi_event_id IS NOT NULL", "d.environment = ?", "d.issued_at >= ?", "d.issued_at < ?"];
+    const conditions = [
+      "d.wompi_event_id IS NOT NULL",
+      "d.fiscal_operation_claim_id IS NULL",
+      "d.environment = ?",
+      "d.issued_at >= ?",
+      "d.issued_at < ?"
+    ];
     const bindings: Array<string | number> = [environment, range.startIso, range.endIso];
     if (cursor) {
       conditions.push("(d.issued_at, d.id) > (?, ?)");
@@ -731,34 +991,65 @@ export class Repository {
     return rows.results ?? [];
   }
 
-  async updateDocumentSigned(id: string, signedJws: string): Promise<void> {
-    await this.db
-      .prepare("UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? WHERE id = ?")
-      .bind(signedJws, nowIso(), id)
-      .run();
+  async updateDocumentSigned(id: string, signedJws: string, expectedStatus: string): Promise<boolean> {
+    const updated = await this.db
+      .prepare(
+        "UPDATE dte_documents SET signed_jws = ?, status = 'SIGNED', updated_at = ? " +
+          "WHERE id = ? AND status = ? AND fiscal_operation_claim_id IS NULL RETURNING id"
+      )
+      .bind(signedJws, nowIso(), id, expectedStatus)
+      .first<{ id: string }>();
+    return Boolean(updated);
   }
 
-  // CAS claim for an operator rebuild of a REJECTED Wompi CDE. Atomically writes the
-  // freshly rebuilt payload + signature and moves the row REJECTED → SIGNED, clearing
-  // the stale MH verdict in the same statement. Guarded on status = 'REJECTED', so two
-  // concurrent retries can never both proceed: the loser matches 0 rows and gets false,
-  // so it never transmits a second legal DTE for the same Wompi event and can never
-  // leave the stored payload describing a different document than the recorded MH
-  // result. Returns true only for the retry that won the claim.
-  async claimRejectedWompiRebuild(
+  // Claim before allocating a new fiscal control sequence. A concurrent loser must
+  // stop here so it cannot burn a permanent number for a DTE it will never transmit.
+  async claimRejectedWompiRetry(id: string, wompiEventId: string, claimId: string): Promise<boolean> {
+    const claimedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET fiscal_operation_claim_id = ?, fiscal_operation_claimed_at = ?,
+             fiscal_operation_kind = 'TRANSMISSION', fiscal_operation_event_id = NULL,
+             post_accept_finalized_at = NULL, updated_at = ?
+         WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
+           AND fiscal_operation_claim_id IS NULL
+         RETURNING id`
+      )
+      .bind(claimId, claimedAt, claimedAt, id, wompiEventId)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  // Only the claim owner may replace the rejected payload and move it to SIGNED.
+  // The claim remains attached across the fiscal POST until that owner records MH's
+  // definitive verdict (or proves dispatch never began).
+  async prepareClaimedRejectedWompiRebuild(
     id: string,
     wompiEventId: string,
+    claimId: string,
     input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null }
   ): Promise<boolean> {
     const row = await this.db
       .prepare(
         `UPDATE dte_documents
          SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?,
-             status = 'SIGNED', sello_recibido = NULL, mh_estado = NULL, mh_observaciones_json = '[]', updated_at = ?
+             status = 'SIGNED', sello_recibido = NULL, mh_estado = NULL, mh_observaciones_json = '[]',
+             post_accept_finalized_at = NULL, updated_at = ?
          WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
+           AND fiscal_operation_claim_id = ?
          RETURNING id`
       )
-      .bind(input.codigoGeneracion, input.numeroControl, JSON.stringify(input.plainJson), input.signedJws, nowIso(), id, wompiEventId)
+      .bind(
+        input.codigoGeneracion,
+        input.numeroControl,
+        JSON.stringify(input.plainJson),
+        input.signedJws,
+        nowIso(),
+        id,
+        wompiEventId,
+        claimId
+      )
       .first<{ id: string }>();
     if (!row) {
       return false;
@@ -767,19 +1058,304 @@ export class Repository {
     return true;
   }
 
-  async updateDocumentMhResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
-    await this.db
+  async claimDocumentTransmission(id: string, expectedStatus: string, signedJws: string, claimId: string): Promise<boolean> {
+    const claimedAt = nowIso();
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
-         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = COALESCE(?, accepted_at), updated_at = ?
-         WHERE id = ?`
+         SET status = 'SIGNED', fiscal_operation_claim_id = ?, fiscal_operation_claimed_at = ?,
+             fiscal_operation_kind = 'TRANSMISSION', fiscal_operation_event_id = NULL,
+             post_accept_finalized_at = NULL, updated_at = ?
+         WHERE id = ? AND status = ? AND signed_jws = ?
+           AND fiscal_operation_claim_id IS NULL
+         RETURNING id`
       )
-      .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt ?? null, nowIso(), id)
-      .run();
+      .bind(claimId, claimedAt, claimedAt, id, expectedStatus, signedJws)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
-  async markDocumentInvalidated(id: string): Promise<void> {
-    await this.db.prepare("UPDATE dte_documents SET status = 'INVALIDATED', updated_at = ? WHERE id = ?").bind(nowIso(), id).run();
+  async claimDocumentInvalidation(id: string, claimId: string): Promise<boolean> {
+    const claimedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET fiscal_operation_claim_id = ?, fiscal_operation_claimed_at = ?,
+             fiscal_operation_kind = 'INVALIDATION', fiscal_operation_event_id = NULL,
+             updated_at = ?
+         WHERE id = ? AND status = 'ACCEPTED'
+           AND sello_recibido IS NOT NULL AND accepted_at IS NOT NULL
+           AND post_accept_finalized_at IS NOT NULL
+           AND fiscal_operation_claim_id IS NULL
+         RETURNING id`
+      )
+      .bind(claimId, claimedAt, claimedAt, id)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async createAndAttachDocumentInvalidationEvent(input: {
+    documentId: string;
+    claimId: string;
+    environment: Ambiente;
+    codigoGeneracion: string;
+    plainJson: Record<string, unknown>;
+    signedJws: string;
+    legalDeadlineAt: string;
+    createdBy: string;
+  }): Promise<string> {
+    const eventId = newId("event");
+    const updatedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `INSERT INTO dte_events (
+             id, document_id, event_type, environment, codigo_generacion,
+             status, plain_json, signed_jws, legal_deadline_at, created_by
+           )
+           SELECT ?, id, 'INVALIDACION', ?, ?, 'SIGNED', ?, ?, ?, ?
+             FROM dte_documents
+            WHERE id = ? AND status = 'ACCEPTED'
+              AND fiscal_operation_claim_id = ?
+              AND fiscal_operation_kind = 'INVALIDATION'
+              AND fiscal_operation_event_id IS NULL`
+        )
+        .bind(
+          eventId,
+          input.environment,
+          input.codigoGeneracion,
+          JSON.stringify(input.plainJson),
+          input.signedJws,
+          input.legalDeadlineAt,
+          input.createdBy,
+          input.documentId,
+          input.claimId
+        ),
+      this.db
+        .prepare(
+          `UPDATE dte_documents
+              SET fiscal_operation_event_id = ?, updated_at = ?
+            WHERE id = ? AND status = 'ACCEPTED'
+              AND fiscal_operation_claim_id = ?
+              AND fiscal_operation_kind = 'INVALIDATION'
+              AND fiscal_operation_event_id IS NULL
+              AND EXISTS (
+                SELECT 1 FROM dte_events
+                 WHERE id = ? AND document_id = dte_documents.id
+                   AND event_type = 'INVALIDACION' AND status = 'SIGNED'
+              )`
+        )
+        .bind(eventId, updatedAt, input.documentId, input.claimId, eventId)
+    ]);
+    if (Number(results[0]?.meta?.changes ?? 0) !== 1 || Number(results[1]?.meta?.changes ?? 0) !== 1) {
+      throw new Error("La invalidación no pudo crear y vincular su evento bajo el mismo reclamo fiscal");
+    }
+    return eventId;
+  }
+
+  async releaseDocumentInvalidationBeforeDispatch(
+    documentId: string,
+    claimId: string,
+    eventId: string,
+    reason: string
+  ): Promise<boolean> {
+    const updatedAt = nowIso();
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE dte_events
+              SET status = 'FAILED', sello_recibido = NULL,
+                  mh_estado = 'PRE_DISPATCH_FAILED', mh_observaciones_json = ?,
+                  accepted_at = NULL
+            WHERE id = ? AND document_id = ?
+              AND event_type = 'INVALIDACION' AND status = 'SIGNED'
+              AND EXISTS (
+                SELECT 1 FROM dte_documents
+                 WHERE id = ? AND status = 'ACCEPTED'
+                   AND fiscal_operation_claim_id = ?
+                   AND fiscal_operation_kind = 'INVALIDATION'
+                   AND fiscal_operation_event_id = ?
+              )`
+        )
+        .bind(JSON.stringify([reason]), eventId, documentId, documentId, claimId, eventId),
+      this.db
+        .prepare(
+          `UPDATE dte_documents
+              SET fiscal_operation_claim_id = NULL,
+                  fiscal_operation_claimed_at = NULL,
+                  fiscal_operation_kind = NULL,
+                  fiscal_operation_event_id = NULL,
+                  updated_at = ?
+            WHERE id = ? AND status = 'ACCEPTED'
+              AND fiscal_operation_claim_id = ?
+              AND fiscal_operation_kind = 'INVALIDATION'
+              AND fiscal_operation_event_id = ?
+              AND EXISTS (
+                SELECT 1 FROM dte_events
+                 WHERE id = ? AND document_id = dte_documents.id
+                   AND event_type = 'INVALIDACION' AND status = 'FAILED'
+                   AND mh_estado = 'PRE_DISPATCH_FAILED'
+              )`
+        )
+        .bind(updatedAt, documentId, claimId, eventId, eventId)
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1 && Number(results[1]?.meta?.changes ?? 0) === 1;
+  }
+
+  async completeDocumentInvalidation(input: {
+    documentId: string;
+    claimId: string;
+    eventId: string;
+    accepted: boolean;
+    sello: string | null;
+    mhEstado: string;
+    observaciones: string[];
+    acceptedAt: string | null;
+    actorId: string;
+    raw: unknown;
+  }): Promise<boolean> {
+    const eventStatus = input.accepted ? "ACCEPTED" : "REJECTED";
+    const documentStatus = input.accepted ? "INVALIDATED" : "ACCEPTED";
+    const auditAction = input.accepted ? "DTE_INVALIDATED" : "DTE_INVALIDATION_REJECTED";
+    const updatedAt = nowIso();
+    const auditId = `audit_invalidation_${input.eventId}`;
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE dte_events
+              SET status = ?, sello_recibido = ?, mh_estado = ?,
+                  mh_observaciones_json = ?, accepted_at = ?
+            WHERE id = ? AND document_id = ?
+              AND event_type = 'INVALIDACION' AND status = 'SIGNED'
+              AND EXISTS (
+                SELECT 1 FROM dte_documents
+                 WHERE id = ? AND status = 'ACCEPTED'
+                   AND fiscal_operation_claim_id = ?
+                   AND fiscal_operation_kind = 'INVALIDATION'
+                   AND fiscal_operation_event_id = ?
+              )`
+        )
+        .bind(
+          eventStatus,
+          input.sello,
+          input.mhEstado,
+          JSON.stringify(input.observaciones),
+          input.acceptedAt,
+          input.eventId,
+          input.documentId,
+          input.documentId,
+          input.claimId,
+          input.eventId
+        ),
+      this.db
+        .prepare(
+          `UPDATE dte_documents
+              SET status = ?, fiscal_operation_claim_id = NULL,
+                  fiscal_operation_claimed_at = NULL,
+                  fiscal_operation_kind = NULL,
+                  fiscal_operation_event_id = NULL,
+                  updated_at = ?
+            WHERE id = ? AND status = 'ACCEPTED'
+              AND fiscal_operation_claim_id = ?
+              AND fiscal_operation_kind = 'INVALIDATION'
+              AND fiscal_operation_event_id = ?
+              AND EXISTS (
+                SELECT 1 FROM dte_events
+                 WHERE id = ? AND document_id = dte_documents.id
+                   AND event_type = 'INVALIDACION' AND status = ?
+              )`
+        )
+        .bind(documentStatus, updatedAt, input.documentId, input.claimId, input.eventId, input.eventId, eventStatus),
+      this.db
+        .prepare(
+          `INSERT INTO audit_logs (
+             id, actor_type, actor_id, action, entity_type, entity_id,
+             summary, metadata_json
+           )
+           SELECT ?, 'USER', ?, ?, 'dte_document', ?, ?, ?
+            WHERE EXISTS (
+              SELECT 1 FROM dte_events
+               WHERE id = ? AND document_id = ?
+                 AND event_type = 'INVALIDACION' AND status = ?
+            )
+              AND EXISTS (
+                SELECT 1 FROM dte_documents
+                 WHERE id = ? AND status = ?
+                   AND fiscal_operation_claim_id IS NULL
+              )
+           ON CONFLICT(id) DO NOTHING`
+        )
+        .bind(
+          auditId,
+          input.actorId,
+          auditAction,
+          input.documentId,
+          input.mhEstado,
+          JSON.stringify(input.raw ?? {}),
+          input.eventId,
+          input.documentId,
+          eventStatus,
+          input.documentId,
+          documentStatus
+        )
+    ]);
+    return Number(results[0]?.meta?.changes ?? 0) === 1 && Number(results[1]?.meta?.changes ?? 0) === 1;
+  }
+
+  async completeDocumentTransmission(
+    id: string,
+    claimId: string,
+    result: { status: "ACCEPTED" | "REJECTED"; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt: string | null }
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = ?,
+             fiscal_operation_claim_id = NULL, fiscal_operation_claimed_at = NULL,
+             fiscal_operation_kind = NULL, fiscal_operation_event_id = NULL, updated_at = ?
+         WHERE id = ? AND status = 'SIGNED' AND fiscal_operation_claim_id = ?
+         RETURNING id`
+      )
+      .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt, nowIso(), id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async markDocumentFailed(
+    id: string,
+    claimId: string | null,
+    result: { mhEstado: string; observaciones: string[] }
+  ): Promise<boolean> {
+    const claimPredicate = claimId ? "fiscal_operation_claim_id = ?" : "fiscal_operation_claim_id IS NULL";
+    const bindings: unknown[] = [result.mhEstado, JSON.stringify(result.observaciones), nowIso(), id];
+    if (claimId) bindings.push(claimId);
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET status = 'FAILED', sello_recibido = NULL, mh_estado = ?, mh_observaciones_json = ?,
+             fiscal_operation_claim_id = NULL, fiscal_operation_claimed_at = NULL,
+             fiscal_operation_kind = NULL, fiscal_operation_event_id = NULL, updated_at = ?
+         WHERE id = ? AND status NOT IN ('ACCEPTED', 'REJECTED', 'INVALIDATED')
+           AND ${claimPredicate}
+         RETURNING id`
+      )
+      .bind(...bindings)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async releaseDocumentFiscalOperation(id: string, claimId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET fiscal_operation_claim_id = NULL, fiscal_operation_claimed_at = NULL,
+             fiscal_operation_kind = NULL, fiscal_operation_event_id = NULL, updated_at = ?
+         WHERE id = ? AND fiscal_operation_claim_id = ?
+         RETURNING id`
+      )
+      .bind(nowIso(), id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   // Marca un CDE como diferido: estado SIGNED + transmission_deferred_at (no hay un
@@ -787,26 +1363,120 @@ export class Repository {
   // reconstruir la tabla para ampliar su CHECK). El marcador NO se limpia al resolver:
   // queda como evidencia histórica ("estuvo diferido desde"), y es el status al salir
   // de SIGNED (ACCEPTED/REJECTED) lo que retira al documento del barrido de reintento.
-  async markDocumentTransmissionDeferred(id: string, reason: string): Promise<void> {
-    await this.db
+  async markDocumentTransmissionDeferred(id: string, claimId: string, reason: string): Promise<boolean> {
+    const row = await this.db
       .prepare(
         `UPDATE dte_documents
          SET status = 'SIGNED', transmission_deferred_at = ?, sello_recibido = NULL,
-             mh_estado = ?, mh_observaciones_json = ?, updated_at = ?
-         WHERE id = ?`
+             mh_estado = ?, mh_observaciones_json = ?, fiscal_operation_claim_id = NULL,
+             fiscal_operation_claimed_at = NULL, fiscal_operation_kind = NULL,
+             fiscal_operation_event_id = NULL, updated_at = ?
+         WHERE id = ? AND status = 'SIGNED' AND fiscal_operation_claim_id = ?
+         RETURNING id`
       )
-      .bind(nowIso(), "MH_NO_DISPONIBLE", JSON.stringify([reason]), nowIso(), id)
-      .run();
+      .bind(nowIso(), "MH_NO_DISPONIBLE", JSON.stringify([reason]), nowIso(), id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
   // los reintenta en orden de emisión. Lee por el índice idx_dte_documents_status.
   async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
-      .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL ORDER BY created_at ASC LIMIT ?")
+      .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL AND fiscal_operation_claim_id IS NULL ORDER BY created_at ASC LIMIT ?")
       .bind("SIGNED", Math.min(Math.max(Math.trunc(limit), 1), 500))
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
+  }
+
+  async listPendingPostAcceptFinalizations(limit = 100): Promise<DteDocumentRecord[]> {
+    const staleBefore = new Date(Date.now() - POST_ACCEPT_FINALIZATION_STALE_MS).toISOString();
+    return this.db
+      .prepare(
+        `SELECT * FROM dte_documents
+         WHERE status = 'ACCEPTED' AND post_accept_finalized_at IS NULL
+           AND fiscal_operation_claim_id IS NULL
+           AND ${POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE}
+         ORDER BY created_at ASC, id ASC LIMIT ?`
+      )
+      .bind(staleBefore, Math.min(Math.max(Math.trunc(limit), 1), 500))
+      .all<DteDocumentRecord>()
+      .then((result) => result.results ?? []);
+  }
+
+  async claimDocumentPostAcceptFinalization(id: string, claimId: string): Promise<boolean> {
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - POST_ACCEPT_FINALIZATION_STALE_MS).toISOString();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+            SET post_accept_finalization_claim_id = ?,
+                post_accept_finalization_claimed_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'ACCEPTED'
+            AND post_accept_finalized_at IS NULL
+            AND fiscal_operation_claim_id IS NULL
+            AND ${POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE}
+          RETURNING id`
+      )
+      .bind(claimId, claimedAt, claimedAt, id, staleBefore)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async markDocumentPostAcceptEmailDispatchStarted(id: string, claimId: string): Promise<boolean> {
+    const startedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+            SET post_accept_email_dispatch_started_at = ?, updated_at = ?
+          WHERE id = ? AND status = 'ACCEPTED'
+            AND post_accept_finalized_at IS NULL
+            AND post_accept_finalization_claim_id = ?
+            AND post_accept_email_dispatch_started_at IS NULL
+          RETURNING id`
+      )
+      .bind(startedAt, startedAt, id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async releaseDocumentPostAcceptFinalization(id: string, claimId: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+            SET post_accept_finalization_claim_id = NULL,
+                post_accept_finalization_claimed_at = NULL,
+                post_accept_email_dispatch_started_at = NULL,
+                updated_at = ?
+          WHERE id = ? AND status = 'ACCEPTED'
+            AND post_accept_finalized_at IS NULL
+            AND post_accept_finalization_claim_id = ?
+          RETURNING id`
+      )
+      .bind(nowIso(), id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async markDocumentPostAcceptFinalized(id: string, claimId: string): Promise<boolean> {
+    const finalizedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE dte_documents
+         SET post_accept_finalized_at = ?,
+             post_accept_finalization_claim_id = NULL,
+             post_accept_finalization_claimed_at = NULL,
+             post_accept_email_dispatch_started_at = NULL,
+             updated_at = ?
+         WHERE id = ? AND status = 'ACCEPTED'
+           AND post_accept_finalized_at IS NULL
+           AND fiscal_operation_claim_id IS NULL
+           AND post_accept_finalization_claim_id = ?
+         RETURNING id`
+      )
+      .bind(finalizedAt, finalizedAt, id, claimId)
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   // Dedupe de evidencia de correo: ¿ya existe un envío SENT de este tipo para el
@@ -819,9 +1489,30 @@ export class Repository {
     return Boolean(row);
   }
 
-  async updateDocumentDonorEmail(id: string, email: string): Promise<void> {
-    await this.db.prepare("UPDATE dte_documents SET donor_email = ?, updated_at = ? WHERE id = ?").bind(email, nowIso(), id).run();
+  async hasHandledEmail(documentId: string, emailType: string, documentStatusAtSend: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        "SELECT id FROM email_deliveries WHERE document_id = ? AND email_type = ? AND status IN ('SENT', 'FAILED') AND document_status_at_send = ? LIMIT 1"
+      )
+      .bind(documentId, emailType, documentStatusAtSend)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async updateDocumentDonorEmail(id: string, email: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE dte_documents
+            SET donor_email = ?, updated_at = ?
+          WHERE id = ? AND post_accept_finalization_claim_id IS NULL`
+      )
+      .bind(email, nowIso(), id)
+      .run();
+    if (Number(result.meta?.changes ?? 0) !== 1) {
+      return false;
+    }
     await this.indexDteDocumentById(id);
+    return true;
   }
 
   private async indexDteDocumentById(id: string): Promise<void> {
@@ -865,19 +1556,20 @@ export class Repository {
     // callers rarely need them since handleApi/webhook inject the context once.
     actorIp?: string | null;
     actorContext?: unknown;
+    rateLimitClaimId?: string | null;
   }): Promise<void> {
-    const actorIp = input.actorIp ?? this.auditContext?.ip ?? null;
-    const contextValue = input.actorContext ?? this.auditContext?.context;
+    const actorIp = normalizeAuditIp(
+      input.actorIp ?? this.auditContext?.ip ?? null
+    );
     // Persist context only when there is something to persist; an absent request
     // (cron/queue) or an all-undefined cf blob leaves actor_context NULL.
-    const actorContext =
-      contextValue && typeof contextValue === "object" && Object.keys(contextValue as object).length > 0
-        ? JSON.stringify(contextValue)
-        : null;
+    const actorContext = serializeAuditContext(
+      input.actorContext ?? this.auditContext?.context
+    );
     await this.db
       .prepare(
-        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context, rate_limit_claim_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .bind(
         newId("audit"),
@@ -889,9 +1581,49 @@ export class Repository {
         input.summary,
         JSON.stringify(input.metadata ?? {}),
         actorIp,
-        actorContext
+        actorContext,
+        input.rateLimitClaimId ?? null
       )
       .run();
+  }
+
+  async ensurePostAcceptAudit(input: {
+    auditId: string;
+    documentId: string;
+    claimId: string;
+    action: string;
+    entityType: string;
+    entityId: string;
+    summary: string;
+    metadata?: unknown;
+  }): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `INSERT INTO audit_logs (
+           id, actor_type, actor_id, action, entity_type, entity_id, summary,
+           metadata_json, actor_ip, actor_context, rate_limit_claim_id
+         )
+         SELECT ?, 'SYSTEM', NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL
+           FROM dte_documents
+          WHERE id = ? AND status = 'ACCEPTED'
+            AND post_accept_finalized_at IS NULL
+            AND fiscal_operation_claim_id IS NULL
+            AND post_accept_finalization_claim_id = ?
+         ON CONFLICT(id) DO UPDATE SET id = excluded.id
+         RETURNING id`
+      )
+      .bind(
+        input.auditId,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.summary,
+        JSON.stringify(input.metadata ?? {}),
+        input.documentId,
+        input.claimId
+      )
+      .first<{ id: string }>();
+    return Boolean(row);
   }
 
   async listAudit(entityType?: string, entityId?: string): Promise<Array<Record<string, unknown>>> {
@@ -937,50 +1669,6 @@ export class Repository {
       .bind(...bindings, bounded + 1)
       .all<Record<string, unknown>>()
       .then((result) => redactSensitiveAuditRows(result.results ?? []));
-  }
-
-  async createDteEvent(input: {
-    documentId: string | null;
-    eventType: "INVALIDACION" | "CONTINGENCIA";
-    environment: Ambiente;
-    codigoGeneracion: string;
-    plainJson: Record<string, unknown>;
-    signedJws?: string | null;
-    legalDeadlineAt?: string | null;
-    createdBy?: string | null;
-  }): Promise<string> {
-    const id = newId("event");
-    await this.db
-      .prepare(
-        `INSERT INTO dte_events (
-          id, document_id, event_type, environment, codigo_generacion, status, plain_json, signed_jws, legal_deadline_at, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .bind(
-        id,
-        input.documentId,
-        input.eventType,
-        input.environment,
-        input.codigoGeneracion,
-        input.signedJws ? "SIGNED" : "PENDING",
-        JSON.stringify(input.plainJson),
-        input.signedJws ?? null,
-        input.legalDeadlineAt ?? null,
-        input.createdBy ?? null
-      )
-      .run();
-    return id;
-  }
-
-  async updateDteEventResult(id: string, result: { status: string; sello: string | null; mhEstado: string; observaciones: string[]; acceptedAt?: string | null }): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE dte_events
-         SET status = ?, sello_recibido = ?, mh_estado = ?, mh_observaciones_json = ?, accepted_at = ?
-         WHERE id = ?`
-      )
-      .bind(result.status, result.sello, result.mhEstado, JSON.stringify(result.observaciones), result.acceptedAt ?? null, id)
-      .run();
   }
 
   // Lectura histórica: la emisión en contingencia se eliminó (el Anexo del evento
@@ -1122,6 +1810,19 @@ export class Repository {
     return row?.count ?? 0;
   }
 
+  async createInitialOwner(input: { email: string; name: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown> | null> {
+    const id = newId("user");
+    return this.db
+      .prepare(
+        `INSERT INTO users (id, email, name, role, password_hash, password_salt)
+         SELECT ?, ?, ?, 'OWNER', ?, ?
+          WHERE NOT EXISTS (SELECT 1 FROM users)
+         RETURNING id, email, name, role, disabled_at, created_at, updated_at`
+      )
+      .bind(id, input.email.toLowerCase(), input.name, input.passwordHash, input.passwordSalt)
+      .first<Record<string, unknown>>();
+  }
+
   async createUser(input: { email: string; name: string; role: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown>> {
     const id = newId("user");
     await this.db
@@ -1140,18 +1841,275 @@ export class Repository {
 
   async getUserForLogin(email: string): Promise<Record<string, string> | null> {
     return this.db
-      .prepare("SELECT id, email, name, role, password_hash, password_salt, disabled_at FROM users WHERE email = ?")
+      .prepare("SELECT id, email, name, role, password_hash, password_salt, disabled_at, auth_generation FROM users WHERE email = ?")
       .bind(email.toLowerCase())
       .first<Record<string, string>>();
   }
 
-  async createSession(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
-    const id = newId("session");
+  async claimDonationIntentRateLimit(
+    keyHash: string,
+    clientIp: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<string | null> {
+    // Unattributed rows are legacy activity, including old-version requests that
+    // finish after the first new claim. New-version rows carry their claim id.
+    const id = newId("rate");
+    const row = await this.db
+      .prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         )
+         SELECT ?, 'donation_intent', ?, ?, ?
+          WHERE (
+            (
+              SELECT COUNT(*)
+                FROM security_rate_limit_claims
+               WHERE scope = 'donation_intent'
+                 AND key_hash = ?
+                 AND claimed_at >= ?
+            ) + (
+              SELECT COUNT(*)
+               FROM donation_intents
+               WHERE client_ip = ?
+                 AND created_at >= ?
+                 AND rate_limit_claim_id IS NULL
+            )
+          ) < ?
+         RETURNING id`
+      )
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, clientIp, cutoff, limit)
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  }
+
+  async claimDonationDatosRateLimit(
+    keyHash: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<string | null> {
+    const id = newId("rate");
+    const row = await this.db
+      .prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, claimed_at, expires_at
+         )
+         SELECT ?, 'donation_datos', ?, ?, ?
+          WHERE (
+            SELECT COUNT(*)
+              FROM security_rate_limit_claims
+             WHERE scope = 'donation_datos'
+               AND key_hash = ?
+               AND claimed_at >= ?
+          ) < ?
+         RETURNING id`
+      )
+      .bind(id, keyHash, now, expiresAt, keyHash, cutoff, limit)
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  }
+
+  async claimPasswordResetBudgets(
+    pairKeyHash: string,
+    accountKeyHash: string,
+    accountId: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    pairLimit: number,
+    accountLimit: number
+  ): Promise<string | null> {
+    const id = newId("rate");
+    const row = await this.db
+      .prepare(
+        `INSERT INTO security_rate_limit_claims (
+           id, scope, key_hash, subject_key_hash, claimed_at, expires_at
+         )
+         SELECT ?, 'password_reset', ?, ?, ?, ?
+          WHERE (
+            SELECT COUNT(*)
+              FROM security_rate_limit_claims
+             WHERE scope = 'password_reset'
+               AND key_hash = ?
+               AND claimed_at >= ?
+          ) < ?
+            AND (
+              (
+                SELECT COUNT(*)
+                  FROM security_rate_limit_claims
+                 WHERE scope = 'password_reset'
+                   AND subject_key_hash = ?
+                   AND claimed_at >= ?
+              ) + (
+                SELECT COUNT(*)
+                  FROM audit_logs AS audit
+                  LEFT JOIN security_rate_limit_claims AS legacy_claim
+                    ON legacy_claim.id = audit.rate_limit_claim_id
+                 WHERE audit.entity_id = ?
+                   AND audit.action IN ('PASSWORD_RESET_REQUESTED', 'PASSWORD_RESET_EMAIL_FAILED')
+                   AND audit.created_at >= ?
+                   AND (
+                     audit.rate_limit_claim_id IS NULL
+                     OR legacy_claim.subject_key_hash IS NULL
+                   )
+              )
+            ) < ?
+         RETURNING id`
+      )
+      .bind(
+        id,
+        pairKeyHash,
+        accountKeyHash,
+        now,
+        expiresAt,
+        pairKeyHash,
+        cutoff,
+        pairLimit,
+        accountKeyHash,
+        cutoff,
+        accountId,
+        cutoff,
+        accountLimit
+      )
+      .first<{ id: string }>();
+    return row?.id ?? null;
+  }
+
+  async claimLoginAttempt(
+    keyHash: string,
+    now: string,
+    cutoff: string,
+    expiresAt: string,
+    limit: number
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `INSERT INTO login_rate_limits (
+           key_hash, window_started_at, attempt_count, expires_at
+         ) VALUES (?, ?, 1, ?)
+         ON CONFLICT(key_hash) DO UPDATE SET
+           window_started_at = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN excluded.window_started_at
+             ELSE login_rate_limits.window_started_at
+           END,
+           attempt_count = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN 1
+             ELSE login_rate_limits.attempt_count + 1
+           END,
+           expires_at = CASE
+             WHEN login_rate_limits.window_started_at <= ?
+               THEN excluded.expires_at
+             ELSE login_rate_limits.expires_at
+           END
+         WHERE login_rate_limits.window_started_at <= ?
+            OR login_rate_limits.attempt_count < ?
+         RETURNING attempt_count`
+      )
+      .bind(keyHash, now, expiresAt, cutoff, cutoff, cutoff, cutoff, limit)
+      .first<{ attempt_count: number }>();
+    return row !== null;
+  }
+
+  async deleteExpiredLoginRateLimits(now: string): Promise<void> {
     await this.db
-      .prepare("INSERT INTO sessions (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-      .bind(id, userId, tokenHash, expiresAt)
+      .prepare("DELETE FROM login_rate_limits WHERE expires_at <= ?")
+      .bind(now)
       .run();
-    return id;
+  }
+
+  async deleteExpiredSecurityRateLimitClaims(now: string): Promise<void> {
+    await this.db
+      .prepare("DELETE FROM security_rate_limit_claims WHERE expires_at <= ?")
+      .bind(now)
+      .run();
+  }
+
+  async createSessionIfCredentialsCurrent(input: {
+    userId: string;
+    expectedPasswordHash: string;
+    expectedPasswordSalt: string;
+    expectedEmail: string;
+    expectedAuthGeneration: number;
+    tokenHash: string;
+    expiresAt: string;
+  }): Promise<boolean> {
+    const id = newId("session");
+    const createdAt = nowIso();
+    const guard = [
+      input.userId,
+      input.expectedPasswordHash,
+      input.expectedPasswordSalt,
+      input.expectedEmail,
+      input.expectedAuthGeneration
+    ] as const;
+    const results = await this.db.batch([
+      this.db
+        .prepare(
+          `DELETE FROM sessions
+            WHERE user_id = ?
+              AND (revoked_at IS NOT NULL OR expires_at <= ?)
+              AND EXISTS (
+                SELECT 1 FROM users
+                 WHERE id = ?
+                   AND disabled_at IS NULL
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND email = ?
+                   AND auth_generation = ?
+              )`
+        )
+        .bind(input.userId, createdAt, ...guard),
+      this.db
+        .prepare(
+          `DELETE FROM sessions
+            WHERE id IN (
+              SELECT id FROM sessions
+               WHERE user_id = ?
+                 AND revoked_at IS NULL
+                 AND expires_at > ?
+               ORDER BY created_at DESC, id DESC
+               LIMIT -1 OFFSET 7
+            )
+              AND EXISTS (
+                SELECT 1 FROM users
+                 WHERE id = ?
+                   AND disabled_at IS NULL
+                   AND password_hash = ?
+                   AND password_salt = ?
+                   AND email = ?
+                   AND auth_generation = ?
+              )`
+        )
+        .bind(input.userId, createdAt, ...guard),
+      this.db
+        .prepare(
+          `INSERT INTO sessions (
+             id, user_id, token_hash, expires_at, created_at
+           )
+           SELECT ?, id, ?, ?, ?
+             FROM users
+            WHERE id = ?
+              AND disabled_at IS NULL
+              AND password_hash = ?
+              AND password_salt = ?
+              AND email = ?
+              AND auth_generation = ?`
+        )
+        .bind(
+          id,
+          input.tokenHash,
+          input.expiresAt,
+          createdAt,
+          ...guard
+        )
+    ]);
+    return Number(results[2]?.meta?.changes ?? 0) === 1;
   }
 
   async getSessionUser(tokenHash: string): Promise<Record<string, string> | null> {
@@ -1169,22 +2127,115 @@ export class Repository {
       .first<Record<string, string>>();
   }
 
-  async updateUser(id: string, input: { role?: string; disabled?: boolean; name?: string; email?: string }): Promise<Record<string, unknown>> {
-    const existing = await this.db.prepare("SELECT id, email, name, role, disabled_at FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
+  async revokeSession(tokenHash: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE sessions
+            SET revoked_at = ?
+          WHERE token_hash = ?
+            AND revoked_at IS NULL`
+      )
+      .bind(nowIso(), tokenHash)
+      .run();
+  }
+
+  async updateUser(
+    id: string,
+    input: { role?: string; disabled?: boolean; name?: string; email?: string },
+    allowOwnerTarget = false
+  ): Promise<Record<string, unknown>> {
+    const existing = await this.db.prepare("SELECT id, email, name, role, disabled_at, auth_generation FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
     if (!existing) {
       throw new Error("Usuario no encontrado");
     }
-    await this.db
-      .prepare("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")
+    const changedAt = nowIso();
+    const currentEmail = String(existing.email).toLowerCase();
+    const nextEmail = String(input.email ?? existing.email).trim().toLowerCase();
+    const wasDisabled = existing.disabled_at != null && existing.disabled_at !== "";
+    const willBeDisabled = input.disabled === undefined ? wasDisabled : input.disabled;
+    const nextDisabledAt =
+      input.disabled === undefined
+        ? existing.disabled_at
+        : willBeDisabled
+          ? changedAt
+          : null;
+    const invalidatesCapabilities =
+      nextEmail !== currentEmail || willBeDisabled !== wasDisabled;
+    const observedAuthGeneration = Number(existing.auth_generation ?? 0);
+    const nextAuthGeneration = observedAuthGeneration + (invalidatesCapabilities ? 1 : 0);
+
+    const update = this.db
+      .prepare(
+        `UPDATE users
+            SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?,
+                auth_generation = auth_generation + ?
+          WHERE id = ?
+            AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))
+            AND email = ?
+            AND disabled_at IS ?
+            AND auth_generation = ?
+            AND name = ?
+            AND role = ?`
+      )
       .bind(
         input.name ?? existing.name,
-        String(input.email ?? existing.email).toLowerCase(),
+        nextEmail,
         input.role ?? existing.role,
-        input.disabled === undefined ? existing.disabled_at : input.disabled ? nowIso() : null,
-        nowIso(),
-        id
-      )
-      .run();
+        nextDisabledAt,
+        changedAt,
+        invalidatesCapabilities ? 1 : 0,
+        id,
+        allowOwnerTarget ? 1 : 0,
+        currentEmail,
+        existing.disabled_at ?? null,
+        observedAuthGeneration,
+        existing.name,
+        existing.role
+      );
+
+    if (invalidatesCapabilities) {
+      const results = await this.db.batch([
+        update,
+        this.db
+          .prepare(
+            `UPDATE sessions
+                SET revoked_at = ?
+              WHERE user_id = ?
+                AND revoked_at IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM users
+                   WHERE id = ?
+                     AND email = ?
+                     AND disabled_at IS ?
+                     AND auth_generation = ?
+                )`
+          )
+          .bind(changedAt, id, id, nextEmail, nextDisabledAt, nextAuthGeneration),
+        this.db
+          .prepare(
+            `UPDATE password_reset_tokens
+                SET used_at = ?
+              WHERE user_id = ?
+                AND used_at IS NULL
+                AND EXISTS (
+                  SELECT 1 FROM users
+                   WHERE id = ?
+                     AND email = ?
+                     AND disabled_at IS ?
+                     AND auth_generation = ?
+                )`
+          )
+          .bind(changedAt, id, id, nextEmail, nextDisabledAt, nextAuthGeneration)
+      ]);
+      if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
+        await this.throwUserMutationFailure(id, allowOwnerTarget);
+      }
+    } else {
+      const result = await update.run();
+      if (Number(result.meta?.changes ?? 0) !== 1) {
+        await this.throwUserMutationFailure(id, allowOwnerTarget);
+      }
+    }
     const updated = await this.db
       .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
       .bind(id)
@@ -1193,6 +2244,17 @@ export class Repository {
       throw new Error("No se pudo leer el usuario actualizado");
     }
     return updated;
+  }
+
+  private async throwUserMutationFailure(id: string, allowOwnerTarget: boolean): Promise<never> {
+    const currentRole = await this.getUserRole(id);
+    if (currentRole === null) {
+      throw new Error("Usuario no encontrado");
+    }
+    if (!allowOwnerTarget && currentRole === "OWNER") {
+      throw new OwnerTargetProtectedError();
+    }
+    throw new UserMutationConflictError();
   }
 
   async listStalledApprovedWompiEvents(cutoffIso: string): Promise<Array<Record<string, unknown>>> {
@@ -1264,7 +2326,8 @@ export class Repository {
       .prepare(`SELECT * FROM ${table} WHERE ${conditions.join(" AND ")} ORDER BY ${column} ASC, id ASC LIMIT ?`)
       .bind(...bindings, limit)
       .all<Record<string, unknown>>();
-    return rows.results ?? [];
+    const results = rows.results ?? [];
+    return table === "audit_logs" ? redactSensitiveAuditRows(results) : results;
   }
 
   // Full-snapshot paged reads for the small contingency tables (no created_at
@@ -1284,13 +2347,50 @@ export class Repository {
     return rows.results ?? [];
   }
 
-  async createPasswordResetToken(userId: string, tokenHash: string, expiresAt: string): Promise<string> {
+  async createPasswordResetToken(
+    userId: string,
+    tokenHash: string,
+    expiresAt: string,
+    expectedEmail: string,
+    expectedAuthGeneration: number,
+    expectedPasswordHash: string,
+    expectedPasswordSalt: string
+  ): Promise<string | null> {
     const id = newId("reset");
+    const created = await this.db
+      .prepare(
+        `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
+         SELECT ?, id, ?, ?
+         FROM users
+         WHERE id = ? AND disabled_at IS NULL
+           AND email = ? AND auth_generation = ?
+           AND password_hash = ? AND password_salt = ?
+         RETURNING id`
+      )
+      .bind(
+        id,
+        tokenHash,
+        expiresAt,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      )
+      .first<{ id: string }>();
+    return created?.id ?? null;
+  }
+
+  async invalidatePasswordResetToken(id: string): Promise<void> {
     await this.db
-      .prepare("INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, ?)")
-      .bind(id, userId, tokenHash, expiresAt)
+      .prepare(
+        `UPDATE password_reset_tokens
+            SET used_at = ?
+          WHERE id = ?
+            AND used_at IS NULL`
+      )
+      .bind(nowIso(), id)
       .run();
-    return id;
   }
 
   async getActivePasswordResetUser(tokenHash: string): Promise<Record<string, string> | null> {
@@ -1368,12 +2468,22 @@ export class Repository {
     return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
-  async setUserPassword(userId: string, passwordHash: string, passwordSalt: string): Promise<boolean> {
+  async setUserPassword(
+    userId: string,
+    passwordHash: string,
+    passwordSalt: string,
+    allowOwnerTarget = false
+  ): Promise<boolean> {
     const changedAt = nowIso();
     const results = await this.db.batch([
       this.db
-        .prepare("UPDATE users SET password_hash = ?, password_salt = ?, updated_at = ? WHERE id = ?")
-        .bind(passwordHash, passwordSalt, changedAt, userId),
+        .prepare(
+          `UPDATE users
+              SET password_hash = ?, password_salt = ?, updated_at = ?
+            WHERE id = ?
+              AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))`
+        )
+        .bind(passwordHash, passwordSalt, changedAt, userId, allowOwnerTarget ? 1 : 0),
       this.db
         .prepare(
           `UPDATE sessions
@@ -1407,7 +2517,11 @@ export class Repository {
         )
         .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
     ]);
-    return Number(results[0]?.meta?.changes ?? 0) === 1;
+    const changed = Number(results[0]?.meta?.changes ?? 0) === 1;
+    if (!changed && !allowOwnerTarget && (await this.getUserRole(userId)) === "OWNER") {
+      throw new OwnerTargetProtectedError();
+    }
+    return changed;
   }
 
   // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does
