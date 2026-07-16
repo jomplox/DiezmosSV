@@ -163,8 +163,22 @@ Cada CDE muestra una etiqueta de color con su estado:
 
 ## 6. Cuando aparece algo en Fallos
 
-La sección **Fallos** lista los CDE con errores o rechazos que requieren su atención.
-Seleccione el documento en la lista y, en el panel de detalle a la derecha:
+La sección **Fallos** reúne dos situaciones distintas:
+
+- Una tarjeta **CDE NO CREADO** significa que el pago de Wompi sí llegó, pero el error
+  ocurrió antes de crear el CDE. No es un CDE **Fallido** ni **Rechazado**: todavía no
+  existe un comprobante que Hacienda pueda aceptar o rechazar. Lea el error exacto que
+  muestra la tarjeta y pulse **Reintentar creación**.
+- Un CDE **Fallido** ya existe, pero tuvo un error durante el proceso. Un CDE
+  **Rechazado** también existe y Hacienda respondió que no lo aceptaba. Para estos casos,
+  seleccione el documento en la lista y use el panel de detalle a la derecha.
+
+En una tarjeta **CDE NO CREADO**, **Número reservado** significa que el sistema apartó ese
+número para crear el mismo comprobante al reintentar; no significa que el CDE ya fue
+emitido ni aceptado. **Número aún no asignado** significa que el error ocurrió antes de
+reservarlo. No emita otro CDE para sustituir esa tarjeta.
+
+Para un CDE **Fallido** o **Rechazado**:
 
 - Pulse **Reintentar** para volver a procesar el CDE. Es lo primero que debe intentar: la
   mayoría de fallos son temporales (Hacienda ocupada, corte de red) y se resuelven al
@@ -175,7 +189,10 @@ Seleccione el documento en la lista y, en el panel de detalle a la derecha:
 **Cuándo escalar a soporte técnico:** si un mismo CDE sigue en **Fallido** o **Rechazado**
 después de dos o tres reintentos, o si el mensaje de error menciona credenciales, firma o
 certificado, no siga reintentando: contacte a soporte técnico (ver pie de página) e
-indíquele el **Código de generación** del documento.
+indíquele el **Código de generación** del documento. Para un **CDE NO CREADO**, si el
+mismo error de validación se repite después de **Reintentar creación**, no siga pulsando
+el botón: contacte a soporte y comparta el error exacto de la tarjeta y el **Número
+reservado**, si aparece.
 
 ---
 
@@ -243,7 +260,7 @@ recibirá automáticamente avisos cuando algo necesite atención:
 | Alerta | Qué significa |
 |---|---|
 | **Hacienda no disponible** | Hay CDE **En trámite** desde hace más de una hora porque Hacienda no responde. Los donantes ya tienen su comprobante transitorio; el sistema sigue reintentando cada 15 minutos. |
-| **Mensaje de emisión agotó reintentos** | Un CDE no se pudo procesar tras varios intentos automáticos. Revise **Fallos**. |
+| **Mensaje de emisión agotó reintentos** | El caso agotó sus intentos automáticos. Si corresponde a un evento o pago de Wompi sin documento, abra **Fallos → CDE NO CREADO**, revise el error exacto guardado (sin datos sensibles) y pulse **Reintentar creación**. Si corresponde a un CDE avanzado o ya existente, abra ese CDE fallido en **Fallos** y revise el error del documento. En ambos casos, si el mismo error de validación se repite, contacte a soporte en vez de seguir reintentando. |
 | **Evento Wompi sin procesar** | Un pago de Wompi quedó estancado; el sistema intenta recuperarlo, pero conviene revisarlo. |
 | **Certificado del firmador por vencer** | El certificado de firma de Hacienda está por vencer (avisos a 30, 14 y 3 días). Coordine su renovación con soporte técnico. |
 

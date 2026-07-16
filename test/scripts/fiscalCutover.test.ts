@@ -31,10 +31,19 @@ describe("fiscal claim migration cutover", () => {
   });
 
   it("guards every standard remote migration and deploy command", () => {
-    expect(packageJson.scripts["cf:migrate:staging"]).toMatch(/^node scripts\/assert-fiscal-cutover\.mjs staging &&/);
-    expect(packageJson.scripts["cf:migrate:prod"]).toMatch(/^node scripts\/assert-fiscal-cutover\.mjs production &&/);
-    expect(packageJson.scripts["cf:deploy:staging"]).toMatch(/^node scripts\/assert-fiscal-cutover\.mjs staging &&/);
-    expect(packageJson.scripts["cf:deploy:prod"]).toMatch(/^node scripts\/assert-fiscal-cutover\.mjs production &&/);
+    for (const [script, environment] of [
+      ["cf:migrate:staging", "staging"],
+      ["cf:migrate:prod", "production"]
+    ] as const) {
+      expect(packageJson.scripts[script]).toMatch(/^node scripts\/d1-migration-preflight\.mjs /);
+      expect(packageJson.scripts[script]).toContain(`&& node scripts/assert-fiscal-cutover.mjs ${environment} &&`);
+    }
+    for (const [script, environment] of [
+      ["cf:deploy:staging", "staging"],
+      ["cf:deploy:prod", "production"]
+    ] as const) {
+      expect(packageJson.scripts[script]).toMatch(new RegExp(`^node scripts/assert-fiscal-cutover\\.mjs ${environment} &&`));
+    }
   });
 
   it("backfills historical acceptances and verifies finalization ownership at cutover", () => {

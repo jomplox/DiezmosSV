@@ -1,53 +1,38 @@
 export type Ambiente = "00" | "01";
 
-export interface Env {
-  DB: D1Database;
-  ISSUANCE_QUEUE: Queue<IssuanceMessage>;
-  ASSETS: Fetcher;
-  ARCHIVE: R2Bucket;
-  EMAIL?: SendEmail;
-  APP_ENV?: string;
-  APP_ORIGIN?: string;
-  MOCK_EXTERNAL_SERVICES?: string;
-  BOOTSTRAP_OWNER_TOKEN?: string;
-  CLOUDFLARE_ACCOUNT_ID?: string;
-  CLOUDFLARE_API_TOKEN?: string;
-  CLOUDFLARE_SCRIPT_NAME?: string;
-  CLOUDFLARE_API_BASE_URL?: string;
-  WOMPI_API_SECRET?: string;
-  WOMPI_CLIENT_ID?: string;
-  WOMPI_CLIENT_SECRET?: string;
-  MH_CERT_XML?: string;
-  MH_CERT_XML_PART_1?: string;
-  MH_CERT_XML_PART_2?: string;
-  MH_CERT_PASSWORD?: string;
-  MH_USER?: string;
-  MH_PASSWORD?: string;
-  MH_USER_TEST?: string;
-  MH_PASSWORD_TEST?: string;
-  MH_USER_PROD?: string;
-  MH_PASSWORD_PROD?: string;
-  MH_AUTH_URL_TEST?: string;
-  // Narrow TEST-account fallback to MH's central auth host after codigoMsg 106.
-  // This is not a production transmission capability.
-  MH_AUTH_URL_TEST_FALLBACK?: string;
-  MH_AUTH_URL_PROD?: string;
-  MH_RECEPCION_URL_TEST?: string;
-  MH_RECEPCION_URL_PROD?: string;
-  MH_CONTINGENCIA_URL_TEST?: string;
-  MH_CONTINGENCIA_URL_PROD?: string;
-  MH_ANULACION_URL_TEST?: string;
-  MH_ANULACION_URL_PROD?: string;
-  MH_USER_AGENT?: string;
-  EMAIL_PROVIDER_URL?: string;
-  EMAIL_API_KEY?: string;
-  EMAIL_ARBITRARY_RECIPIENTS?: string;
-  EMAIL_FROM?: string;
-  EMISOR_CONFIG_JSON?: string;
-}
+// Wrangler owns configured binding/runtime types. Environment-dependent bindings
+// stay partial here so fail-closed paths can still model missing or invalid config;
+// dashboard-only secrets that Wrangler cannot infer are added explicitly below.
+export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
+  Partial<Omit<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE" | "ISSUANCE_QUEUE">> & {
+    ISSUANCE_QUEUE: Queue<IssuanceMessage>;
+    BOOTSTRAP_OWNER_TOKEN?: string;
+    CLOUDFLARE_ACCOUNT_ID?: string;
+    CLOUDFLARE_API_TOKEN?: string;
+    CLOUDFLARE_API_BASE_URL?: string;
+    WOMPI_API_SECRET?: string;
+    WOMPI_CLIENT_ID?: string;
+    WOMPI_CLIENT_SECRET?: string;
+    MH_CERT_XML?: string;
+    MH_CERT_XML_PART_1?: string;
+    MH_CERT_XML_PART_2?: string;
+    MH_CERT_PASSWORD?: string;
+    MH_USER?: string;
+    MH_PASSWORD?: string;
+    MH_USER_TEST?: string;
+    MH_PASSWORD_TEST?: string;
+    MH_USER_PROD?: string;
+    MH_PASSWORD_PROD?: string;
+    MH_CONTINGENCIA_URL_PROD?: string;
+    EMAIL_PROVIDER_URL?: string;
+    EMAIL_API_KEY?: string;
+    EMAIL_FROM?: string;
+    EMISOR_CONFIG_JSON?: string;
+  };
 
 export interface IssuanceMessage {
   wompiEventId?: string;
+  issuanceAttemptId?: string;
   advancedDocumentId?: string;
 }
 
@@ -154,6 +139,7 @@ export interface DteDocumentRecord {
   post_accept_finalization_claim_id?: string | null;
   post_accept_finalization_claimed_at?: string | null;
   post_accept_email_dispatch_started_at?: string | null;
+  transmission_claim_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -276,6 +262,37 @@ export interface WompiPaymentLink {
   urlEnlaceLargo: string;
 }
 
+export type WompiIssuanceStatus =
+  | "PROCESSING"
+  | "FAILED"
+  | "DEAD_LETTERED"
+  | "RETRY_QUEUED"
+  | "DOCUMENT_CREATED"
+  | "IGNORED";
+
+export interface WompiIssuanceFailureItem {
+  id: string;
+  environment: Ambiente;
+  amount_cents: number;
+  donor_name: string | null;
+  donor_email: string | null;
+  received_at: string;
+  issuance_status: WompiIssuanceStatus | null;
+  issuance_attempt_count: number;
+  issuance_error_code: string | null;
+  issuance_error_message: string | null;
+  issuance_last_attempt_at: string | null;
+  issuance_failed_at: string | null;
+  issuance_dead_lettered_at: string | null;
+  reserved_numero_control: string | null;
+}
+
+export interface WompiDocumentIdentifiers {
+  sequence: number;
+  numeroControl: string;
+  codigoGeneracion: string;
+}
+
 export interface WompiEventRecord {
   id: string;
   transaction_id: string;
@@ -291,6 +308,18 @@ export interface WompiEventRecord {
   created_document_id: string | null;
   issuance_claim_id?: string | null;
   issuance_claimed_at?: string | null;
+  issuance_status: WompiIssuanceStatus | null;
+  control_prefix: string | null;
+  control_sequence: number | null;
+  reserved_numero_control: string | null;
+  reserved_codigo_generacion: string | null;
+  issuance_attempt_count: number;
+  issuance_attempt_id: string | null;
+  issuance_error_code: string | null;
+  issuance_error_message: string | null;
+  issuance_last_attempt_at: string | null;
+  issuance_failed_at: string | null;
+  issuance_dead_lettered_at: string | null;
 }
 
 export interface MhResponse {
