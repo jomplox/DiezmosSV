@@ -932,12 +932,15 @@ export function DonarPage() {
           <div className="donar-compact-head">
             <ShieldCheck size={18} aria-hidden="true" />
             <div className="donar-compact-titles">
-              <h1 className="donar-step-title">
-                {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
-              </h1>
+              {/* Eyebrow order: the small persistent brand ABOVE, the step's task
+                  below as the big line — the other way around read as if the brand
+                  were a subtitle of "Sus datos". The h1 stays the step title. */}
               <p className="donar-brand-line">
                 {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
               </p>
+              <h1 className="donar-step-title">
+                {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
+              </h1>
             </div>
           </div>
         )}
