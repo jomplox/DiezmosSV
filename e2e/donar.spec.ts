@@ -39,6 +39,19 @@ test.beforeEach(async ({ context }) => {
   );
 });
 
+test("the direct SV route leaves the amount unfocused until the donor taps it", async ({ page }) => {
+  await page.goto("/donar?ruta=sv");
+
+  const amount = page.getByLabel("Monto");
+  // The heading's flag is an aria-hidden inline SVG badge (emoji rendered as a
+  // blank box off-Apple), so the accessible name is the bare title.
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(amount).not.toBeFocused();
+
+  await amount.click();
+  await expect(amount).toBeFocused();
+});
+
 test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) => {
   await page.goto("/donar");
 
@@ -49,9 +62,9 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Door 1 (El Salvador y el mundo) opens the SV fiscal (Wompi + CDE) wizard.
   await page.getByRole("button", { name: "El Salvador y el mundo" }).click();
 
-  // Paso 1 — Monto. The diezmo/ofrenda framing (flagged 🇸🇻) heads the card; the
-  // step indicator and the segmented control render; the hero input is auto-focused.
-  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇸🇻" })).toBeVisible();
+  // Paso 1 — Monto. The diezmo/ofrenda framing (SV flag badge) heads the card; the
+  // step indicator and segmented control render without summoning a mobile keyboard.
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   // The assurance subtitle names the comprobante this SV path produces (user-centered
   // copy: donors know "DTE", not the CDE initials).
   await expect(page.getByText("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.")).toBeVisible();
@@ -59,7 +72,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await expect(page.getByRole("radiogroup", { name: "Tipo" })).toBeVisible();
   // Diezmo is preselected on mount.
   await expect(page.getByRole("radio", { name: "Diezmo" })).toBeChecked();
-  await expect(page.getByLabel("Monto")).toBeFocused();
+  await expect(page.getByLabel("Monto")).not.toBeFocused();
 
   // The old "Otro monto" afterthought field is gone: the hero input IS the monto.
   await expect(page.getByPlaceholder("Otro monto")).toHaveCount(0);
@@ -73,9 +86,12 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await page.getByLabel("Monto").fill(DONOR.amount);
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
-  // Paso 2 — Sus datos. Focus lands on the first field; name/email are entered
+  // Paso 2 — Sus datos. The ceremonial header stays; a small caps step label
+  // sits under the title. Focus lands on the first field; name/email are entered
   // on Wompi's sheet, not here.
   await expect(page.getByText("Paso 2 de 3")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(page.getByText("Sus datos", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Tipo de documento")).toBeFocused();
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
@@ -93,9 +109,10 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // The submit names the donor's own gift (entrega framing — never "pago").
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
 
-  // Paso 3 — Pago. The summary line recaps the Paso 1 choice with an Editar way
-  // back, above the Wompi handoff.
+  // Paso 3 — the handoff step is labeled "Su entrega" (entrega framing, never
+  // "pago"). The summary line recaps the Paso 1 choice with an Editar way back.
   await expect(page.getByText("Paso 3 de 3")).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Diezmo · $1.00")).toBeVisible();
   await expect(page.getByRole("button", { name: "Editar" })).toBeVisible();
 
@@ -109,6 +126,36 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(page.url()).toContain("/donar");
 });
 
+test("Paso 2 reports every invalid field at once and clears each error as it is fixed", async ({ page }) => {
+  await page.goto("/donar?ruta=sv");
+  await page.getByLabel("Monto").fill(DONOR.amount);
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+
+  // Submit the empty datos form: EVERY invalid control reports at once, each
+  // message under its own field — no fix-one-resubmit-see-the-next loop.
+  await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
+  await expect(page.getByText("Revise el número de DUI.")).toBeVisible();
+  await expect(page.getByText("Seleccione un departamento.")).toBeVisible();
+  await expect(page.getByText("Seleccione un municipio.")).toBeVisible();
+  await expect(page.getByText("Seleccione un distrito.")).toBeVisible();
+  await expect(page.getByText("Ingrese su dirección.")).toBeVisible();
+
+  // Focus moved to the first invalid control, and it is marked for AT.
+  const documento = page.getByLabel("Número de documento");
+  await expect(documento).toBeFocused();
+  await expect(documento).toHaveAttribute("aria-invalid", "true");
+
+  // Fixing a field clears ITS message immediately; the others stay until fixed.
+  await documento.fill(DONOR.dui);
+  await expect(page.getByText("Revise el número de DUI.")).toHaveCount(0);
+  await expect(page.getByText("Seleccione un departamento.")).toBeVisible();
+
+  // The dependent selects clear their own errors as the cascade is completed.
+  await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
+  await expect(page.getByText("Seleccione un departamento.")).toHaveCount(0);
+  await expect(page.getByText("Seleccione un municipio.")).toBeVisible();
+});
+
 test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", async ({ page }) => {
   await page.goto("/donar");
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
@@ -116,9 +163,10 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
   await page.getByRole("button", { name: "EE. UU." }).click();
 
-  // Paso 1 — Monto. The US flow has its own heading (flagged 🇺🇸) and a 2-step
-  // count; the monthly toggle is the segmented control (Única | Mensual, real radios).
-  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
+  // Paso 1 — Monto. The US flow shares the title (its flag badge is aria-hidden
+  // SVG) and a 2-step count; the monthly toggle is the segmented control (Única |
+  // Mensual, real radios).
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   // The assurance subtitle names the US tax-deductible receipt in formal IRS terms.
   await expect(
     page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.")
@@ -127,7 +175,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByRole("radiogroup", { name: "Donación mensual" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
   await expect(page.getByRole("radio", { name: "Mensual" })).toBeVisible();
-  await expect(page.getByLabel("Monto")).toBeFocused();
+  await expect(page.getByLabel("Monto")).not.toBeFocused();
 
   // The extranjero mechanics and SV fields are skipped entirely.
   await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
@@ -135,21 +183,24 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByLabel("Dirección")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continuar con su/ })).toHaveCount(0);
 
-  // A quick-amount chip fills the hero input.
-  await page.getByRole("button", { name: "$25", exact: true }).click();
-  await expect(page.getByLabel("Monto")).toHaveValue("25.00");
+  // A quick-amount chip fills the hero input. The US door's anchors bridge toward
+  // the Givebutter campaign presets ($100–$2,000) instead of the SV $5–$50 scale.
+  await expect(page.getByRole("button", { name: "$25", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "$100", exact: true }).click();
+  await expect(page.getByLabel("Monto")).toHaveValue("100.00");
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
   // Paso 2 — the donor's real Paso 2/3 is the Givebutter giving form. A summary
   // line with Editar sits above the FMCE explanation and the embed.
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
-  await expect(page.getByText("Única · $25.00")).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
+  await expect(page.getByText("Única · $100.00")).toBeVisible();
   await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
   const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
   await expect(givebutterFrame).toBeVisible();
   await expect(givebutterFrame).toHaveAttribute("src", /givebutter\.com\/embed\/c\/example-campaign/);
-  await expect(givebutterFrame).toHaveAttribute("src", /amount=25/);
+  await expect(givebutterFrame).toHaveAttribute("src", /amount=100/);
   await expect(givebutterFrame).toHaveAttribute("src", /goalBar=false/);
 
   // The escape hatch back to the SV fiscal form is GONE.
@@ -159,7 +210,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // carrying the Paso 1 amount as the prefill.
   const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done en GiveButter" });
   await expect(hint).toHaveAttribute("href", /givebutter\.com\/example-campaign/);
-  await expect(hint).toHaveAttribute("href", /amount=25/);
+  await expect(hint).toHaveAttribute("href", /amount=100/);
 
   // The direct iframe loaded, so the slow-load CTA is not shown.
   await expect(page.getByRole("link", { name: "Donar en GiveButter" })).toHaveCount(0);
@@ -167,7 +218,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // "← Atrás" returns to Paso 1 with the wizard state intact...
   await page.getByRole("button", { name: /Atrás/ }).click();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
-  await expect(page.getByLabel("Monto")).toHaveValue("25.00");
+  await expect(page.getByLabel("Monto")).toHaveValue("100.00");
   await expect(page.locator("iframe.donar-givebutter-frame")).toHaveCount(0);
 
   // ...and "← Cambiar opción" (Paso 1 only) returns to the two-door chooser.
@@ -186,10 +237,11 @@ test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await page.getByLabel("Número de documento").fill("10000001-9");
 
-  // Forward: extranjero + Estados Unidos → the US (Givebutter) path takes over.
+  // Forward: extranjero + Estados Unidos → the US (Givebutter) path takes over
+  // (the step label under the title reads "Su entrega").
   await page.getByLabel("Resido en el extranjero").check();
   await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
-  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas 🇺🇸" })).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
 
   // THE ESCAPE: Atrás returns to the SV datos screen — datos intact, extranjero still
