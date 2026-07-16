@@ -86,11 +86,12 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await page.getByLabel("Monto").fill(DONOR.amount);
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
-  // Paso 2 — Sus datos. The working steps use the compact chrome: the step's task
-  // is the H1, the brand demotes to a small line. Focus lands on the first field;
-  // name/email are entered on Wompi's sheet, not here.
+  // Paso 2 — Sus datos. The ceremonial header stays; a small caps step label
+  // sits under the title. Focus lands on the first field; name/email are entered
+  // on Wompi's sheet, not here.
   await expect(page.getByText("Paso 2 de 3")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Sus datos" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(page.getByText("Sus datos", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Tipo de documento")).toBeFocused();
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
@@ -108,10 +109,10 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // The submit names the donor's own gift (entrega framing — never "pago").
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
 
-  // Paso 3 — the handoff step titles itself "Su entrega" (entrega framing, never
+  // Paso 3 — the handoff step is labeled "Su entrega" (entrega framing, never
   // "pago"). The summary line recaps the Paso 1 choice with an Editar way back.
   await expect(page.getByText("Paso 3 de 3")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Su entrega" })).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Diezmo · $1.00")).toBeVisible();
   await expect(page.getByRole("button", { name: "Editar" })).toBeVisible();
 
@@ -192,7 +193,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // Paso 2 — the donor's real Paso 2/3 is the Givebutter giving form. A summary
   // line with Editar sits above the FMCE explanation and the embed.
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Su entrega" })).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Única · $100.00")).toBeVisible();
   await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
@@ -237,10 +238,10 @@ test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns
   await page.getByLabel("Número de documento").fill("10000001-9");
 
   // Forward: extranjero + Estados Unidos → the US (Givebutter) path takes over
-  // (compact step chrome: the H1 is the step's task, "Su entrega").
+  // (the step label under the title reads "Su entrega").
   await page.getByLabel("Resido en el extranjero").check();
   await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
-  await expect(page.getByRole("heading", { name: "Su entrega" })).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
 
   // THE ESCAPE: Atrás returns to the SV datos screen — datos intact, extranjero still
