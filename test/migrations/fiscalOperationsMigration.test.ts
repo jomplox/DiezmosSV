@@ -181,6 +181,17 @@ describe("migration 0022 security boundary guards", () => {
 
 
 describe("migration 0024 rate-limit claim ids", () => {
+  it("adds the missing columns without rebuilding deployed tables", () => {
+    const migration = readFileSync(
+      resolve(migrationsDirectory, "0024_add_rate_limit_claim_ids.sql"),
+      "utf8"
+    );
+
+    expect(migration).toContain("ALTER TABLE donation_intents ADD COLUMN rate_limit_claim_id TEXT;");
+    expect(migration).toContain("ALTER TABLE audit_logs ADD COLUMN rate_limit_claim_id TEXT;");
+    expect(migration).not.toMatch(/\b(?:RENAME|DROP) TABLE\b/i);
+  });
+
   it("adds rate-limit provenance columns after a pre-fix 0019 schema", () => {
     const database = new DatabaseSync(":memory:");
     database.exec("PRAGMA foreign_keys = ON");
