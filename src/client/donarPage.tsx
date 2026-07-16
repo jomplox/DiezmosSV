@@ -1,8 +1,10 @@
 import svFlag from "./assets/sv-flag.svg";
-import { CheckCircle2, ShieldCheck } from "lucide-react";
+import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import {
+  DONAR_ALL_COUNTRIES_GROUP_LABEL,
   DONAR_AMOUNT_CHIPS,
+  DONAR_AMOUNT_CHIPS_US,
   DONAR_BACK_LABEL,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_COMPLETED_MESSAGE,
@@ -15,6 +17,8 @@ import {
   DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
   DONAR_FOREIGN_COUNTRIES,
+  DONAR_FREQUENT_COUNTRIES,
+  DONAR_FREQUENT_COUNTRIES_GROUP_LABEL,
   DONAR_GIFT_TYPE_FIELD_LABEL,
   DONAR_GIFT_TYPE_LABEL,
   DONAR_HERO_PLACEHOLDER,
@@ -27,6 +31,8 @@ import {
   DONAR_ROUTE_PARAM,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
+  DONAR_STEP_TITLE_DATOS,
+  DONAR_STEP_TITLE_ENTREGA,
   DONAR_SUPPORT_EMAIL,
   DONAR_STEP_COUNT_US,
   DONAR_THANK_YOU_BODY,
@@ -43,6 +49,9 @@ import {
   GIVEBUTTER_INTRO,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
+  DONATION_STEP1_FIELD_ORDER,
+  DONATION_STEP2_FIELD_ORDER,
+  clearDonationFieldErrors,
   donarAmountDisplay,
   donarDatosPath,
   donarStepIndicator,
@@ -50,8 +59,9 @@ import {
   donationDatosBody,
   donationDraftBody,
   donationIntentBody,
-  donationStep1ValidationMessage,
-  donationStep2ValidationMessage,
+  donationStep1FieldErrors,
+  donationStep2FieldErrors,
+  firstDonationFieldError,
   doorFromSearch,
   draftMatchesForm,
   givebutterEmbedUrl,
@@ -62,6 +72,8 @@ import {
   widgetUrlFrom,
   type DonarDoor,
   type DonarGiftType,
+  type DonationField,
+  type DonationFieldErrors,
   type DonationFormInput,
   type DonorDocumentType
 } from "./donation";
@@ -106,24 +118,96 @@ function DonarSelect({
   value,
   options,
   onChange,
-  ariaLabel
+  ariaLabel,
+  id,
+  errorId,
+  frequentOptions
 }: {
   value: string;
   options: readonly CatalogOption[];
   onChange: (value: string) => void;
   ariaLabel: string;
+  id?: string;
+  // Present only while this field has an inline error: wires aria-invalid (red
+  // border via CSS) + aria-describedby to the message paragraph.
+  errorId?: string;
+  // Optional "Frecuentes" optgroup above the full list (the país select): the
+  // same codes stay in the full group too, as country selects conventionally do.
+  frequentOptions?: readonly CatalogOption[];
 }) {
   const selected = options.some((option) => option.code === value) ? value : "";
+  const renderOptions = (list: readonly CatalogOption[], keyPrefix = "") =>
+    list.map((option) => (
+      <option key={`${keyPrefix}${option.code}-${option.label}`} value={option.code}>
+        {catalogOptionLabel(option.label)}
+      </option>
+    ));
   return (
-    <select value={selected} onChange={(event) => onChange(event.target.value)} aria-label={ariaLabel}>
+    <select
+      id={id}
+      value={selected}
+      onChange={(event) => onChange(event.target.value)}
+      aria-label={ariaLabel}
+      aria-invalid={errorId ? true : undefined}
+      aria-describedby={errorId}
+    >
       <option value="">Seleccione</option>
-      {options.map((option) => (
-        <option key={`${option.code}-${option.label}`} value={option.code}>
-          {catalogOptionLabel(option.label)}
-        </option>
-      ))}
+      {frequentOptions?.length ? (
+        <>
+          <optgroup label={DONAR_FREQUENT_COUNTRIES_GROUP_LABEL}>{renderOptions(frequentOptions, "freq-")}</optgroup>
+          <optgroup label={DONAR_ALL_COUNTRIES_GROUP_LABEL}>{renderOptions(options)}</optgroup>
+        </>
+      ) : (
+        renderOptions(options)
+      )}
     </select>
   );
+}
+
+// One donor-form control's inline error message. Rendered as a span (labels only
+// allow phrasing content) directly under the field it names; role="alert" makes
+// screen readers announce it when it appears.
+function DonarFieldError({ field, errors }: { field: DonationField; errors: DonationFieldErrors }) {
+  const message = errors[field];
+  if (!message) {
+    return null;
+  }
+  return (
+    <span className="donar-field-error" id={donarFieldErrorId(field)} role="alert">
+      {message}
+    </span>
+  );
+}
+
+// Stable DOM ids for focus-first-invalid and aria-describedby wiring.
+function donarFieldDomId(field: DonationField): string {
+  return `donar-field-${field}`;
+}
+
+function donarFieldErrorId(field: DonationField): string {
+  return `${donarFieldDomId(field)}-error`;
+}
+
+// The aria-describedby target for a field, only while it carries an error.
+function donarFieldErrorRef(field: DonationField, errors: DonationFieldErrors): string | undefined {
+  return errors[field] ? donarFieldErrorId(field) : undefined;
+}
+
+// After a failed submit, move the donor to the first problem instead of leaving
+// them at the CTA staring at nothing. rAF lets React paint the error state first.
+function focusFirstInvalidField(errors: DonationFieldErrors, order: readonly DonationField[]) {
+  const first = firstDonationFieldError(errors, order);
+  if (!first) {
+    return;
+  }
+  requestAnimationFrame(() => {
+    const element = document.getElementById(donarFieldDomId(first));
+    if (!element) {
+      return;
+    }
+    element.focus({ preventScroll: true });
+    element.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
 }
 
 const emptyDonationForm: DonationFormInput = {
@@ -232,10 +316,11 @@ function SvWorldIcon() {
 // Door 2 icon: the United States circle flag (HatScripts/circle-flags, MIT), inlined
 // verbatim (self-hosted, no runtime fetch) so the previous hand-drawn flag's glitch
 // is gone. aria-hidden: the door button's text label is the single accessible name.
-function UsFlagIcon() {
+// className is parameterized so the same artwork doubles as the small heading badge.
+function UsFlagIcon({ className = "donar-door-icon" }: { className?: string }) {
   return (
     <svg
-      className="donar-door-icon"
+      className={className}
       viewBox="0 0 512 512"
       aria-hidden="true"
       focusable="false"
@@ -255,6 +340,17 @@ function UsFlagIcon() {
       </g>
     </svg>
   );
+}
+
+// Inline circle-flag badge replacing the SV/US flag EMOJI in headings and the
+// landing unifier: flag emoji render as a blank box on platforms without flag
+// glyphs (and as bare "SV"/"US" letters on Windows), which left an orphaned
+// period on the landing. Decorative (aria-hidden) — the text carries the meaning.
+function DonarFlagBadge({ country }: { country: "sv" | "us" }) {
+  if (country === "us") {
+    return <UsFlagIcon className="donar-flag" />;
+  }
+  return <img className="donar-flag" src={svFlag} alt="" aria-hidden="true" />;
 }
 
 // Clamp for the height Wompi's checkout reports via its sizeUpdate postMessage: a
@@ -278,7 +374,11 @@ function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: s
 // Public donation wizard + Wompi/Givebutter handoff. Renders WITHOUT a session.
 export function DonarPage() {
   const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
+  // Server/global failures only (intent POST errors, the closed state). Field
+  // validation lives in fieldErrors: every invalid control at once, each message
+  // under its own field, cleared the moment that field changes.
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<DonationFieldErrors>({});
   const [submitting, setSubmitting] = useState(false);
   const [stage, setStage] = useState<DonarStage>("form");
   const [step, setStep] = useState<DonarStep>(1);
@@ -362,29 +462,39 @@ export function DonarPage() {
     setMonthly(false);
     setStep(1);
     setError("");
+    setFieldErrors({});
     setIntent(null);
     abandonDraftIntent();
     setStage("form");
     setDoor(next);
   };
 
-  const update = (patch: Partial<DonationFormInput>) => setForm((current) => ({ ...current, ...patch }));
+  // Every form write also clears the inline errors that edit can affect (reward
+  // early: the message disappears as soon as the donor acts on it; re-validation
+  // happens on the next submit). editedFields narrows the clearing when a patch
+  // bundles mechanical resets the donor did not type (the departamento cascade).
+  const update = (patch: Partial<DonationFormInput>, editedFields?: readonly (keyof DonationFormInput)[]) => {
+    setForm((current) => ({ ...current, ...patch }));
+    setFieldErrors((current) =>
+      clearDonationFieldErrors(current, editedFields ?? (Object.keys(patch) as (keyof DonationFormInput)[]))
+    );
+  };
 
-  // Changing departamento resets the dependent selects.
-  const setDepartamento = (departamento: string) => update({ departamento, municipio: "", distrito: "" });
+  // Changing departamento resets the dependent selects. Only the departamento was
+  // EDITED: the children's "Seleccione…" errors stay (still true of the reset
+  // values) and keep walking the donor down the cascade.
+  const setDepartamento = (departamento: string) => update({ departamento, municipio: "", distrito: "" }, ["departamento"]);
 
   const municipalityOptions = getCat013Municipalities(form.departamento);
   const districtOptions = getCat008Districts(form.departamento);
 
-  // Focus follows the wizard: each advance (or back) moves focus to the step's
-  // first control — the hero input on Paso 1, the document type on Paso 2, the
-  // summary's Editar on Paso 3 / the US embed step.
+  // Focus follows later wizard steps, but Paso 1 deliberately leaves focus
+  // untouched so opening the donation flow does not summon a mobile keyboard.
   useEffect(() => {
     if (door === null) {
       return;
     }
     if (step === 1) {
-      heroInputRef.current?.focus();
       return;
     }
     if (step === 2 && step2FirstFieldRef.current) {
@@ -587,11 +697,18 @@ export function DonarPage() {
   // gift type) gates on the amount alone.
   function continueFromMonto(event: FormEvent) {
     event.preventDefault();
-    const message = usDonation ? donationAmountValidationMessage(form.amount) : donationStep1ValidationMessage(form);
-    if (message) {
-      setError(message);
+    const amountMessage = donationAmountValidationMessage(form.amount);
+    const errors: DonationFieldErrors = usDonation
+      ? amountMessage
+        ? { amount: amountMessage }
+        : {}
+      : donationStep1FieldErrors(form);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      focusFirstInvalidField(errors, DONATION_STEP1_FIELD_ORDER);
       return;
     }
+    setFieldErrors({});
     setError("");
     if (!usDonation) {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
@@ -650,11 +767,13 @@ export function DonarPage() {
   // full-body POST, which still mints the link inline. On error the donor stays on Paso 2.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
-    const message = donationStep2ValidationMessage(form);
-    if (message) {
-      setError(message);
+    const errors = donationStep2FieldErrors(form);
+    if (Object.keys(errors).length > 0) {
+      setFieldErrors(errors);
+      focusFirstInvalidField(errors, DONATION_STEP2_FIELD_ORDER);
       return;
     }
+    setFieldErrors({});
     setError("");
     setSubmitting(true);
     try {
@@ -692,6 +811,8 @@ export function DonarPage() {
   // next Paso 1→2 crossing mints fresh and the stale link expires on the sweep.
   function goBack() {
     setError("");
+    // Inline errors belong to a submit attempt on the screen being left.
+    setFieldErrors({});
     if (step === 3) {
       setIntent(null);
       setStage("form");
@@ -715,6 +836,7 @@ export function DonarPage() {
   // any background-minted draft (the amount is about to change).
   function editAmount() {
     setError("");
+    setFieldErrors({});
     setIntent(null);
     abandonDraftIntent();
     setStage("form");
@@ -738,8 +860,12 @@ export function DonarPage() {
           )}
           <h1>{DONAR_LANDING_HEADING}</h1>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
-              they differ by residence / payment rail / tax receipt, not beneficiary. */}
-          <p className="donar-landing-unifier">{DONAR_LANDING_UNIFIER}</p>
+              they differ by residence / payment rail / tax receipt, not beneficiary.
+              The flag is an inline SVG badge (the flag emoji rendered as a blank
+              box, leaving an orphaned period). */}
+          <p className="donar-landing-unifier">
+            {DONAR_LANDING_UNIFIER} <DonarFlagBadge country="sv" />.
+          </p>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
             <button type="button" className="donar-door" onClick={() => chooseDoor("sv")}>
@@ -788,10 +914,23 @@ export function DonarPage() {
           <p className="donar-step-indicator">{donarStepIndicator(displayStep, stepCount)}</p>
         </div>
 
+        {/* The ceremonial header is identical on every step — centered shield,
+            big brand title. The flag is an inline SVG badge (emoji render as a
+            blank box or bare "SV"/"US" letters on platforms without flag glyphs).
+            Working steps add a small caps-tracked step label UNDER the title for
+            orientation; a brand-demoting compact header was tried and read as a
+            regression (the brand looked like a fake subtitle of the step). */}
         <div className="donar-glyph">
           <ShieldCheck size={28} />
         </div>
-        <h1>{usDonation ? "Diezmos y Ofrendas 🇺🇸" : "Diezmos y Ofrendas 🇸🇻"}</h1>
+        <h1>
+          {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
+        </h1>
+        {step > 1 && (
+          <p className="donar-step-label">
+            {step === 2 && !usDonation ? DONAR_STEP_TITLE_DATOS : DONAR_STEP_TITLE_ENTREGA}
+          </p>
+        )}
 
         {/* Paso 1 assurance: right under the heading, name the legal document this
             door produces — reassurance of the door the donor just chose. */}
@@ -821,12 +960,19 @@ export function DonarPage() {
                 </label>
               </div>
             ) : (
-              <div className="donar-segment" role="radiogroup" aria-label={DONAR_GIFT_TYPE_FIELD_LABEL}>
-                {(["DIEZMO", "OFRENDA"] as DonarGiftType[]).map((option) => (
+              <div
+                className="donar-segment"
+                role="radiogroup"
+                aria-label={DONAR_GIFT_TYPE_FIELD_LABEL}
+                aria-invalid={fieldErrors.giftType ? true : undefined}
+                aria-describedby={donarFieldErrorRef("giftType", fieldErrors)}
+              >
+                {(["DIEZMO", "OFRENDA"] as DonarGiftType[]).map((option, index) => (
                   <label key={option} className={form.giftType === option ? "donar-segment-option active" : "donar-segment-option"}>
                     <input
                       type="radio"
                       name="donar-gift-type"
+                      id={index === 0 ? donarFieldDomId("giftType") : undefined}
                       value={option}
                       checked={form.giftType === option}
                       onChange={() => update({ giftType: option })}
@@ -836,6 +982,7 @@ export function DonarPage() {
                 ))}
               </div>
             )}
+            <DonarFieldError field="giftType" errors={fieldErrors} />
 
             {/* THE HERO: the amount IS this screen. Giant Gotham numerals with a
                 quiet "$" prefix; most tithes are personal amounts, so typing is
@@ -846,10 +993,13 @@ export function DonarPage() {
               </span>
               <input
                 ref={heroInputRef}
+                id={donarFieldDomId("amount")}
                 value={form.amount}
                 onChange={(event) => update({ amount: event.target.value })}
                 placeholder={DONAR_HERO_PLACEHOLDER}
                 aria-label="Monto"
+                aria-invalid={fieldErrors.amount ? true : undefined}
+                aria-describedby={donarFieldErrorRef("amount", fieldErrors)}
                 inputMode="decimal"
                 autoComplete="off"
                 size={Math.min(Math.max(form.amount.length, DONAR_HERO_PLACEHOLDER.length), 10)}
@@ -857,7 +1007,9 @@ export function DonarPage() {
             </div>
 
             <div className="donar-chips">
-              {DONAR_AMOUNT_CHIPS.map((chip) => (
+              {/* The US door's anchors bridge toward the Givebutter campaign presets
+                  ($100–$2,000) so consecutive screens don't disagree on scale. */}
+              {(usDonation ? DONAR_AMOUNT_CHIPS_US : DONAR_AMOUNT_CHIPS).map((chip) => (
                 <button
                   key={chip}
                   type="button"
@@ -872,8 +1024,14 @@ export function DonarPage() {
                 </button>
               ))}
             </div>
+            <DonarFieldError field="amount" errors={fieldErrors} />
 
-            {error && <p className="error donar-error">{error}</p>}
+            {error && (
+              <p className="error donar-error" role="alert">
+                <AlertCircle size={16} aria-hidden="true" />
+                {error}
+              </p>
+            )}
             <button className="primary" type="submit">
               {DONAR_CONTINUE_LABEL}
             </button>
@@ -911,6 +1069,7 @@ export function DonarPage() {
               <label>
                 <span>{form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}</span>
                 <input
+                  id={donarFieldDomId("donorDocument")}
                   value={form.donorDocument}
                   onChange={(event) => update({ donorDocument: event.target.value })}
                   onBlur={() => {
@@ -923,7 +1082,10 @@ export function DonarPage() {
                   }}
                   placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
                   aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
+                  aria-invalid={fieldErrors.donorDocument ? true : undefined}
+                  aria-describedby={donarFieldErrorRef("donorDocument", fieldErrors)}
                 />
+                <DonarFieldError field="donorDocument" errors={fieldErrors} />
               </label>
             </div>
 
@@ -931,11 +1093,15 @@ export function DonarPage() {
               <label>
                 <span>Razón social</span>
                 <input
+                  id={donarFieldDomId("donorName")}
                   value={form.donorName}
                   onChange={(event) => update({ donorName: event.target.value })}
                   placeholder="Nombre legal de la empresa"
                   aria-label="Razón social"
+                  aria-invalid={fieldErrors.donorName ? true : undefined}
+                  aria-describedby={donarFieldErrorRef("donorName", fieldErrors)}
                 />
+                <DonarFieldError field="donorName" errors={fieldErrors} />
               </label>
             )}
 
@@ -971,6 +1137,7 @@ export function DonarPage() {
                 <DonarSelect
                   value={form.pais}
                   options={DONAR_FOREIGN_COUNTRIES}
+                  frequentOptions={DONAR_FREQUENT_COUNTRIES}
                   onChange={(pais) => {
                     // Switching country away from US must leave the Givebutter path
                     // cleanly (the prefill effect cleanup restores the URL).
@@ -978,21 +1145,48 @@ export function DonarPage() {
                     update({ pais });
                   }}
                   ariaLabel="País"
+                  id={donarFieldDomId("pais")}
+                  errorId={donarFieldErrorRef("pais", fieldErrors)}
                 />
+                <DonarFieldError field="pais" errors={fieldErrors} />
               </label>
             ) : (
               <div className="donar-address-row">
                 <label>
                   <span>Departamento</span>
-                  <DonarSelect value={form.departamento} options={DONAR_DOMESTIC_DEPARTMENTS} onChange={setDepartamento} ariaLabel="Departamento" />
+                  <DonarSelect
+                    value={form.departamento}
+                    options={DONAR_DOMESTIC_DEPARTMENTS}
+                    onChange={setDepartamento}
+                    ariaLabel="Departamento"
+                    id={donarFieldDomId("departamento")}
+                    errorId={donarFieldErrorRef("departamento", fieldErrors)}
+                  />
+                  <DonarFieldError field="departamento" errors={fieldErrors} />
                 </label>
                 <label>
                   <span>Municipio</span>
-                  <DonarSelect value={form.municipio} options={municipalityOptions} onChange={(municipio) => update({ municipio })} ariaLabel="Municipio" />
+                  <DonarSelect
+                    value={form.municipio}
+                    options={municipalityOptions}
+                    onChange={(municipio) => update({ municipio })}
+                    ariaLabel="Municipio"
+                    id={donarFieldDomId("municipio")}
+                    errorId={donarFieldErrorRef("municipio", fieldErrors)}
+                  />
+                  <DonarFieldError field="municipio" errors={fieldErrors} />
                 </label>
                 <label>
                   <span>Distrito</span>
-                  <DonarSelect value={form.distrito} options={districtOptions} onChange={(distrito) => update({ distrito })} ariaLabel="Distrito" />
+                  <DonarSelect
+                    value={form.distrito}
+                    options={districtOptions}
+                    onChange={(distrito) => update({ distrito })}
+                    ariaLabel="Distrito"
+                    id={donarFieldDomId("distrito")}
+                    errorId={donarFieldErrorRef("distrito", fieldErrors)}
+                  />
+                  <DonarFieldError field="distrito" errors={fieldErrors} />
                 </label>
               </div>
             )}
@@ -1000,15 +1194,24 @@ export function DonarPage() {
             <label>
               <span>Dirección</span>
               <textarea
+                id={donarFieldDomId("complemento")}
                 value={form.complemento}
                 onChange={(event) => update({ complemento: event.target.value })}
                 placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
                 aria-label="Dirección"
+                aria-invalid={fieldErrors.complemento ? true : undefined}
+                aria-describedby={donarFieldErrorRef("complemento", fieldErrors)}
                 maxLength={200}
               />
+              <DonarFieldError field="complemento" errors={fieldErrors} />
             </label>
 
-            {error && <p className="error donar-error">{error}</p>}
+            {error && (
+              <p className="error donar-error" role="alert">
+                <AlertCircle size={16} aria-hidden="true" />
+                {error}
+              </p>
+            )}
             <button className="primary" type="submit" disabled={submitting}>
               {submitting ? "Preparando su entrega…" : form.giftType === "OFRENDA" ? "Continuar con su ofrenda" : "Continuar con su diezmo"}
             </button>

@@ -3232,6 +3232,31 @@ pre {
   text-wrap: balance;
 }
 
+/* Inline circle-flag badge in headings and the landing unifier (replaces the
+   🇸🇻/🇺🇸 emoji, which render as a blank box or bare letters off-Apple). Sized to
+   the surrounding text; object-fit crops the rectangular SV asset circular. */
+.donar-flag {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  border-radius: 50%;
+  object-fit: cover;
+  vertical-align: -0.08em;
+}
+
+/* Step label under the brand title on the working steps (Paso ≥2): a small
+   caps-tracked Gotham line ("SUS DATOS", "SU ENTREGA") that orients without
+   competing with the ceremonial header. #767676 clears WCAG AA (4.54:1). */
+.donar-step-label {
+  margin: -2px 0 0;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #767676;
+  text-align: center;
+}
+
 /* Paso 1 assurance: names the legal document this door produces, right under the
    heading — Gotham Book gray, sitting just below the title. */
 .donar-assurance {
@@ -3257,7 +3282,9 @@ pre {
   margin: 0;
   font-size: 13px;
   font-weight: 400;
-  color: #8a8a8a;
+  /* #767676 is the lightest gray that clears WCAG AA (4.54:1) at this size —
+     the previous #8a8a8a measured 3.45:1 on white. */
+  color: #767676;
   letter-spacing: 0.02em;
 }
 
@@ -3357,7 +3384,9 @@ pre {
   border-radius: 10px;
   padding: 12px 14px;
   min-height: 48px;
-  font-size: 15px;
+  /* 16px is the iOS threshold: any focused control below it auto-zooms the
+     viewport (and Safari never zooms back out). */
+  font-size: 16px;
   background: #ffffff;
 }
 
@@ -3366,6 +3395,29 @@ pre {
 .donar-form textarea:focus {
   outline: none;
   border-color: #000000;
+}
+
+/* Per-field inline errors: every invalid control at once, the message under the
+   field it names (aria-describedby), the control outlined in the danger red.
+   Focus keeps the black border — the donor is fixing it. */
+.donar-form input[aria-invalid="true"],
+.donar-form select[aria-invalid="true"],
+.donar-form textarea[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.donar-segment[aria-invalid="true"] {
+  box-shadow: 0 0 0 1px var(--danger);
+}
+
+.donar-field-error {
+  color: var(--danger);
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.donar-form > .donar-field-error {
+  text-align: center;
 }
 
 /* Segmented control (Diezmo|Ofrenda, Única|Mensual): real radios styled as two
@@ -3534,6 +3586,14 @@ pre {
 .donar-address-row {
   display: grid;
   gap: 12px;
+  /* Keep siblings top-aligned when one carries an inline error message and its
+     neighbors don't — otherwise the shorter cells center vertically. */
+  align-items: start;
+}
+
+.donar-doc-row label,
+.donar-address-row label {
+  align-content: start;
 }
 
 /* The extranjero checkbox sits above the address block: a horizontal row (the
@@ -3555,9 +3615,20 @@ pre {
   accent-color: #000000;
 }
 
+/* Global (server) failure banner: 14px — it is the screen's only failure signal —
+   with a small alert icon. Field validation renders per-field instead. */
 .donar-error {
   margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 14px;
   text-align: center;
+}
+
+.donar-error svg {
+  flex-shrink: 0;
 }
 
 .donar-handoff {
@@ -3798,7 +3869,9 @@ pre {
 
 .donar-givebutter-frame {
   width: min(100%, 440px);
-  min-height: 860px;
+  /* 760px clears Givebutter's tallest checkout step without the ~250px of dead
+     space 860px left between the form's Continue and the fallback link. */
+  min-height: 760px;
   border: 0;
   justify-self: center;
   background: #fff;

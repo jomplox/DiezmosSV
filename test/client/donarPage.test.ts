@@ -52,12 +52,19 @@ import {
   donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
+  DONAR_AMOUNT_CHIPS_US,
+  DONAR_FREQUENT_COUNTRIES,
+  DONAR_STEP_TITLE_DATOS,
+  DONAR_STEP_TITLE_ENTREGA,
+  clearDonationFieldErrors,
   donationAmountValidationMessage,
   donationDatosBody,
   donationDraftBody,
   donationFormValidationMessage,
   donationIntentBody,
+  donationStep1FieldErrors,
   donationStep1ValidationMessage,
+  donationStep2FieldErrors,
   donationStep2ValidationMessage,
   draftMatchesForm,
   givebutterEmbedUrl,
@@ -255,6 +262,130 @@ describe("donar form validation", () => {
 describe("donar amount chips", () => {
   it("offers the $5 / $10 / $25 / $50 quick amounts", () => {
     expect(DONAR_AMOUNT_CHIPS).toEqual([5, 10, 25, 50]);
+  });
+
+  it("the US door bridges toward the Givebutter campaign presets", () => {
+    // The chip prefills the Givebutter embed, whose own presets anchor at
+    // $100–$2,000 — wildly different scales on consecutive screens read wrong.
+    expect(DONAR_AMOUNT_CHIPS_US).toEqual([50, 100, 250, 500]);
+    expect(donarSource).toContain("usDonation ? DONAR_AMOUNT_CHIPS_US : DONAR_AMOUNT_CHIPS");
+  });
+});
+
+describe("donar per-field validation", () => {
+  const base = {
+    amount: "25.00",
+    giftType: "DIEZMO" as const,
+    donorDocumentType: "13" as const,
+    donorDocument: "10000001-9",
+    donorName: "",
+    donorPhone: "",
+    foreignResident: false,
+    pais: "",
+    departamento: "06",
+    municipio: "23",
+    distrito: "01",
+    complemento: "San Salvador"
+  };
+
+  it("returns EVERY invalid field at once (no one-error-at-a-time whack-a-mole)", () => {
+    const errors = donationStep2FieldErrors({
+      ...base,
+      donorDocument: "04182769-0",
+      departamento: "",
+      municipio: "",
+      distrito: "",
+      complemento: " "
+    });
+    expect(errors).toEqual({
+      donorDocument: "Revise el número de DUI.",
+      departamento: "Seleccione un departamento.",
+      municipio: "Seleccione un municipio.",
+      distrito: "Seleccione un distrito.",
+      complemento: "Ingrese su dirección."
+    });
+  });
+
+  it("reports the empresa NIT and razón social independently", () => {
+    const errors = donationStep2FieldErrors({
+      ...base,
+      donorDocumentType: "36",
+      donorDocument: "123",
+      donorName: " "
+    });
+    expect(errors.donorDocument).toBe("Ingrese el NIT de la empresa (14 dígitos).");
+    expect(errors.donorName).toBe("Ingrese la razón social.");
+  });
+
+  it("gates the foreign path on país and never on the domestic cascade", () => {
+    const errors = donationStep2FieldErrors({
+      ...base,
+      foreignResident: true,
+      pais: "",
+      departamento: "",
+      municipio: "",
+      distrito: ""
+    });
+    expect(errors.pais).toBe("Seleccione su país de residencia.");
+    expect(errors.departamento).toBeUndefined();
+  });
+
+  it("step 1 reports gift type and amount together", () => {
+    expect(donationStep1FieldErrors({ giftType: "", amount: "" })).toEqual({
+      giftType: "Seleccione si es diezmo u ofrenda.",
+      amount: "Ingrese un monto válido en dólares."
+    });
+    expect(donationStep1FieldErrors({ giftType: "OFRENDA", amount: "5.00" })).toEqual({});
+  });
+
+  it("editing a field clears its own error — and only errors that edit can affect", () => {
+    const errors = {
+      donorDocument: "Revise el número de DUI.",
+      departamento: "Seleccione un departamento.",
+      complemento: "Ingrese su dirección."
+    };
+    // Typing in the document clears only the document message.
+    expect(clearDonationFieldErrors(errors, ["donorDocument"])).toEqual({
+      departamento: "Seleccione un departamento.",
+      complemento: "Ingrese su dirección."
+    });
+    // Switching the document TYPE re-scopes document + razón rules.
+    expect(clearDonationFieldErrors({ ...errors, donorName: "Ingrese la razón social." }, ["donorDocumentType"])).toEqual({
+      departamento: "Seleccione un departamento.",
+      complemento: "Ingrese su dirección."
+    });
+    // Toggling extranjero swaps which geography fields exist.
+    expect(clearDonationFieldErrors(errors, ["foreignResident"])).toEqual({
+      donorDocument: "Revise el número de DUI.",
+      complemento: "Ingrese su dirección."
+    });
+    // Untouched-field edits return the same object (no pointless re-renders).
+    expect(clearDonationFieldErrors(errors, ["donorPhone"])).toBe(errors);
+  });
+
+  it("the legacy single-message validators reduce the field maps in the pinned order", () => {
+    const sample = { ...base, donorDocument: "04182769-0", departamento: "" };
+    expect(donationStep2ValidationMessage(sample)).toBe("Revise el número de DUI.");
+  });
+});
+
+describe("donar step labels", () => {
+  it("labels the working steps under the brand title — entrega framing, never 'pago'", () => {
+    expect(DONAR_STEP_TITLE_DATOS).toBe("Sus datos");
+    expect(DONAR_STEP_TITLE_ENTREGA).toBe("Su entrega");
+    expect(donarSource).toContain("donar-step-label");
+    expect(stylesSource).toContain(".donar-step-label");
+    // The h1 stays the ceremonial brand title on every step; a brand-demoting
+    // compact header was tried and rolled back as a visual regression.
+    expect(donarSource).not.toContain("donar-compact-head");
+  });
+});
+
+describe("donar frequent countries", () => {
+  it("surfaces the diaspora countries in a Frecuentes optgroup above the full CAT-020 list", () => {
+    expect(DONAR_FREQUENT_COUNTRIES.map((option) => option.code)).toEqual(["US", "CA", "ES", "GT", "MX", "HN", "IT", "AU"]);
+    expect(donarSource).toContain("frequentOptions={DONAR_FREQUENT_COUNTRIES}");
+    expect(donarSource).toContain("<optgroup");
   });
 });
 
@@ -568,11 +699,12 @@ describe("donar thank-you page", () => {
 
 describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
-    // Religious framing: the SV fiscal form heading names the aportación, now
-    // flagged with the El Salvador emoji instead of a textual path identifier.
-    // Both doors share the same general title — only the lane flag differs (the US
-    // side set the copy standard; the SV side matches it).
-    expect(donarSource).toContain("Diezmos y Ofrendas 🇸🇻");
+    // Religious framing: the heading names the aportación, flagged with an INLINE
+    // SVG badge — flag EMOJI render as a blank box (or bare "SV"/"US" letters on
+    // Windows), which left an orphaned period on the landing. Both doors share the
+    // same general title — only the lane flag differs.
+    expect(donarSource).toContain('<DonarFlagBadge country={usDonation ? "us" : "sv"} />');
+    expect(donarSource).not.toContain("🇸🇻");
     expect(donarSource).not.toContain("Entregue su diezmo u ofrenda");
     expect(donarSource).toContain("Tipo de documento");
     expect(donarSource).toContain("Teléfono (opcional)");
@@ -618,8 +750,11 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain('form.amount === chip.toFixed(2) ? "donar-chip active" : "donar-chip"');
   });
 
-  it("moves focus to the step's first control on advance", () => {
-    expect(donarSource).toContain(".focus()");
+  it("leaves Paso 1 unfocused while retaining user-initiated and later-step focus", () => {
+    const heroFocusCalls = donarSource.match(/heroInputRef\.current\?\.focus\(\)/g) ?? [];
+    expect(heroFocusCalls).toHaveLength(1);
+    expect(donarSource).toContain("step2FirstFieldRef.current.focus()");
+    expect(donarSource).toContain("summaryEditRef.current?.focus()");
   });
 
   it("shows a Paso 3 summary line with an Editar link back to Paso 1", () => {
@@ -636,9 +771,12 @@ describe("donar wizard source contract", () => {
     expect(donarSource).not.toContain('"Donar"');
   });
 
-  it("shows the EE. UU. flow its own heading, flagged with the US emoji", () => {
-    expect(donarSource).toContain("Diezmos y Ofrendas 🇺🇸");
-    // The old textual "— EE. UU." path identifier is replaced by the flag emoji.
+  it("shows the EE. UU. flow its own inline-SVG flag badge, never the emoji", () => {
+    // The US circle flag ships as inline SVG (UsFlagIcon doubles as the small
+    // heading badge); the 🇺🇸 emoji is gone for the same cross-platform reason.
+    expect(donarSource).toContain('<UsFlagIcon className="donar-flag" />');
+    expect(donarSource).not.toContain("🇺🇸");
+    // The old textual "— EE. UU." path identifier stays gone.
     expect(donarSource).not.toContain("Diezmos y Ofrendas — EE. UU.");
   });
 
@@ -735,9 +873,16 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("Preparando su entrega…");
   });
 
-  it("validates per step: Paso 1 gates on the step-1 rules, Paso 2 on the rest", () => {
-    expect(donarSource).toContain("donationStep1ValidationMessage(");
-    expect(donarSource).toContain("donationStep2ValidationMessage(");
+  it("validates per step and per FIELD: every invalid control at once, focus on the first", () => {
+    expect(donarSource).toContain("donationStep1FieldErrors(");
+    expect(donarSource).toContain("donationStep2FieldErrors(");
+    expect(donarSource).toContain("focusFirstInvalidField(");
+    // Editing a field clears its own inline error (no stale messages).
+    expect(donarSource).toContain("clearDonationFieldErrors(");
+    // Each message is tied to its control for screen readers.
+    expect(donarSource).toContain('role="alert"');
+    expect(donarSource).toContain("aria-invalid=");
+    expect(donarSource).toContain("aria-describedby=");
   });
 
   it("renders the Wompi checkout embedded in Paso 3 via a plain iframe", () => {
@@ -1120,8 +1265,10 @@ describe("two-door landing copy", () => {
   });
 
   it("pins the unifying line that both doors fund the same church in El Salvador", () => {
+    // The SV flag (an inline SVG badge) and the closing period are appended in
+    // JSX — the emoji rendered as a blank box, leaving an orphaned period.
     expect(DONAR_LANDING_UNIFIER).toBe(
-      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador 🇸🇻."
+      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador"
     );
   });
 
