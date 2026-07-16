@@ -181,6 +181,7 @@ async function streamRetentionTable<Cursor>(
   readPage: (cursor: Cursor | null) => Promise<Array<Record<string, unknown>>>,
   cursorFrom: (row: Record<string, unknown>) => Cursor
 ): Promise<TableManifestEntry> {
+  const tempKey = `${key}.tmp.${crypto.randomUUID()}`;
   const identity = new TransformStream<Uint8Array, Uint8Array>();
   const digest = new crypto.DigestStream("SHA-256");
   const bodyWriter = identity.writable.getWriter();
@@ -189,7 +190,7 @@ async function streamRetentionTable<Cursor>(
     (value) => ({ ok: true as const, value }),
     (error) => ({ ok: false as const, error })
   );
-  const putPromise = env.ARCHIVE.put(key, identity.readable);
+  const putPromise = env.ARCHIVE.put(tempKey, identity.readable);
   void putPromise.catch((error) => bodyWriter.abort(error).catch(() => undefined));
   let cursor: Cursor | null = null;
   let rowCount = 0;
@@ -214,22 +215,41 @@ async function streamRetentionTable<Cursor>(
     }
     await bodyWriter.close();
     await putPromise;
+    const tempObject = await env.ARCHIVE.get(tempKey);
+    if (!tempObject) {
+      throw new Error("retention_temp_object_missing");
+    }
+    await env.ARCHIVE.put(key, tempObject.body);
+    await cleanupRetentionTempObject(env, tempKey);
     const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
     return { rowCount, sha256 };
   } catch (error) {
     await Promise.allSettled([bodyWriter.abort(error), digestWriter.abort(error)]);
     await Promise.allSettled([putPromise, digestResultPromise]);
     try {
-      await env.ARCHIVE.delete(key);
+      await env.ARCHIVE.delete(tempKey);
     } catch (cleanupError) {
       try {
         const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-        console.error("Retention partial-object cleanup failed", { key, error: message });
+        console.error("Retention partial-object cleanup failed", { key: tempKey, error: message });
       } catch {
         // Cleanup diagnostics must never replace the primary export failure.
       }
     }
     throw error;
+  }
+}
+
+async function cleanupRetentionTempObject(env: Env, tempKey: string): Promise<void> {
+  try {
+    await env.ARCHIVE.delete(tempKey);
+  } catch (cleanupError) {
+    try {
+      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      console.error("Retention temp-object cleanup failed", { key: tempKey, error: message });
+    } catch {
+      // Cleanup diagnostics must never replace a successful export.
+    }
   }
 }
 

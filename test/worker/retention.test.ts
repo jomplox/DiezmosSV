@@ -90,6 +90,12 @@ class FakeArchiveBucket implements Partial<R2Bucket> {
     this.objects.delete(key);
   }
 
+  async get(key: string): Promise<R2ObjectBody | null> {
+    const object = this.objects.get(key);
+    if (!object) return null;
+    return { key, body: new Response(object.body).body } as R2ObjectBody;
+  }
+
   async head(key: string): Promise<R2Object | null> {
     this.headCalls.push(key);
     return this.objects.has(key) ? ({ key } as R2Object) : null;
@@ -127,7 +133,7 @@ class SlowArchiveBucket extends FakeArchiveBucket {
   readonly resume = new Deferred();
 
   override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !key.endsWith(".ndjson")) {
+    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
       return super.put(key, value);
     }
     const reader = value.getReader();
@@ -149,7 +155,7 @@ class SlowArchiveBucket extends FakeArchiveBucket {
 
 class FailingArchiveBucket extends FakeArchiveBucket {
   override async put(key: string, value: unknown): Promise<R2Object> {
-    if (value instanceof ReadableStream && key.endsWith(".ndjson")) {
+    if (value instanceof ReadableStream && key.includes(".ndjson.tmp.")) {
       const reader = value.getReader();
       const first = await reader.read();
       if (!first.done) {
@@ -167,7 +173,7 @@ class SettlingArchiveBucket extends FakeArchiveBucket {
   readonly uploadErrors: unknown[] = [];
 
   override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !key.endsWith(".ndjson")) {
+    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
       return super.put(key, value);
     }
     try {
@@ -195,7 +201,7 @@ class DigestPausedArchiveBucket extends FakeArchiveBucket {
   readonly streamErrors: unknown[] = [];
 
   override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !key.endsWith(".ndjson")) {
+    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
       return super.put(key, value);
     }
     const reader = value.getReader();
@@ -786,9 +792,11 @@ describe("runRetentionExport", () => {
     const result = await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
 
     expect(result.status).toBe("completed");
-    const tablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
-    expect(tablePuts).toHaveLength(10);
-    expect(tablePuts.every((call) => call.streamed)).toBe(true);
+    const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
+    const tempTablePuts = archive.putCalls.filter((call) => call.key.includes(".ndjson.tmp."));
+    expect(finalTablePuts).toHaveLength(10);
+    expect(tempTablePuts).toHaveLength(10);
+    expect(tempTablePuts.every((call) => call.streamed)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
     const expectedBytes = utf8Bytes(db.dteDocuments.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
@@ -827,8 +835,27 @@ describe("runRetentionExport", () => {
 
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     expect(result.status).toBe("failed");
-    expect(archive.deleteCalls).toContain(key);
+    expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+    expect(archive.deleteCalls).not.toContain(key);
     expect(archive.objects.has(key)).toBe(false);
+    expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
+  });
+
+  it("does not delete an existing canonical table object when a streamed export fails", async () => {
+    const db = new InMemoryRetentionD1();
+    db.dteDocuments.push(row({ id: "dte_failure" }));
+    const archive = new FailingArchiveBucket();
+    const env = envWithArchive(db, archive);
+    const key = "retention/2026/2026-06/dte_documents.ndjson";
+    const existingBytes = utf8Bytes('{"id":"valid_concurrent_export"}\n');
+    archive.objects.set(key, { key, body: existingBytes });
+
+    const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
+
+    expect(result.status).toBe("failed");
+    expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+    expect(archive.deleteCalls).not.toContain(key);
+    expect(archive.objects.get(key)?.body).toEqual(existingBytes);
     expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
   });
 
@@ -851,7 +878,8 @@ describe("runRetentionExport", () => {
       expect(result).toMatchObject({ status: "failed", error: "page read failed" });
       expect(digest.abortReasons).toContain(primaryError);
       expect(archive.uploadErrors).toHaveLength(1);
-      expect(archive.deleteCalls).toContain(key);
+      expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+      expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
       expect(unhandled.reasons).toEqual([]);
     } finally {
@@ -878,13 +906,15 @@ describe("runRetentionExport", () => {
       const key = "retention/2026/2026-06/dte_documents.ndjson";
       expect(result).toMatchObject({ status: "failed", error: "page read failed before cleanup" });
       expect(digest.abortReasons).toContain(primaryError);
-      expect(archive.deleteCalls).toContain(key);
+      const deletedTempKey = archive.deleteCalls.find((deleteKey) => deleteKey.startsWith(`${key}.tmp.`));
+      expect(deletedTempKey).toBeDefined();
+      expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
       expect(db.audits).toContainEqual(
         expect.objectContaining({ action: "RETENTION_EXPORT_FAILED", summary: "page read failed before cleanup" })
       );
       expect(consoleError).toHaveBeenCalledWith("Retention partial-object cleanup failed", {
-        key,
+        key: deletedTempKey,
         error: "partial delete failed"
       });
       expect(unhandled.reasons).toEqual([]);
@@ -942,7 +972,8 @@ describe("runRetentionExport", () => {
       expect(result).toMatchObject({ status: "failed", error: "digest finalization failed" });
       expect(digestProbe.abortReasons).toEqual([]);
       expect(archive.streamErrors).toContain(digestError);
-      expect(archive.deleteCalls).toContain(key);
+      expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+      expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has(key)).toBe(false);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
       expect(unhandled.reasons).toEqual([]);
