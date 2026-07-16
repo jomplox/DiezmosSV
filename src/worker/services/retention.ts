@@ -8,7 +8,7 @@ import {
   type RetentionTable
 } from "../storage/repository";
 import type { Env } from "../types";
-import { sha256Hex, utf8Bytes } from "../utils/encoding";
+import { hexFromBytes, utf8Bytes } from "../utils/encoding";
 import { sendOperationalAlert } from "./alerts";
 
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
@@ -134,56 +134,85 @@ async function exportWindowedTable(
   // wompi_events has no created_at column — it records received_at instead
   // (migrations/0001_init.sql). Every other windowed table uses created_at.
   const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
-  const chunks: Uint8Array[] = [];
-  let rowCount = 0;
-  let cursor: RetentionCursor | null = null;
-  for (;;) {
-    const rows = await repo.listRowsCreatedBetween(table, { startIso, endIso }, cursor, RETENTION_PAGE_SIZE);
-    if (rows.length === 0) break;
-    for (const row of rows) {
-      chunks.push(utf8Bytes(`${JSON.stringify(row)}\n`));
-      rowCount += 1;
-    }
-    const last = rows[rows.length - 1];
-    cursor = { createdAt: String(last[cursorColumn]), id: String(last.id) };
-    if (rows.length < RETENTION_PAGE_SIZE) break;
-  }
-  const body = concatBytes(chunks);
-  const key = `${prefix}/${table}.ndjson`;
-  await env.ARCHIVE.put(key, body);
-  return { rowCount, sha256: await sha256Hex(body) };
+  return streamRetentionTable(
+    env,
+    `${prefix}/${table}.ndjson`,
+    (cursor) => repo.listRowsCreatedBetween(table, { startIso, endIso }, cursor, RETENTION_PAGE_SIZE),
+    (row) => ({
+      createdAt: String(row[cursorColumn]),
+      id: String(row.id)
+    })
+  );
 }
 
 async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
-  const chunks: Uint8Array[] = [];
-  let rowCount = 0;
-  let cursor: RetentionCursor | null = null;
-  for (;;) {
-    const rows = await repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE);
-    if (rows.length === 0) break;
-    for (const row of rows) {
-      chunks.push(utf8Bytes(`${JSON.stringify(row)}\n`));
-      rowCount += 1;
-    }
-    const last = rows[rows.length - 1];
-    cursor = { createdAt: String(last.created_at), id: String(last.id) };
-    if (rows.length < RETENTION_PAGE_SIZE) break;
-  }
-  const body = concatBytes(chunks);
-  const key = `${prefix}/${table}.ndjson`;
-  await env.ARCHIVE.put(key, body);
-  return { rowCount, sha256: await sha256Hex(body) };
+  return streamRetentionTable(
+    env,
+    `${prefix}/${table}.ndjson`,
+    (cursor) => repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE),
+    (row) => ({
+      createdAt: String(row.created_at),
+      id: String(row.id)
+    })
+  );
 }
 
-function concatBytes(chunks: Uint8Array[]): Uint8Array {
-  const total = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
-  const merged = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+async function streamRetentionTable(
+  env: Env,
+  key: string,
+  readPage: (cursor: RetentionCursor | null) => Promise<Array<Record<string, unknown>>>,
+  cursorFrom: (row: Record<string, unknown>) => RetentionCursor
+): Promise<TableManifestEntry> {
+  const identity = new TransformStream<Uint8Array, Uint8Array>();
+  const digest = new crypto.DigestStream("SHA-256");
+  const bodyWriter = identity.writable.getWriter();
+  const digestWriter = digest.getWriter();
+  const digestResultPromise = digest.digest.then(
+    (value) => ({ ok: true as const, value }),
+    (error) => ({ ok: false as const, error })
+  );
+  const putPromise = env.ARCHIVE.put(key, identity.readable);
+  void putPromise.catch((error) => bodyWriter.abort(error).catch(() => undefined));
+  let cursor: RetentionCursor | null = null;
+  let rowCount = 0;
+
+  try {
+    for (;;) {
+      const rows = await readPage(cursor);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        const bytes = utf8Bytes(`${JSON.stringify(row)}\n`);
+        await Promise.all([bodyWriter.write(bytes), digestWriter.write(bytes)]);
+        rowCount += 1;
+      }
+      cursor = cursorFrom(rows[rows.length - 1]);
+      if (rows.length < RETENTION_PAGE_SIZE) break;
+    }
+
+    await digestWriter.close();
+    const digestResult = await digestResultPromise;
+    if (!digestResult.ok) {
+      throw digestResult.error;
+    }
+    await bodyWriter.close();
+    await putPromise;
+    const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
+    return { rowCount, sha256 };
+  } catch (error) {
+    await Promise.allSettled([bodyWriter.abort(error), digestWriter.abort(error)]);
+    await Promise.allSettled([putPromise, digestResultPromise]);
+    try {
+      await env.ARCHIVE.delete(key);
+    } catch (cleanupError) {
+      try {
+        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+        console.error("Retention partial-object cleanup failed", { key, error: message });
+      } catch {
+        // Cleanup diagnostics must never replace the primary export failure.
+      }
+    }
+    throw error;
   }
-  return merged;
 }
 
 // "Previous calendar month" in El Salvador local time (UTC-6, no DST): if `now`

@@ -1,5 +1,6 @@
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
 import type { Ambiente, DonationGiftType } from "../types";
+import { utf8Bytes } from "../utils/encoding";
 
 // Analítica: tendencias del carril Wompi EXCLUSIVAMENTE (documentos con
 // wompi_event_id NOT NULL + sus donation_intents). Los CDE emitidos a mano
@@ -8,6 +9,58 @@ import type { Ambiente, DonationGiftType } from "../types";
 // Todo el bucketing de fechas usa America/El_Salvador como offset fijo UTC-6 (sin
 // horario de verano en El Salvador), reflejando el helper de certificate.ts.
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
+const MAX_ANALYTICS_ROWS = 10_000;
+const MAX_ANALYTICS_BYTES = 8 * 1024 * 1024;
+// An authenticated document-email amendment can fill its 256 KiB request body.
+// With the remaining selected fields at their enforced maxima, one normalized
+// document row is conservatively at most 264,156 serialized bytes (256 KiB email,
+// 1,500 escaped-name bytes, 512 fixed/framing bytes); 31 rows are 8,188,836
+// bytes, below the shared 8 MiB boundary (32 would exceed it).
+const MAX_ANALYTICS_DOCUMENT_PAGE_SIZE = 31;
+
+export class AnalyticsCapacityError extends Error {
+  readonly code = "analytics_range_too_large";
+
+  constructor() {
+    super(
+      "El rango solicitado contiene demasiados datos. Reduzca las fechas."
+    );
+    this.name = "AnalyticsCapacityError";
+  }
+}
+
+class AnalyticsBudget {
+  private rows = 0;
+  private bytes = 0;
+
+  nextQueryLimit(pageSize: number): number {
+    return Math.min(pageSize, MAX_ANALYTICS_ROWS - this.rows + 1);
+  }
+
+  accept(row: unknown): void {
+    const serializedBytes =
+      utf8Bytes(JSON.stringify(row)).byteLength + 1;
+    if (
+      this.rows + 1 > MAX_ANALYTICS_ROWS ||
+      this.bytes + serializedBytes > MAX_ANALYTICS_BYTES
+    ) {
+      throw new AnalyticsCapacityError();
+    }
+    this.rows += 1;
+    this.bytes += serializedBytes;
+  }
+}
+
+function appendAnalyticsRows<T>(
+  target: T[],
+  page: T[],
+  budget: AnalyticsBudget
+): void {
+  for (const row of page) {
+    budget.accept(row);
+    target.push(row);
+  }
+}
 
 // Filas planas leídas por SELECTs paginados (una tabla por lector). Las funciones
 // puras de agregación consumen estas filas y devuelven métricas; se prueban
@@ -696,27 +749,29 @@ export async function computeAnalytics(
   labels: LabelResolvers
 ): Promise<AnalyticsResult> {
   const window = elSalvadorRangeWindow(range);
-  const [documents, intents, emails] = await Promise.all([
-    readAnalyticsDocuments(repo, window, environment),
-    readAnalyticsIntents(repo, window, environment),
-    readAnalyticsEmails(repo, window, environment)
-  ]);
+  const budget = new AnalyticsBudget();
+  const documents = await readAnalyticsDocuments(repo, window, environment, budget);
+  const intents = await readAnalyticsIntents(repo, window, environment, budget);
+  const emails = await readAnalyticsEmails(repo, window, environment, budget);
   return buildAnalytics({ documents, intents, emails, range, now, environment, labels });
 }
 
 async function readAnalyticsDocuments(
   repo: Repository,
   window: { startIso: string; endIso: string },
-  environment: Ambiente
+  environment: Ambiente,
+  budget: AnalyticsBudget
 ): Promise<AnalyticsDocumentRow[]> {
   const rows: AnalyticsDocumentRow[] = [];
   let cursor: { issuedAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listWompiLaneDocumentsForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
+    const limit = budget.nextQueryLimit(MAX_ANALYTICS_DOCUMENT_PAGE_SIZE);
+    const page = await repo.listWompiLaneDocumentsForAnalytics(window, environment, cursor, limit);
     // gift_type comes back as a raw string from D1; the CHECK constraint guarantees it
     // is DIEZMO/OFRENDA/null, so the narrowing cast is safe.
-    rows.push(...page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) })));
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    const normalized = page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) }));
+    appendAnalyticsRows(rows, normalized, budget);
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { issuedAt: last.issued_at, id: last.id };
   }
@@ -726,14 +781,17 @@ async function readAnalyticsDocuments(
 async function readAnalyticsIntents(
   repo: Repository,
   window: { startIso: string; endIso: string },
-  environment: Ambiente
+  environment: Ambiente,
+  budget: AnalyticsBudget
 ): Promise<AnalyticsIntentRow[]> {
   const rows: AnalyticsIntentRow[] = [];
   let cursor: { createdAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listDonationIntentsForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
-    rows.push(...page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) })));
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    const limit = budget.nextQueryLimit(RETENTION_PAGE_SIZE);
+    const page = await repo.listDonationIntentsForAnalytics(window, environment, cursor, limit);
+    const normalized = page.map((row) => ({ ...row, gift_type: coerceGiftType(row.gift_type) }));
+    appendAnalyticsRows(rows, normalized, budget);
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { createdAt: last.created_at, id: last.id };
   }
@@ -743,14 +801,16 @@ async function readAnalyticsIntents(
 async function readAnalyticsEmails(
   repo: Repository,
   window: { startIso: string; endIso: string },
-  environment: Ambiente
+  environment: Ambiente,
+  budget: AnalyticsBudget
 ): Promise<AnalyticsEmailRow[]> {
   const rows: AnalyticsEmailRow[] = [];
   let cursor: { createdAt: string; id: string } | null = null;
   for (;;) {
-    const page = await repo.listEmailDeliveriesForAnalytics(window, environment, cursor, RETENTION_PAGE_SIZE);
-    rows.push(...page);
-    if (page.length < RETENTION_PAGE_SIZE) break;
+    const limit = budget.nextQueryLimit(RETENTION_PAGE_SIZE);
+    const page = await repo.listEmailDeliveriesForAnalytics(window, environment, cursor, limit);
+    appendAnalyticsRows(rows, page, budget);
+    if (page.length < limit) break;
     const last = page[page.length - 1];
     cursor = { createdAt: last.created_at, id: last.id };
   }

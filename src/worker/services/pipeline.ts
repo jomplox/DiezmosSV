@@ -1,18 +1,21 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
-import { buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
+import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
+import { DocumentSchemaValidationError } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
+import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
-import { MhClient, MhUnavailableError } from "./mhClient";
+import type { DonationIntentBinding } from "./donationIntentBinding";
+import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
 
 // Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
@@ -21,6 +24,37 @@ export class RejectedWompiRetryConflictError extends Error {
   constructor(message = "Ya hay un reintento en curso para este documento.") {
     super(message);
     this.name = "RejectedWompiRetryConflictError";
+  }
+}
+
+type IntentCorrelation =
+  | { kind: "legacy" }
+  | { kind: "ready"; intent: DonationIntentRecord }
+  | {
+      kind: "quarantined";
+      intentId: string;
+      reason:
+        | Extract<DonationIntentBinding, { kind: "unbound" }>["reason"]
+        | "incomplete_donor_data";
+      expectedLinkId: number | null;
+      payloadLinkId: number | null;
+    };
+
+export class WompiIntentQuarantinedError extends Error {
+  readonly code = "wompi_intent_quarantined";
+
+  constructor() {
+    super(
+      "El evento Wompi está en cuarentena porque no coincide con una intención lista."
+    );
+    this.name = "WompiIntentQuarantinedError";
+  }
+}
+
+class PostAcceptFinalizationOwnershipError extends Error {
+  constructor(message: string, readonly cause?: unknown) {
+    super(message);
+    this.name = "PostAcceptFinalizationOwnershipError";
   }
 }
 
@@ -108,7 +142,14 @@ export class IssuancePipeline {
     assertDeploymentAllowsAmbiente(this.env, event.environment);
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
+      if (existing.status === "ACCEPTED" && !existing.post_accept_finalized_at) {
+        await this.finalizeAcceptedDocument(existing);
+        return (await this.repo.getDteDocument(existing.id)) ?? existing;
+      }
       return existing;
+    }
+    if (event.processed_at) {
+      return null;
     }
     const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
     if (!isApprovedDonation(payload)) {
@@ -123,8 +164,15 @@ export class IssuancePipeline {
 
     const config = getEmisorConfig(this.env);
     const environment = event.environment;
-    const intent = await this.correlateIntent(payload, wompiEventId);
-    const donorOverride = intent ? donorOverrideFromIntent(intent, payload) : undefined;
+    const correlation = await this.correlateIntent(payload);
+    if (correlation.kind === "quarantined") {
+      await this.quarantineWompiEvent(wompiEventId, correlation);
+      return null;
+    }
+    const intent = correlation.kind === "ready" ? correlation.intent : null;
+    const donorOverride = intent
+      ? donorOverrideFromIntent(intent, payload)
+      : undefined;
     // Validate the donor DUI BEFORE allocating a control sequence. A malformed DUI is a
     // permanent input failure; letting buildCdeDocument throw it AFTER nextControlSequence
     // burns a control number on every queue retry, opening a permanent fiscal gap. Reject
@@ -140,29 +188,82 @@ export class IssuancePipeline {
       await this.repo.markWompiEventProcessed(wompiEventId);
       return null;
     }
-    const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
-    const normalDocument = buildCdeDocument(payload, config, { sequence, environment, donorOverride });
-    const identifiers = extractCdeIdentifiers(normalDocument);
-    // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook: for
-    // an empresa (NIT 36) intent the receptor nombre is the razón social, so storing the
-    // webhook cardholder name here would diverge from the signed document. For a natural
-    // person the receptor nombre/correo are the webhook values, so this is unchanged.
-    const summary = cdeDocumentSummary(normalDocument);
-    let record = await this.repo.createDteDocument({
-      wompiEventId,
-      environment,
-      codigoGeneracion: identifiers.codigoGeneracion,
-      numeroControl: identifiers.numeroControl,
-      plainJson: normalDocument,
-      donorEmail: summary.donorEmail,
-      donorName: summary.donorName,
-      amountCents: amountCents(payload),
-      issuedAt: nowIso()
-    });
-
+    const issuedAt = new Date(payload.FechaTransaccion);
     try {
+      // Validate every deterministic CDE field before the durable sequence mutation.
+      // The preview number is never persisted; the real build below uses the allocated
+      // sequence and the same business timestamp after this complete schema check passes.
+      buildCdeDocument(payload, config, {
+        sequence: 1,
+        environment,
+        donorOverride,
+        issuedAt
+      });
+    } catch (error) {
+      if (!(error instanceof DocumentSchemaValidationError)) throw error;
+      await this.repo.createAudit({
+        action: "WOMPI_INVALID_CDE_INPUT",
+        entityType: "wompi_event",
+        entityId: wompiEventId,
+        summary: error.message
+      });
+      await this.repo.markWompiEventProcessed(wompiEventId);
+      return null;
+    }
+    const issuanceClaimId = newId("wompi_issue");
+    if (!(await this.repo.claimWompiEventIssuance(wompiEventId, issuanceClaimId))) {
+      return (await this.repo.getDteDocumentByWompiEvent(wompiEventId)) ?? null;
+    }
+
+    let normalDocument: Record<string, unknown>;
+    let identifiers: { codigoGeneracion: string; numeroControl: string };
+    let record: DteDocumentRecord;
+    try {
+      const sequence = await this.repo.nextControlSequence(environment, config.controlPrefix);
+      normalDocument = buildCdeDocument(payload, config, {
+        sequence,
+        environment,
+        donorOverride,
+        issuedAt
+      });
+      identifiers = extractCdeIdentifiers(normalDocument);
+      // Persist the donor metadata from the EMITTED CDE receptor, not the raw webhook:
+      // for an empresa intent the receptor name is its razón social, while natural-person
+      // name/email remain the webhook values.
+      const summary = cdeDocumentSummary(normalDocument);
+      const created = await this.repo.createClaimedWompiDteDocument({
+        wompiEventId,
+        issuanceClaimId,
+        environment,
+        codigoGeneracion: identifiers.codigoGeneracion,
+        numeroControl: identifiers.numeroControl,
+        plainJson: normalDocument,
+        donorEmail: summary.donorEmail,
+        donorName: summary.donorName,
+        amountCents: amountCents(payload),
+        issuedAt: nowIso()
+      });
+      if (!created) {
+        await this.repo.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
+        return (await this.repo.getDteDocumentByWompiEvent(wompiEventId)) ?? null;
+      }
+      record = created;
+    } catch (error) {
+      await this.repo.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
+      throw error;
+    }
+
+    let claimId: string | null = null;
+    try {
+      assertCdeIssuerMatchesConfig(normalDocument, config);
       const signedJws = await signMhDocument(normalDocument, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      await this.repo.updateDocumentSigned(record.id, signedJws);
+      if (!(await this.repo.updateDocumentSigned(record.id, signedJws, record.status))) {
+        return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
+      claimId = newId("fiscal");
+      if (!(await this.repo.claimDocumentTransmission(record.id, "SIGNED", signedJws, claimId))) {
+        return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
       const mhResult = await this.mh.transmitDte({
         ambiente: environment,
         version: 2,
@@ -170,40 +271,64 @@ export class IssuancePipeline {
         codigoGeneracion: identifiers.codigoGeneracion,
         signedJws
       });
-      await this.repo.updateDocumentMhResult(record.id, {
+      const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
         status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
         sello: mhResult.selloRecibido,
         mhEstado: mhResult.estado,
         observaciones: mhResult.observaciones,
         acceptedAt: mhResult.accepted ? nowIso() : null
       });
+      if (!completed) {
+        return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
       record = (await this.repo.getDteDocument(record.id)) ?? record;
-      await this.repo.createAudit({
-        action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `${record.numero_control} ${mhResult.estado}`,
-        metadata: mhResult.raw
-      });
       if (mhResult.accepted) {
-        if (intent) {
-          await this.completeIntent(intent, record.id);
-        }
-        await this.emailReceipt(record);
+        await this.finalizeAcceptedDocument(record, {
+          intent,
+          auditAction: "DTE_ACCEPTED",
+          auditSummary: `${record.numero_control} ${mhResult.estado}`,
+          auditMetadata: mhResult.raw
+        });
+      } else {
+        await this.repo.createAudit({
+          action: "DTE_REJECTED",
+          entityType: "dte_document",
+          entityId: record.id,
+          summary: `${record.numero_control} ${mhResult.estado}`,
+          metadata: mhResult.raw
+        });
       }
       return record;
     } catch (error) {
-      if (error instanceof MhUnavailableError) {
+      if (error instanceof MhPreDispatchError && claimId) {
         // El documento ya quedó firmado con forma NORMAL antes del intento de
         // transmisión: se difiere tal cual (nunca se reconstruye en contingencia).
-        return this.deferTransmission(record.id, String(error.message));
+        return this.deferTransmission(record.id, claimId, String(error.message));
       }
-      await this.repo.updateDocumentMhResult(record.id, {
-        status: "FAILED",
-        sello: null,
+      const latest = await this.repo.getDteDocument(record.id);
+      if (latest?.status === "ACCEPTED" && !latest.post_accept_finalized_at) {
+        // The fiscal verdict is durable but the intent/receipt/audit outbox is not.
+        // Propagate so queue redelivery (and the scheduled pending sweep) retries only
+        // local finalization; the terminal guard above prevents another MH dispatch.
+        throw error;
+      }
+      if (latest && isTerminalDteStatus(latest.status)) {
+        return latest;
+      }
+      if (claimId) {
+        // Dispatch began but no verdict was durable. The non-null claim is the
+        // reconciliation marker; clearing it or writing FAILED would authorize a
+        // fresh submission whose external outcome may duplicate this one.
+        throw error;
+      }
+      const failed = await this.repo.markDocumentFailed(record.id, claimId, {
         mhEstado: "PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
+      if (!failed) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (current) return current;
+      }
       const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
         action: "DTE_FAILED",
@@ -242,67 +367,101 @@ export class IssuancePipeline {
     // Re-apply the same intent correlation as processWompiEvent: without it, an
     // operator retry would silently downgrade a rejected intent-backed CDE to the
     // raw-webhook fallback donor data.
-    const intent = await this.correlateIntent(payload, wompiEventId);
-    const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
-    const rebuilt = buildCdeDocument(payload, config, { sequence, environment: record.environment, donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined });
-    const identifiers = extractCdeIdentifiers(rebuilt);
-    const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-    // Atomically claim the rebuild before transmitting: only one concurrent operator
-    // retry may move this REJECTED CDE to SIGNED with the freshly rebuilt payload. The
-    // loser matches 0 rows and stops here — it must not transmit a second distinct legal
-    // DTE for the same Wompi event, nor leave the stored payload and the MH result
-    // describing different documents. Signing happens first (above) so a failure before
-    // the claim leaves the row REJECTED and still retryable.
-    const claimed = await this.repo.claimRejectedWompiRebuild(record.id, wompiEventId, {
-      codigoGeneracion: identifiers.codigoGeneracion,
-      numeroControl: identifiers.numeroControl,
-      plainJson: rebuilt,
-      signedJws
-    });
-    if (!claimed) {
+    const correlation = await this.correlateIntent(payload);
+    if (correlation.kind === "quarantined") {
+      // Preserve the existing CAS-loser result for a caller holding a stale REJECTED
+      // snapshot after another retry already claimed and completed this document.
+      const current = await this.repo.getDteDocument(record.id);
+      if (!current || current.status !== "REJECTED") {
+        throw new RejectedWompiRetryConflictError();
+      }
+      await this.quarantineWompiEvent(wompiEventId, correlation);
+      throw new WompiIntentQuarantinedError();
+    }
+    const intent = correlation.kind === "ready" ? correlation.intent : null;
+    const claimId = newId("fiscal");
+    // Win ownership before allocating the new control number. A concurrent loser must
+    // not create a second fiscal identity or burn a sequence it can never transmit.
+    if (!(await this.repo.claimRejectedWompiRetry(record.id, wompiEventId, claimId))) {
       throw new RejectedWompiRetryConflictError();
     }
-    let mhResult: MhResponse;
+    let fiscalCallStarted = false;
     try {
-      mhResult = await this.mh.transmitDte({
-        ambiente: record.environment,
-        version: 2,
-        tipoDte: "15",
-        codigoGeneracion: identifiers.codigoGeneracion,
-        signedJws
+      const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
+      const rebuilt = buildCdeDocument(payload, config, {
+        sequence,
+        environment: record.environment,
+        donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined
       });
+      const identifiers = extractCdeIdentifiers(rebuilt);
+      assertCdeIssuerMatchesConfig(rebuilt, config);
+      const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+      if (
+        !(await this.repo.prepareClaimedRejectedWompiRebuild(record.id, wompiEventId, claimId, {
+          codigoGeneracion: identifiers.codigoGeneracion,
+          numeroControl: identifiers.numeroControl,
+          plainJson: rebuilt,
+          signedJws
+        }))
+      ) {
+        throw new RejectedWompiRetryConflictError();
+      }
+
+      let mhResult: MhResponse;
+      try {
+        fiscalCallStarted = true;
+        mhResult = await this.mh.transmitDte({
+          ambiente: record.environment,
+          version: 2,
+          tipoDte: "15",
+          codigoGeneracion: identifiers.codigoGeneracion,
+          signedJws
+        });
+      } catch (error) {
+        if (error instanceof MhPreDispatchError) {
+          // Authentication failed before the fiscal POST. The rebuilt normal CDE is
+          // safe to defer with the same identity for the scheduled retry.
+          const reason = String(error.message);
+          await this.deferTransmission(record.id, claimId, reason);
+          return { accepted: false, estado: "TRANSMISION_DIFERIDA", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
+        }
+        throw error;
+      }
+
+      const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
+        status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
+        sello: mhResult.selloRecibido,
+        mhEstado: mhResult.estado,
+        observaciones: mhResult.observaciones,
+        acceptedAt: mhResult.accepted ? nowIso() : null
+      });
+      if (!completed) {
+        throw new RejectedWompiRetryConflictError();
+      }
+      const updated = (await this.repo.getDteDocument(record.id)) ?? record;
+      if (mhResult.accepted) {
+        await this.finalizeAcceptedDocument(updated, {
+          intent,
+          auditAction: "DTE_ACCEPTED",
+          auditSummary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
+          auditMetadata: mhResult.raw
+        });
+      } else {
+        await this.repo.createAudit({
+          action: "DTE_REJECTED",
+          entityType: "dte_document",
+          entityId: updated.id,
+          summary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
+          metadata: mhResult.raw
+        });
+      }
+      return mhResult;
     } catch (error) {
-      if (error instanceof MhUnavailableError) {
-        // MH cayó durante el reintento del operador: el CDE reconstruido (forma
-        // normal, ya firmado) se difiere y el cron lo transmitirá al volver MH.
-        const reason = String(error.message);
-        await this.deferTransmission(record.id, reason);
-        return { accepted: false, estado: "TRANSMISION_DIFERIDA", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
+      if (!fiscalCallStarted) {
+        await this.repo.releaseDocumentFiscalOperation(record.id, claimId);
       }
       throw error;
     }
-    await this.repo.updateDocumentMhResult(record.id, {
-      status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-      sello: mhResult.selloRecibido,
-      mhEstado: mhResult.estado,
-      observaciones: mhResult.observaciones,
-      acceptedAt: mhResult.accepted ? nowIso() : null
-    });
-    const updated = (await this.repo.getDteDocument(record.id)) ?? record;
-    await this.repo.createAudit({
-      action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-      entityType: "dte_document",
-      entityId: updated.id,
-      summary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
-      metadata: mhResult.raw
-    });
-    if (mhResult.accepted) {
-      if (intent) {
-        await this.completeIntent(intent, updated.id);
-      }
-      await this.emailReceipt(updated);
-    }
-    return mhResult;
   }
 
   async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
@@ -316,15 +475,30 @@ export class IssuancePipeline {
     // y su veredicto no se sobrescribe. Los diferidos (SIGNED + marcador) NO son
     // terminales: siguen su reintento por el cron.
     if (isTerminalDteStatus(record.status)) {
+      if (record.status === "ACCEPTED" && !record.post_accept_finalized_at) {
+        await this.finalizeAcceptedDocument(record);
+        return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
       return record;
     }
     const document = JSON.parse(record.plain_json) as Record<string, unknown>;
     const summary = cdeDocumentSummary(document);
     assertDeploymentAllowsAmbiente(this.env, summary.environment);
+    let claimId: string | null = null;
     try {
-      const signedJws = record.signed_jws ?? await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      if (!record.signed_jws) {
-        await this.repo.updateDocumentSigned(record.id, signedJws);
+      let signedJws = record.signed_jws;
+      let expectedStatus = record.status;
+      if (!signedJws) {
+        assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
+        signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+        if (!(await this.repo.updateDocumentSigned(record.id, signedJws, expectedStatus))) {
+          return (await this.repo.getDteDocument(record.id)) ?? record;
+        }
+        expectedStatus = "SIGNED";
+      }
+      claimId = newId("fiscal");
+      if (!(await this.repo.claimDocumentTransmission(record.id, expectedStatus, signedJws, claimId))) {
+        return (await this.repo.getDteDocument(record.id)) ?? record;
       }
       const mhResult = await this.mh.transmitDte({
         ambiente: summary.environment,
@@ -333,44 +507,62 @@ export class IssuancePipeline {
         codigoGeneracion: summary.codigoGeneracion,
         signedJws
       });
-      await this.repo.updateDocumentMhResult(record.id, {
+      const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
         status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
         sello: mhResult.selloRecibido,
         mhEstado: mhResult.estado,
         observaciones: mhResult.observaciones,
         acceptedAt: mhResult.accepted ? nowIso() : null
       });
+      if (!completed) {
+        return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
       record = (await this.repo.getDteDocument(record.id)) ?? record;
-      await this.repo.createAudit({
-        action: mhResult.accepted ? "ADVANCED_CDE_ACCEPTED" : "ADVANCED_CDE_REJECTED",
-        entityType: "dte_document",
-        entityId: record.id,
-        summary: `${record.numero_control} ${mhResult.estado}`,
-        metadata: mhResult.raw
-      });
       if (mhResult.accepted) {
-        await this.emailReceipt(record);
+        await this.finalizeAcceptedDocument(record, {
+          auditAction: "ADVANCED_CDE_ACCEPTED",
+          auditSummary: `${record.numero_control} ${mhResult.estado}`,
+          auditMetadata: mhResult.raw
+        });
+      } else {
+        await this.repo.createAudit({
+          action: "ADVANCED_CDE_REJECTED",
+          entityType: "dte_document",
+          entityId: record.id,
+          summary: `${record.numero_control} ${mhResult.estado}`,
+          metadata: mhResult.raw
+        });
       }
       return record;
     } catch (error) {
-      if (error instanceof MhUnavailableError) {
+      if (error instanceof MhPreDispatchError && claimId) {
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
-        return this.deferTransmission(record.id, String(error.message));
+        return this.deferTransmission(record.id, claimId, String(error.message));
       }
       // Entre nuestra lectura y este fallo, MH pudo haber sellado el documento
       // (ACCEPTED/REJECTED) o pudo invalidarse: si ya es TERMINAL, un fallo posterior de
       // bookkeeping (p. ej. la escritura de auditoría) NO debe degradarlo a FAILED. Se
       // conserva el sello y se devuelve el estado terminal.
       const latest = await this.repo.getDteDocument(record.id);
+      if (latest?.status === "ACCEPTED" && !latest.post_accept_finalized_at) {
+        throw error;
+      }
       if (latest && isTerminalDteStatus(latest.status)) {
         return latest;
       }
-      await this.repo.updateDocumentMhResult(record.id, {
-        status: "FAILED",
-        sello: null,
+      if (claimId) {
+        // Keep an outcome-ambiguous dispatch claimed. Queue redelivery may observe
+        // the row, but it must stop before another MH request is issued.
+        throw error;
+      }
+      const failed = await this.repo.markDocumentFailed(record.id, claimId, {
         mhEstado: "ADVANCED_PIPELINE_ERROR",
         observaciones: [error instanceof Error ? error.message : String(error)]
       });
+      if (!failed) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (current) return current;
+      }
       const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.createAudit({
         action: "ADVANCED_CDE_FAILED",
@@ -404,6 +596,7 @@ export class IssuancePipeline {
     let rejected = 0;
     let pending = 0;
     for (const record of docs) {
+      let claimId: string | null = null;
       // Cada documento se reintenta aislado: un fallo no debe abortar el barrido.
       try {
         assertDeploymentAllowsAmbiente(this.env, record.environment);
@@ -411,7 +604,18 @@ export class IssuancePipeline {
         if (!signedJws) {
           // Defensivo: todos los caminos que difieren firman antes. RS512/PKCS1 es
           // determinista, así que re-firmar el mismo plain_json es idempotente.
-          signedJws = await signMhDocument(JSON.parse(record.plain_json), getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+          const document = JSON.parse(record.plain_json) as Record<string, unknown>;
+          assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
+          signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
+        }
+        if (!record.signed_jws && !(await this.repo.updateDocumentSigned(record.id, signedJws, record.status))) {
+          pending += 1;
+          continue;
+        }
+        claimId = newId("fiscal");
+        if (!(await this.repo.claimDocumentTransmission(record.id, "SIGNED", signedJws, claimId))) {
+          pending += 1;
+          continue;
         }
         const mhResult = await this.mh.transmitDte({
           ambiente: record.environment,
@@ -420,45 +624,54 @@ export class IssuancePipeline {
           codigoGeneracion: record.codigo_generacion,
           signedJws
         });
-        if (!record.signed_jws) {
-          await this.repo.updateDocumentSigned(record.id, signedJws);
-        }
         // El status sale de SIGNED (ACCEPTED/REJECTED) y con eso el documento deja de
         // aparecer en listDeferredTransmissionDocuments; transmission_deferred_at se
         // conserva a propósito como evidencia histórica de que estuvo diferido.
-        await this.repo.updateDocumentMhResult(record.id, {
+        const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
           status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
           sello: mhResult.selloRecibido,
           mhEstado: mhResult.estado,
           observaciones: mhResult.observaciones,
           acceptedAt: mhResult.accepted ? nowIso() : null
         });
+        if (!completed) {
+          pending += 1;
+          continue;
+        }
+        if (mhResult.accepted) transmitted += 1;
+        else rejected += 1;
         const updated = (await this.repo.getDteDocument(record.id)) ?? record;
-        await this.repo.createAudit({
-          action: mhResult.accepted ? "DTE_ACCEPTED" : "DTE_REJECTED",
-          entityType: "dte_document",
-          entityId: updated.id,
-          summary: `${updated.numero_control} ${mhResult.estado} (transmisión diferida)`,
-          metadata: mhResult.raw
-        });
         if (mhResult.accepted) {
-          transmitted += 1;
-          // La aceptación REAL de MH completa la intención correlacionada y envía el
-          // comprobante DEFINITIVO (el PDF ahora lleva el Sello de Recepción).
-          const intent = await this.correlateIntentForDocument(updated);
-          if (intent) {
-            await this.completeIntent(intent, updated.id);
-          }
-          await this.emailReceipt(updated);
+          await this.finalizeAcceptedDocument(updated, {
+            auditAction: "DTE_ACCEPTED",
+            auditSummary: `${updated.numero_control} ${mhResult.estado} (transmisión diferida)`,
+            auditMetadata: mhResult.raw
+          });
         } else {
-          rejected += 1;
+          await this.repo.createAudit({
+            action: "DTE_REJECTED",
+            entityType: "dte_document",
+            entityId: updated.id,
+            summary: `${updated.numero_control} ${mhResult.estado} (transmisión diferida)`,
+            metadata: mhResult.raw
+          });
         }
       } catch (error) {
+        if (claimId && error instanceof MhPreDispatchError) {
+          // Authentication failed before the fiscal POST, so this claim is safe to
+          // release. Every failure after dispatch starts remains claimed because MH
+          // may already have processed the document.
+          await this.repo.releaseDocumentFiscalOperation(record.id, claimId);
+        }
+        const latest = await this.repo.getDteDocument(record.id);
+        if (latest && isTerminalDteStatus(latest.status)) {
+          continue;
+        }
         // MH sigue sin responder (u otro fallo transitorio): el documento permanece
         // diferido (SIGNED + marcador) sin auditoría por tick — auditar cada reintento de un
         // cron de 15 minutos sería puro ruido. La visibilidad la da la alerta de
         // backlog de alertOnDeferredBacklog.
-        if (!(error instanceof MhUnavailableError)) {
+        if (!(error instanceof MhPreDispatchError)) {
           console.error("Reintento de transmisión diferida falló", record.id, error);
         }
         pending += 1;
@@ -466,6 +679,23 @@ export class IssuancePipeline {
     }
     await this.alertOnDeferredBacklog();
     return { transmitted, rejected, pending };
+  }
+
+  async retryPendingPostAcceptFinalizations(limit = 100): Promise<{ finalized: number; failed: number }> {
+    const documents = await this.repo.listPendingPostAcceptFinalizations(limit);
+    let finalized = 0;
+    let failed = 0;
+    for (const document of documents) {
+      try {
+        if (await this.finalizeAcceptedDocument(document)) {
+          finalized += 1;
+        }
+      } catch (error) {
+        failed += 1;
+        console.error("Post-accept finalization failed", document.id, error);
+      }
+    }
+    return { finalized, failed };
   }
 
   // Alerta operativa MH_UNAVAILABLE cuando algún CDE diferido lleva más de una hora
@@ -491,11 +721,14 @@ export class IssuancePipeline {
   // Difiere la transmisión de un CDE ya firmado (forma normal). El donante recibe de
   // inmediato el comprobante TRANSITORIO — pdf.ts imprime "TRANSITORIO" como sello
   // cuando sello_recibido es null — y el cron reintenta la transmisión.
-  private async deferTransmission(documentId: string, reason: string): Promise<DteDocumentRecord> {
-    await this.repo.markDocumentTransmissionDeferred(documentId, reason);
+  private async deferTransmission(documentId: string, claimId: string, reason: string): Promise<DteDocumentRecord> {
+    const deferred = await this.repo.markDocumentTransmissionDeferred(documentId, claimId, reason);
     const updated = await this.repo.getDteDocument(documentId);
     if (!updated) {
       throw new Error(`Documento DTE ${documentId} no encontrado al diferir su transmisión`);
+    }
+    if (!deferred) {
+      return updated;
     }
     await this.repo.createAudit({
       action: "DTE_TRANSMISSION_DEFERRED",
@@ -511,57 +744,177 @@ export class IssuancePipeline {
     return updated;
   }
 
-  // Resuelve la intención de donación de un documento respaldado por Wompi para
-  // completarla cuando MH acepta el reintento. Documentos rápidos/avanzados no
-  // tienen intención; cualquier problema de parseo degrada a null (sin intención).
-  private async correlateIntentForDocument(record: DteDocumentRecord): Promise<DonationIntentRecord | null> {
-    if (!record.wompi_event_id) {
-      return null;
+  private async finalizeAcceptedDocument(
+    record: DteDocumentRecord,
+    options: {
+      intent?: DonationIntentRecord | null;
+      auditAction?: "DTE_ACCEPTED" | "ADVANCED_CDE_ACCEPTED";
+      auditSummary?: string;
+      auditMetadata?: unknown;
+    } = {}
+  ): Promise<boolean> {
+    if (record.status !== "ACCEPTED" || record.post_accept_finalized_at) {
+      return false;
     }
-    const event = await this.repo.getWompiEventById(record.wompi_event_id);
-    if (!event) {
-      return null;
+
+    const claimId = newId("finalize");
+    if (!(await this.repo.claimDocumentPostAcceptFinalization(record.id, claimId))) {
+      return false;
     }
+
+    let emailDispatchStarted = false;
     try {
-      return await this.correlateIntent(normalizeWompiWebhook(JSON.parse(event.raw_body)), event.id);
-    } catch {
-      return null;
+      const claimedRecord = await this.repo.getDteDocument(record.id);
+      if (
+        !claimedRecord ||
+        claimedRecord.status !== "ACCEPTED" ||
+        claimedRecord.post_accept_finalized_at ||
+        claimedRecord.post_accept_finalization_claim_id !== claimId
+      ) {
+        throw new PostAcceptFinalizationOwnershipError(
+          `El CDE aceptado ${record.id} perdió la propiedad antes de recargar el destinatario`
+        );
+      }
+      // The list/acceptance caller can hold a stale snapshot. Reload only after the
+      // claim is durable; donor-email edits reject that active claim, so whichever
+      // write wins determines the one recipient used at provider dispatch.
+      record = claimedRecord;
+
+      let completedIntent = await this.repo.getCompletedIntentForDocument(record.id);
+      let intent = options.intent ?? null;
+      if (!completedIntent && !intent && record.wompi_event_id) {
+        const event = await this.repo.getWompiEventById(record.wompi_event_id);
+        if (!event) {
+          throw new Error(`Evento Wompi ${record.wompi_event_id} no encontrado al finalizar ${record.id}`);
+        }
+        const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
+        const binding = await resolveDonationIntentBinding(this.repo, payload);
+        if (binding.kind === "bound") {
+          intent = binding.intent;
+        } else if (binding.kind === "unbound") {
+          // An accepted intent-backed document must never be marked finalized while its
+          // application intent remains unresolved. COMPLETED rows are found above by
+          // document_id; every other unbound state needs operator-visible retry/recovery.
+          throw new Error(`La intención ${binding.intentId} no pudo finalizarse: ${binding.reason}`);
+        }
+      }
+
+      if (intent) {
+        const completed = await this.repo.completeIntentForPostAcceptOwner(intent.id, record.id, claimId);
+        completedIntent = await this.repo.getCompletedIntentForDocument(record.id);
+        if (!completed || completedIntent?.id !== intent.id) {
+          throw new Error(`La intención ${intent.id} no pudo vincularse al CDE aceptado ${record.id}`);
+        }
+      }
+
+      if (record.donor_email) {
+        if (!(await this.repo.hasHandledEmail(record.id, "dteReceipt", "ACCEPTED"))) {
+          await this.emailReceipt(record, async () => {
+            try {
+              if (!(await this.repo.markDocumentPostAcceptEmailDispatchStarted(record.id, claimId))) {
+                throw new Error(`El CDE aceptado ${record.id} perdió la propiedad antes de enviar su comprobante`);
+              }
+              emailDispatchStarted = true;
+            } catch (error) {
+              throw new PostAcceptFinalizationOwnershipError(
+                `El CDE aceptado ${record.id} no pudo confirmar su propiedad antes de enviar el comprobante`,
+                error
+              );
+            }
+          });
+        }
+      } else if (!(await this.repo.ensurePostAcceptAudit({
+        auditId: `audit_post_accept_email_skipped_${record.id}`,
+        documentId: record.id,
+        claimId,
+        action: "EMAIL_SKIPPED",
+        entityType: "dte_document",
+        entityId: record.id,
+        summary: "Documento sin correo del donante"
+      }))) {
+        throw new PostAcceptFinalizationOwnershipError(
+          `El CDE aceptado ${record.id} perdió la propiedad antes de registrar EMAIL_SKIPPED`
+        );
+      }
+
+      if (completedIntent && !(await this.repo.ensurePostAcceptAudit({
+          auditId: `audit_post_accept_intent_${record.id}`,
+          documentId: record.id,
+          claimId,
+          action: "DONATION_INTENT_COMPLETED",
+          entityType: "donation_intent",
+          entityId: completedIntent.id,
+          summary: `Intención ${completedIntent.id} completada por el CDE ${record.id}`,
+          metadata: { documentId: record.id }
+        }))) {
+        throw new PostAcceptFinalizationOwnershipError(
+          `El CDE aceptado ${record.id} perdió la propiedad antes de auditar su intención`
+        );
+      }
+
+      const auditAction = options.auditAction ?? (record.wompi_event_id ? "DTE_ACCEPTED" : "ADVANCED_CDE_ACCEPTED");
+      if (!(await this.repo.ensurePostAcceptAudit({
+          auditId: `audit_post_accept_${auditAction.toLowerCase()}_${record.id}`,
+          documentId: record.id,
+          claimId,
+          action: auditAction,
+          entityType: "dte_document",
+          entityId: record.id,
+          summary: options.auditSummary ?? `${record.numero_control} ${record.mh_estado ?? "ACEPTADO"}`,
+          metadata: options.auditMetadata ?? { recoveredPostAcceptFinalization: true }
+        }))) {
+        throw new PostAcceptFinalizationOwnershipError(
+          `El CDE aceptado ${record.id} perdió la propiedad antes de auditar su aceptación`
+        );
+      }
+
+      if (!(await this.repo.markDocumentPostAcceptFinalized(record.id, claimId))) {
+        const current = await this.repo.getDteDocument(record.id);
+        if (!current?.post_accept_finalized_at) {
+          throw new Error(`El CDE aceptado ${record.id} cambió antes de completar su finalización`);
+        }
+      }
+      return true;
+    } catch (error) {
+      // Release only when retry cannot duplicate an email side effect. Before dispatch
+      // there is no external effect; after dispatch, a durable SENT row (or the local
+      // EMAIL_SKIPPED outcome) lets a later owner safely resume audits/final marking.
+      const safeReceiptEvidence = record.donor_email
+        ? await this.repo.hasHandledEmail(record.id, "dteReceipt", "ACCEPTED")
+        : await this.repo.hasAuditAction("EMAIL_SKIPPED", "dte_document", record.id);
+      if (!emailDispatchStarted || safeReceiptEvidence) {
+        await this.repo.releaseDocumentPostAcceptFinalization(record.id, claimId);
+      }
+      throw error;
     }
   }
 
   // The shared resolver is the only authority for both the synchronous paid marker
   // and fiscal correlation. It requires the canonical Wompi commerce id plus the exact
   // numeric link id; legacy static links remain on the raw-webhook path.
-  private async correlateIntent(payload: WompiWebhook, wompiEventId: string): Promise<DonationIntentRecord | null> {
+  private async correlateIntent(payload: WompiWebhook): Promise<IntentCorrelation> {
     const binding = await resolveDonationIntentBinding(this.repo, payload);
     if (binding.kind === "legacy") {
-      return null;
+      return { kind: "legacy" };
     }
     if (binding.kind === "unbound") {
-      if ((await this.repo.countAuditEntries("DONATION_INTENT_BINDING_REJECTED", wompiEventId)) === 0) {
-        await this.repo.createAudit({
-          action: "DONATION_INTENT_BINDING_REJECTED",
-          entityType: "wompi_event",
-          entityId: wompiEventId,
-          summary: `La vinculación con la intención ${binding.intentId} fue rechazada`,
-          metadata: {
-            intentId: binding.intentId,
-            reason: binding.reason,
-            expectedLinkId: binding.expectedLinkId,
-            payloadLinkId: binding.payloadLinkId
-          }
-        });
-      }
-      return null;
+      return {
+        kind: "quarantined",
+        intentId: binding.intentId,
+        reason: binding.reason,
+        expectedLinkId: binding.expectedLinkId,
+        payloadLinkId: binding.payloadLinkId
+      };
     }
     const intent = binding.intent;
-    // Premint draft that the donor never completed: the link was minted but the fiscal
-    // data was never attached (donor_document still NULL/empty), so donorOverrideFromIntent
-    // would build a receptor with an empty numDocumento that fails CDE schema validation.
-    // Treat it as non-correlating → the legacy/static-link webhook fallback builds the CDE
-    // from webhook data. Defensive only: the UI cannot show the link before datos are set.
     if (!intent.donor_document || intent.donor_document.trim() === "") {
-      return null;
+      return {
+        kind: "quarantined",
+        intentId: intent.id,
+        reason: "incomplete_donor_data",
+        expectedLinkId: intent.wompi_id_enlace,
+        payloadLinkId: payload.EnlacePago?.Id ?? null
+      };
     }
     // Money truth comes from Wompi: on a mismatch we audit and still correlate, but the
     // CDE amount is left as the webhook's (buildCdeDocument derives it from the payload).
@@ -575,21 +928,26 @@ export class IssuancePipeline {
         metadata: { intentAmountCents: intent.amount_cents, eventAmountCents }
       });
     }
-    return intent;
+    return { kind: "ready", intent };
   }
 
-  private async completeIntent(intent: DonationIntentRecord, documentId: string): Promise<void> {
-    await this.repo.markIntentCompleted(intent.id, documentId);
-    await this.repo.createAudit({
-      action: "DONATION_INTENT_COMPLETED",
-      entityType: "donation_intent",
-      entityId: intent.id,
-      summary: `Intención ${intent.id} completada por el CDE ${documentId}`,
-      metadata: { documentId }
+  private async quarantineWompiEvent(
+    wompiEventId: string,
+    correlation: Extract<IntentCorrelation, { kind: "quarantined" }>
+  ): Promise<void> {
+    await this.repo.quarantineWompiIntentBinding({
+      wompiEventId,
+      intentId: correlation.intentId,
+      reason: correlation.reason,
+      expectedLinkId: correlation.expectedLinkId,
+      payloadLinkId: correlation.payloadLinkId
     });
   }
 
-  private async emailReceipt(record: DteDocumentRecord): Promise<void> {
+  private async emailReceipt(
+    record: DteDocumentRecord,
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<void> {
     if (!record.donor_email) {
       await this.repo.createAudit({
         action: "EMAIL_SKIPPED",
@@ -599,10 +957,16 @@ export class IssuancePipeline {
       });
       return;
     }
+    const emailType = record.status === "SIGNED" && record.transmission_deferred_at ? "dteReceiptTransitorio" : "dteReceipt";
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(this.repo, this.env);
-      const response = await new EmailService(this.env, templates, branding).sendReceipt(record, record.donor_email);
+      const response = await new EmailService(this.env, templates, branding).sendReceipt(
+        record,
+        record.donor_email,
+        `dte-email:${record.id}:${emailType}`,
+        beforeProviderDispatch
+      );
       await this.repo.recordEmailDelivery({
         documentId: record.id,
         toEmail: record.donor_email,
@@ -624,11 +988,16 @@ export class IssuancePipeline {
         metadata: response
       });
     } catch (error) {
+      if (error instanceof PostAcceptFinalizationOwnershipError) {
+        throw error;
+      }
       await this.repo.recordEmailDelivery({
         documentId: record.id,
         toEmail: record.donor_email,
         status: "FAILED",
-        providerResponse: { error: error instanceof Error ? error.message : String(error) }
+        providerResponse: { error: error instanceof Error ? error.message : String(error) },
+        emailType,
+        documentStatusAtSend: record.status
       });
       await this.repo.createAudit({
         action: "EMAIL_FAILED",

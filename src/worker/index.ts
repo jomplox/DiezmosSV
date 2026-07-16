@@ -3,7 +3,7 @@ import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEven
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
-import { AuthError, AuthService, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
+import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
 import {
   applyIntentDatos,
@@ -15,6 +15,7 @@ import {
   intentThrottleSinceIso,
   IntentValidationError,
   INTENT_THROTTLE_LIMIT,
+  INTENT_THROTTLE_WINDOW_MINUTES,
   isDraftIntentBody,
   validateDatosInput,
   validateDraftIntentInput,
@@ -24,9 +25,11 @@ import { EmailService } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import {
+  assertDeploymentCanCollectPayments,
   assertDeploymentAllowsAmbiente,
   deploymentEnvironmentPolicy,
-  EnvironmentNotAllowedError
+  EnvironmentNotAllowedError,
+  PaymentCollectionDisabledError
 } from "./services/environmentPolicy";
 import {
   BRANDING_ACCENT_COLOR_SETTING_KEY,
@@ -47,12 +50,16 @@ import {
   parseBrandingSettings
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
-import { computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
+import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
-import { MhClient } from "./services/mhClient";
-import { IssuancePipeline, RejectedWompiRetryConflictError } from "./services/pipeline";
+import { MhClient, MhPreDispatchError } from "./services/mhClient";
+import {
+  IssuancePipeline,
+  RejectedWompiRetryConflictError,
+  WompiIntentQuarantinedError
+} from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
@@ -61,10 +68,11 @@ import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
-import { Repository } from "./storage/repository";
+import { OwnerTargetProtectedError, Repository, UserMutationConflictError } from "./storage/repository";
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
-import { timingSafeEqual } from "./utils/encoding";
+import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
+import { newId } from "./utils/ids";
 import {
   InvalidJsonBodyError,
   jsonResponse,
@@ -80,23 +88,25 @@ const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
-// Audit-based auth throttling. Failed logins and password-reset requests are
-// counted over a rolling window; crossing the threshold short-circuits the endpoint
-// before any credential work runs, so there is no timing oracle to distinguish
-// throttled from rejected. Login failures are keyed on (email, caller IP) so a third
-// party cannot lock out a victim's email by spamming failures from another address,
-// while real brute-force from a single IP is still capped.
+// Auth throttling uses atomic claim ledgers for aggregate login attempts and
+// password-reset requests. Account-specific login failures remain keyed on
+// (email, caller IP), so a third party cannot lock out a victim's email by spamming
+// failures from another address while brute-force traffic from one IP is still capped.
 const AUTH_THROTTLE_WINDOW_MINUTES = 15;
 const LOGIN_FAILED_LIMIT = 5;
-const PASSWORD_RESET_LIMIT = 3;
+const LOGIN_IP_ATTEMPT_LIMIT = 60;
+const PASSWORD_RESET_PAIR_LIMIT = 3;
+const PASSWORD_RESET_ACCOUNT_LIMIT = 3;
+const BOOTSTRAP_ATTEMPT_LIMIT = 10;
+const BOOTSTRAP_TOKEN_PATTERN = /^bt_[A-Za-z0-9_-]{43}$/;
 
-// The public donation endpoints parse untrusted JSON before any validation or
-// persistence, and the per-IP throttle counts only PERSISTED intents — so oversized
-// invalid bodies would otherwise be free to spam. Cap the body at 16 KiB (these
-// payloads are a few hundred bytes) so an oversized request is rejected up front.
+// Public donation endpoints parse untrusted JSON before validation and rate-limit
+// admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
+// oversized request is rejected before it can consume application resources.
 const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
+const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
 
 type BrandingLogoSlot = {
   settingKey: string;
@@ -147,6 +157,18 @@ function authThrottleSinceIso(): string {
   return new Date(Date.now() - AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
 }
 
+function authThrottleExpiresIso(): string {
+  return new Date(Date.now() + AUTH_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
+async function rateLimitKey(value: string | null): Promise<string> {
+  return sha256Hex(utf8Bytes(value?.trim() || "unknown"));
+}
+
+function intentThrottleExpiresIso(): string {
+  return new Date(Date.now() + INTENT_THROTTLE_WINDOW_MINUTES * 60_000).toISOString();
+}
+
 async function listAuditForUser(
   repo: Repository,
   user: AuthUser,
@@ -167,17 +189,68 @@ function resolveAppOrigin(env: Env, url: URL): string {
   return url.origin;
 }
 
+// A cross-origin browser can send a CORS-simple text/plain POST even when it cannot
+// read the response. Reject that request before it can spend the visitor's IP quota,
+// write D1 state, or call Wompi. Direct server clients may omit Origin, but every
+// caller must use JSON; browser requests that do provide Origin must match the URL
+// that received the request. APP_ORIGIN remains the canonical link-generation origin.
+function rejectUnsafePublicDonationMutation(request: Request, url: URL): Response | null {
+  const mediaType = request.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (mediaType !== "application/json") {
+    return jsonResponse(
+      { error: "unsupported_media_type", message: "Use Content-Type: application/json." },
+      { status: 415 }
+    );
+  }
+  if (request.headers.get("sec-fetch-site")?.trim().toLowerCase() === "cross-site") {
+    return jsonResponse({ error: "cross_site_request", message: "Solicitud de origen no permitido." }, { status: 403 });
+  }
+  const suppliedOrigin = request.headers.get("origin");
+  if (suppliedOrigin === null) {
+    return null;
+  }
+  try {
+    if (new URL(suppliedOrigin).origin === url.origin) {
+      return null;
+    }
+  } catch {
+    // Invalid and opaque origins fail closed below.
+  }
+  return jsonResponse({ error: "cross_site_request", message: "Solicitud de origen no permitido." }, { status: 403 });
+}
+
+function documentResponseWithSecurityHeaders(response: Response): Response {
+  const contentType = response.headers.get("Content-Type")?.toLowerCase() ?? "";
+  if (!contentType.includes("text/html")) {
+    return response;
+  }
+  const headers = new Headers(response.headers);
+  const directives = (headers.get("Content-Security-Policy") ?? "")
+    .split(";")
+    .map((directive) => directive.trim())
+    .filter((directive) => directive && !/^frame-ancestors(?:\s|$)/i.test(directive));
+  directives.push("frame-ancestors 'none'");
+  headers.set("Content-Security-Policy", directives.join("; "));
+  headers.set("X-Frame-Options", "DENY");
+  headers.set("Referrer-Policy", "no-referrer");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
       if (url.pathname.startsWith("/api/")) {
-        return await handleApi(request, env, url);
+        return await handleApi(request, env, url, ctx);
       }
       if (url.pathname === "/webhooks/wompi") {
         return await handleWompiWebhook(request, env);
       }
-      return env.ASSETS.fetch(request);
+      return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
     } catch (error) {
       if (error instanceof RequestBodyTooLargeError) {
         return jsonResponse({ error: "request_body_too_large", message: "La solicitud es demasiado grande." }, { status: 413 });
@@ -191,7 +264,11 @@ export default {
       if (error instanceof EnvironmentNotAllowedError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 409 });
       }
-      return jsonResponse({ error: "internal_error", message: error instanceof Error ? error.message : String(error) }, { status: 500 });
+      if (error instanceof PaymentCollectionDisabledError) {
+        return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
+      }
+      console.error("Unhandled Worker request error", error);
+      return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
     }
   },
 
@@ -227,6 +304,10 @@ export default {
       }
       return;
     }
+    const repo = new Repository(env.DB);
+    const now = nowIso();
+    await repo.deleteExpiredLoginRateLimits(now);
+    await repo.deleteExpiredSecurityRateLimitClaims(now);
     const pipeline = new IssuancePipeline(env);
     try {
       await pipeline.retryDeferredTransmissions();
@@ -234,13 +315,16 @@ export default {
       console.error("Deferred transmission retry failed", error);
     }
     try {
+      await pipeline.retryPendingPostAcceptFinalizations();
+    } catch (error) {
+      console.error("Post-accept finalization sweep failed", error);
+    }
+    try {
       await pipeline.sweepStalledWompiEvents();
     } catch (error) {
       console.error("Stalled Wompi event sweep failed", error);
     }
     try {
-      const repo = new Repository(env.DB);
-      const now = nowIso();
       // Process a bounded page per tick: snapshot the capped set of expiring intents,
       // then expire exactly that page by id, so public intent creation cannot force one
       // cron invocation to snapshot or deactivate an unbounded row set. The remainder
@@ -416,7 +500,62 @@ async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook
   }
 }
 
-async function handleApi(request: Request, env: Env, url: URL): Promise<Response> {
+async function processPasswordResetRequest(
+  repo: Repository,
+  auth: AuthService,
+  env: Env,
+  url: URL,
+  email: string,
+  clientIp: string
+): Promise<void> {
+  const account = await repo.getUserForLogin(email);
+  if (!account || account.disabled_at) return;
+
+  const claimNow = nowIso();
+  const rateLimitClaimId = await repo.claimPasswordResetBudgets(
+    await rateLimitKey(`password-reset:${account.id}:${clientIp}`),
+    await rateLimitKey(`password-reset-account:${account.id}`),
+    account.id,
+    claimNow,
+    authThrottleSinceIso(),
+    authThrottleExpiresIso(),
+    PASSWORD_RESET_PAIR_LIMIT,
+    PASSWORD_RESET_ACCOUNT_LIMIT
+  );
+  if (!rateLimitClaimId) return;
+
+  const created = await auth.createPasswordResetToken(email);
+  if (!created) return;
+
+  const link = `${resolveAppOrigin(env, url)}/#reset=${created.token}`;
+  try {
+    const resetBranding = await loadEmailBranding(repo, env);
+    await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(
+      created.user.email,
+      created.user.name,
+      link,
+      PASSWORD_RESET_TTL_MINUTES
+    );
+    await repo.createAudit({
+      action: "PASSWORD_RESET_REQUESTED",
+      entityType: "user",
+      entityId: created.user.id,
+      summary: created.user.email,
+      rateLimitClaimId
+    });
+  } catch (error) {
+    await repo.invalidatePasswordResetToken(created.tokenId);
+    await repo.createAudit({
+      action: "PASSWORD_RESET_EMAIL_FAILED",
+      entityType: "user",
+      entityId: created.user.id,
+      summary: error instanceof Error ? error.message : String(error),
+      rateLimitClaimId
+    });
+  }
+}
+
+async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
   // every downstream repo.createAudit (route handlers reuse this same instance)
   // records the caller's IP and Cloudflare request context without per-call-site wiring.
@@ -429,7 +568,8 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
-    return jsonResponse({ bootstrapAvailable: (await repo.countUsers()) === 0 });
+    const hasNoUsers = (await repo.countUsers()) === 0;
+    return jsonResponse({ bootstrapAvailable: isBootstrapOwnerTokenConfigured(env) && hasNoUsers });
   }
 
   // Public branding read: the login screen needs the display name, accent color, and
@@ -451,12 +591,10 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   // background on Paso 1→2); a body carrying donor data is a full create (the fallback
   // when no usable premint draft exists). Both mint the link identically.
   if (url.pathname === "/api/donations/intent" && request.method === "POST") {
+    const rejected = rejectUnsafePublicDonationMutation(request, url);
+    if (rejected) return rejected;
+    assertDeploymentCanCollectPayments(env);
     const clientIp = clientIpFrom(request);
-    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
-    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
-      // Short-circuit before any validation/persistence so a throttled attempt is cheap.
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
     let body: Record<string, unknown>;
     try {
       body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
@@ -476,10 +614,22 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       }
       throw error;
     }
+    const claimNow = nowIso();
+    const rateLimitClaimId = await repo.claimDonationIntentRateLimit(
+      await rateLimitKey(clientIp),
+      clientIp,
+      claimNow,
+      intentThrottleSinceIso(),
+      intentThrottleExpiresIso(),
+      INTENT_THROTTLE_LIMIT
+    );
+    if (!rateLimitClaimId) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
     try {
       const created = draft
-        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp)
-        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp);
+        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
+        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
       return jsonResponse(created, { status: 201 });
     } catch (error) {
       if (error instanceof IntentLinkError) {
@@ -491,12 +641,20 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   // Public datos completion: attaches the donor's fiscal data to a minted draft with a
-  // fast D1-only call (no Wompi). Same per-IP throttle as create (cheap but public).
+  // fast D1-only call (no Wompi). Its dedicated per-IP budget counts every attempt,
+  // including malformed bodies and failed capability guesses.
   const intentDatosMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/datos$/);
   if (intentDatosMatch && request.method === "POST") {
     const clientIp = clientIpFrom(request);
-    const recentIntents = await repo.countRecentIntentsByIp(clientIp, intentThrottleSinceIso());
-    if (recentIntents >= INTENT_THROTTLE_LIMIT) {
+    const claimNow = nowIso();
+    const rateLimitClaimId = await repo.claimDonationDatosRateLimit(
+      await rateLimitKey(clientIp),
+      claimNow,
+      intentThrottleSinceIso(),
+      intentThrottleExpiresIso(),
+      INTENT_THROTTLE_LIMIT
+    );
+    if (!rateLimitClaimId) {
       return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
     }
     let data;
@@ -513,8 +671,13 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       throw error;
     }
     try {
-      await applyIntentDatos(repo, intentDatosMatch[1], request.headers.get("X-Donation-Datos-Token") ?? "", data);
-      return jsonResponse({ ok: true });
+      const completed = await applyIntentDatos(
+        repo,
+        intentDatosMatch[1],
+        request.headers.get("X-Donation-Datos-Token") ?? "",
+        data
+      );
+      return jsonResponse(completed);
     } catch (error) {
       if (error instanceof IntentDatosError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
@@ -537,11 +700,33 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
   }
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
-    if (!hasValidBootstrapOwnerToken(request, env)) {
+    if (!isBootstrapOwnerTokenConfigured(env)) {
+      return jsonResponse({ error: "bootstrap_configuration_invalid" }, { status: 503 });
+    }
+    const claimNow = nowIso();
+    const accepted = await repo.claimLoginAttempt(
+      await rateLimitKey(`bootstrap-owner:${clientIpFrom(request)}`),
+      claimNow,
+      authThrottleSinceIso(),
+      authThrottleExpiresIso(),
+      BOOTSTRAP_ATTEMPT_LIMIT
+    );
+    if (!accepted) {
+      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+    }
+    if (!(await hasValidBootstrapOwnerToken(request, env))) {
       return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
     }
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; password: string };
-    const owner = await auth.bootstrapOwner(body);
+    let owner;
+    try {
+      owner = await auth.bootstrapOwner(body);
+    } catch (error) {
+      if (error instanceof BootstrapUnavailableError) {
+        return jsonResponse({ error: "bootstrap_unavailable", message: error.message }, { status: 409 });
+      }
+      throw error;
+    }
     await repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
     return jsonResponse({ user: owner }, { status: 201 });
   }
@@ -550,6 +735,23 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
     const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
     const { ip: callerIp } = auditContextFrom(request);
+    const claimNow = nowIso();
+    const accepted = await repo.claimLoginAttempt(
+      await rateLimitKey(callerIp),
+      claimNow,
+      authThrottleSinceIso(),
+      authThrottleExpiresIso(),
+      LOGIN_IP_ATTEMPT_LIMIT
+    );
+    if (!accepted) {
+      return jsonResponse(
+        {
+          error: "too_many_attempts",
+          message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+        },
+        { status: 429 }
+      );
+    }
     const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
     if (recentFailures >= LOGIN_FAILED_LIMIT) {
       // Short-circuit before authenticating so a throttled attempt costs the same as
@@ -568,37 +770,21 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     return jsonResponse(result);
   }
 
+  if (url.pathname === "/api/auth/logout" && request.method === "POST") {
+    await auth.logout(request);
+    return new Response(null, { status: 204 });
+  }
+
   if (url.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
     const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
     const email = String(body.email ?? "").trim();
     if (email) {
-      // Resolve the account first so the throttle can key on its id (matching
-      // PASSWORD_RESET_REQUESTED) and, crucially, run BEFORE any token is created.
-      // Unknown emails yield no account and fall through to the enumeration-safe
-      // 200 below without ever touching the rate limiter.
-      const account = await repo.getUserForLogin(email);
-      if (account && !account.disabled_at) {
-        const recentRequests = await repo.countAuditEntriesSince("PASSWORD_RESET_REQUESTED", account.id, authThrottleSinceIso());
-        if (recentRequests >= PASSWORD_RESET_LIMIT) {
-          await repo.createAudit({ action: "PASSWORD_RESET_THROTTLED", entityType: "user", entityId: account.id, summary: account.email });
-        } else {
-          const created = await auth.createPasswordResetToken(email);
-          if (created) {
-            const link = `${resolveAppOrigin(env, url)}/?reset=${created.token}`;
-            try {
-              const resetBranding = await loadEmailBranding(repo, env);
-              await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(created.user.email, created.user.name, link, PASSWORD_RESET_TTL_MINUTES);
-              await repo.createAudit({ action: "PASSWORD_RESET_REQUESTED", entityType: "user", entityId: created.user.id, summary: created.user.email });
-            } catch (error) {
-              await repo.createAudit({
-                action: "PASSWORD_RESET_EMAIL_FAILED",
-                entityType: "user",
-                entityId: created.user.id,
-                summary: error instanceof Error ? error.message : String(error)
-              });
-            }
-          }
-        }
+      const task = processPasswordResetRequest(repo, auth, env, url, email, clientIpFrom(request))
+        .catch((error) => console.error("Password reset request failed", error));
+      if (ctx) {
+        ctx.waitUntil(task);
+      } else {
+        void task;
       }
     }
     // Always report success so the endpoint cannot be used to probe which emails exist.
@@ -1109,13 +1295,16 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
       return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
     }
     try {
-      await auth.resetUserPassword(passwordMatch[1], body.password);
+      await auth.resetUserPassword(passwordMatch[1], body.password, actor.role === "OWNER");
     } catch (error) {
       if (error instanceof PasswordPolicyError) {
         return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
       }
       if (error instanceof UserNotFoundError) {
         return jsonResponse({ error: "user_not_found", message: error.message }, { status: 404 });
+      }
+      if (error instanceof OwnerTargetProtectedError) {
+        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
       }
       throw error;
     }
@@ -1139,7 +1328,18 @@ async function handleApi(request: Request, env: Env, url: URL): Promise<Response
     if (actor.role !== "OWNER" && (await repo.getUserRole(userMatch[1])) === "OWNER") {
       return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
     }
-    const updated = await repo.updateUser(userMatch[1], patch);
+    let updated: Record<string, unknown>;
+    try {
+      updated = await repo.updateUser(userMatch[1], patch, actor.role === "OWNER");
+    } catch (error) {
+      if (error instanceof OwnerTargetProtectedError) {
+        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
+      }
+      if (error instanceof UserMutationConflictError) {
+        return jsonResponse({ error: "user_update_conflict", message: error.message }, { status: 409 });
+      }
+      throw error;
+    }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
     return jsonResponse({ user: updated });
   }
@@ -1159,11 +1359,21 @@ async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser |
   if (!range) {
     return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
   }
-  const analytics = await computeAnalytics(repo, range, environment, now, {
-    department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
-    country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
-  });
-  return jsonResponse({ analytics });
+  try {
+    const analytics = await computeAnalytics(repo, range, environment, now, {
+      department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+      country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
+    });
+    return jsonResponse({ analytics });
+  } catch (error) {
+    if (error instanceof AnalyticsCapacityError) {
+      return jsonResponse(
+        { error: error.code, message: error.message },
+        { status: 422 }
+      );
+    }
+    throw error;
+  }
 }
 
 // Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
@@ -1555,7 +1765,10 @@ function mhRejectionMessage(result: MhResponse): string {
   return result.estado || "Invalidación rechazada por el Ministerio de Hacienda";
 }
 
-function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at">): boolean {
+function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "transmission_deferred_at" | "fiscal_operation_claim_id">): boolean {
+  if (document.fiscal_operation_claim_id) {
+    return false;
+  }
   // Un CDE diferido (SIGNED + transmission_deferred_at) NO es reintetable manualmente:
   // el cron de 15 minutos es el único dueño del reintento, porque el camino manual
   // genérico no completa la intención ni envía el comprobante definitivo. Un SIGNED
@@ -1736,7 +1949,15 @@ async function handleDocumentRoute(
     if (!email) {
       return jsonResponse({ error: "invalid_email", message: "Ingrese un correo válido." }, { status: 400 });
     }
-    await repo.updateDocumentDonorEmail(document.id, email);
+    if (!(await repo.updateDocumentDonorEmail(document.id, email))) {
+      return jsonResponse(
+        {
+          error: "document_finalization_pending",
+          message: "El comprobante aceptado está finalizando; vuelva a intentar la corrección de correo al terminar."
+        },
+        { status: 409 }
+      );
+    }
     await repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
@@ -1750,6 +1971,21 @@ async function handleDocumentRoute(
   }
 
   if (action === "resend" && request.method === "POST") {
+    if (document.status === "ACCEPTED" && !document.post_accept_finalized_at) {
+      return jsonResponse(
+        { error: "document_finalization_pending", message: "El comprobante aceptado aún está completando su registro y envío definitivo." },
+        { status: 409 }
+      );
+    }
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "El resultado fiscal está pendiente de conciliación; no se puede reenviar un comprobante potencialmente incorrecto."
+        },
+        { status: 409 }
+      );
+    }
     const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { email?: string };
     const toEmail = body.email ?? document.donor_email;
     if (!toEmail) {
@@ -1791,6 +2027,15 @@ async function handleDocumentRoute(
   }
 
   if (action === "retry" && request.method === "POST") {
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "MH pudo haber procesado la operación. Concilie el resultado antes de cualquier reintento."
+        },
+        { status: 409 }
+      );
+    }
     if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
@@ -1808,6 +2053,12 @@ async function handleDocumentRoute(
       try {
         result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
       } catch (error) {
+        if (error instanceof WompiIntentQuarantinedError) {
+          return jsonResponse(
+            { error: error.code, message: error.message },
+            { status: 409 }
+          );
+        }
         if (error instanceof RejectedWompiRetryConflictError) {
           // A concurrent retry already claimed the rebuild: refuse cleanly so we never
           // transmit a second distinct legal DTE for the same Wompi event.
@@ -1835,25 +2086,59 @@ async function handleDocumentRoute(
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
       return jsonResponse({ ok: true, queued: true });
     }
-    const result = await new MhClient(env).transmitDte({
-      ambiente: document.environment,
-      version: 2,
-      tipoDte: document.tipo_dte,
-      codigoGeneracion: document.codigo_generacion,
-      signedJws: document.signed_jws
-    });
-    await repo.updateDocumentMhResult(document.id, {
+    const claimId = newId("fiscal");
+    const claimed = await repo.claimDocumentTransmission(document.id, document.status, document.signed_jws, claimId);
+    if (!claimed) {
+      return jsonResponse(
+        { error: "document_retry_in_progress", message: "Ya hay una operación fiscal en curso para este documento." },
+        { status: 409 }
+      );
+    }
+    // Once dispatch has started, a transport exception cannot prove that MH did
+    // not accept the document. Keep the durable claim so another retry cannot
+    // create a second fiscal side effect before reconciliation.
+    let result;
+    try {
+      result = await new MhClient(env).transmitDte({
+        ambiente: document.environment,
+        version: 2,
+        tipoDte: document.tipo_dte,
+        codigoGeneracion: document.codigo_generacion,
+        signedJws: document.signed_jws
+      });
+    } catch (error) {
+      if (error instanceof MhPreDispatchError) {
+        await repo.releaseDocumentFiscalOperation(document.id, claimId);
+      }
+      throw error;
+    }
+    const completed = await repo.completeDocumentTransmission(document.id, claimId, {
       status: result.accepted ? "ACCEPTED" : "REJECTED",
       sello: result.selloRecibido,
       mhEstado: result.estado,
       observaciones: result.observaciones,
       acceptedAt: result.accepted ? nowIso() : null
     });
+    if (!completed) {
+      return jsonResponse(
+        { error: "document_retry_in_progress", message: "La operación fiscal ya no pertenece a este reintento." },
+        { status: 409 }
+      );
+    }
     await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRIED", entityType: "dte_document", entityId: document.id, summary: result.estado, metadata: result.raw });
     return jsonResponse({ ok: true, result });
   }
 
   if (action === "invalidate" && request.method === "POST") {
+    if (document.fiscal_operation_claim_id) {
+      return jsonResponse(
+        {
+          error: "fiscal_outcome_pending_reconciliation",
+          message: "MH pudo haber procesado la operación. Concilie el resultado antes de otra invalidación."
+        },
+        { status: 409 }
+      );
+    }
     if (document.status !== "ACCEPTED" || !document.sello_recibido || !document.accepted_at) {
       return jsonResponse({ error: "document_not_accepted" }, { status: 409 });
     }
@@ -1862,46 +2147,78 @@ async function handleDocumentRoute(
       return jsonResponse({ error: "outside_legal_window", deadline }, { status: 409 });
     }
     assertDeploymentAllowsAmbiente(env, document.environment);
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as Partial<InvalidationInput>;
-    if (body.tipoAnulacion === 1 && !body.codigoGeneracionR) {
+    const body = await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" });
+    if (Object.keys(body).some((key) => !INVALIDATION_REQUEST_KEYS.has(key))) {
+      return jsonResponse({ error: "invalid_invalidation_input", message: "La solicitud contiene campos no permitidos" }, { status: 400 });
+    }
+    const requested = body as { tipoAnulacion?: 1 | 2 | 3; motivoAnulacion?: string; codigoGeneracionR?: string | null };
+    if (requested.tipoAnulacion === 1 && !requested.codigoGeneracionR) {
       return jsonResponse({ error: "replacement_required_for_tipo_1" }, { status: 400 });
     }
     const config = getEmisorConfig(env);
     const input: InvalidationInput = {
-      tipoAnulacion: body.tipoAnulacion ?? 2,
-      motivoAnulacion: body.motivoAnulacion ?? "Invalidación solicitada por operador",
-      nombreResponsable: body.nombreResponsable ?? config.responsable.nombre,
-      tipDocResponsable: body.tipDocResponsable ?? config.responsable.tipoDocumento,
-      numDocResponsable: body.numDocResponsable ?? config.responsable.numeroDocumento,
-      nombreSolicita: body.nombreSolicita ?? actor.name,
-      tipDocSolicita: body.tipDocSolicita ?? config.responsable.tipoDocumento,
-      numDocSolicita: body.numDocSolicita ?? config.responsable.numeroDocumento,
-      codigoGeneracionR: body.codigoGeneracionR ?? null
+      tipoAnulacion: requested.tipoAnulacion ?? 2,
+      motivoAnulacion: requested.motivoAnulacion ?? "Invalidación solicitada por operador",
+      nombreResponsable: config.responsable.nombre,
+      tipDocResponsable: config.responsable.tipoDocumento,
+      numDocResponsable: config.responsable.numeroDocumento,
+      nombreSolicita: config.responsable.nombre,
+      tipDocSolicita: config.responsable.tipoDocumento,
+      numDocSolicita: config.responsable.numeroDocumento,
+      codigoGeneracionR: requested.codigoGeneracionR ?? null
     };
     const eventDocument = buildInvalidacionEvent(document, config, input);
     const signedJws = await signMhDocument(eventDocument, getMhCertificateXml(env), requireSecret(env, "MH_CERT_PASSWORD"));
-    const eventId = await repo.createDteEvent({
+    const claimId = newId("fiscal");
+    if (!(await repo.claimDocumentInvalidation(document.id, claimId))) {
+      return jsonResponse(
+        { error: "document_fiscal_operation_in_progress", message: "Ya hay una operación fiscal en curso para este documento." },
+        { status: 409 }
+      );
+    }
+    let eventId: string;
+    try {
+      eventId = await repo.createAndAttachDocumentInvalidationEvent({
+        documentId: document.id,
+        claimId,
+        environment: document.environment,
+        codigoGeneracion: (eventDocument.identificacion as { codigoGeneracion: string }).codigoGeneracion,
+        plainJson: eventDocument,
+        signedJws,
+        legalDeadlineAt: deadline,
+        createdBy: actor.id
+      });
+    } catch (error) {
+      await repo.releaseDocumentFiscalOperation(document.id, claimId);
+      throw error;
+    }
+    let result;
+    try {
+      result = await new MhClient(env).transmitInvalidacion({ ambiente: document.environment, version: 3, signedJws });
+    } catch (error) {
+      if (error instanceof MhPreDispatchError) {
+        await repo.releaseDocumentInvalidationBeforeDispatch(document.id, claimId, eventId, error.message);
+      }
+      throw error;
+    }
+    const completed = await repo.completeDocumentInvalidation({
       documentId: document.id,
-      eventType: "INVALIDACION",
-      environment: document.environment,
-      codigoGeneracion: (eventDocument.identificacion as { codigoGeneracion: string }).codigoGeneracion,
-      plainJson: eventDocument,
-      signedJws,
-      legalDeadlineAt: deadline,
-      createdBy: actor.id
-    });
-    const result = await new MhClient(env).transmitInvalidacion({ ambiente: document.environment, version: 3, signedJws });
-    await repo.updateDteEventResult(eventId, {
-      status: result.accepted ? "ACCEPTED" : "REJECTED",
+      claimId,
+      eventId,
+      accepted: result.accepted,
       sello: result.selloRecibido,
       mhEstado: result.estado,
       observaciones: result.observaciones,
-      acceptedAt: result.accepted ? nowIso() : null
+      acceptedAt: result.accepted ? nowIso() : null,
+      actorId: actor.id,
+      raw: result.raw
     });
+    if (!completed) {
+      throw new Error("La invalidación no pudo completar atómicamente su evento y documento");
+    }
     let emailSent = false;
     let emailError: string | undefined;
     if (result.accepted) {
-      await repo.markDocumentInvalidated(document.id);
       const invalidatedDocument = (await repo.getDteDocument(document.id)) ?? { ...document, status: "INVALIDATED" };
       if (invalidatedDocument.donor_email) {
         try {
@@ -1946,15 +2263,6 @@ async function handleDocumentRoute(
         }
       }
     }
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: result.accepted ? "DTE_INVALIDATED" : "DTE_INVALIDATION_REJECTED",
-      entityType: "dte_document",
-      entityId: document.id,
-      summary: result.estado,
-      metadata: result.raw
-    });
     const responseBody = { accepted: result.accepted, eventId, deadline, result, emailSent, ...(emailError ? { emailError } : {}) };
     if (!result.accepted) {
       return jsonResponse(
@@ -1995,8 +2303,12 @@ async function auditExport(repo: Repository, actor: AuthUser, action: string, fi
   });
 }
 
-function hasValidBootstrapOwnerToken(request: Request, env: Env): boolean {
-  const expected = env.BOOTSTRAP_OWNER_TOKEN?.trim();
-  const supplied = request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim();
-  return Boolean(expected && supplied && timingSafeEqual(supplied, expected));
+function isBootstrapOwnerTokenConfigured(env: Env): boolean {
+  return BOOTSTRAP_TOKEN_PATTERN.test(env.BOOTSTRAP_OWNER_TOKEN?.trim() ?? "");
+}
+
+async function hasValidBootstrapOwnerToken(request: Request, env: Env): Promise<boolean> {
+  const expected = env.BOOTSTRAP_OWNER_TOKEN?.trim() ?? "";
+  const supplied = request.headers.get(BOOTSTRAP_OWNER_TOKEN_HEADER)?.trim() ?? "";
+  return timingSafeEqual(await rateLimitKey(supplied), await rateLimitKey(expected));
 }

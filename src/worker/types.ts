@@ -39,7 +39,7 @@ export interface Env {
   MH_ANULACION_URL_TEST?: string;
   MH_ANULACION_URL_PROD?: string;
   MH_USER_AGENT?: string;
-  EMAIL_API_URL?: string;
+  EMAIL_PROVIDER_URL?: string;
   EMAIL_API_KEY?: string;
   EMAIL_ARBITRARY_RECIPIENTS?: string;
   EMAIL_FROM?: string;
@@ -146,6 +146,14 @@ export interface DteDocumentRecord {
   // (no hay valor nuevo en el CHECK de status — D1 no puede reconstruir tablas
   // padre de FK). Se conserva tras la resolución como evidencia histórica.
   transmission_deferred_at: string | null;
+  fiscal_operation_claim_id?: string | null;
+  fiscal_operation_claimed_at?: string | null;
+  fiscal_operation_kind?: "TRANSMISSION" | "INVALIDATION" | null;
+  fiscal_operation_event_id?: string | null;
+  post_accept_finalized_at?: string | null;
+  post_accept_finalization_claim_id?: string | null;
+  post_accept_finalization_claimed_at?: string | null;
+  post_accept_email_dispatch_started_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -232,6 +240,9 @@ export interface DonationIntentRecord {
   // SHA-256 of the one-time draft /datos capability (migration 0017). The raw
   // capability is never stored and this column is cleared by the successful CAS.
   datos_token_hash: string | null;
+  // Admission claim that reserved this create in the atomic public-rate-limit ledger.
+  // Legacy rows remain null so deployment-overlap activity is still counted.
+  rate_limit_claim_id: string | null;
   // Wompi payment marker (migration 0016): stamped by the webhook the moment an
   // approved payment for this intent arrives — independent of status. COMPLETED still
   // means the CDE was accepted by MH; paid_at means the donor paid. The donor-facing
@@ -278,6 +289,8 @@ export interface WompiEventRecord {
   received_at: string;
   processed_at: string | null;
   created_document_id: string | null;
+  issuance_claim_id?: string | null;
+  issuance_claimed_at?: string | null;
 }
 
 export interface MhResponse {

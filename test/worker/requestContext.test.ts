@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { auditContextFrom } from "../../src/worker/services/requestContext";
+import {
+  auditContextFrom,
+  normalizeAuditContext,
+  normalizeAuditIp,
+  serializeAuditContext
+} from "../../src/worker/services/requestContext";
+
+const utf8Length = (value: string): number =>
+  new TextEncoder().encode(value).byteLength;
 
 // Cloudflare only exposes `request.cf` in the Workers runtime; in tests we attach a
 // plain object and the helper reads it defensively via `(request as any).cf`.
@@ -72,5 +80,105 @@ describe("auditContextFrom", () => {
     expect(context).toEqual({ country: "SV", asOrganization: "Tigo" });
     expect(Object.keys(context)).not.toContain("city");
     expect(Object.keys(context)).not.toContain("asn");
+  });
+
+  it("caps every string in UTF-8 bytes and records the truncated fields", () => {
+    const normalized = normalizeAuditContext({
+      country: "S".repeat(20),
+      colo: "SJO".repeat(10),
+      city: "á".repeat(100),
+      region: "R".repeat(200),
+      timezone: "America/El_Salvador".repeat(20),
+      asOrganization: "Org".repeat(100),
+      httpProtocol: "H".repeat(80),
+      tlsVersion: "T".repeat(80),
+      userAgent: "🧪".repeat(300),
+      ignored: "x".repeat(100_000)
+    });
+
+    expect(utf8Length(normalized.country!)).toBeLessThanOrEqual(8);
+    expect(utf8Length(normalized.colo!)).toBeLessThanOrEqual(8);
+    expect(utf8Length(normalized.city!)).toBeLessThanOrEqual(128);
+    expect(utf8Length(normalized.region!)).toBeLessThanOrEqual(128);
+    expect(utf8Length(normalized.timezone!)).toBeLessThanOrEqual(128);
+    expect(utf8Length(normalized.asOrganization!)).toBeLessThanOrEqual(128);
+    expect(utf8Length(normalized.httpProtocol!)).toBeLessThanOrEqual(32);
+    expect(utf8Length(normalized.tlsVersion!)).toBeLessThanOrEqual(32);
+    expect(utf8Length(normalized.userAgent!)).toBeLessThanOrEqual(512);
+    expect(normalized.userAgent).not.toContain("�");
+    expect(normalized).not.toHaveProperty("ignored");
+    expect(normalized._truncated).toEqual([
+      "country",
+      "city",
+      "region",
+      "timezone",
+      "asOrganization",
+      "colo",
+      "httpProtocol",
+      "tlsVersion",
+      "userAgent"
+    ]);
+  });
+
+  it("keeps persisted actor fields within their final byte budgets", () => {
+    expect(utf8Length(normalizeAuditIp("🧪".repeat(100))!)).toBeLessThanOrEqual(64);
+    const serialized = serializeAuditContext({
+      userAgent: "🧪".repeat(10_000),
+      city: "a".repeat(10_000),
+      asn: 27773
+    });
+    expect(serialized).not.toBeNull();
+    expect(utf8Length(serialized!)).toBeLessThanOrEqual(4096);
+    expect(JSON.parse(serialized!)).toMatchObject({
+      asn: 27773,
+      _truncated: expect.arrayContaining(["city", "userAgent"])
+    });
+  });
+
+  it("reduces JSON-escaped control characters without losing all recognized context", () => {
+    const input = {
+      country: "\0".repeat(8),
+      city: "\0".repeat(128),
+      region: "\0".repeat(128),
+      timezone: "\0".repeat(128),
+      asOrganization: "\0".repeat(128),
+      colo: "\0".repeat(8),
+      httpProtocol: "\0".repeat(32),
+      tlsVersion: "\0".repeat(32),
+      userAgent: "\0".repeat(512),
+      asn: 27773
+    };
+    const recognizedStringFields = [
+      "country",
+      "city",
+      "region",
+      "timezone",
+      "asOrganization",
+      "colo",
+      "httpProtocol",
+      "tlsVersion",
+      "userAgent"
+    ] as const;
+    const normalized = normalizeAuditContext(input);
+
+    expect(normalized).not.toHaveProperty("_truncated");
+    expect(utf8Length(JSON.stringify(normalized))).toBeGreaterThan(4096);
+
+    const serialized = serializeAuditContext(input);
+    expect(serialized).not.toBeNull();
+    expect(utf8Length(serialized!)).toBeLessThanOrEqual(4096);
+    const parsed = JSON.parse(serialized!) as Record<string, unknown>;
+    expect(JSON.stringify(parsed)).toBe(serialized);
+    expect(serialized).not.toContain("�");
+    expect(parsed).not.toEqual({ _truncated: ["actor_context"] });
+    expect(recognizedStringFields.some((field) => field in parsed)).toBe(true);
+    expect(parsed.asn).toBe(27773);
+
+    const changedFields = recognizedStringFields.filter(
+      (field) => parsed[field] !== input[field]
+    );
+    expect([...(parsed._truncated as string[])].sort()).toEqual(
+      [...changedFields].sort()
+    );
   });
 });

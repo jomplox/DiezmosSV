@@ -24,8 +24,17 @@ export class EnvironmentNotAllowedError extends Error {
   }
 }
 
+export class PaymentCollectionDisabledError extends Error {
+  readonly code = "payment_collection_disabled";
+
+  constructor(readonly policy: DeploymentEnvironmentPolicy) {
+    super("Este despliegue no tiene habilitada la recolección de pagos.");
+    this.name = "PaymentCollectionDisabledError";
+  }
+}
+
 export function deploymentEnvironmentPolicy(env: Pick<Env, "APP_ENV">): DeploymentEnvironmentPolicy {
-  const normalized = env.APP_ENV?.trim().toLowerCase();
+  const normalized = typeof env.APP_ENV === "string" ? env.APP_ENV.trim().toLowerCase() : undefined;
   if (normalized === "local") {
     return { appEnv: "local", allowedAmbiente: "00", directGenerationAllowed: true };
   }
@@ -43,4 +52,12 @@ export function assertDeploymentAllowsAmbiente(env: Pick<Env, "APP_ENV">, ambien
   if (policy.allowedAmbiente !== ambiente) {
     throw new EnvironmentNotAllowedError(ambiente, policy);
   }
+}
+
+export function assertDeploymentCanCollectPayments(env: Pick<Env, "APP_ENV">): Ambiente {
+  const policy = deploymentEnvironmentPolicy(env);
+  if (policy.allowedAmbiente === null) {
+    throw new PaymentCollectionDisabledError(policy);
+  }
+  return policy.allowedAmbiente;
 }

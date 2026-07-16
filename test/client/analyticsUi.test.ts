@@ -22,7 +22,7 @@ describe("Analítica navigation and wiring", () => {
 
   it("defaults the ambiente selector to the active emission environment", () => {
     // The view opens by loading the active emission environment for its default selector.
-    expect(appSource).toContain('api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"');
+    expect(appSource).toContain('accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"');
     expect(appSource).toContain("setAnalyticsEnvironment");
   });
 });

@@ -37,10 +37,11 @@ import {
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
+import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
-import { passwordResetConfirmValidationMessage, resetTokenFromSearch } from "./passwordReset";
+import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { openNativeDatePicker } from "./datePicker";
@@ -193,7 +194,7 @@ function StartupShell() {
   );
 }
 
-export function App() {
+export function App({ initialResetToken = null }: { initialResetToken?: string | null }) {
   // Public donor-checkout routes render as standalone pages WITHOUT a session and
   // never trigger the auth bootstrap/login flow. Branch on pathname before any of
   // App's own hooks run so the hook order stays stable for a given URL (the page
@@ -211,6 +212,10 @@ export function App() {
     const stored = localStorage.getItem("diezmos_user");
     return stored ? (JSON.parse(stored) as User) : null;
   });
+  const accountStateGuardRef = useRef(new AccountStateGuard());
+  // Functions from an older React render retain this version. The centralized request
+  // wrapper rejects them before they can issue another request or write account data.
+  const renderAccountStateVersion = accountStateGuardRef.current.capture();
   const [view, setView] = useState<View>("documents");
   const [documents, setDocuments] = useState<DteDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -383,12 +388,12 @@ export function App() {
       return;
     }
     let cancelled = false;
-    void api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+    void accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       .then((result) => {
         if (!cancelled) setAnalyticsEnvironment(result.emissionEnvironment.environment);
       })
-      .catch(() => {
-        if (!cancelled) setAnalyticsEnvironment("00");
+      .catch((error) => {
+        if (!cancelled && !(error instanceof StaleAccountStateError)) setAnalyticsEnvironment("00");
       });
     return () => {
       cancelled = true;
@@ -407,12 +412,12 @@ export function App() {
     let cancelled = false;
     setAnalyticsLoading(true);
     const params = new URLSearchParams({ from: analyticsRange.from, to: analyticsRange.to, environment: analyticsEnvironment });
-    void api<{ analytics: AnalyticsResponse }>(`/api/analytics?${params.toString()}`, token)
+    void accountApi<{ analytics: AnalyticsResponse }>(`/api/analytics?${params.toString()}`)
       .then((result) => {
         if (!cancelled) setAnalytics(result.analytics);
       })
       .catch((error) => {
-        if (!cancelled) {
+        if (!cancelled && !(error instanceof StaleAccountStateError)) {
           setAnalytics(null);
           handleApiFailure(error);
         }
@@ -437,15 +442,15 @@ export function App() {
     setDonorVerifiedDocId(null);
     setSelectedDocumentAudit([]);
     let cancelled = false;
-    void api<{ donorDataVerified?: boolean; audit?: AuditRow[] }>(`/api/documents/${documentId}`, token)
+    void accountApi<{ donorDataVerified?: boolean; audit?: AuditRow[] }>(`/api/documents/${documentId}`)
       .then((detail) => {
         if (!cancelled) {
           setDonorVerifiedDocId(detail.donorDataVerified ? documentId : null);
           setSelectedDocumentAudit(Array.isArray(detail.audit) ? detail.audit : []);
         }
       })
-      .catch(() => {
-        if (!cancelled) {
+      .catch((error) => {
+        if (!cancelled && !(error instanceof StaleAccountStateError)) {
           setDonorVerifiedDocId(null);
           setSelectedDocumentAudit([]);
         }
@@ -473,6 +478,17 @@ export function App() {
     };
   }, [token]);
 
+  function runAccountOperation<T>(operation: () => Promise<T>): Promise<T> {
+    return accountStateGuardRef.current.runAt(renderAccountStateVersion, operation);
+  }
+
+  function accountApi<T>(
+    path: string,
+    options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}
+  ): Promise<T> {
+    return runAccountOperation(() => api<T>(path, token, options));
+  }
+
   async function fetchDocumentPage(options: { append?: boolean; cursor?: string | null; query?: string; status?: string } = {}) {
     const params = new URLSearchParams();
     const effectiveStatus = options.status ?? filteredStatus;
@@ -481,7 +497,7 @@ export function App() {
     if (effectiveQuery) params.set("q", effectiveQuery);
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(DOCUMENT_PAGE_SIZE));
-    const page = await api<DocumentListPage>(`/api/documents?${params}`, token);
+    const page = await accountApi<DocumentListPage>(`/api/documents?${params}`);
     setDocuments((current) => options.append ? [...current, ...page.documents] : page.documents);
     setDocumentNextCursor(page.nextCursor);
     setDocumentsHasMore(page.hasMore);
@@ -499,19 +515,20 @@ export function App() {
   async function refresh() {
     await fetchDocumentPage();
     if (view === "audit") {
-      const auditPage = await api<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50", token);
+      const auditPage = await accountApi<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50");
       setAudit(auditPage.audit);
       setAuditCursor(auditPage.nextCursor);
     }
     if (view === "users" && can(user, "ADMIN")) {
-      setUsers((await api<{ users: User[] }>("/api/users", token)).users);
+      const result = await accountApi<{ users: User[] }>("/api/users");
+      setUsers(result.users);
     }
     if (view === "credentials" && can(user, "OWNER")) {
       const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
-        api<{ credentials: CredentialStatus }>("/api/credentials", token),
-        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
-        api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token),
-        api<AlertEmailState>("/api/settings/alert-email", token)
+        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+        accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
+        accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
+        accountApi<AlertEmailState>("/api/settings/alert-email")
       ]);
       setCredentials(credentialResult.credentials);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -532,11 +549,11 @@ export function App() {
         backupsResult,
         environmentResult
       ] = await Promise.all([
-        api<F960Preview>(`/api/exports/f960?${params}`, token),
-        api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token),
-        api<{ intents: DonationIntentListItem[] }>("/api/donations/intents", token),
-        api<BackupsGrid>("/api/admin/backups", token),
-        api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token)
+        accountApi<F960Preview>(`/api/exports/f960?${params}`),
+        accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)),
+        accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
+        accountApi<BackupsGrid>("/api/admin/backups"),
+        accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
       setExportPreview(f960Preview);
       setCertificatePreview(certificateResult);
@@ -544,6 +561,70 @@ export function App() {
       setBackups(backupsResult.months);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
     }
+  }
+
+  function resetAccountState() {
+    accountStateGuardRef.current.advance();
+    setView("documents");
+    setDocuments([]);
+    setSelectedId(null);
+    setAudit([]);
+    setAuditCursor(null);
+    setAuditLoadingMore(false);
+    setUsers([]);
+    setCredentials(null);
+    setEmissionEnvironment(null);
+    setEmailTemplates(null);
+    setEmailTemplateDraft({});
+    setAlertEmailDraft("");
+    setQuery("");
+    setDebouncedQuery("");
+    setStatus("");
+    setDocumentNextCursor(null);
+    setDocumentsHasMore(false);
+    setDocumentsLoadingMore(false);
+    setToast("");
+    setAuditQuery("");
+    setBusy("");
+    setPendingInvalidationId(null);
+    setInvalidationForm(defaultInvalidationForm);
+    setEmailEditingId(null);
+    setEmailDraft("");
+    setAdvancedDteOpen(false);
+    setAdvancedDteTemplate(null);
+    setAdvancedDteForm(defaultAdvancedCdeForm());
+    setAdvancedDteStep(0);
+    setAdvancedDteError("");
+    setExportStartDate(currentMonthStartValue());
+    setExportEndDate(todayDateValue());
+    setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
+    setCertificateYear(String(new Date().getFullYear()));
+    setCertificateSearch("");
+    setDebouncedCertificateSearch("");
+    setCertificatePreview(null);
+    setContactsPeriod("todo");
+    setContactsFrom(currentMonthStartValue());
+    setContactsTo(todayDateValue());
+    setContactsGiftType("todos");
+    setContactsColumns(new Set(CONTACT_EXPORT_COLUMNS.map((column) => column.key)));
+    setDonationIntents([]);
+    setBackups([]);
+    setBackupVerifyByMonth({});
+    setDonorVerifiedDocId(null);
+    setSelectedDocumentAudit([]);
+    setTestInput(emptyTestDteInput());
+    setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
+    setSelectedUserId(null);
+    setUserSettings(emptyUserSettings());
+    setCredentialInput(emptyCredentialInput("test"));
+    setAnalytics(null);
+    setAnalyticsLoading(false);
+    setAnalyticsEnvironment(null);
+    setAnalyticsPresetId("trimestre");
+    const analyticsDefaults = analyticsRangePresets(new Date()).find((preset) => preset.id === "personalizado")!;
+    setAnalyticsFrom(analyticsDefaults.from);
+    setAnalyticsTo(analyticsDefaults.to);
+    setAnalyticsGiftFilter("todos");
   }
 
   async function loadMoreDocuments() {
@@ -558,6 +639,7 @@ export function App() {
 
   async function login(email: string, password: string) {
     const result = await api<{ user: User; token: string }>("/api/auth/login", "", { method: "POST", body: { email, password } });
+    resetAccountState();
     localStorage.setItem("diezmos_token", result.token);
     localStorage.setItem("diezmos_user", JSON.stringify(result.user));
     setToken(result.token);
@@ -582,19 +664,19 @@ export function App() {
     await api("/api/auth/password-reset/confirm", "", { method: "POST", body: { token: resetToken, password } });
   }
 
-  function logout() {
+  async function logout() {
+    try {
+      await accountApi("/api/auth/logout", { method: "POST" });
+    } catch (error) {
+      handleApiFailure(error);
+      return;
+    }
     localStorage.removeItem("diezmos_token");
     localStorage.removeItem("diezmos_user");
+    resetAccountState();
     setToken("");
     setUser(null);
     setAuthNotice("");
-    setDocuments([]);
-    setSelectedId(null);
-    setSelectedUserId(null);
-    setUserSettings(emptyUserSettings());
-    setPendingInvalidationId(null);
-    setEmailEditingId(null);
-    setEmailDraft("");
   }
 
   async function createTestDte() {
@@ -604,7 +686,7 @@ export function App() {
       return;
     }
     await runAction("test-dte", async () => {
-      await api("/api/test/dte", token, { method: "POST", body: testInput });
+      await accountApi("/api/test/dte", { method: "POST", body: testInput });
       setTestInput(emptyTestDteInput());
       setToast("CDE creado. Transmitiendo al Ministerio de Hacienda…");
       await delay(2500);
@@ -614,7 +696,7 @@ export function App() {
 
   async function openAdvancedDte() {
     await runAction("advanced-template", async () => {
-      const result = await api<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", token, { method: "POST", body: testInput });
+      const result = await accountApi<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", { method: "POST", body: testInput });
       setAdvancedDteTemplate(result.draft);
       setAdvancedDteForm(advancedFormFromDraft(result.draft));
       setAdvancedDteStep(0);
@@ -636,7 +718,7 @@ export function App() {
     const draft = advancedDraftFromForm(advancedDteTemplate, advancedDteForm);
     setAdvancedDteError("");
     await runAction("advanced-dte", async () => {
-      await api("/api/test/dte/advanced", token, { method: "POST", body: { draft } });
+      await accountApi("/api/test/dte/advanced", { method: "POST", body: { draft } });
       setToast("CDE avanzado creado. Transmitiendo al Ministerio de Hacienda…");
       setAdvancedDteOpen(false);
       await delay(2500);
@@ -655,7 +737,7 @@ export function App() {
     }
     const body = action === "invalidate" ? invalidationRequestBody(invalidationForm) : {};
     await runAction(action, async () => {
-      const result = await api<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, token, { method: "POST", body });
+      const result = await accountApi<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, { method: "POST", body });
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
       if (action === "invalidate") setPendingInvalidationId(null);
       await refresh();
@@ -670,7 +752,7 @@ export function App() {
       return;
     }
     await runAction("email", async () => {
-      await api(`/api/documents/${target.id}/email`, token, { method: "PATCH", body: { email } });
+      await accountApi(`/api/documents/${target.id}/email`, { method: "PATCH", body: { email } });
       setToast("Correo de envío actualizado");
       setEmailEditingId(null);
       setEmailDraft("");
@@ -678,17 +760,24 @@ export function App() {
     });
   }
 
-  async function downloadDocument(format: "pdf" | "json") {
-    if (!selected) return;
-    await runAction(`download-${format}`, async () => {
-      const response = await fetch(`/api/documents/${selected.id}/${format}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
+  async function fetchAccountDownload(path: string): Promise<{ blob: Blob; contentDisposition: string | null }> {
+    return runAccountOperation(async () => {
+      const response = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
       if (!response.ok) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
       }
-      const blob = await response.blob();
+      return {
+        blob: await response.blob(),
+        contentDisposition: response.headers.get("Content-Disposition")
+      };
+    });
+  }
+
+  async function downloadDocument(format: "pdf" | "json") {
+    if (!selected) return;
+    await runAction(`download-${format}`, async () => {
+      const { blob } = await fetchAccountDownload(`/api/documents/${selected.id}/${format}`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
@@ -700,18 +789,11 @@ export function App() {
 
   async function downloadF960(format: "csv" | "xlsx") {
     await runAction(`export-${format}`, async () => {
-      const response = await fetch(`/api/exports/f960.${format}?${exportParams(exportStartDate, exportEndDate)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
+      const { blob, contentDisposition } = await fetchAccountDownload(`/api/exports/f960.${format}?${exportParams(exportStartDate, exportEndDate)}`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
-      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `f960.${format}`);
+      link.download = filenameFromDisposition(contentDisposition, `f960.${format}`);
       link.click();
       URL.revokeObjectURL(href);
       setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
@@ -742,18 +824,11 @@ export function App() {
       if (selectedColumns.length < CONTACT_EXPORT_COLUMNS.length) {
         params.set("columns", selectedColumns.join(","));
       }
-      const response = await fetch(`/api/exports/contacts?${params.toString()}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
+      const { blob, contentDisposition } = await fetchAccountDownload(`/api/exports/contacts?${params.toString()}`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
-      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), "contactos-donantes.csv");
+      link.download = filenameFromDisposition(contentDisposition, "contactos-donantes.csv");
       link.click();
       URL.revokeObjectURL(href);
       setToast("Contactos exportados");
@@ -762,7 +837,7 @@ export function App() {
 
   async function verifyBackup(month: string) {
     await runAction(`backup-verify-${month}`, async () => {
-      const result = await api<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, token, { method: "POST" });
+      const result = await accountApi<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, { method: "POST" });
       setBackupVerifyByMonth((current) => ({ ...current, [month]: result }));
       setToast(result.ok ? `Respaldo de ${month} verificado: íntegro.` : `Respaldo de ${month}: se detectaron discrepancias.`);
     });
@@ -770,19 +845,12 @@ export function App() {
 
   async function downloadBackup(month: string, table: string) {
     await runAction(`backup-download-${month}-${table}`, async () => {
-      const response = await fetch(`/api/admin/backups/${month}/download?table=${encodeURIComponent(table)}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
+      const { blob, contentDisposition } = await fetchAccountDownload(`/api/admin/backups/${month}/download?table=${encodeURIComponent(table)}`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
       link.download = filenameFromDisposition(
-        response.headers.get("Content-Disposition"),
+        contentDisposition,
         table === "manifest" ? `retention-${month}-manifest.json` : `retention-${month}-${table}.ndjson`
       );
       link.click();
@@ -794,18 +862,11 @@ export function App() {
   // Keyed by `backup-download-all-<month>` so only that row's button shows a busy state.
   async function downloadAllBackup(month: string) {
     await runAction(`backup-download-all-${month}`, async () => {
-      const response = await fetch(`/api/admin/backups/${month}/download-all`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (!response.ok) {
-        const data = await response.json().catch(() => ({}));
-        throw new Error(data.message ?? data.error ?? `HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
+      const { blob, contentDisposition } = await fetchAccountDownload(`/api/admin/backups/${month}/download-all`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = href;
-      link.download = filenameFromDisposition(response.headers.get("Content-Disposition"), `respaldo-${month}.zip`);
+      link.download = filenameFromDisposition(contentDisposition, `respaldo-${month}.zip`);
       link.click();
       URL.revokeObjectURL(href);
       setToast(`Respaldo completo de ${month} descargado.`);
@@ -818,8 +879,8 @@ export function App() {
       return;
     }
     await runAction(`backup-export-${month}`, async () => {
-      await api(`/api/admin/retention-export?month=${month}`, token, { method: "POST" });
-      setBackups((await api<BackupsGrid>("/api/admin/backups", token)).months);
+      await accountApi(`/api/admin/retention-export?month=${month}`, { method: "POST" });
+      setBackups((await accountApi<BackupsGrid>("/api/admin/backups")).months);
       setToast(`Respaldo del mes ${month} generado.`);
     });
   }
@@ -838,9 +899,9 @@ export function App() {
       return;
     }
     await runAction("certificates-send", async () => {
-      const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, { method: "POST" });
+      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, { method: "POST" });
       setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
-      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
+      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
     });
   }
 
@@ -862,7 +923,7 @@ export function App() {
       return;
     }
     await runAction(`certificates-send-${donor.groupKey}`, async () => {
-      const result = await api<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, token, {
+      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, {
         method: "POST",
         body: { donor: donor.groupKey }
       });
@@ -871,7 +932,7 @@ export function App() {
           ? `Constancia ${result.year} enviada a ${donor.donorName}.`
           : `No se pudo enviar la constancia a ${donor.donorName}.`
       );
-      setCertificatePreview(await api<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch), token));
+      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
     });
   }
 
@@ -882,7 +943,7 @@ export function App() {
       return;
     }
     await runAction("create-user", async () => {
-      const created = await api<{ user: User }>("/api/users", token, { method: "POST", body: newUser });
+      const created = await accountApi<{ user: User }>("/api/users", { method: "POST", body: newUser });
       setToast(`Usuario creado: ${created.user.email}`);
       setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
       await refresh();
@@ -914,7 +975,7 @@ export function App() {
       return;
     }
     await runAction("user-settings", async () => {
-      const result = await api<{ user: User }>(`/api/users/${selectedUserId}`, token, {
+      const result = await accountApi<{ user: User }>(`/api/users/${selectedUserId}`, {
         method: "PATCH",
         body: {
           name,
@@ -941,7 +1002,7 @@ export function App() {
       return;
     }
     await runAction("user-password", async () => {
-      await api(`/api/users/${selectedUserId}/password`, token, { method: "POST", body: { password: userSettings.password } });
+      await accountApi(`/api/users/${selectedUserId}/password`, { method: "POST", body: { password: userSettings.password } });
       setUserSettings((current) => ({ ...current, password: "" }));
       setToast("Contraseña restablecida");
     });
@@ -949,10 +1010,10 @@ export function App() {
 
   async function updateCredentials() {
     await runAction("credentials", async () => {
-      const result = await api<{ updated: string[]; deleted: string[] }>("/api/credentials", token, { method: "POST", body: credentialInput });
+      const result = await accountApi<{ updated: string[]; deleted: string[] }>("/api/credentials", { method: "POST", body: credentialInput });
       setToast(`Secretos actualizados: ${result.updated.length}`);
       setCredentialInput(emptyCredentialInput(credentialInput.environment));
-      setCredentials((await api<{ credentials: CredentialStatus }>("/api/credentials", token)).credentials);
+      setCredentials((await accountApi<{ credentials: CredentialStatus }>("/api/credentials")).credentials);
     });
   }
 
@@ -961,7 +1022,7 @@ export function App() {
       return;
     }
     await runAction("emission-environment", async () => {
-      const result = await api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token, {
+      const result = await accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", {
         method: "PUT",
         body: { environment }
       });
@@ -981,7 +1042,7 @@ export function App() {
 
   async function updateAlertEmail() {
     await runAction("alert-email", async () => {
-      const result = await api<AlertEmailState>("/api/settings/alert-email", token, {
+      const result = await accountApi<AlertEmailState>("/api/settings/alert-email", {
         method: "PUT",
         body: { alertEmail: alertEmailDraft.trim() }
       });
@@ -992,7 +1053,7 @@ export function App() {
 
   async function updateEmailTemplates() {
     await runAction("email-templates", async () => {
-      const result = await api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token, {
+      const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
         body: { templates: emailTemplateDraft }
       });
@@ -1004,7 +1065,7 @@ export function App() {
   async function bootstrapCredentialWriter(cloudflareToken: string): Promise<boolean> {
     setBusy("credential-writer");
     try {
-      const result = await api<{ updated: string[]; credentials: CredentialStatus }>("/api/credentials/writer-token", token, {
+      const result = await accountApi<{ updated: string[]; credentials: CredentialStatus }>("/api/credentials/writer-token", {
         method: "POST",
         body: { token: cloudflareToken }
       });
@@ -1015,18 +1076,18 @@ export function App() {
       handleApiFailure(error);
       return false;
     } finally {
-      setBusy("");
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) setBusy("");
     }
   }
 
   async function runAction(name: string, action: () => Promise<void>) {
     setBusy(name);
     try {
-      await action();
+      await runAccountOperation(action);
     } catch (error) {
       handleApiFailure(error);
     } finally {
-      setBusy("");
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) setBusy("");
     }
   }
 
@@ -1038,16 +1099,15 @@ export function App() {
     }
     setAuditLoadingMore(true);
     try {
-      const pageResult = await api<{ audit: AuditRow[]; nextCursor: string | null }>(
-        `/api/audit?limit=50&cursor=${encodeURIComponent(auditCursor)}`,
-        token
+      const pageResult = await accountApi<{ audit: AuditRow[]; nextCursor: string | null }>(
+        `/api/audit?limit=50&cursor=${encodeURIComponent(auditCursor)}`
       );
       setAudit((current) => [...current, ...pageResult.audit]);
       setAuditCursor(pageResult.nextCursor);
     } catch (err) {
-      setToast(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+      handleApiFailure(err);
     } finally {
-      setAuditLoadingMore(false);
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) setAuditLoadingMore(false);
     }
   }
 
@@ -1058,6 +1118,7 @@ export function App() {
   if (!token || !user) {
     return (
       <AuthScreen
+        initialResetToken={initialResetToken}
         notice={authNotice}
         branding={branding}
         onLogin={login}
@@ -1070,6 +1131,9 @@ export function App() {
   }
 
   function handleApiFailure(error: unknown) {
+    if (error instanceof StaleAccountStateError) {
+      return;
+    }
     if (isApiError(error) && error.status === 401) {
       expireSession();
       return;
@@ -1080,13 +1144,9 @@ export function App() {
   function expireSession() {
     localStorage.removeItem("diezmos_token");
     localStorage.removeItem("diezmos_user");
+    resetAccountState();
     setToken("");
     setUser(null);
-    setDocuments([]);
-    setSelectedId(null);
-    setAudit([]);
-    setUsers([]);
-    setCredentials(null);
     setAuthNotice("Su sesión expiró. Inicie sesión de nuevo.");
   }
 
@@ -1381,7 +1441,7 @@ export function App() {
           </>
         )}
 
-        {view === "credentials" && (
+        {view === "credentials" && can(user, "OWNER") && (
           <CredentialsPanel
             status={credentials}
             emissionEnvironment={emissionEnvironment}
@@ -1417,12 +1477,13 @@ export function App() {
               setBranding(next);
             }}
             onBootstrapWriter={bootstrapCredentialWriter}
+            runAccountOperation={runAccountOperation}
             onRefresh={async () => {
               const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
-                api<{ credentials: CredentialStatus }>("/api/credentials", token),
-                api<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", token),
-                api<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", token),
-                api<AlertEmailState>("/api/settings/alert-email", token)
+                accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+                accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
+                accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
+                accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -1432,7 +1493,7 @@ export function App() {
           />
         )}
       </main>
-      {advancedDteOpen && (
+      {advancedDteOpen && can(user, "OPERATOR") && (
         <AdvancedDteModal
           form={advancedDteForm}
           preview={JSON.stringify(advancedDraftFromForm(advancedDteTemplate, advancedDteForm), null, 2)}
@@ -2204,6 +2265,7 @@ function CredentialsPanel({
   onAlertEmailSubmit,
   onBrandingSave,
   onBootstrapWriter,
+  runAccountOperation,
   onRefresh
 }: {
   status: CredentialStatus | null;
@@ -2228,6 +2290,7 @@ function CredentialsPanel({
   onAlertEmailSubmit: () => Promise<void>;
   onBrandingSave: (next: Branding) => void;
   onBootstrapWriter: (cloudflareToken: string) => Promise<boolean>;
+  runAccountOperation: <T>(operation: () => Promise<T>) => Promise<T>;
   onRefresh: () => Promise<void>;
 }) {
   const groups = status ? Object.entries(status.groups) : [];
@@ -2262,7 +2325,7 @@ function CredentialsPanel({
   async function handleCertificateFile(file: File | undefined): Promise<void> {
     if (!file) return;
     try {
-      const text = await file.text();
+      const text = await runAccountOperation(() => file.text());
       const trimmed = text.trim();
       if (!trimmed) {
         setCertificateFileError("El archivo seleccionado está vacío.");
@@ -2369,7 +2432,7 @@ function CredentialsPanel({
                 onSubmit={onEmailTemplateSubmit}
               />
             ) : activeSection === "marca" ? (
-              <BrandingEditor branding={branding} token={token} onSave={onBrandingSave} />
+              <BrandingEditor branding={branding} token={token} onSave={onBrandingSave} runAccountOperation={runAccountOperation} />
             ) : (
               <form
                 className="credential-form-panel credential-detail-panel"
@@ -2542,12 +2605,20 @@ function CredentialsPanel({
                         Authorization: Bearer; se usa solo si Cloudflare Email no puede entregar el comprobante.
                       </p>
                     </div>
-                    <label>
-                      <CredentialFieldLabel label="Endpoint HTTPS de respaldo (POST JSON)" configured={credentialConfigured(status, "EMAIL_API_URL")} />
-                      <CredentialActiveValue status={status} name="EMAIL_API_URL" />
-                      <input value={input.emailApiUrl} onChange={(event) => onChange({ ...input, emailApiUrl: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_API_URL", "https://correo.example/send")} type="url" />
-                      <small>Recibe un POST JSON con remitente, destinatario, asunto, texto, HTML y adjuntos PDF/JSON en base64.</small>
-                    </label>
+                    <div className="credential-field-block">
+                      <CredentialFieldLabel
+                        label="Endpoint HTTPS de respaldo (POST JSON)"
+                        configured={credentialConfigured(status, "EMAIL_PROVIDER_URL")}
+                      />
+                      <CredentialActiveValue
+                        status={status}
+                        name="EMAIL_PROVIDER_URL"
+                      />
+                      <small>
+                        Administrado por el despliegue. Los propietarios pueden rotar el token
+                        bearer y el remitente, pero no cambiar el destino.
+                      </small>
+                    </div>
                     <label>
                       <CredentialFieldLabel label="Token bearer del respaldo HTTP" configured={credentialConfigured(status, "EMAIL_API_KEY")} />
                       <CredentialActiveValue status={status} name="EMAIL_API_KEY" />
@@ -2716,11 +2787,13 @@ function CredentialsPanel({
 function BrandingEditor({
   branding,
   token,
-  onSave
+  onSave,
+  runAccountOperation
 }: {
   branding: Branding;
   token: string;
   onSave: (next: Branding) => void;
+  runAccountOperation: <T>(operation: () => Promise<T>) => Promise<T>;
 }) {
   const [displayName, setDisplayName] = useState(branding.displayName);
   const [accentColor, setAccentColor] = useState(branding.accentColor);
@@ -2766,10 +2839,12 @@ function BrandingEditor({
     setError("");
     setSavingText(true);
     try {
-      const result = await api<{ displayName: string; accentColor: string; supportEmail: string }>("/api/settings/branding", token, {
-        method: "PUT",
-        body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase(), supportEmail: supportEmail.trim().toLowerCase() }
-      });
+      const result = await runAccountOperation(() =>
+        api<{ displayName: string; accentColor: string; supportEmail: string }>("/api/settings/branding", token, {
+          method: "PUT",
+          body: { displayName: displayName.trim(), accentColor: accentColor.trim().toLowerCase(), supportEmail: supportEmail.trim().toLowerCase() }
+        })
+      );
       setDisplayName(result.displayName);
       setAccentColor(result.accentColor);
       setSupportEmail(result.supportEmail);
@@ -2795,15 +2870,18 @@ function BrandingEditor({
     }
     setLogoBusy(true);
     try {
-      const response = await fetch("/api/settings/branding/logo", {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
-        body: file
+      const data = await runAccountOperation(async () => {
+        const response = await fetch("/api/settings/branding/logo", {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
+          body: file
+        });
+        const result = (await response.json().catch(() => ({}))) as { logoVersion?: string; message?: string; error?: string };
+        if (!response.ok) {
+          throw new Error(String(result.message ?? result.error ?? `HTTP ${response.status}`));
+        }
+        return result;
       });
-      const data = (await response.json().catch(() => ({}))) as { logoVersion?: string; message?: string; error?: string };
-      if (!response.ok) {
-        throw new Error(String(data.message ?? data.error ?? `HTTP ${response.status}`));
-      }
       const nextVersion = data.logoVersion ?? null;
       setLogoVersion(nextVersion);
       setPreviewUrl(null);
@@ -2823,7 +2901,7 @@ function BrandingEditor({
     setLogoError("");
     setLogoBusy(true);
     try {
-      await api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" });
+      await runAccountOperation(() => api<{ ok: true }>("/api/settings/branding/logo", token, { method: "DELETE" }));
       setLogoVersion(null);
       setPreviewUrl(null);
       onSave(draftBranding({ logoVersion: null }));
@@ -2853,15 +2931,18 @@ function BrandingEditor({
     }
     setDonorLogoBusy(true);
     try {
-      const response = await fetch("/api/settings/branding/donor-logo", {
-        method: "PUT",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
-        body: file
+      const data = await runAccountOperation(async () => {
+        const response = await fetch("/api/settings/branding/donor-logo", {
+          method: "PUT",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": file.type },
+          body: file
+        });
+        const result = (await response.json().catch(() => ({}))) as { donorLogoVersion?: string; message?: string; error?: string };
+        if (!response.ok) {
+          throw new Error(String(result.message ?? result.error ?? `HTTP ${response.status}`));
+        }
+        return result;
       });
-      const data = (await response.json().catch(() => ({}))) as { donorLogoVersion?: string; message?: string; error?: string };
-      if (!response.ok) {
-        throw new Error(String(data.message ?? data.error ?? `HTTP ${response.status}`));
-      }
       const nextVersion = data.donorLogoVersion ?? null;
       setDonorLogoVersion(nextVersion);
       setDonorPreviewUrl(null);
@@ -2881,7 +2962,7 @@ function BrandingEditor({
     setDonorLogoError("");
     setDonorLogoBusy(true);
     try {
-      await api<{ ok: true }>("/api/settings/branding/donor-logo", token, { method: "DELETE" });
+      await runAccountOperation(() => api<{ ok: true }>("/api/settings/branding/donor-logo", token, { method: "DELETE" }));
       setDonorLogoVersion(null);
       setDonorPreviewUrl(null);
       onSave(draftBranding({ donorLogoVersion: null }));
@@ -3211,8 +3292,7 @@ function IssuerConfigEditor({
   input: CredentialFormInput;
   onChange: (input: CredentialFormInput) => void;
 }) {
-  const activeJson = credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue ?? "";
-  const form = useMemo(() => issuerFormFromConfigJson(input.emisorConfigJson || activeJson), [activeJson, input.emisorConfigJson]);
+  const form = useMemo(() => issuerFormFromConfigJson(input.emisorConfigJson), [input.emisorConfigJson]);
   const municipalityOptions = getCat013Municipalities(form.departamento);
   const districtOptions = getCat008Districts(form.departamento);
   const configured = credentialConfigured(status, "EMISOR_CONFIG_JSON");
@@ -3240,7 +3320,7 @@ function IssuerConfigEditor({
       <CredentialFieldLabel label="Configuración del emisor" configured={configured} />
       <div className={configured ? "issuer-config-status ready" : "issuer-config-status"}>
         {configured ? <CheckCircle2 size={16} /> : <AlertTriangle size={16} />}
-        <span>{configured ? "Datos activos cargados en campos editables" : "Complete los datos del emisor para habilitar emisión real"}</span>
+        <span>{configured ? "Configuración protegida; complete todos los campos para reemplazarla" : "Complete los datos del emisor para habilitar emisión real"}</span>
       </div>
       <div className="issuer-config-grid">
         <div className="credential-subsection span-2">
@@ -3919,6 +3999,7 @@ function catalogSelectValue(options: readonly CatalogOption[], value: unknown): 
 }
 
 function AuthScreen({
+  initialResetToken,
   notice,
   branding,
   onLogin,
@@ -3927,6 +4008,7 @@ function AuthScreen({
   onConfirmReset,
   bootstrapAvailable
 }: {
+  initialResetToken: string | null;
   notice?: string;
   branding: Branding;
   onLogin: (email: string, password: string) => Promise<void>;
@@ -3935,7 +4017,7 @@ function AuthScreen({
   onConfirmReset: (token: string, password: string) => Promise<void>;
   bootstrapAvailable: boolean;
 }) {
-  const [resetToken] = useState(() => resetTokenFromSearch(window.location.search));
+  const [resetToken] = useState(initialResetToken);
   const [mode, setMode] = useState<"login" | "bootstrap" | "reset-request" | "reset-confirm">(resetToken ? "reset-confirm" : "login");
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
@@ -4192,6 +4274,8 @@ function DetailPanel({
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const rejectionDetail = rejectionDetailForDocument(selected, audit);
   const emailEditing = emailEditingId === selected.id;
+  const fiscalOutcomePending = Boolean(selected.fiscal_operation_claim_id);
+  const postAcceptFinalizationPending = selected.status === "ACCEPTED" && !selected.post_accept_finalized_at;
   const canRetry = isRetryableDocument(selected);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
   return (
@@ -4204,6 +4288,30 @@ function DetailPanel({
         <div className="donor-verified-badge">
           <ShieldCheck size={16} />
           <span>Datos del donante verificados en el formulario de donación</span>
+        </div>
+      )}
+      {fiscalOutcomePending && (
+        <div className="legal-box warning" role="alert">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>Resultado fiscal pendiente de conciliación</strong>
+            <span>MH pudo haber procesado la operación. Los reintentos e invalidaciones permanecen bloqueados.</span>
+            {selected.fiscal_operation_kind && (
+              <small>Operación: {selected.fiscal_operation_kind === "INVALIDATION" ? "Invalidación" : "Transmisión"}</small>
+            )}
+            {selected.fiscal_operation_claimed_at && (
+              <small>Operación iniciada: {formatElSalvadorDateTime(selected.fiscal_operation_claimed_at)} hora El Salvador</small>
+            )}
+          </div>
+        </div>
+      )}
+      {postAcceptFinalizationPending && !fiscalOutcomePending && (
+        <div className="legal-box warning" role="status">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>Completando el comprobante aceptado</strong>
+            <span>El envío definitivo y la trazabilidad local se reintentan automáticamente.</span>
+          </div>
         </div>
       )}
       <dl>
@@ -4245,9 +4353,9 @@ function DetailPanel({
         </div>
       </div>
       <div className="actions">
-        <button disabled={busy === "resend"} title="Reenviar el comprobante al correo del donante" onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
-        <button disabled={!canRetry || busy === "retry"} title={canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
-        <button className="danger" disabled={!invalidationWindow.canInvalidate || busy === "invalidate"} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
+        <button disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : "Reenviar el comprobante al correo del donante"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
+        <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
+        <button className="danger" disabled={fiscalOutcomePending || postAcceptFinalizationPending || !invalidationWindow.canInvalidate || busy === "invalidate"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : undefined} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
       </div>
@@ -4695,7 +4803,10 @@ function invalidationToast(result: { accepted?: boolean; result?: { estado?: str
   return "Invalidación enviada al Ministerio de Hacienda";
 }
 
-function isRetryableDocument(document: Pick<DteDocument, "status" | "transmission_deferred_at">): boolean {
+function isRetryableDocument(document: Pick<DteDocument, "status" | "transmission_deferred_at" | "fiscal_operation_claim_id">): boolean {
+  if (document.fiscal_operation_claim_id) {
+    return false;
+  }
   // Espejo del worker: un CDE diferido (SIGNED + transmission_deferred_at) no se
   // reintenta manualmente — el cron de 15 minutos es el dueño del reintento. Un
   // SIGNED plano (sin marcador) sigue siendo reintetable.
@@ -5375,7 +5486,6 @@ interface CredentialFormInput {
   certificatePassword: string;
   emisorConfigJson: string;
   wompiSecret: string;
-  emailApiUrl: string;
   emailApiKey: string;
   emailFrom: string;
 }
@@ -5439,7 +5549,6 @@ function emptyCredentialInput(environment: CredentialFormInput["environment"]): 
     certificatePassword: "",
     emisorConfigJson: "",
     wompiSecret: "",
-    emailApiUrl: "",
     emailApiKey: "",
     emailFrom: ""
   };

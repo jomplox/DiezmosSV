@@ -63,6 +63,7 @@ export function zipStored(entries: ZipEntry[]): Uint8Array {
   let offset = 0;
 
   for (const entry of entries) {
+    assertSafeZipEntryName(entry.name);
     const nameBytes = encoder.encode(entry.name);
     const data = entry.data;
     const crc = crc32(data);
@@ -127,6 +128,19 @@ export function zipStored(entries: ZipEntry[]): Uint8Array {
   eocdView.setUint16(20, 0, true); // ZIP file comment length
 
   return concat([...localChunks, ...centralChunks, eocd]);
+}
+
+function assertSafeZipEntryName(name: string): void {
+  const segments = name.split("/");
+  const unsafe = name.length === 0
+    || name.includes("\0")
+    || name.includes("\\")
+    || name.startsWith("/")
+    || /^[A-Za-z]:/.test(name)
+    || segments.some((segment) => segment === "" || segment === "." || segment === "..");
+  if (unsafe) {
+    throw new Error(`ZIP entry name must be a safe relative path: ${JSON.stringify(name)}`);
+  }
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {

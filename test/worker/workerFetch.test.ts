@@ -2,15 +2,74 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { hashPassword } from "../../src/worker/services/auth";
-import { IssuancePipeline, RejectedWompiRetryConflictError } from "../../src/worker/services/pipeline";
+import { AuthService, hashPassword } from "../../src/worker/services/auth";
+import {
+  IssuancePipeline,
+  RejectedWompiRetryConflictError,
+  WompiIntentQuarantinedError
+} from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
+import { MhClient } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
-import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
+import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env, IssuanceMessage } from "../../src/worker/types";
+
+const nativeCrypto = crypto;
+
+class TestDigestStream extends WritableStream<ArrayBuffer | ArrayBufferView> {
+  readonly digest: Promise<ArrayBuffer>;
+
+  constructor() {
+    const chunks: Uint8Array[] = [];
+    let resolveDigest!: (value: ArrayBuffer) => void;
+    let rejectDigest!: (reason: unknown) => void;
+    const digest = new Promise<ArrayBuffer>((resolve, reject) => {
+      resolveDigest = resolve;
+      rejectDigest = reject;
+    });
+    super({
+      write(chunk) {
+        const view =
+          chunk instanceof ArrayBuffer
+            ? new Uint8Array(chunk)
+            : new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        chunks.push(view.slice());
+      },
+      async close() {
+        const length = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+        const bytes = new Uint8Array(length);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        try {
+          resolveDigest(await nativeCrypto.subtle.digest("SHA-256", bytes));
+        } catch (error) {
+          rejectDigest(error);
+        }
+      },
+      abort(reason) {
+        rejectDigest(reason);
+      }
+    });
+    this.digest = digest;
+  }
+}
+
+beforeEach(() => {
+  vi.stubGlobal("crypto", {
+    ...nativeCrypto,
+    subtle: nativeCrypto.subtle,
+    getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto),
+    randomUUID: nativeCrypto.randomUUID.bind(nativeCrypto),
+    DigestStream: TestDigestStream
+  });
+});
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -27,6 +86,80 @@ describe("Worker fetch error handling", () => {
 
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ error: "auth_error" });
+  });
+
+  it("logs unexpected failures without returning their raw message", async () => {
+    const sensitiveMessage = "D1 credential sentinel must stay server-side";
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env({
+        prepare: () => {
+          throw new Error(sensitiveMessage);
+        }
+      } as unknown as InMemoryD1)
+    );
+
+    expect(response.status).toBe(500);
+    const payload = await response.json();
+    expect(payload).toEqual({ error: "internal_error", message: "Ocurrió un error interno." });
+    expect(JSON.stringify(payload)).not.toContain(sensitiveMessage);
+    expect(errorSpy).toHaveBeenCalledWith("Unhandled Worker request error", expect.any(Error));
+  });
+});
+
+describe("static document security policy", () => {
+  it("adds anti-framing and no-referrer headers without changing the asset response", async () => {
+    const db = new InMemoryD1();
+    const assetResponse = new Response("<!doctype html><title>DiezmosSV</title>", {
+      status: 202,
+      statusText: "Asset response",
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "public, max-age=60",
+        ETag: '"asset-v1"',
+        "Content-Security-Policy": "default-src 'self'; frame-ancestors https://legacy.example; script-src 'self'"
+      }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/admin"),
+      env(db, {
+        ASSETS: { fetch: () => Promise.resolve(assetResponse) } as unknown as Fetcher
+      })
+    );
+
+    expect(response.status).toBe(202);
+    expect(response.statusText).toBe("Asset response");
+    await expect(response.text()).resolves.toBe("<!doctype html><title>DiezmosSV</title>");
+    expect(response.headers.get("Cache-Control")).toBe("public, max-age=60");
+    expect(response.headers.get("ETag")).toBe('"asset-v1"');
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(response.headers.get("Referrer-Policy")).toBe("no-referrer");
+    const csp = response.headers.get("Content-Security-Policy") ?? "";
+    expect(csp).toContain("default-src 'self'");
+    expect(csp).toContain("script-src 'self'");
+    expect(csp.match(/frame-ancestors/gi)).toHaveLength(1);
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).not.toContain("legacy.example");
+  });
+
+  it("leaves non-document asset responses unchanged", async () => {
+    const db = new InMemoryD1();
+    const assetResponse = new Response("console.log('ok')", {
+      headers: { "Content-Type": "application/javascript", ETag: '"script-v1"' }
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/assets/app.js"),
+      env(db, {
+        ASSETS: { fetch: () => Promise.resolve(assetResponse) } as unknown as Fetcher
+      })
+    );
+
+    expect(response).toBe(assetResponse);
+    expect(response.headers.has("X-Frame-Options")).toBe(false);
+    expect(response.headers.get("ETag")).toBe('"script-v1"');
   });
 });
 
@@ -161,12 +294,15 @@ describe("document route authorization order", () => {
   });
 });
 
+const VALID_BOOTSTRAP_TOKEN = `bt_${"A".repeat(43)}`;
+const OTHER_BOOTSTRAP_TOKEN = `bt_${"B".repeat(43)}`;
+
 describe("owner bootstrap", () => {
   it("reports bootstrap availability before the first user exists", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       new Request("https://example.org/api/auth/bootstrap-status"),
-      env(db)
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(200);
@@ -199,7 +335,7 @@ describe("owner bootstrap", () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       bootstrapRequest(),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(403);
@@ -211,7 +347,7 @@ describe("owner bootstrap", () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
       bootstrapRequest({ token: "wrong-token" }),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(403);
@@ -219,11 +355,58 @@ describe("owner bootstrap", () => {
     expect(db.users).toHaveLength(0);
   });
 
+  it("fails closed when the configured setup token is not a generated token", async () => {
+    const db = new InMemoryD1();
+    const status = await worker.fetch(
+      new Request("https://example.org/api/auth/bootstrap-status"),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+    const creation = await worker.fetch(
+      bootstrapRequest({ token: "setup-token" }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+    );
+
+    await expect(status.json()).resolves.toEqual({ bootstrapAvailable: false });
+    expect(creation.status).toBe(503);
+    await expect(creation.json()).resolves.toMatchObject({ error: "bootstrap_configuration_invalid" });
+    expect(db.users).toHaveLength(0);
+  });
+
+  it("limits every bootstrap-token guess from one source before parsing the owner body", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN });
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/bootstrap-owner", {
+          method: "POST",
+          headers: {
+            "CF-Connecting-IP": "203.0.113.88",
+            "X-Bootstrap-Owner-Token": `invalid-${attempt}`
+          },
+          body: "not-json"
+        }),
+        runtime
+      );
+      expect(response.status).toBe(403);
+    }
+
+    const denied = await worker.fetch(
+      bootstrapRequest({ token: OTHER_BOOTSTRAP_TOKEN }, "203.0.113.88"),
+      runtime
+    );
+
+    expect(denied.status).toBe(429);
+    await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+    expect(db.users).toHaveLength(0);
+    expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+    expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.88");
+  });
+
   it("creates the first owner when the setup token matches", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(
-      bootstrapRequest({ token: "setup-token" }),
-      env(db, { BOOTSTRAP_OWNER_TOKEN: "setup-token" })
+      bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
     );
 
     expect(response.status).toBe(201);
@@ -236,6 +419,58 @@ describe("owner bootstrap", () => {
     });
     expect(db.users).toHaveLength(1);
     expect(db.users[0].role).toBe("OWNER");
+  });
+
+  it("returns a closed-bootstrap conflict after the first owner is created", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN });
+
+    const first = await worker.fetch(bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }), runtime);
+    const second = await worker.fetch(bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN }), runtime);
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({ error: "bootstrap_unavailable" });
+    expect(db.users).toHaveLength(1);
+    expect(db.audits.filter((row) => row.action === "OWNER_BOOTSTRAPPED")).toHaveLength(1);
+  });
+
+  it("uses one conditional insert to admit only one initial owner", async () => {
+    const sqlite = new DatabaseSync(":memory:");
+    try {
+      sqlite.exec(`CREATE TABLE users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        password_salt TEXT NOT NULL,
+        disabled_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+        updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+      )`);
+      const repo = new Repository(sqliteD1(sqlite));
+      const results = await Promise.all([
+        repo.createInitialOwner({
+          email: "owner-one@example.org",
+          name: "Owner One",
+          passwordHash: "hash-one",
+          passwordSalt: "salt-one"
+        }),
+        repo.createInitialOwner({
+          email: "owner-two@example.org",
+          name: "Owner Two",
+          passwordHash: "hash-two",
+          passwordSalt: "salt-two"
+        })
+      ]);
+
+      expect(results.filter(Boolean)).toHaveLength(1);
+      expect(sqlite.prepare("SELECT COUNT(*) AS count FROM users").get()).toEqual({ count: 1 });
+      expect(sqlite.prepare("SELECT role FROM users").get()).toEqual({ role: "OWNER" });
+    } finally {
+      sqlite.close();
+    }
   });
 });
 
@@ -271,6 +506,335 @@ describe("auth rate limiting", () => {
     });
   }
 
+  describe("aggregate login attempts", () => {
+    it("blocks the sixty-first login attempt from one IP across distinct account names", async () => {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 60; index += 1) {
+        const response = await worker.fetch(
+          new Request("https://example.org/api/auth/login", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "CF-Connecting-IP": "203.0.113.70"
+            },
+            body: JSON.stringify({ email: `user-${index}@example.org`, password: "invalid" })
+          }),
+          env(db)
+        );
+        expect(response.status).toBe(401);
+      }
+
+      const auditsBeforeDenial = db.audits.length;
+      const readsBeforeDenial = db.loginCredentialReads;
+      const denied = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "203.0.113.70"
+          },
+          body: JSON.stringify({ email: "sixty-first@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(denied.status).toBe(429);
+      await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+      expect(db.loginCredentialReads).toBe(readsBeforeDenial);
+      expect(db.audits).toHaveLength(auditsBeforeDenial);
+      expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+      expect([...db.loginRateLimits.keys()][0]).toMatch(/^[a-f0-9]{64}$/);
+      expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.70");
+    });
+
+    it("resets an expired aggregate login bucket before normal credential handling", async () => {
+      const db = new InMemoryD1();
+      const callerIp = "198.51.100.9";
+      const keyHash = await sha256Hex(utf8Bytes(callerIp));
+      db.loginRateLimits.set(keyHash, {
+        window_started_at: "2026-07-04T11:00:00.000Z",
+        attempt_count: 60,
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": callerIp
+          },
+          body: JSON.stringify({ email: "other@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(401);
+      expect(db.loginCredentialReads).toBe(1);
+      expect(db.loginRateLimits.get(keyHash)).toEqual({
+        window_started_at: "2026-07-04T12:00:00.000Z",
+        attempt_count: 1,
+        expires_at: "2026-07-04T12:15:00.000Z"
+      });
+    });
+
+    it("resets an expired aggregate login bucket with SQLite UPSERT semantics", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE login_rate_limits (
+          key_hash TEXT PRIMARY KEY,
+          window_started_at TEXT NOT NULL,
+          attempt_count INTEGER NOT NULL CHECK (attempt_count >= 1),
+          expires_at TEXT NOT NULL
+        )`);
+        const callerIp = "198.51.100.9";
+        const keyHash = await sha256Hex(utf8Bytes(callerIp));
+        sqlite
+          .prepare(
+            `INSERT INTO login_rate_limits (
+               key_hash, window_started_at, attempt_count, expires_at
+             ) VALUES (?, ?, ?, ?)`
+          )
+          .run(keyHash, "2026-07-04T11:00:00.000Z", 60, "2026-07-04T11:15:00.000Z");
+
+        const repo = new Repository(sqliteD1(sqlite));
+        const accepted = await repo.claimLoginAttempt(
+          keyHash,
+          "2026-07-04T12:00:00.000Z",
+          "2026-07-04T11:45:00.000Z",
+          "2026-07-04T12:15:00.000Z",
+          60
+        );
+
+        expect(accepted).toBe(true);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT window_started_at, attempt_count, expires_at
+               FROM login_rate_limits
+               WHERE key_hash = ?`
+            )
+            .get(keyHash)
+        ).toEqual({
+          window_started_at: "2026-07-04T12:00:00.000Z",
+          attempt_count: 1,
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("combines legacy activity and atomic claims with the production SQLite statement", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE TABLE donation_intents (
+          id TEXT PRIMARY KEY,
+          client_ip TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO donation_intents (id, client_ip, created_at) VALUES
+          ('legacy_1', '203.0.113.7', '2026-07-04T11:50:00.000Z'),
+          ('legacy_2', '203.0.113.7', '2026-07-04T11:51:00.000Z');`);
+        const repo = new Repository(sqliteD1(sqlite));
+        const accepted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimDonationIntentRateLimit(
+              "hashed-client-ip",
+              "203.0.113.7",
+              "2026-07-04T12:00:00.000Z",
+              "2026-07-04T11:45:00.000Z",
+              "2026-07-04T12:15:00.000Z",
+              5
+            )
+          )
+        );
+
+        expect(accepted.filter(Boolean)).toHaveLength(3);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM security_rate_limit_claims
+                WHERE scope = ? AND key_hash = ?`
+            )
+            .get("donation_intent", "hashed-client-ip")
+        ).toEqual({ count: 3 });
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("counts a late legacy donation row after the first ledger claim", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE TABLE donation_intents (
+          id TEXT PRIMARY KEY,
+          client_ip TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO security_rate_limit_claims (id, scope, key_hash, claimed_at, expires_at)
+          VALUES ('first_new_claim', 'donation_intent', 'hashed-client-ip', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z');
+        INSERT INTO donation_intents (id, client_ip, rate_limit_claim_id, created_at)
+          VALUES ('late_legacy_intent', '203.0.113.7', NULL, '2026-07-04T12:01:00.000Z');`);
+        const repo = new Repository(sqliteD1(sqlite));
+
+        const admitted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimDonationIntentRateLimit(
+              "hashed-client-ip",
+              "203.0.113.7",
+              "2026-07-04T12:02:00.000Z",
+              "2026-07-04T11:47:00.000Z",
+              "2026-07-04T12:17:00.000Z",
+              5
+            )
+          )
+        );
+
+        expect(admitted.filter(Boolean)).toHaveLength(3);
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("atomically composes reset pair and account budgets across the legacy cutover", async () => {
+      const sqlite = new DatabaseSync(":memory:");
+      try {
+        sqlite.exec(`CREATE TABLE security_rate_limit_claims (
+          id TEXT PRIMARY KEY,
+          scope TEXT NOT NULL CHECK (scope IN ('donation_intent', 'password_reset')),
+          key_hash TEXT NOT NULL,
+          subject_key_hash TEXT,
+          claimed_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        CREATE TABLE audit_logs (
+          id TEXT PRIMARY KEY,
+          action TEXT NOT NULL,
+          entity_id TEXT NOT NULL,
+          rate_limit_claim_id TEXT,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO security_rate_limit_claims (id, scope, key_hash, claimed_at, expires_at)
+          VALUES ('first_new_claim', 'password_reset', 'hashed-source-account', '2026-07-04T12:00:00.000Z', '2026-07-04T12:15:00.000Z');
+        INSERT INTO audit_logs (id, action, entity_id, rate_limit_claim_id, created_at)
+          VALUES ('late_legacy_audit', 'PASSWORD_RESET_REQUESTED', 'user_operator', NULL, '2026-07-04T12:01:00.000Z');`);
+        const repo = new Repository(sqliteD1(sqlite));
+
+        const admitted = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            repo.claimPasswordResetBudgets(
+              "hashed-source-account",
+              "hashed-account",
+              "user_operator",
+              "2026-07-04T12:02:00.000Z",
+              "2026-07-04T11:47:00.000Z",
+              "2026-07-04T12:17:00.000Z",
+              3,
+              3
+            )
+          )
+        );
+
+        expect(admitted.filter(Boolean)).toHaveLength(2);
+        expect(
+          sqlite
+            .prepare(
+              `SELECT COUNT(*) AS count
+                 FROM security_rate_limit_claims
+                WHERE scope = 'password_reset'
+                  AND subject_key_hash = ?`
+            )
+            .get("hashed-account")
+        ).toEqual({ count: 2 });
+      } finally {
+        sqlite.close();
+      }
+    });
+
+    it("keeps aggregate login buckets independent and deletes expired buckets during scheduled cleanup", async () => {
+      const db = new InMemoryD1();
+      db.loginRateLimits.set("expired-hash", {
+        window_started_at: "2026-07-04T11:00:00.000Z",
+        attempt_count: 60,
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+      db.securityRateLimitClaims.push({
+        id: "expired-claim",
+        scope: "password_reset",
+        key_hash: "expired-hash",
+        claimed_at: "2026-07-04T11:00:00.000Z",
+        expires_at: "2026-07-04T11:15:00.000Z"
+      });
+
+      const otherIp = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "192.0.2.18"
+          },
+          body: JSON.stringify({ email: "independent@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(otherIp.status).toBe(401);
+      await worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        env(db)
+      );
+      expect(db.loginRateLimits.has("expired-hash")).toBe(false);
+      expect(db.loginRateLimits.size).toBe(1);
+      expect(db.securityRateLimitClaims).toHaveLength(0);
+    });
+
+    it("blocks the sixty-first login attempt in the shared unknown IP bucket", async () => {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 60; index += 1) {
+        const response = await worker.fetch(
+          new Request("https://example.org/api/auth/login", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: `unknown-${index}@example.org`, password: "invalid" })
+          }),
+          env(db)
+        );
+        expect(response.status).toBe(401);
+      }
+
+      const denied = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "unknown-sixty-first@example.org", password: "invalid" })
+        }),
+        env(db)
+      );
+
+      expect(denied.status).toBe(429);
+      await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
+      expect([...db.loginRateLimits.keys()]).toHaveLength(1);
+    });
+  });
+
   it("blocks the sixth failed login within 15 minutes without attempting authentication", async () => {
     const db = new InMemoryD1();
     // Five recent failures inside the window, keyed on the normalized (lowercase) email.
@@ -299,7 +863,7 @@ describe("auth rate limiting", () => {
     const response = await worker.fetch(loginRequest("olduser@example.org"), env(db));
 
     // No such user exists, so the credential error surfaces (not the throttle).
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     // A fresh LOGIN_FAILED audit is recorded for this attempt.
     const recent = db.audits.filter((audit) => audit.action === "LOGIN_FAILED");
@@ -312,7 +876,7 @@ describe("auth rate limiting", () => {
 
     const response = await worker.fetch(loginRequest("nobody@example.org"), env(db));
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "LOGIN_FAILED", entity_type: "user", entity_id: "nobody@example.org", summary: "Credenciales inválidas" })
@@ -411,36 +975,401 @@ describe("auth rate limiting", () => {
       disabled_at: ""
     });
     const sentMessages: unknown[] = [];
-    // Three recent reset requests inside the window — the next one must be throttled.
+    const sourceAccountKey = await sha256Hex(utf8Bytes("password-reset:user_operator:unknown"));
     for (let i = 0; i < 3; i += 1) {
-      seedAudit(db, "PASSWORD_RESET_REQUESTED", "user_operator", `2026-07-04T11:5${i}:00.000Z`);
+      db.securityRateLimitClaims.push({
+        id: `reset_rate_${i}`,
+        scope: "password_reset",
+        key_hash: sourceAccountKey,
+        claimed_at: `2026-07-04T11:5${i}:00.000Z`,
+        expires_at: "2026-07-04T12:15:00.000Z"
+      });
     }
 
-    const response = await worker.fetch(
+    const auditCountBefore = db.audits.length;
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: "cf-email-reset" };
+        }
+      } as SendEmail
+    });
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email: "operator@example.org" })
       }),
-      env(db, {
-        MOCK_EXTERNAL_SERVICES: "false",
-        EMAIL_FROM: "legacy-contact-6@example.com",
-        EMAIL: {
-          send: async (message: unknown) => {
-            sentMessages.push(message);
-            return { messageId: "cf-email-reset" };
-          }
-        } as SendEmail
-      })
+      runtime
     );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ ok: true });
     expect(db.resetTokens).toHaveLength(0);
     expect(sentMessages).toHaveLength(0);
-    expect(db.audits).toContainEqual(
-      expect.objectContaining({ action: "PASSWORD_RESET_THROTTLED", entity_type: "user", entity_id: "user_operator" })
+    expect(db.audits).toHaveLength(auditCountBefore);
+    expect(db.audits.some((row) => row.action === "PASSWORD_RESET_THROTTLED")).toBe(false);
+  });
+
+  it.each([
+    ["active", true],
+    ["unknown", false]
+  ] as const)("schedules the same background reset unit for an %s account", async (_label, active) => {
+    const db = new InMemoryD1();
+    if (active) {
+      db.users.push({
+        id: "user_reset",
+        email: "candidate@example.org",
+        name: "Reset Candidate",
+        role: "ADMIN",
+        password_hash: "old-hash",
+        password_salt: "old-salt",
+        disabled_at: ""
+      });
+    }
+    const tasks: Promise<unknown>[] = [];
+    const response = await worker.fetch(
+      new Request("https://example.org/api/auth/password-reset/request", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "CF-Connecting-IP": "198.51.100.23" },
+        body: JSON.stringify({ email: "candidate@example.org" })
+      }),
+      env(db),
+      executionContextCapturing(tasks)
     );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ ok: true });
+    expect(tasks).toHaveLength(1);
+    await Promise.all(tasks);
+    expect(db.resetTokens).toHaveLength(active ? 1 : 0);
+  });
+});
+
+describe("session logout", () => {
+  it("revokes the presented bearer on the server and remains idempotent", async () => {
+    const db = new InMemoryD1();
+    const rawToken = "copied-session-token";
+    db.users.push({
+      id: "user_admin",
+      email: "admin@example.org",
+      name: "Admin",
+      role: "ADMIN",
+      password_hash: "hash",
+      password_salt: "salt",
+      disabled_at: null
+    });
+    db.sessions.push({
+      id: "session_logout",
+      user_id: "user_admin",
+      token_hash: await sha256Hex(utf8Bytes(rawToken)),
+      expires_at: "2099-01-01T00:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z",
+      revoked_at: null
+    });
+    const runtime = env(db);
+    const authorization = { Authorization: `Bearer ${rawToken}` };
+
+    const before = await worker.fetch(new Request("https://example.org/api/users", { headers: authorization }), runtime);
+    const logout = await worker.fetch(
+      new Request("https://example.org/api/auth/logout", { method: "POST", headers: authorization }),
+      runtime
+    );
+    const after = await worker.fetch(new Request("https://example.org/api/users", { headers: authorization }), runtime);
+    const repeated = await worker.fetch(
+      new Request("https://example.org/api/auth/logout", { method: "POST", headers: authorization }),
+      runtime
+    );
+    const missing = await worker.fetch(new Request("https://example.org/api/auth/logout", { method: "POST" }), runtime);
+
+    expect(before.status).toBe(200);
+    expect(logout.status).toBe(204);
+    expect(db.sessions[0].revoked_at).toBeTruthy();
+    expect(after.status).toBe(401);
+    expect(repeated.status).toBe(204);
+    expect(missing.status).toBe(401);
+  });
+});
+
+describe("credential-current session issuance", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it.each(["self-reset", "admin-reset"] as const)(
+    "does not issue a session when %s wins after password verification",
+    async (mutation) => {
+      const db = new InMemoryD1();
+      const runtime = env(db);
+      const old = await hashPassword("Old#Password2026", "old-salt", {
+        enforcePolicy: false
+      });
+      db.users.push({
+        id: "user_race",
+        email: "race@example.org",
+        name: "Race",
+        role: "OPERATOR",
+        password_hash: old.hash,
+        password_salt: old.salt,
+        disabled_at: null
+      });
+
+      if (mutation === "self-reset") {
+        const resetToken = "self-reset-token";
+        db.resetTokens.push({
+          id: "reset_race",
+          user_id: "user_race",
+          token_hash: await sha256Hex(utf8Bytes(resetToken)),
+          expires_at: "2026-07-04T13:00:00.000Z",
+          used_at: null
+        });
+        db.beforeCredentialGuardedSessionBatch = async () => {
+          db.beforeCredentialGuardedSessionBatch = null;
+          await new AuthService(runtime).confirmPasswordReset(resetToken, "New#Password2026");
+        };
+      } else {
+        db.beforeCredentialGuardedSessionBatch = async () => {
+          db.beforeCredentialGuardedSessionBatch = null;
+          await new AuthService(runtime).resetUserPassword("user_race", "Admin#Password2026");
+        };
+      }
+
+      await expect(
+        new AuthService(runtime).login("race@example.org", "Old#Password2026")
+      ).rejects.toThrow("Credenciales inválidas");
+      expect(db.sessions).toHaveLength(0);
+    }
+  );
+
+  it("does not prune valid sessions when a stale credential guard loses", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const old = await hashPassword("Old#Password2026", "old-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_stale",
+      email: "stale@example.org",
+      name: "Stale",
+      role: "OPERATOR",
+      password_hash: old.hash,
+      password_salt: old.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `session_${index}`,
+        user_id: "user_stale",
+        token_hash: `existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      db.beforeCredentialGuardedSessionBatch = null;
+      await new AuthService(runtime).resetUserPassword(
+        "user_stale",
+        "Changed#Password2026"
+      );
+    };
+
+    await expect(
+      new AuthService(runtime).login("stale@example.org", "Old#Password2026")
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.sessions.map((row) => row.id)).toEqual([
+      "session_0",
+      "session_1",
+      "session_2",
+      "session_3",
+      "session_4",
+      "session_5",
+      "session_6",
+      "session_7"
+    ]);
+  });
+
+  it("does not issue or prune sessions when user is disabled after password verification", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    const passwordHash = `pbkdf2$100000$${stored.hash}`;
+    db.users.push({
+      id: "user_disabled_race",
+      email: "disabled-race@example.org",
+      name: "Disabled Race",
+      role: "OPERATOR",
+      password_hash: passwordHash,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `disabled_session_${index}`,
+        user_id: "user_disabled_race",
+        token_hash: `disabled_existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+    const sessionsBefore = structuredClone(db.sessions);
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      db.users[0].disabled_at = "2026-07-04T12:00:00.000Z";
+    };
+
+    await expect(
+      new AuthService(runtime).login(
+        "disabled-race@example.org",
+        "Valid#Password2026"
+      )
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.users[0]).toMatchObject({
+      password_hash: passwordHash,
+      password_salt: stored.salt,
+      disabled_at: "2026-07-04T12:00:00.000Z"
+    });
+    expect(db.sessions).toStrictEqual(sessionsBefore);
+  });
+
+  it("does not issue a session when an email change wins after password verification", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_email_race",
+      email: "before@example.org",
+      name: "Email Race",
+      role: "OPERATOR",
+      password_hash: stored.hash,
+      password_salt: stored.salt,
+      disabled_at: null,
+      auth_generation: 0,
+      created_at: "2026-07-04T11:00:00.000Z",
+      updated_at: "2026-07-04T11:00:00.000Z"
+    });
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      await new Repository(runtime.DB).updateUser("user_email_race", {
+        email: "after@example.org"
+      });
+    };
+
+    await expect(
+      new AuthService(runtime).login("before@example.org", "Valid#Password2026")
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.users[0]).toMatchObject({ email: "after@example.org", auth_generation: 1 });
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("does not issue a session after a disable and re-enable cycle completed post-verification", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_reenabled_race",
+      email: "reenabled@example.org",
+      name: "Re-enabled Race",
+      role: "OPERATOR",
+      password_hash: stored.hash,
+      password_salt: stored.salt,
+      disabled_at: null,
+      auth_generation: 0,
+      created_at: "2026-07-04T11:00:00.000Z",
+      updated_at: "2026-07-04T11:00:00.000Z"
+    });
+    db.beforeCredentialGuardedSessionBatch = async () => {
+      const repository = new Repository(runtime.DB);
+      await repository.updateUser("user_reenabled_race", { disabled: true });
+      await repository.updateUser("user_reenabled_race", { disabled: false });
+    };
+
+    await expect(
+      new AuthService(runtime).login("reenabled@example.org", "Valid#Password2026")
+    ).rejects.toThrow("Credenciales inválidas");
+    expect(db.users[0]).toMatchObject({ disabled_at: null, auth_generation: 2 });
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("keeps at most eight active session rows and evicts the oldest bearer", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_cap",
+      email: "cap@example.org",
+      name: "Cap",
+      role: "VIEWER",
+      password_hash: stored.hash,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+    for (let index = 0; index < 8; index += 1) {
+      db.sessions.push({
+        id: `session_${index}`,
+        user_id: "user_cap",
+        token_hash: `existing_${index}`,
+        expires_at: "2026-07-05T12:00:00.000Z",
+        created_at: `2026-07-04T11:${String(index).padStart(2, "0")}:00.000Z`,
+        revoked_at: null
+      });
+    }
+
+    const newest = await new AuthService(runtime).login(
+      "cap@example.org",
+      "Valid#Password2026"
+    );
+
+    expect(db.sessions).toHaveLength(8);
+    expect(db.sessions.some((row) => row.id === "session_0")).toBe(false);
+    const newestTokenHash = await sha256Hex(utf8Bytes(newest.token));
+    expect(
+      db.sessions.some((row) => row.token_hash === newestTokenHash)
+    ).toBe(true);
+  });
+
+  it("keeps concurrent committed session rows at or below eight", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
+      enforcePolicy: false
+    });
+    db.users.push({
+      id: "user_concurrent_cap",
+      email: "concurrent-cap@example.org",
+      name: "Concurrent Cap",
+      role: "VIEWER",
+      password_hash: `pbkdf2$100000$${stored.hash}`,
+      password_salt: stored.salt,
+      disabled_at: null
+    });
+
+    const logins = await Promise.all(
+      Array.from({ length: 9 }, () =>
+        new AuthService(runtime).login(
+          "concurrent-cap@example.org",
+          "Valid#Password2026"
+        )
+      )
+    );
+
+    expect(logins).toHaveLength(9);
+    expect(db.sessions).toHaveLength(8);
+    expect(db.maxCommittedSessionRows).toBe(8);
   });
 });
 
@@ -474,6 +1403,45 @@ describe("donation intents", () => {
     });
   }
 
+  it.each([
+    [undefined, validIntentBody()],
+    ["preview", validIntentBody()],
+    [undefined, { amount: "25.00", giftType: "DIEZMO" }],
+    ["preview", { amount: "25.00", giftType: "DIEZMO" }]
+  ] as const)("rejects payment creation in APP_ENV %s before DB or Wompi work", async (appEnv, body) => {
+    const db = new InMemoryD1();
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const response = await worker.fetch(
+      intentRequest(body as Record<string, unknown>),
+      env(db, { APP_ENV: appEnv })
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "payment_collection_disabled"
+    });
+    expect(db.preparedSql).toHaveLength(0);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it("rejects payment creation for a non-string runtime APP_ENV before DB or Wompi work", async () => {
+    const db = new InMemoryD1();
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const response = await worker.fetch(
+      intentRequest(validIntentBody()),
+      env(db, { APP_ENV: 42 } as unknown as Partial<Env>)
+    );
+
+    expect(response.status).toBe(503);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "payment_collection_disabled"
+    });
+    expect(db.preparedSql).toHaveLength(0);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("creates a PENDING intent, attaches a mock Wompi link, and returns all three link fields", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
@@ -496,6 +1464,7 @@ describe("donation intents", () => {
     expect(intent.donor_email).toBeNull();
     expect(intent.client_ip).toBe("203.0.113.7");
     expect(intent.wompi_url_enlace).toBe(payload.urlEnlace);
+    expect(intent.rate_limit_claim_id).toBe(db.securityRateLimitClaims[0].id);
 
     // Audit records the intent creation with amount + document type, never the number.
     const audit = db.audits.find((row) => row.action === "DONATION_INTENT_CREATED");
@@ -506,9 +1475,50 @@ describe("donation intents", () => {
     expect(metadata).not.toContain("04182769");
   });
 
+  it("atomically admits at most five overlapping intent creations from one IP", async () => {
+    const db = new InMemoryD1();
+
+    const responses = await Promise.all(
+      Array.from({ length: 20 }, () => worker.fetch(intentRequest(validIntentBody()), env(db)))
+    );
+
+    expect(responses.filter((response) => response.status === 201)).toHaveLength(5);
+    expect(responses.filter((response) => response.status === 429)).toHaveLength(15);
+    expect(db.donationIntents).toHaveLength(5);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(5);
+    const [claim] = db.securityRateLimitClaims;
+    expect(claim.key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(claim.key_hash).not.toContain("203.0.113.7");
+  });
+
+  it("counts pre-ledger intents while atomically admitting overlapping creations", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      const db = new InMemoryD1();
+      for (let index = 0; index < 2; index += 1) {
+        db.donationIntents.push({
+          id: `legacy_intent_${index}`,
+          client_ip: "203.0.113.7",
+          created_at: `2026-07-04T11:5${index}:00.000Z`
+        });
+      }
+
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, () => worker.fetch(intentRequest(validIntentBody()), env(db)))
+      );
+
+      expect(responses.filter((response) => response.status === 201)).toHaveLength(3);
+      expect(responses.filter((response) => response.status === 429)).toHaveLength(17);
+      expect(db.donationIntents).toHaveLength(5);
+      expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_intent")).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("rejects an oversized public intent body with 413 before any persistence", async () => {
     // A body over the 16 KiB cap is refused up front, so oversized spam never
-    // reaches validation or D1 (the per-IP throttle counts only persisted rows).
+    // reaches validation or the atomic D1 admission ledger.
     const db = new InMemoryD1();
     const response = await worker.fetch(
       intentRequest(validIntentBody({ filler: "x".repeat(17 * 1024) })),
@@ -621,7 +1631,7 @@ describe("donation intents", () => {
     await expect(tooLong.json()).resolves.toMatchObject({ error: "invalid_razon_social" });
   });
 
-  it("bounds pasaporte (03) and carnet (02) documents to 5-30 chars and stores them uppercase", async () => {
+  it("bounds pasaporte (03) and carnet (02) documents to 5-20 chars and stores them uppercase", async () => {
     const pasaporteDb = new InMemoryD1();
     const pasaporte = await worker.fetch(
       intentRequest(validIntentBody({ donorDocumentType: "03", donorDocument: "ab-123456" })),
@@ -646,7 +1656,7 @@ describe("donation intents", () => {
     await expect(tooShort.json()).resolves.toMatchObject({ error: "invalid_identity_document" });
 
     const tooLong = await worker.fetch(
-      intentRequest(validIntentBody({ donorDocumentType: "02", donorDocument: "X".repeat(31) })),
+      intentRequest(validIntentBody({ donorDocumentType: "02", donorDocument: "X".repeat(21) })),
       env(new InMemoryD1())
     );
     expect(tooLong.status).toBe(400);
@@ -1025,17 +2035,24 @@ describe("donation intents", () => {
       const response = await worker.fetch(draftRequest({ amount: "25.50", giftType: "DIEZMO" }), env(db));
 
       expect(response.status).toBe(201);
-      const payload = (await response.json()) as { intentId: string; urlEnlace: string; urlEnlaceLargo: string; datosToken?: string };
-      // Response shape is unchanged from the full create, and the link is minted with
-      // identificadorEnlaceComercio = intent id (mock echoes the id into the URL).
+      const payload = (await response.json()) as {
+        intentId: string;
+        datosToken?: string;
+        urlEnlace?: string;
+        urlEnlaceLargo?: string;
+      };
+      // Preminting remains an internal latency optimization. The payment capability
+      // stays server-side until /datos atomically commits the fiscal fields.
       expect(payload.intentId).toMatch(/^di_/);
-      expect(payload.urlEnlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
-      expect(payload.urlEnlaceLargo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
       expect(payload.datosToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(payload).not.toHaveProperty("urlEnlace");
+      expect(payload).not.toHaveProperty("urlEnlaceLargo");
 
       expect(db.donationIntents).toHaveLength(1);
       const intent = db.donationIntents[0];
       expect(intent.status).toBe("LINK_CREATED");
+      expect(intent.wompi_url_enlace).toBe(`https://mock.wompi.sv/enlace/${payload.intentId}`);
+      expect(intent.wompi_url_enlace_largo).toBe(`https://mock.wompi.sv/enlace-largo/${payload.intentId}`);
       expect(intent.amount_cents).toBe(2550);
       expect(intent.gift_type).toBe("DIEZMO");
       // The draft marker: donor document + address stay NULL until the datos call.
@@ -1046,6 +2063,70 @@ describe("donation intents", () => {
       expect(intent.client_ip).toBe("203.0.113.7");
       expect(String(intent.datos_token_hash)).toMatch(/^[a-f0-9]{64}$/);
       expect(intent.datos_token_hash).not.toBe(payload.datosToken);
+    });
+
+    it("rejects cross-site simple and mismatched-origin JSON before any side effect", async () => {
+      const db = new InMemoryD1();
+      const simpleResponse = await worker.fetch(
+        new Request("https://example.org/api/donations/intent", {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain;charset=UTF-8",
+            Origin: "https://attacker.example",
+            "Sec-Fetch-Site": "cross-site",
+            "cf-connecting-ip": "203.0.113.7"
+          },
+          body: JSON.stringify({ amount: "25.50", giftType: "DIEZMO" })
+        }),
+        env(db)
+      );
+      const mismatchedOriginResponse = await worker.fetch(
+        new Request("https://example.org/api/donations/intent", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://attacker.example",
+            "Sec-Fetch-Site": "same-site",
+            "cf-connecting-ip": "203.0.113.7"
+          },
+          body: JSON.stringify({ amount: "25.50", giftType: "DIEZMO" })
+        }),
+        env(db)
+      );
+
+      expect(simpleResponse.status).toBe(415);
+      expect(mismatchedOriginResponse.status).toBe(403);
+      expect(db.securityRateLimitClaims).toHaveLength(0);
+      expect(db.donationIntents).toHaveLength(0);
+      expect(db.audits).toHaveLength(0);
+    });
+
+    it("accepts same-origin JSON through the public mutation admission check", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(
+        draftRequest(
+          { amount: "25.50", giftType: "DIEZMO" },
+          { Origin: "https://example.org", "Sec-Fetch-Site": "same-origin" }
+        ),
+        env(db)
+      );
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
+    });
+
+    it("accepts the request origin when APP_ORIGIN names a different canonical host", async () => {
+      const db = new InMemoryD1();
+      const response = await worker.fetch(
+        draftRequest(
+          { amount: "25.50", giftType: "DIEZMO" },
+          { Origin: "https://example.org", "Sec-Fetch-Site": "same-origin" }
+        ),
+        env(db, { APP_ORIGIN: "https://canonical.example.org" })
+      );
+
+      expect(response.status).toBe(201);
+      expect(db.donationIntents).toHaveLength(1);
     });
 
     it("mints a draft with no gift type at all (US / legacy background mint)", async () => {
@@ -1175,7 +2256,11 @@ describe("donation intents", () => {
       const response = await worker.fetch(datosRequest("di_draft_1", validDatos), env(db));
 
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ ok: true });
+      await expect(response.json()).resolves.toEqual({
+        intentId: "di_draft_1",
+        urlEnlace: "https://mock.wompi.sv/enlace/di_draft_1",
+        urlEnlaceLargo: "https://mock.wompi.sv/enlace-largo/di_draft_1"
+      });
       // No outbound HTTP: datos is D1-only.
       expect(fetchSpy).not.toHaveBeenCalled();
 
@@ -1355,8 +2440,15 @@ describe("donation intents", () => {
     it("applies the per-IP throttle to the public datos endpoint", async () => {
       const db = new InMemoryD1();
       await seedDraft(db);
+      const keyHash = await sha256Hex(utf8Bytes("203.0.113.7"));
       for (let i = 0; i < 5; i += 1) {
-        db.donationIntents.push({ id: `di_seed_${i}`, client_ip: "203.0.113.7", created_at: "2026-07-04T12:00:00.000Z" });
+        db.securityRateLimitClaims.push({
+          id: `datos_rate_${i}`,
+          scope: "donation_datos",
+          key_hash: keyHash,
+          claimed_at: "2026-07-04T12:00:00.000Z",
+          expires_at: "2026-07-04T12:15:00.000Z"
+        });
       }
       vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:05:00.000Z") });
       try {
@@ -1368,8 +2460,66 @@ describe("donation intents", () => {
         vi.useRealTimers();
       }
     });
+
+    it("counts failed datos capability guesses even when no intent rows are created", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+      const statuses: number[] = [];
+
+      for (let index = 0; index < 6; index += 1) {
+        const response = await worker.fetch(
+          datosRequest("di_draft_1", validDatos, { "X-Donation-Datos-Token": `wrong-${index}` }),
+          env(db)
+        );
+        statuses.push(response.status);
+      }
+
+      expect(statuses).toEqual([409, 409, 409, 409, 409, 429]);
+      expect(db.donationIntents).toHaveLength(1);
+      expect(db.donationIntents[0].donor_document).toBeNull();
+      expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "donation_datos")).toHaveLength(5);
+      expect(db.securityRateLimitClaims.some((claim) => claim.scope === "donation_intent")).toBe(false);
+    });
   });
 });
+
+function seededUserLifecycleDb(): InMemoryD1 {
+  const db = new InMemoryD1();
+  db.sessionUser = {
+    id: "user_owner",
+    email: "owner@example.org",
+    name: "Owner",
+    role: "OWNER"
+  };
+  db.users.push({
+    id: "user_target",
+    email: "target@example.org",
+    name: "Target",
+    role: "OPERATOR",
+    password_hash: "target-hash",
+    password_salt: "target-salt",
+    disabled_at: null,
+    updated_at: "2026-07-03T12:00:00.000Z"
+  });
+  for (let index = 0; index < 2; index += 1) {
+    db.sessions.push({
+      id: `session_lifecycle_${index}`,
+      user_id: "user_target",
+      token_hash: `lifecycle_token_${index}`,
+      expires_at: "2026-07-05T12:00:00.000Z",
+      created_at: `2026-07-04T11:0${index}:00.000Z`,
+      revoked_at: null
+    });
+    db.resetTokens.push({
+      id: `reset_lifecycle_${index}`,
+      user_id: "user_target",
+      token_hash: `reset_hash_${index}`,
+      expires_at: "2026-07-05T12:00:00.000Z",
+      used_at: null
+    });
+  }
+  return db;
+}
 
 describe("password reset", () => {
   beforeEach(() => {
@@ -1397,7 +2547,7 @@ describe("password reset", () => {
     const sentMessages: Array<{ to: string; subject: string; text: string }> = [];
     db.users.push(knownUser());
 
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1419,12 +2569,16 @@ describe("password reset", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
     expect(db.resetTokens).toHaveLength(1);
     expect(sentMessages).toHaveLength(1);
-    const link = /https:\/\/example\.org\/\?reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
+    const link = /https:\/\/example\.org\/#reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
     expect(link).toBeTruthy();
-    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/?reset=${link![1]}"`);
+    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/#reset=${link![1]}"`);
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
-    expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_REQUESTED", entity_id: "user_operator" }));
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "PASSWORD_RESET_REQUESTED",
+      entity_id: "user_operator",
+      rate_limit_claim_id: db.securityRateLimitClaims[0].id
+    }));
   });
 
   it("builds the reset link from APP_ORIGIN even when the request carries a different origin", async () => {
@@ -1435,7 +2589,7 @@ describe("password reset", () => {
     // Host-header poisoning: the request arrives via an attacker-controlled origin,
     // but the emailed reset link must use the canonical APP_ORIGIN so the token
     // cannot be captured by pointing the link at an attacker host.
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://attacker.example/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1456,16 +2610,16 @@ describe("password reset", () => {
 
     expect(response.status).toBe(200);
     expect(sentMessages).toHaveLength(1);
-    expect(sentMessages[0].text).toContain("https://app.example.org/?reset=");
-    expect(sentMessages[0].text).not.toContain("https://attacker.example/?reset=");
-    expect(sentMessages[0].html).toContain('href="https://app.example.org/?reset=');
+    expect(sentMessages[0].text).toContain("https://app.example.org/#reset=");
+    expect(sentMessages[0].text).not.toContain("https://attacker.example/#reset=");
+    expect(sentMessages[0].html).toContain('href="https://app.example.org/#reset=');
   });
 
   it("returns ok without creating tokens or sending email for unknown accounts", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
 
-    const response = await worker.fetch(
+    const response = await fetchAndWaitUntil(
       new Request("https://example.org/api/auth/password-reset/request", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1487,6 +2641,241 @@ describe("password reset", () => {
     expect(db.resetTokens).toHaveLength(0);
     expect(sentMessages).toHaveLength(0);
   });
+
+  it("atomically admits only three overlapping reset requests for one account", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: `reset-${sentMessages.length}` };
+        }
+      } as SendEmail
+    });
+    const request = () =>
+      fetchAndWaitUntil(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(3);
+    expect(db.resetTokens).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(3);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
+    expect(db.securityRateLimitClaims[0].key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(db.securityRateLimitClaims[0].key_hash).not.toContain("user_operator");
+  });
+
+  it("counts a pre-migration account audit against the account-wide reset budget", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    db.audits.push({
+      id: "legacy_reset_audit",
+      action: "PASSWORD_RESET_REQUESTED",
+      entity_id: "user_operator",
+      created_at: "2026-07-04T11:55:00.000Z"
+    });
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: `reset-${sentMessages.length}` };
+        }
+      } as SendEmail
+    });
+    const request = () =>
+      fetchAndWaitUntil(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(2);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(2);
+  });
+
+  it("does not let rotating sources multiply one account's reset budget", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const sentMessages: unknown[] = [];
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: {
+        send: async (message: unknown) => {
+          sentMessages.push(message);
+          return { messageId: `reset-${sentMessages.length}` };
+        }
+      } as SendEmail
+    });
+    const request = (callerIp: string) =>
+      fetchAndWaitUntil(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "cf-connecting-ip": callerIp },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, index) => request(`198.51.100.${index + 1}`))
+    );
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(sentMessages).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(3);
+    const claims = db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset");
+    expect(claims).toHaveLength(3);
+    expect(new Set(claims.map((claim) => claim.key_hash)).size).toBe(3);
+    expect(new Set(claims.map((claim) => claim.subject_key_hash)).size).toBe(1);
+    expect(claims[0].subject_key_hash).toMatch(/^[a-f0-9]{64}$/);
+    expect(claims[0].subject_key_hash).not.toContain("user_operator");
+  });
+
+  it("consumes reset quota and invalidates each exact token when delivery fails", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const send = vi.fn().mockRejectedValue(new Error("provider unavailable"));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as unknown as SendEmail
+    });
+    const request = () =>
+      fetchAndWaitUntil(
+        new Request("https://example.org/api/auth/password-reset/request", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: "operator@example.org" })
+        }),
+        runtime
+      );
+
+    const responses = await Promise.all(Array.from({ length: 20 }, request));
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
+    expect(db.resetTokens).toHaveLength(3);
+    expect(db.resetTokens.every((token) => Boolean(token.used_at))).toBe(true);
+  });
+
+  it("keeps earlier unused reset tokens valid until one reset succeeds", async () => {
+    const db = new InMemoryD1();
+    db.users.push(knownUser());
+    const runtime = env(db);
+    const auth = new AuthService(runtime);
+
+    const first = await auth.createPasswordResetToken("operator@example.org");
+    const second = await auth.createPasswordResetToken("operator@example.org");
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(db.resetTokens).toHaveLength(2);
+    expect(db.resetTokens[0].used_at).toBeNull();
+    expect(db.resetTokens[1].used_at).toBeNull();
+  });
+
+  it.each(["email-change", "disable-reenable"] as const)(
+    "does not mint a reset token when %s wins after the account lookup",
+    async (mutation) => {
+      const db = new InMemoryD1();
+      const runtime = env(db);
+      db.users.push({
+        ...knownUser(),
+        disabled_at: null,
+        auth_generation: 0,
+        created_at: "2026-07-04T11:00:00.000Z",
+        updated_at: "2026-07-04T11:00:00.000Z"
+      });
+      db.beforeCredentialGuardedResetTokenInsert = async () => {
+        const repository = new Repository(runtime.DB);
+        if (mutation === "email-change") {
+          await repository.updateUser("user_operator", { email: "changed@example.org" });
+        } else {
+          await repository.updateUser("user_operator", { disabled: true });
+          await repository.updateUser("user_operator", { disabled: false });
+        }
+      };
+
+      const result = await new AuthService(runtime).createPasswordResetToken("operator@example.org");
+
+      expect(result).toBeNull();
+      expect(db.resetTokens).toHaveLength(0);
+      expect(db.users[0].auth_generation).toBe(mutation === "email-change" ? 1 : 2);
+    }
+  );
+
+  it.each(["self-reset", "admin-reset"] as const)(
+    "does not mint a reset token when a concurrent %s changes the password",
+    async (mutation) => {
+      const db = new InMemoryD1();
+      const runtime = env(db);
+      db.users.push({
+        ...knownUser(),
+        disabled_at: null,
+        auth_generation: 0,
+        created_at: "2026-07-04T11:00:00.000Z",
+        updated_at: "2026-07-04T11:00:00.000Z"
+      });
+      const existingTokenHash = await sha256Hex(utf8Bytes("existing-reset-token"));
+      db.resetTokens.push({
+        id: "reset_existing",
+        user_id: "user_operator",
+        token_hash: existingTokenHash,
+        expires_at: "2099-07-04T23:00:00.000Z",
+        used_at: null
+      });
+      db.beforeCredentialGuardedResetTokenInsert = async () => {
+        const repository = new Repository(runtime.DB);
+        if (mutation === "self-reset") {
+          await repository.resetPasswordWithToken(
+            "user_operator",
+            existingTokenHash,
+            "self-reset-hash",
+            "self-reset-salt"
+          );
+        } else {
+          await repository.setUserPassword(
+            "user_operator",
+            "admin-reset-hash",
+            "admin-reset-salt"
+          );
+        }
+      };
+
+      const result = await new AuthService(runtime).createPasswordResetToken("operator@example.org");
+
+      expect(result).toBeNull();
+      expect(db.resetTokens).toHaveLength(1);
+      expect(db.resetTokens[0].used_at).toEqual(expect.any(String));
+      expect(db.users[0]).toMatchObject({
+        password_hash: `${mutation}-hash`,
+        password_salt: `${mutation}-salt`
+      });
+    }
+  );
 
   it("resets the password, revokes sessions, and consumes the token", async () => {
     const db = new InMemoryD1();
@@ -1515,6 +2904,46 @@ describe("password reset", () => {
     expect(db.sessions[0].revoked_at).toBeTruthy();
     expect(db.resetTokens[0].used_at).toBeTruthy();
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "PASSWORD_RESET_COMPLETED", entity_id: "user_operator" }));
+  });
+
+  it("serializes reset redemption with lifecycle invalidation in both orders", async () => {
+    const firstDb = seededUserLifecycleDb();
+    const firstEnv = env(firstDb);
+    const firstRawToken = "lifecycle-reset-first";
+    firstDb.resetTokens[0].token_hash = await sha256Hex(utf8Bytes(firstRawToken));
+    firstDb.beforePasswordResetBatch = async () => {
+      firstDb.beforePasswordResetBatch = null;
+      await new Repository(firstEnv.DB).updateUser("user_target", {
+        email: "transitioned@example.org"
+      });
+    };
+
+    await expect(
+      new AuthService(firstEnv).confirmPasswordReset(
+        firstRawToken,
+        "New#Password2026"
+      )
+    ).rejects.toThrow(/válido|expiró/i);
+    expect(firstDb.users[0].email).toBe("transitioned@example.org");
+    expect(firstDb.users[0].password_hash).toBe("target-hash");
+    expect(firstDb.sessions.every((row) => row.revoked_at != null)).toBe(true);
+    expect(firstDb.resetTokens.every((row) => row.used_at != null)).toBe(true);
+
+    const secondDb = seededUserLifecycleDb();
+    const secondEnv = env(secondDb);
+    const secondRawToken = "reset-wins-first";
+    secondDb.resetTokens[0].token_hash = await sha256Hex(utf8Bytes(secondRawToken));
+    await new AuthService(secondEnv).confirmPasswordReset(
+      secondRawToken,
+      "New#Password2026"
+    );
+    await new Repository(secondEnv.DB).updateUser("user_target", {
+      email: "after-reset@example.org"
+    });
+    expect(secondDb.users[0].email).toBe("after-reset@example.org");
+    expect(secondDb.users[0].password_hash).not.toBe("target-hash");
+    expect(secondDb.sessions.every((row) => row.revoked_at != null)).toBe(true);
+    expect(secondDb.resetTokens.every((row) => row.used_at != null)).toBe(true);
   });
 
   it("invalidates every sibling password reset token after one succeeds", async () => {
@@ -2042,7 +3471,7 @@ describe("user administration", () => {
       env(db)
     );
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({ message: "Credenciales inválidas" });
     expect(db.users[0].password_hash).toBe(reset.hash);
     expect(db.sessions).toHaveLength(0);
@@ -2101,6 +3530,43 @@ describe("user administration", () => {
       entity_id: "user_operator"
     });
   });
+
+  it.each([
+    ["email", { email: "changed@example.org" }, true],
+    ["disable", { disabled: true }, true],
+    ["re-enable", { disabled: false }, true],
+    ["name", { name: "Changed Name" }, false],
+    ["role", { role: "ADMIN" }, false]
+  ] as const)(
+    "%s updates %s existing sessions and reset tokens",
+    async (_label, patch, invalidates) => {
+      const db = seededUserLifecycleDb();
+      if ("disabled" in patch && patch.disabled === false) {
+        db.users.find((row) => row.id === "user_target")!.disabled_at =
+          "2026-07-03T12:00:00.000Z";
+      }
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/users/user_target", {
+          method: "PATCH",
+          headers: {
+            Authorization: "Bearer test-token",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify(patch)
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(200);
+      expect(
+        db.sessions.every((row) => row.revoked_at != null)
+      ).toBe(invalidates);
+      expect(
+        db.resetTokens.every((row) => row.used_at != null)
+      ).toBe(invalidates);
+    }
+  );
 
   it("stops an ADMIN from creating or promoting a user to OWNER", async () => {
     const db = new InMemoryD1();
@@ -2182,6 +3648,142 @@ describe("user administration", () => {
     expect(patch.status).toBe(403);
     await expect(patch.json()).resolves.toMatchObject({ error: "owner_target_protected" });
     expect(db.users[0].disabled_at).toBe("");
+  });
+
+  it("rejects an ADMIN password reset when the target is promoted to OWNER before the write", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null
+    });
+    db.beforeGuardedUserMutation = () => {
+      db.users[0].role = "OWNER";
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target/password", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "Fresh#Password2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0]).toMatchObject({ role: "OWNER", password_hash: "old-hash", password_salt: "old-salt" });
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects an ADMIN patch when the target is promoted to OWNER before the write", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null
+    });
+    db.beforeGuardedUserMutation = () => {
+      db.users[0].role = "OWNER";
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Hijacked Owner" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ error: "owner_target_protected" });
+    expect(db.users[0]).toMatchObject({ role: "OWNER", name: "Target" });
+    expect(db.audits).toHaveLength(0);
+  });
+
+  it("rejects a stale ADMIN patch instead of undoing an overlapping disable", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null,
+      auth_generation: 0,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.beforeGuardedUserMutation = async () => {
+      await new Repository(runtime.DB).updateUser("user_target", { disabled: true });
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Stale Rename" })
+      }),
+      runtime
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "user_update_conflict" });
+    expect(db.users[0]).toMatchObject({
+      name: "Target",
+      email: "target@example.org",
+      disabled_at: expect.any(String),
+      auth_generation: 1
+    });
+    expect(db.audits.filter((audit) => audit.action === "USER_UPDATED")).toHaveLength(0);
+  });
+
+  it("rejects a stale OWNER rename instead of undoing an overlapping role promotion", async () => {
+    const db = new InMemoryD1();
+    const runtime = env(db);
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.users.push({
+      id: "user_target",
+      email: "target@example.org",
+      name: "Target",
+      role: "OPERATOR",
+      password_hash: "old-hash",
+      password_salt: "old-salt",
+      disabled_at: null,
+      auth_generation: 0,
+      created_at: "2026-06-26T01:46:47.015Z",
+      updated_at: "2026-06-26T01:46:47.015Z"
+    });
+    db.beforeGuardedUserMutation = async () => {
+      await new Repository(runtime.DB).updateUser("user_target", { role: "OWNER" }, true);
+    };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users/user_target", {
+        method: "PATCH",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ name: "Stale Rename" })
+      }),
+      runtime
+    );
+
+    expect(response.status).toBe(409);
+    expect(db.users[0]).toMatchObject({ name: "Target", role: "OWNER" });
+    expect(db.audits.filter((audit) => audit.action === "USER_UPDATED")).toHaveLength(0);
   });
 
   it("lets an OWNER create and promote users to OWNER", async () => {
@@ -2364,6 +3966,32 @@ describe("user administration", () => {
   });
 });
 
+function emailResendDb(): InMemoryD1 {
+  const db = new InMemoryD1();
+  db.sessionUser = {
+    id: "user_operator",
+    email: "operator@example.org",
+    name: "Operator",
+    role: "OPERATOR"
+  };
+  db.documents.push(testDocument());
+  return db;
+}
+
+function resendDocument(runtime: Env): Promise<Response> {
+  return worker.fetch(
+    new Request("https://example.org/api/documents/doc_1/resend", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer test-token",
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({})
+    }),
+    runtime
+  );
+}
+
 describe("document email resend", () => {
   it("sends receipts through the Cloudflare Email Service binding", async () => {
     const db = new InMemoryD1();
@@ -2534,13 +4162,16 @@ describe("document email resend", () => {
     );
   });
 
-  it("falls back to an HTTP email provider when Cloudflare requires verified destinations", async () => {
+  it("does not cross providers after an ambiguous Cloudflare email failure", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
     db.documents.push(testDocument());
     const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ id: "email_http_1" }), { status: 202 })
     );
+    const cloudflareSend = vi.fn(async () => {
+      throw new Error("provider accepted message before response channel closed");
+    });
 
     const response = await worker.fetch(
       new Request("https://example.org/api/documents/doc_1/resend", {
@@ -2554,36 +4185,97 @@ describe("document email resend", () => {
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
         EMAIL_FROM: "legacy-contact-6@example.com",
-        EMAIL_API_URL: "https://mail.example/send",
+        EMAIL_ARBITRARY_RECIPIENTS: "true",
+        EMAIL_PROVIDER_URL: "https://mail.example/send",
         EMAIL_API_KEY: "email-api-key",
-        EMAIL: {
-          send: async () => {
-            throw new Error("destination address is not a verified address");
-          }
-        } as SendEmail
+        EMAIL: { send: cloudflareSend } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "email_send_failed",
+      message: expect.stringContaining("response channel closed")
+    });
+    expect(cloudflareSend).toHaveBeenCalledTimes(1);
+    expect(providerFetch).not.toHaveBeenCalled();
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "FAILED",
+      provider_response_json: expect.stringContaining("response channel closed")
+    }));
+  });
+
+  it("preselects the HTTP provider when Cloudflare arbitrary recipients are not enabled", async () => {
+    const db = emailResendDb();
+    const cloudflareSend = vi.fn(async () => ({ messageId: "must-not-use-cloudflare" }));
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "email_http_selected" }), { status: 202 })
+    );
+
+    const response = await resendDocument(
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL_ARBITRARY_RECIPIENTS: "false",
+        EMAIL_PROVIDER_URL: "https://mail.example/send",
+        EMAIL_API_KEY: "email-api-key",
+        EMAIL: { send: cloudflareSend } as SendEmail
       })
     );
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ ok: true });
-    expect(providerFetch).toHaveBeenCalledWith("https://mail.example/send", expect.objectContaining({
-      method: "POST",
-      headers: expect.objectContaining({
-        Authorization: "Bearer email-api-key",
-        "Content-Type": "application/json"
-      })
-    }));
+    expect(cloudflareSend).not.toHaveBeenCalled();
+    expect(providerFetch).toHaveBeenCalledTimes(1);
     expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
       document_id: "doc_1",
-      to_email: "legacy-contact-2@example.com",
       status: "SENT",
       provider_response_json: JSON.stringify({
         provider: "http-email",
-        fallbackFrom: "cloudflare-email",
-        cloudflareError: "destination address is not a verified address",
-        response: { id: "email_http_1" }
+        response: { id: "email_http_selected" }
       })
     }));
+  });
+
+  it.each([
+    "http://mail.example/send",
+    "https://user:password@mail.example/send",
+    "not-a-url"
+  ])("never sends credentials to unsafe email provider endpoint %s", async (providerUrl) => {
+    const db = emailResendDb();
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "must-not-send" }), { status: 202 })
+    );
+    const response = await resendDocument(
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL_PROVIDER_URL: providerUrl,
+        EMAIL_API_KEY: "email-api-key"
+      })
+    );
+
+    expect(response.status).toBe(502);
+    expect(providerFetch).not.toHaveBeenCalled();
+  });
+
+  it("ignores the legacy owner-controlled EMAIL_API_URL", async () => {
+    const db = emailResendDb();
+    const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ id: "legacy-must-not-send" }), { status: 202 })
+    );
+    const response = await resendDocument(
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL_API_URL: "https://legacy-owner.example/send",
+        EMAIL_API_KEY: "email-api-key"
+      } as Partial<Env> & { EMAIL_API_URL: string })
+    );
+
+    expect(response.status).toBe(502);
+    expect(providerFetch).not.toHaveBeenCalled();
   });
 
   it("records and returns email failures when the provider is not configured", async () => {
@@ -2686,6 +4378,34 @@ describe("document contact email", () => {
     });
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "DTE_EMAIL_UPDATED", entity_id: "doc_1" }));
   });
+
+  it("rejects a donor-email correction while accepted-document finalization owns the row", async () => {
+    const db = new InMemoryD1();
+    const document = testDocument({
+      post_accept_finalized_at: null,
+      post_accept_finalization_claim_id: "finalize_active",
+      post_accept_finalization_claimed_at: "2026-07-14T15:00:00.000Z"
+    });
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(document);
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/email", {
+        method: "PATCH",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ email: "nuevo@example.org" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "document_finalization_pending" });
+    expect(db.documents[0].donor_email).toBe("legacy-contact-2@example.com");
+    expect(db.audits.some((audit) => audit.action === "DTE_EMAIL_UPDATED")).toBe(false);
+  });
 });
 
 describe("document JSON download", () => {
@@ -2757,6 +4477,122 @@ describe("document retry", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "environment_not_allowed" });
     expect(send).not.toHaveBeenCalled();
     expect(db.audits).toHaveLength(0);
+  });
+
+  it("allows exactly one of two concurrent retries to transmit a signed CDE", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      status: "SIGNED",
+      signed_jws: "signed-retry-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    }));
+    let documentReads = 0;
+    let releaseDocumentReads!: () => void;
+    const bothDocumentReads = new Promise<void>((resolve) => {
+      releaseDocumentReads = resolve;
+    });
+    db.beforeDocumentRead = async () => {
+      documentReads += 1;
+      if (documentReads === 2) releaseDocumentReads();
+      await bothDocumentReads;
+    };
+    const runtime = env(db);
+    const retry = () => worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      runtime
+    );
+
+    const responses = await Promise.all([retry(), retry()]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const conflict = responses.find((response) => response.status === 409)!;
+    await expect(conflict.json()).resolves.toMatchObject({ error: "document_retry_in_progress" });
+    expect(db.audits.filter((audit) => audit.action === "DTE_RETRIED")).toHaveLength(1);
+    expect(db.documents[0].status).toBe("ACCEPTED");
+  });
+
+  it("keeps the fiscal claim when a retry's MH outcome is unknown", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      status: "SIGNED",
+      signed_jws: "signed-ambiguous-retry-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockRejectedValueOnce(new Error("connection reset after request write"));
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+    const retry = () => worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      runtime
+    );
+
+    const first = await retry();
+    expect(first.status).toBe(500);
+    expect(db.documents[0]).toMatchObject({
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/),
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    });
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    const second = await retry();
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({ error: "fiscal_outcome_pending_reconciliation" });
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
+  it("releases a signed retry claim when MH authentication fails before dispatch", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      status: "SIGNED",
+      signed_jws: "signed-predispatch-retry-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response("auth unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+    const retry = () => worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/retry", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      runtime
+    );
+
+    expect((await retry()).status).toBe(500);
+    expect(db.documents[0].fiscal_operation_claim_id).toBeNull();
+    expect((await retry()).status).toBe(500);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("rebuilds a rejected Wompi CDE from the original webhook before retransmitting", async () => {
@@ -3101,6 +4937,241 @@ describe("document invalidation", () => {
     expect(document.status).toBe("ACCEPTED");
   });
 
+  it("rejects caller-supplied invalidation identity fields before signing", async () => {
+    const db = new InMemoryD1();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument());
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          tipoAnulacion: 2,
+          motivoAnulacion: "Prueba",
+          nombreResponsable: "Attacker",
+          tipDocResponsable: "13",
+          numDocResponsable: "00000000-0"
+        })
+      }),
+      env(db, { EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()) })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_invalidation_input" });
+    expect(db.dteEvents).toHaveLength(0);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("allows exactly one of two concurrent invalidations to create and transmit an event", async () => {
+    const db = new InMemoryD1();
+    const certPassword = "correct horse battery staple";
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({ donor_email: null }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml(certPassword),
+      MH_CERT_PASSWORD: certPassword
+    });
+    const invalidate = () => worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Prueba concurrente" })
+      }),
+      runtime
+    );
+
+    const responses = await Promise.all([invalidate(), invalidate()]);
+
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const conflict = responses.find((response) => response.status === 409)!;
+    await expect(conflict.json()).resolves.toMatchObject({ error: "document_fiscal_operation_in_progress" });
+    expect(db.dteEvents).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "DTE_INVALIDATED")).toHaveLength(1);
+    expect(db.documents[0].status).toBe("INVALIDATED");
+  });
+
+  it("does not redispatch an invalidation after an ambiguous MH 503 response", async () => {
+    const db = new InMemoryD1();
+    const certPassword = "correct horse battery staple";
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({ donor_email: null }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(new Response("MH unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml(certPassword),
+      MH_CERT_PASSWORD: certPassword,
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+    });
+    const invalidate = () => worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Resultado ambiguo" })
+      }),
+      runtime
+    );
+
+    expect((await invalidate()).status).toBe(500);
+    expect(db.documents[0]).toMatchObject({
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/),
+      fiscal_operation_kind: "INVALIDATION",
+      fiscal_operation_event_id: db.dteEvents[0].id
+    });
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    const second = await invalidate();
+    expect(second.status).toBe(409);
+    await expect(second.json()).resolves.toMatchObject({ error: "fiscal_outcome_pending_reconciliation" });
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+    expect(db.dteEvents).toHaveLength(1);
+  });
+
+  it("atomically fails the event and releases its claim when MH auth fails before dispatch", async () => {
+    const db = new InMemoryD1();
+    const certPassword = "correct horse battery staple";
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({ donor_email: null }));
+    const fetchMock = vi.fn().mockResolvedValue(new Response("auth unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml(certPassword),
+      MH_CERT_PASSWORD: certPassword,
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_ANULACION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Fallo antes del envío" })
+      }),
+      runtime
+    );
+
+    expect(response.status).toBe(500);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      fiscal_operation_claim_id: null,
+      fiscal_operation_claimed_at: null,
+      fiscal_operation_kind: null,
+      fiscal_operation_event_id: null
+    });
+    expect(db.dteEvents).toHaveLength(1);
+    expect(db.dteEvents[0]).toMatchObject({
+      status: "FAILED",
+      mh_estado: "PRE_DISPATCH_FAILED",
+      accepted_at: null
+    });
+  });
+
+  it("rolls back the event verdict when atomic invalidation completion fails", async () => {
+    const db = new InMemoryD1();
+    const certPassword = "correct horse battery staple";
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({ donor_email: null }));
+    db.failInvalidationCompletionBatchAfterStatement = 1;
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml(certPassword),
+      MH_CERT_PASSWORD: certPassword
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/invalidate", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ tipoAnulacion: 2, motivoAnulacion: "Fallo transaccional" })
+      }),
+      runtime
+    );
+
+    expect(response.status).toBe(500);
+    expect(db.dteEvents).toHaveLength(1);
+    expect(db.dteEvents[0].status).toBe("SIGNED");
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/),
+      fiscal_operation_kind: "INVALIDATION",
+      fiscal_operation_event_id: db.dteEvents[0].id
+    });
+    expect(db.audits.some((audit) => audit.action === "DTE_INVALIDATED")).toBe(false);
+  });
+
+  it("blocks receipt resend while an invalidation outcome is pending reconciliation", async () => {
+    const db = new InMemoryD1();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      fiscal_operation_claim_id: "fiscal_pending_invalidation",
+      fiscal_operation_claimed_at: "2026-07-14T12:00:00.000Z",
+      fiscal_operation_kind: "INVALIDATION",
+      fiscal_operation_event_id: "event_pending_invalidation"
+    }));
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: "{}"
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({ error: "fiscal_outcome_pending_reconciliation" });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.emailDeliveries).toHaveLength(0);
+  });
+
+  it("excludes accepted-looking documents with pending invalidations from status-dependent exports", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(
+      testDocument({ id: "doc_definitive", wompi_event_id: "wompi_definitive" }),
+      testDocument({
+        id: "doc_pending_invalidation",
+        wompi_event_id: "wompi_pending_invalidation",
+        fiscal_operation_claim_id: "fiscal_pending_invalidation",
+        fiscal_operation_claimed_at: "2026-07-14T12:00:00.000Z",
+        fiscal_operation_kind: "INVALIDATION",
+        fiscal_operation_event_id: "event_pending_invalidation"
+      })
+    );
+    const repository = new Repository(env(db).DB);
+    const range = { startIso: "2026-01-01T00:00:00.000Z", endIso: "2027-01-01T00:00:00.000Z" };
+
+    expect((await repository.listAcceptedDteDocumentsForExport()).map((document) => document.id)).toEqual(["doc_definitive"]);
+    expect((await repository.listAcceptedDocumentsInYear(range, null)).map((document) => document.id)).toEqual(["doc_definitive"]);
+    expect((await repository.listAcceptedWompiContactRows("00", null)).map((row) => row.id)).toEqual(["doc_definitive"]);
+    expect((await repository.listWompiLaneDocumentsForAnalytics(range, "00", null)).map((document) => document.id)).toEqual(["doc_definitive"]);
+  });
+
   it("emails an invalidation notice when MH accepts the invalidation event", async () => {
     const db = new InMemoryD1();
     const document = testDocument();
@@ -3170,7 +5241,7 @@ describe("document invalidation", () => {
       accepted: true,
       emailSent: true
     });
-    expect(document.status).toBe("INVALIDATED");
+    expect(db.documents[0].status).toBe("INVALIDATED");
     expect(sentMessages).toHaveLength(1);
     const sentMessage = sentMessages[0] as { subject: string; text: string; attachments: Array<{ filename: string; content: unknown }> };
     expect(sentMessage.subject).toBe("Aviso de invalidación DTE-15-M001P004-000000000000009");
@@ -3195,6 +5266,17 @@ describe("document invalidation", () => {
       provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-invalidated" })
     }));
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_INVALIDATION_SENT", entity_id: "doc_1" }));
+    const invalidation = JSON.parse(String(db.dteEvents[0].plain_json)) as {
+      motivo: Record<string, string>;
+    };
+    expect(invalidation.motivo).toMatchObject({
+      nombreResponsable: "Example Person",
+      tipDocResponsable: "13",
+      numDocResponsable: "100000001",
+      nombreSolicita: "Example Person",
+      tipDocSolicita: "13",
+      numDocSolicita: "100000001"
+    });
   });
 
   it("returns a conflict when MH rejects the invalidation event", async () => {
@@ -4986,6 +7068,43 @@ describe("donation intent correlation", () => {
     });
   }
 
+  async function expectQuarantined(
+    db: InMemoryD1,
+    eventId: string,
+    runtime: Env,
+    reason: string
+  ): Promise<void> {
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+    const result = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+
+    expect(result).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeTruthy();
+    const audits = db.audits.filter(
+      (row) =>
+        row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+        row.entity_id === eventId
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].metadata_json))).toMatchObject({ reason });
+
+    await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(1);
+    expect(db.documents).toHaveLength(0);
+  }
+
   it("correlates a LINK_CREATED intent: identity + address from the intent, nombre/correo from the webhook", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db);
@@ -5017,6 +7136,36 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "DONATION_INTENT_COMPLETED", entity_type: "donation_intent", entity_id: "di_corr_1" })
     );
+  });
+
+  it("lets only one concurrent delivery issue a successful Wompi event", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook({ IdTransaccion: "wompi_concurrent_success" }));
+    let claimAttempts = 0;
+    let releaseClaims!: () => void;
+    const bothClaimsReached = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    db.beforeWompiIssuanceClaim = async () => {
+      claimAttempts += 1;
+      if (claimAttempts === 2) releaseClaims();
+      await bothClaimsReached;
+    };
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = await pipelineEnv(db);
+    const sequenceBefore = db.nextSequence;
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).processWompiEvent(eventId),
+      new IssuancePipeline(runtime).processWompiEvent(eventId)
+    ]);
+
+    expect(results.filter((result) => result !== null)).toHaveLength(1);
+    expect(db.documents).toHaveLength(1);
+    expect(db.documents[0].status).toBe("ACCEPTED");
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
+    expect(transmit).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the payload-derived codPais/codDomiciliado for a domestic intent", async () => {
@@ -5131,19 +7280,13 @@ describe("donation intent correlation", () => {
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("COMPLETED");
   });
 
-  it("does not correlate a COMPLETED intent: falls back to the webhook donor data", async () => {
+  it("quarantines a COMPLETED application intent", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db, { status: "COMPLETED", document_id: "dte_prev" });
     const eventId = seedWompiEvent(db, correlationWebhook());
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "ineligible_status");
 
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    // Fallback receptor derived from the webhook, not the intent.
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
-    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-    // The already-completed intent keeps its original document link.
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.document_id).toBe("dte_prev");
   });
 
@@ -5185,7 +7328,7 @@ describe("donation intent correlation", () => {
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
   });
 
-  it("refuses to correlate when the webhook link id does not match the intent's minted link", async () => {
+  it("quarantines when the webhook link id does not match the intent's minted link", async () => {
     const db = new InMemoryD1();
     seedIntentRow(db); // wompi_id_enlace: 987654
     // A donor-influenced IdExterno points at di_corr_1, but the payment was made on a
@@ -5195,23 +7338,148 @@ describe("donation intent correlation", () => {
       correlationWebhook({ EnlacePago: { Id: 111111, IdentificadorEnlaceComercio: "di_corr_1" } })
     );
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "link_id_mismatch");
 
-    // No correlation: the CDE falls back to the webhook donor data, and the intent is
-    // left uncompleted so no signed CDE/PII binds to an unrelated intent.
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
-    const mismatch = db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED");
-    expect(mismatch).toMatchObject({ entity_type: "wompi_event", entity_id: eventId });
-    const metadata = JSON.parse(String(mismatch!.metadata_json)) as {
-      payloadLinkId: number;
-      expectedLinkId: number;
-      reason: string;
+  });
+
+  it("creates one binding-rejected audit when two pipelines quarantine the same event concurrently", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    let countArrivals = 0;
+    let releaseCounts!: () => void;
+    const bothCountsReached = new Promise<void>((resolve) => {
+      releaseCounts = resolve;
+    });
+    db.beforeBindingAuditCount = async () => {
+      countArrivals += 1;
+      if (countArrivals === 2) {
+        releaseCounts();
+      }
+      await bothCountsReached;
     };
-    expect(metadata).toMatchObject({ payloadLinkId: 111111, expectedLinkId: 987654, reason: "link_id_mismatch" });
+    const runtime = await pipelineEnv(db);
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).processWompiEvent(eventId),
+      new IssuancePipeline(runtime).processWompiEvent(eventId)
+    ]);
+
+    expect(results).toEqual([null, null]);
+    const audits = db.audits.filter(
+      (row) =>
+        row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+        row.entity_id === eventId
+    );
+    expect(audits).toHaveLength(1);
+    expect(JSON.parse(String(audits[0].metadata_json))).toMatchObject({
+      intentId: "di_corr_1",
+      reason: "link_id_mismatch",
+      expectedLinkId: 987654,
+      payloadLinkId: 111111
+    });
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeTruthy();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("SELECT COUNT(*) AS count FROM audit_logs")
+      )
+    ).toBe(false);
+    expect(
+      db.preparedSql.some((sql) =>
+        sql.includes("UPDATE dte_documents SET signed_jws")
+      )
+    ).toBe(false);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it("does not add a binding-rejected audit to an already processed application event", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    const event = db.wompiEvents.find((row) => row.id === eventId)!;
+    event.processed_at = "2026-07-13T10:00:00.000Z";
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId)
+    ).resolves.toBeNull();
+
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(0);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBe("2026-07-13T10:00:00.000Z");
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it("rolls back the binding audit when the quarantine batch fails before processed marking", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    db.failBindingQuarantineBatchAfterStatement = 1;
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId)
+    ).rejects.toThrow("injected binding-quarantine batch failure");
+
+    expect(
+      db.audits.filter(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === eventId
+      )
+    ).toHaveLength(0);
+    expect(
+      db.wompiEvents.find((row) => row.id === eventId)?.processed_at
+    ).toBeNull();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(db.emailDeliveries).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
   });
 
   it("correlates when the webhook link id matches the intent's minted link", async () => {
@@ -5230,25 +7498,73 @@ describe("donation intent correlation", () => {
     expect(db.audits.find((row) => row.action === "DONATION_INTENT_BINDING_REJECTED")).toBeUndefined();
   });
 
-  it("treats a draft intent whose donor document is missing as NON-correlating (webhook fallback CDE)", async () => {
+  it("quarantines a draft intent whose donor document is missing", async () => {
     const db = new InMemoryD1();
-    // A premint draft: link minted, but the donor never attached fiscal data, so the
-    // document is still NULL. Correlating it would build a receptor with an empty
-    // numDocumento that fails CDE schema validation — so the guard must skip it and
-    // let the legacy/static-link webhook fallback build the CDE from webhook data.
     seedIntentRow(db, { donor_document: null, direccion_departamento: null, direccion_municipio: null, direccion_distrito: null, direccion_complemento: null });
     const eventId = seedWompiEvent(db, correlationWebhook());
 
-    const record = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    await expectQuarantined(db, eventId, await pipelineEnv(db), "incomplete_donor_data");
 
-    expect(record?.status).toBe("ACCEPTED");
-    const cde = JSON.parse(record!.plain_json) as { receptor: Record<string, unknown> };
-    // Receptor comes from the webhook, not the (incomplete) draft.
-    expect(cde.receptor).toMatchObject({ nombre: "Fallback Cliente", correo: "fallback@example.org" });
-    expect(cde.receptor.direccion).not.toEqual(INTENT_ADDRESS);
-    // The draft is NOT completed by this webhook.
     expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "DONATION_INTENT_COMPLETED" }));
     expect(db.donationIntents.find((row) => row.id === "di_corr_1")?.status).toBe("LINK_CREATED");
+  });
+
+  it("blocks a rejected-document rebuild when its app binding is quarantined", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(
+      db,
+      correlationWebhook({
+        EnlacePago: {
+          Id: 111111,
+          IdentificadorEnlaceComercio: "di_corr_1"
+        }
+      })
+    );
+    db.documents.push({
+      ...testDocument({
+        id: "dte_quarantine_rebuild",
+        wompi_event_id: eventId,
+        status: "REJECTED",
+        signed_jws: null
+      })
+    });
+    const record = db.documents[0];
+    const before = { ...record };
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const sequenceBefore = db.nextSequence;
+
+    await expect(
+      new IssuancePipeline(await pipelineEnv(db))
+        .rebuildRejectedWompiDocument(record)
+    ).rejects.toBeInstanceOf(WompiIntentQuarantinedError);
+
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents[0].plain_json).toBe(before.plain_json);
+    expect(db.documents[0].signed_jws).toBe(before.signed_jws);
+    expect(outbound).not.toHaveBeenCalled();
+
+    db.sessionUser = {
+      id: "user_operator",
+      email: "operator@example.org",
+      name: "Operator",
+      role: "OPERATOR"
+    };
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/documents/dte_quarantine_rebuild/retry",
+        {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token" }
+        }
+      ),
+      await pipelineEnv(db)
+    );
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "wompi_intent_quarantined"
+    });
+    expect(outbound).not.toHaveBeenCalled();
   });
 
   it("keeps the intent receptor when an operator rebuilds a REJECTED intent-backed CDE", async () => {
@@ -5367,17 +7683,32 @@ describe("donation intent correlation", () => {
     seedIntentRow(db);
     const eventId = seedWompiEvent(db, correlationWebhook());
     seedRejectedDoc(db, eventId, "dte_rejected_cas");
-    // Both operator retries capture the same REJECTED snapshot before either claims it.
+    // Both operator retries capture the same REJECTED snapshot and reach the claim
+    // together. The loser must stop before allocating a fiscal control sequence.
     const staleSnapshot = { ...db.documents.find((row) => row.id === "dte_rejected_cas") } as unknown as DteDocumentRecord;
-    const pipeline = new IssuancePipeline(await pipelineEnv(db));
+    let claims = 0;
+    let releaseClaims!: () => void;
+    const bothClaimsReached = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    db.beforeRejectedWompiClaim = async () => {
+      claims += 1;
+      if (claims === 2) releaseClaims();
+      await bothClaimsReached;
+    };
+    const runtime = await pipelineEnv(db);
+    const sequenceBefore = db.nextSequence;
+    const results = await Promise.allSettled([
+      new IssuancePipeline(runtime).rebuildRejectedWompiDocument(staleSnapshot),
+      new IssuancePipeline(runtime).rebuildRejectedWompiDocument(staleSnapshot)
+    ]);
 
-    const first = await pipeline.rebuildRejectedWompiDocument(staleSnapshot);
-    expect(first.accepted).toBe(true);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter((result) => result.status === "rejected")).toEqual([
+      expect.objectContaining({ reason: expect.any(RejectedWompiRetryConflictError) })
+    ]);
     expect(db.documents.find((row) => row.id === "dte_rejected_cas")?.status).toBe("ACCEPTED");
-
-    // The second retry runs on the stale REJECTED snapshot: the compare-and-swap finds the
-    // row is no longer REJECTED and refuses, so no second legal DTE is written/transmitted.
-    await expect(pipeline.rebuildRejectedWompiDocument(staleSnapshot)).rejects.toBeInstanceOf(RejectedWompiRetryConflictError);
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
     expect(db.audits.filter((row) => row.action === "DTE_ACCEPTED" && row.entity_id === "dte_rejected_cas")).toHaveLength(1);
     expect(db.audits.filter((row) => row.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
   });
@@ -5407,6 +7738,7 @@ describe("donation intent correlation", () => {
     // control number on every attempt — the guard must reject it BEFORE allocation.
     const webhook = correlationWebhook({
       IdExterno: undefined,
+      EnlacePago: undefined,
       IdTransaccion: "wompi_bad_dui_tx",
       cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
     });
@@ -5424,11 +7756,39 @@ describe("donation intent correlation", () => {
     expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
   });
 
+  it("rejects deterministic CDE schema failures before allocating a control sequence", async () => {
+    const db = new InMemoryD1();
+    const webhook = correlationWebhook({
+      IdExterno: undefined,
+      EnlacePago: undefined,
+      IdTransaccion: "wompi_oversized_email_tx",
+      cliente: {
+        DocumentoIdentidad: "",
+        Nombre: "Correo",
+        Apellidos: "Extenso",
+        EMail: `${"a".repeat(90)}@example.org`,
+        CodigoPais: "SV"
+      }
+    });
+    const eventId = seedWompiEvent(db, webhook);
+
+    const first = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+    const second = await new IssuancePipeline(await pipelineEnv(db)).processWompiEvent(eventId);
+
+    expect(first).toBeNull();
+    expect(second).toBeNull();
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(1);
+    expect(db.audits.filter((audit) => audit.action === "WOMPI_INVALID_CDE_INPUT")).toHaveLength(1);
+    expect(db.wompiEvents.find((event) => event.id === eventId)?.processed_at).toEqual(expect.any(String));
+  });
+
   it("does not requeue an invalid-DUI Wompi event after terminal processing", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
     const webhook = correlationWebhook({
       IdExterno: undefined,
+      EnlacePago: undefined,
       IdTransaccion: "wompi_bad_dui_sweep_tx",
       cliente: { DocumentoIdentidad: "12345678-9", Nombre: "Mal", Apellidos: "DUI", EMail: "mal@example.org", CodigoPais: "SV" }
     });
@@ -5444,6 +7804,188 @@ describe("donation intent correlation", () => {
     expect(queued).toHaveLength(0);
     expect(db.audits.some((audit) => audit.action === "WOMPI_EVENT_REQUEUED" && audit.entity_id === eventId)).toBe(false);
     expect(db.audits.some((audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId)).toBe(false);
+  });
+
+  it("recovers intent and receipt finalization after post-acceptance auditing fails", async () => {
+    const db = new InMemoryD1();
+    seedIntentRow(db);
+    const eventId = seedWompiEvent(db, correlationWebhook({ IdTransaccion: "wompi_post_accept_audit_failure" }));
+    db.failNextAuditAction = "DTE_ACCEPTED";
+    const runtime = await pipelineEnv(db);
+
+    await expect(new IssuancePipeline(runtime).processWompiEvent(eventId)).rejects.toThrow("injected DTE_ACCEPTED audit failure");
+
+    expect(db.documents).toHaveLength(1);
+    expect(db.documents[0].status).toBe("ACCEPTED");
+    expect(db.documents[0].sello_recibido).toBeTruthy();
+    expect(db.documents[0].post_accept_finalized_at ?? null).toBeNull();
+    expect(db.donationIntents[0]).toMatchObject({ status: "COMPLETED", document_id: db.documents[0].id });
+    expect(db.emailDeliveries.filter((delivery) => delivery.status === "SENT" && delivery.email_type === "dteReceipt")).toHaveLength(1);
+    expect(db.audits.some((audit) => audit.action === "DTE_FAILED")).toBe(false);
+    expect(await new Repository(runtime.DB).claimDocumentInvalidation(db.documents[0].id, "must_not_claim_before_finalization")).toBe(false);
+
+    const recovery = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(recovery).toEqual({ finalized: 1, failed: 0 });
+    expect(db.documents[0].post_accept_finalized_at).toEqual(expect.any(String));
+    expect(db.emailDeliveries.filter((delivery) => delivery.status === "SENT" && delivery.email_type === "dteReceipt")).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "DONATION_INTENT_COMPLETED")).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "DTE_ACCEPTED")).toHaveLength(1);
+  });
+
+  it("lets only one concurrent post-accept finalizer send the definitive receipt", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    let claimAttempts = 0;
+    let releaseClaims!: () => void;
+    const bothClaimed = new Promise<void>((resolve) => {
+      releaseClaims = resolve;
+    });
+    db.beforePostAcceptFinalizationClaim = async () => {
+      claimAttempts += 1;
+      if (claimAttempts === 2) releaseClaims();
+      await bothClaimed;
+    };
+    const runtime = await pipelineEnv(db);
+
+    const results = await Promise.all([
+      new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations(),
+      new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations()
+    ]);
+
+    expect(results.reduce((total, result) => total + result.finalized, 0)).toBe(1);
+    expect(results.reduce((total, result) => total + result.failed, 0)).toBe(0);
+    expect(db.documents[0].post_accept_finalized_at).toEqual(expect.any(String));
+    expect(db.emailDeliveries.filter((delivery) => delivery.status === "SENT" && delivery.email_type === "dteReceipt")).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "ADVANCED_CDE_ACCEPTED")).toHaveLength(1);
+  });
+
+  it("reloads a donor-email correction that commits immediately before finalization ownership", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({
+      wompi_event_id: null,
+      donor_email: "anterior@example.org",
+      post_accept_finalized_at: null
+    }));
+    db.beforePostAcceptFinalizationClaim = () => {
+      db.documents[0].donor_email = "corregido@example.org";
+    };
+    const runtime = await pipelineEnv(db);
+
+    const result = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(result).toEqual({ finalized: 1, failed: 0 });
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      to_email: "corregido@example.org",
+      status: "SENT",
+      email_type: "dteReceipt"
+    }));
+  });
+
+  it("sends the definitive accepted receipt even after a manual rejected-document resend", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.documents.push(testDocument({
+      wompi_event_id: null,
+      status: "REJECTED",
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      accepted_at: null,
+      post_accept_finalized_at: null
+    }));
+
+    const resend = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: "{}"
+      }),
+      env(db)
+    );
+    expect(resend.status).toBe(200);
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      email_type: "dteReceipt",
+      document_status_at_send: "REJECTED",
+      status: "SENT"
+    }));
+
+    Object.assign(db.documents[0], {
+      status: "ACCEPTED",
+      sello_recibido: "ACCEPTED-AFTER-RETRY",
+      mh_estado: "PROCESADO",
+      accepted_at: "2026-07-14T15:00:00.000Z"
+    });
+
+    const finalization = await new IssuancePipeline(await pipelineEnv(db)).retryPendingPostAcceptFinalizations();
+
+    expect(finalization).toEqual({ finalized: 1, failed: 0 });
+    expect(db.emailDeliveries.filter((delivery) => delivery.email_type === "dteReceipt")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ document_status_at_send: "REJECTED", status: "SENT" }),
+        expect.objectContaining({ document_status_at_send: "ACCEPTED", status: "SENT" })
+      ])
+    );
+  });
+
+  it("stops before the email provider when finalization ownership is lost at dispatch", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    db.beforePostAcceptEmailDispatchMark = () => {
+      db.documents[0].post_accept_finalization_claim_id = "stolen_owner";
+    };
+    const send = vi.fn(async () => ({ messageId: "must-not-send" }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send } as SendEmail
+    });
+
+    const result = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(result).toEqual({ finalized: 0, failed: 1 });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.emailDeliveries).toEqual([]);
+    expect(db.documents[0]).toMatchObject({
+      post_accept_finalized_at: null,
+      post_accept_finalization_claim_id: "stolen_owner"
+    });
+    expect(db.documents[0].post_accept_email_dispatch_started_at ?? null).toBeNull();
+  });
+
+  it("recovers finalization after a recorded email failure without redispatching it", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    db.failNextAuditAction = "ADVANCED_CDE_ACCEPTED";
+    const send = vi.fn(async () => {
+      throw new Error("provider unavailable");
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send } as SendEmail
+    });
+
+    const first = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(first).toEqual({ finalized: 0, failed: 1 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      status: "FAILED",
+      email_type: "dteReceipt"
+    }));
+    expect(db.documents[0].post_accept_finalization_claim_id ?? null).toBeNull();
+
+    const recovery = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(recovery).toEqual({ finalized: 1, failed: 0 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.documents[0].post_accept_finalized_at).toEqual(expect.any(String));
+    expect(db.audits.filter((audit) => audit.action === "ADVANCED_CDE_ACCEPTED")).toHaveLength(1);
   });
 
 });
@@ -5548,6 +8090,20 @@ describe("deferred transmission when MH is unavailable", () => {
     return fetchMock;
   }
 
+  // Authentication happens before the legal fiscal POST. This is the only outage
+  // class that is safe to defer and retry automatically.
+  function stubMhAuthUnavailable(): ReturnType<typeof vi.fn> {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/seguridad/auth")) {
+        return new Response("MH no disponible", { status: 503 });
+      }
+      throw new Error(`El endpoint fiscal no debía alcanzarse: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
   async function deferredEnv(db: InMemoryD1, sent: Array<{ subject: string; to: string; text: string }>): Promise<Env> {
     return env(db, {
       MOCK_EXTERNAL_SERVICES: "false",
@@ -5573,7 +8129,7 @@ describe("deferred transmission when MH is unavailable", () => {
     seedIntentRow(db, { gift_type: "DIEZMO" });
     const eventId = seedWompiEvent(db, deferWebhook());
     const sent: Array<{ subject: string; to: string; text: string }> = [];
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
 
     const record = await new IssuancePipeline(await deferredEnv(db, sent)).processWompiEvent(eventId);
 
@@ -5622,7 +8178,7 @@ describe("deferred transmission when MH is unavailable", () => {
     const db = new InMemoryD1();
     db.documents.push(advancedFailingDocument("doc_quick_defer"));
     const sent: Array<{ subject: string; to: string; text: string }> = [];
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
 
     const record = await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_defer");
 
@@ -5656,7 +8212,7 @@ describe("deferred transmission when MH is unavailable", () => {
       provider_delivery_id: null
     });
     const sent: Array<{ subject: string; to: string; text: string }> = [];
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
 
     await new IssuancePipeline(await deferredEnv(db, sent)).processDteDocument("doc_quick_dedupe");
 
@@ -5664,6 +8220,44 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(db.emailDeliveries.filter((row) => row.document_id === "doc_quick_dedupe")).toHaveLength(1);
     expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.status).toBe("SIGNED");
     expect(db.documents.find((row) => row.id === "doc_quick_dedupe")?.transmission_deferred_at).toBeTruthy();
+  });
+
+  it("rejects deferred issuer drift before an unsigned recovery can sign or call MH", async () => {
+    const db = new InMemoryD1();
+    const document = advancedCdeDraft();
+    (document.emisor as Record<string, unknown>).numDocumento = "06142803901122";
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_deferred_issuer_drift",
+      wompi_event_id: null,
+      status: "SIGNED",
+      plain_json: JSON.stringify(document),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null,
+      transmission_deferred_at: new Date().toISOString()
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    const mhFetch = stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    const signSpy = vi.spyOn(crypto.subtle, "sign");
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const result = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+
+    expect(result).toEqual({ transmitted: 0, rejected: 0, pending: 1 });
+    expect(signSpy).not.toHaveBeenCalled();
+    expect(mhFetch).not.toHaveBeenCalled();
+    expect(db.documents.find((row) => row.id === "doc_deferred_issuer_drift")).toMatchObject({
+      status: "SIGNED",
+      signed_jws: null
+    });
+    expect(errorLog).toHaveBeenCalledWith(
+      "Reintento de transmisión diferida falló",
+      "doc_deferred_issuer_drift",
+      expect.objectContaining({ message: expect.stringMatching(/emisor/i) })
+    );
   });
 
   it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {
@@ -5681,7 +8275,7 @@ describe("deferred transmission when MH is unavailable", () => {
       accepted_at: null
     });
     const sent: Array<{ subject: string; to: string; text: string }> = [];
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
 
     const record = db.documents.find((row) => row.id === "doc_rejected_defer") as unknown as DteDocumentRecord;
     const result = await new IssuancePipeline(await deferredEnv(db, sent)).rebuildRejectedWompiDocument(record);
@@ -5704,7 +8298,7 @@ describe("deferred transmission when MH is unavailable", () => {
     const eventId = seedWompiEvent(db, deferWebhook());
     const sent: Array<{ subject: string; to: string; text: string }> = [];
     const pipelineEnv = await deferredEnv(db, sent);
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
     const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
     expect(deferred?.status).toBe("SIGNED");
     expect(deferred?.transmission_deferred_at).toBeTruthy();
@@ -5742,6 +8336,35 @@ describe("deferred transmission when MH is unavailable", () => {
     );
   });
 
+  it("does not redispatch a deferred CDE after an ambiguous transport failure", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_deferred_ambiguous",
+      status: "SIGNED",
+      signed_jws: "signed-deferred-ambiguous-jws",
+      sello_recibido: null,
+      mh_estado: "MH_NO_DISPONIBLE",
+      accepted_at: null,
+      transmission_deferred_at: "2026-07-14T12:00:00.000Z",
+      donor_email: null
+    });
+    const sent: Array<{ subject: string; to: string; text: string }> = [];
+    const pipelineEnv = await deferredEnv(db, sent);
+    const fetchMock = stubMhFetch(() => {
+      throw new Error("connection reset after request write");
+    });
+
+    const first = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(first).toEqual({ transmitted: 0, rejected: 0, pending: 1 });
+    expect(db.documents[0].fiscal_operation_claim_id).toMatch(/^fiscal_/);
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    const second = await new IssuancePipeline(pipelineEnv).retryDeferredTransmissions();
+    expect(second).toEqual({ transmitted: 0, rejected: 0, pending: 0 });
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
   it("keeps the CDE pending without email or audit spam while MH stays down, alerting once after an hour", async () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
@@ -5749,7 +8372,7 @@ describe("deferred transmission when MH is unavailable", () => {
     const eventId = seedWompiEvent(db, deferWebhook());
     const sent: Array<{ subject: string; to: string; text: string }> = [];
     const pipelineEnv = await deferredEnv(db, sent);
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
     const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
     expect(sent).toHaveLength(1); // transitorio
     // Age the DEFERRAL beyond the one-hour alert threshold (the alert is measured
@@ -5780,7 +8403,7 @@ describe("deferred transmission when MH is unavailable", () => {
     const eventId = seedWompiEvent(db, deferWebhook());
     const sent: Array<{ subject: string; to: string; text: string }> = [];
     const pipelineEnv = await deferredEnv(db, sent);
-    stubMhFetch(() => new Response("MH no disponible", { status: 503 }));
+    stubMhAuthUnavailable();
     const deferred = await new IssuancePipeline(pipelineEnv).processWompiEvent(eventId);
 
     stubMhFetch(() => jsonResponse({ estado: "RECHAZADO", observaciones: ["Firma inválida"] }));
@@ -6113,6 +8736,277 @@ describe("pipeline failure alerts", () => {
 });
 
 describe("advanced DTE queue idempotency", () => {
+  it("does not let a late signer reopen and retransmit an already accepted CDE", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_sign_race",
+      wompi_event_id: null,
+      status: "PENDING",
+      plain_json: JSON.stringify(advancedCdeDraft()),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    let reads = 0;
+    let releaseReads!: () => void;
+    const bothRead = new Promise<void>((resolve) => {
+      releaseReads = resolve;
+    });
+    db.beforeDocumentRead = async () => {
+      reads += 1;
+      if (reads === 2) releaseReads();
+      await bothRead;
+    };
+    let signedUpdates = 0;
+    let releaseLateSigner!: () => void;
+    const firstPipelineCompleted = new Promise<void>((resolve) => {
+      releaseLateSigner = resolve;
+    });
+    db.beforeDocumentSignedUpdate = async () => {
+      signedUpdates += 1;
+      if (signedUpdates === 2) await firstPipelineCompleted;
+    };
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "true",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password"
+    });
+    const first = new IssuancePipeline(runtime).processDteDocument("doc_advanced_sign_race");
+    const second = new IssuancePipeline(runtime).processDteDocument("doc_advanced_sign_race");
+
+    await Promise.race([first, second]);
+    releaseLateSigner();
+    const results = await Promise.all([first, second]);
+
+    expect(results.every((record) => record.status === "ACCEPTED")).toBe(true);
+    expect(db.audits.filter((audit) => audit.action === "ADVANCED_CDE_ACCEPTED")).toHaveLength(1);
+    expect(db.documents[0].status).toBe("ACCEPTED");
+    expect(db.documents[0].sello_recibido).toBeTruthy();
+  });
+
+  it.each([408, 429, 500, 503, 521])("does not redispatch a queue CDE after an ambiguous MH %i response", async (status) => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_ambiguous",
+      wompi_event_id: null,
+      status: "PENDING",
+      plain_json: JSON.stringify(advancedCdeDraft()),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(new Response("MH unavailable", { status }));
+    vi.stubGlobal("fetch", fetchMock);
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password",
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_ambiguous")
+    ).rejects.toThrow(`Ministerio de Hacienda no disponible: ${status}`);
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/)
+    });
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    const redelivery = await new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_ambiguous");
+    expect(redelivery.status).toBe("SIGNED");
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
+  it("does not redispatch a queue CDE after an empty HTTP 200 without a terminal MH verdict", async () => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_empty_200",
+      wompi_event_id: null,
+      status: "SIGNED",
+      plain_json: JSON.stringify(advancedCdeDraft()),
+      signed_jws: "signed-empty-200-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(new Response("", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const pipelineEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      MH_USER_TEST: "mh-user",
+      MH_PASSWORD_TEST: "mh-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_empty_200")
+    ).rejects.toThrow("resultado no definitivo");
+    expect(db.documents[0].fiscal_operation_claim_id).toEqual(expect.stringMatching(/^fiscal_/));
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    const redelivery = await new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_empty_200");
+    expect(redelivery.fiscal_operation_claim_id).toBe(db.documents[0].fiscal_operation_claim_id);
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
+  it.each([
+    [{ estado: "NO PROCESADO", selloRecibido: "CONTRADICTORY-SEAL" }, "NO PROCESADO"],
+    [{ estado: "RECHAZADO", selloRecibido: "CONTRADICTORY-SEAL" }, "RECHAZADO"],
+    [{ estado: "PROCESADO", selloRecibido: null }, "PROCESADO"]
+  ])("retains the fiscal claim for contradictory MH HTTP 200 verdict %s", async (mhBody, expectedState) => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_contradictory_200",
+      wompi_event_id: null,
+      status: "SIGNED",
+      plain_json: JSON.stringify(advancedCdeDraft()),
+      signed_jws: "signed-contradictory-200-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse(mhBody));
+    vi.stubGlobal("fetch", fetchMock);
+    const pipelineEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      MH_USER_TEST: "mh-user",
+      MH_PASSWORD_TEST: "mh-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_contradictory_200")
+    ).rejects.toThrow(`resultado no definitivo: ${expectedState}`);
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/)
+    });
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    await new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_contradictory_200");
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
+  it.each([
+    [302, null, "RECIBIDO"],
+    [400, { estado: "PROCESADO", selloRecibido: "CONTRADICTORY-SEAL" }, "PROCESADO"],
+    [400, { estado: "RECHAZADO", selloRecibido: "CONTRADICTORY-SEAL" }, "RECHAZADO"],
+    [422, "not-json", "RECIBIDO"]
+  ])("retains the fiscal claim for non-definitive MH HTTP %i response", async (status, mhBody, expectedState) => {
+    const db = new InMemoryD1();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_nondefinitive_http",
+      wompi_event_id: null,
+      status: "SIGNED",
+      plain_json: JSON.stringify(advancedCdeDraft()),
+      signed_jws: "signed-nondefinitive-http-jws",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const mhResponse = typeof mhBody === "string"
+      ? new Response(mhBody, { status })
+      : mhBody === null
+        ? new Response("", { status })
+        : jsonResponse(mhBody, { status });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ status: "OK", body: { token: "Bearer test-token" }, tokenType: "Bearer" }))
+      .mockResolvedValueOnce(mhResponse);
+    vi.stubGlobal("fetch", fetchMock);
+    const pipelineEnv = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      MH_USER_TEST: "mh-user",
+      MH_PASSWORD_TEST: "mh-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_nondefinitive_http")
+    ).rejects.toThrow(`resultado no definitivo: ${expectedState}`);
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: expect.stringMatching(/^fiscal_/)
+    });
+    const callsAfterAmbiguousResult = fetchMock.mock.calls.length;
+
+    await new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_nondefinitive_http");
+    expect(fetchMock).toHaveBeenCalledTimes(callsAfterAmbiguousResult);
+  });
+
+  it("rejects persisted issuer drift before signing an advanced CDE", async () => {
+    const db = new InMemoryD1();
+    const document = advancedCdeDraft();
+    db.documents.push({
+      ...testDocument(),
+      id: "doc_advanced_issuer_drift",
+      wompi_event_id: null,
+      status: "PENDING",
+      plain_json: JSON.stringify(document),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null
+    });
+    const persisted = JSON.parse(db.documents[0].plain_json) as Record<string, any>;
+    persisted.emisor.numDocumento = "06142803901122";
+    db.documents[0].plain_json = JSON.stringify(persisted);
+    const mhFetch = vi.fn(async () => new Response("MH must not be called", { status: 500 }));
+    vi.stubGlobal("fetch", mhFetch);
+
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      MH_CERT_XML: await generatedCertificateXml("cert-password"),
+      MH_CERT_PASSWORD: "cert-password",
+      MH_USER_TEST: "10000003520015",
+      MH_PASSWORD_TEST: "test-password",
+      MH_AUTH_URL_TEST: "https://apitest.dtes.mh.gob.sv/seguridad/auth",
+      MH_RECEPCION_URL_TEST: "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_issuer_drift")
+    ).rejects.toThrow(/emisor/i);
+
+    expect(db.documents[0].signed_jws).toBeNull();
+    expect(mhFetch).not.toHaveBeenCalled();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({
+        action: "ADVANCED_CDE_FAILED",
+        entity_type: "dte_document",
+        entity_id: "doc_advanced_issuer_drift"
+      })
+    );
+  });
+
   it("does not re-transmit an already ACCEPTED advanced CDE on queue redelivery", async () => {
     const db = new InMemoryD1();
     db.documents.push({
@@ -7448,7 +10342,7 @@ describe("audit actor context", () => {
 
     const response = await worker.fetch(request, env(db));
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(401);
     const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
     expect(failure).toBeTruthy();
     expect(failure?.actor_ip).toBe("190.86.1.2");
@@ -7458,6 +10352,72 @@ describe("audit actor context", () => {
       asOrganization: "Claro El Salvador",
       userAgent: "Mozilla/5.0 Test"
     });
+  });
+
+  it("bounds oversized actor fields on a failed login audit", async () => {
+    const db = new InMemoryD1();
+    const request = withCf(
+      new Request("https://example.org/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "cf-connecting-ip": "2".repeat(200),
+          "user-agent": "Browser".repeat(200)
+        },
+        body: JSON.stringify({ email: "nobody@example.org", password: "whatever" })
+      }),
+      {
+        ...SV_CF,
+        country: "S".repeat(20),
+        city: "á".repeat(1_000),
+        asOrganization: "Org".repeat(1_000),
+        ignored: "x".repeat(100_000)
+      }
+    );
+
+    const response = await worker.fetch(request, env(db));
+
+    expect(response.status).toBe(401);
+    const failure = db.audits.find((audit) => audit.action === "LOGIN_FAILED");
+    expect(failure).toBeTruthy();
+    expect(utf8Bytes(String(failure?.actor_ip)).byteLength).toBeLessThanOrEqual(64);
+    const actorContext = String(failure?.actor_context);
+    expect(utf8Bytes(actorContext).byteLength).toBeLessThanOrEqual(4096);
+    expect(JSON.parse(actorContext)).toMatchObject({
+      _truncated: expect.arrayContaining(["country", "city", "asOrganization", "userAgent"])
+    });
+    expect(JSON.parse(actorContext)).not.toHaveProperty("ignored");
+  });
+
+  it("bounds actor fields when createAudit is called directly", async () => {
+    const db = new InMemoryD1();
+    const repo = new Repository(env(db).DB);
+
+    await repo.createAudit({
+      action: "DIRECT_AUDIT_TEST",
+      entityType: "test",
+      entityId: "direct",
+      summary: "Direct audit boundary",
+      actorIp: "🧪".repeat(100),
+      actorContext: {
+        city: "á".repeat(1_000),
+        userAgent: "🧪".repeat(10_000),
+        asn: 27773,
+        ignored: "x".repeat(100_000)
+      }
+    });
+
+    const audit = db.audits.find((row) => row.action === "DIRECT_AUDIT_TEST");
+    expect(audit).toBeTruthy();
+    expect(utf8Bytes(String(audit?.actor_ip)).byteLength).toBeLessThanOrEqual(64);
+    expect(String(audit?.actor_ip)).not.toContain("�");
+    const actorContext = String(audit?.actor_context);
+    expect(utf8Bytes(actorContext).byteLength).toBeLessThanOrEqual(4096);
+    expect(JSON.parse(actorContext)).toMatchObject({
+      asn: 27773,
+      _truncated: expect.arrayContaining(["city", "userAgent"])
+    });
+    expect(JSON.parse(actorContext)).not.toHaveProperty("ignored");
   });
 
   it("records the client IP and cf context on an admin user update audit", async () => {
@@ -8135,6 +11095,12 @@ describe("branding", () => {
   });
 });
 
+const ANALYTICS_MAX_BYTES = 8 * 1024 * 1024;
+const ANALYTICS_CAPACITY_RESPONSE = {
+  error: "analytics_range_too_large",
+  message: "El rango solicitado contiene demasiados datos. Reduzca las fechas."
+};
+
 describe("analytics endpoint (Wompi lane)", () => {
   it("requires a session (401 without a token)", async () => {
     const db = new InMemoryD1();
@@ -8229,6 +11195,297 @@ describe("analytics endpoint (Wompi lane)", () => {
     expect(JSON.stringify(analytics.giving.topDonors)).not.toContain("numero_control");
   });
 
+  it("returns 422 before materializing more than ten thousand analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 10_001; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(false);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("returns 422 when serialized analytics rows exceed eight MiB", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    db.documents.push(
+      testDocument({
+        id: "doc_byte_budget",
+        wompi_event_id: "wompi_byte_budget",
+        environment: "00",
+        donor_name: "🧪".repeat(2_100_000),
+        issued_at: "2026-06-10T18:00:00.000Z"
+      })
+    );
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+  });
+
+  it("shares remaining row capacity across document and intent readers", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 9_999; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_shared_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_shared_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+    db.donationIntents.push(
+      testAnalyticsIntent({ id: "di_shared_budget_1" }),
+      testAnalyticsIntent({ id: "di_shared_budget_2" })
+    );
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    expect(
+      db.analyticsQueryLimits.find((query) => query.reader === "intents")?.limit
+    ).toBe(2);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("accepts exactly ten thousand analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    for (let index = 0; index < 10_000; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_exact_budget_${String(index).padStart(5, "0")}`,
+          wompi_event_id: `wompi_exact_budget_${index}`,
+          environment: "00",
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { analytics: { giving: { monthly: Array<{ count: number }> } } };
+    expect(body.analytics.giving.monthly[0]?.count).toBe(10_000);
+    expect(
+      db.analyticsQueryLimits.find((query) => query.reader === "intents")?.limit
+    ).toBe(1);
+  });
+
+  it("bounds document query pages for realistically amended donor emails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const amendedEmail = `${"a".repeat(262_000)}@x.co`;
+    expect(
+      utf8Bytes(JSON.stringify({ email: amendedEmail })).byteLength
+    ).toBeLessThanOrEqual(256 * 1024);
+    for (let index = 0; index < 32; index += 1) {
+      db.documents.push(
+        testDocument({
+          id: `doc_amended_email_${String(index).padStart(2, "0")}`,
+          wompi_event_id: `wompi_amended_email_${index}`,
+          environment: "00",
+          donor_email: amendedEmail,
+          issued_at: "2026-06-10T18:00:00.000Z"
+        })
+      );
+    }
+    const serializedRowBytes =
+      utf8Bytes(
+        JSON.stringify(analyticsDocumentRow(db.documents[0], []))
+      ).byteLength + 1;
+    expect(serializedRowBytes * 31).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(serializedRowBytes * 32).toBeGreaterThan(ANALYTICS_MAX_BYTES);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    const documentQueryLimits = db.analyticsQueryLimits
+      .filter((query) => query.reader === "documents")
+      .map((query) => query.limit);
+    expect(documentQueryLimits[0]).toBe(31);
+    expect(documentQueryLimits.every((limit) => limit <= 31)).toBe(true);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(false);
+  });
+
+  it("shares serialized UTF-8 capacity across document and intent readers", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const document = testDocument({
+      id: "doc_combined_bytes",
+      wompi_event_id: "wompi_combined_bytes",
+      environment: "00",
+      donor_name: "🧪".repeat(1_050_000),
+      issued_at: "2026-06-10T18:00:00.000Z"
+    });
+    const intent = testAnalyticsIntent({
+      id: "di_combined_bytes",
+      donor_document: "🧪".repeat(1_050_000)
+    });
+    db.documents.push(document);
+    db.donationIntents.push(intent);
+
+    const documentBytes = utf8Bytes(
+      JSON.stringify(analyticsDocumentRow(document, db.donationIntents))
+    ).byteLength + 1;
+    const intentBytes = utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1;
+    expect(documentBytes).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(intentBytes).toBeLessThan(ANALYTICS_MAX_BYTES);
+    expect(documentBytes + intentBytes).toBeGreaterThan(ANALYTICS_MAX_BYTES);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM donation_intents i"))
+    ).toBe(true);
+    expect(
+      db.preparedSql.some((sql) => sql.includes("FROM email_deliveries e"))
+    ).toBe(false);
+  });
+
+  it("accepts exactly eight MiB of serialized analytics rows", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const intent = analyticsIntentWithSerializedBytes(ANALYTICS_MAX_BYTES);
+    expect(
+      utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1
+    ).toBe(ANALYTICS_MAX_BYTES);
+    db.donationIntents.push(intent);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("rejects one byte beyond eight MiB with the exact capacity response", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    const intent = analyticsIntentWithSerializedBytes(ANALYTICS_MAX_BYTES + 1);
+    expect(
+      utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1
+    ).toBe(ANALYTICS_MAX_BYTES + 1);
+    db.donationIntents.push(intent);
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/analytics?from=2026-06-01&to=2026-06-30&environment=00",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(422);
+    await expect(response.json()).resolves.toEqual(ANALYTICS_CAPACITY_RESPONSE);
+  });
+
   it("scopes every metric to the requested ambiente", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -8249,10 +11506,13 @@ describe("analytics endpoint (Wompi lane)", () => {
   });
 });
 
-function bootstrapRequest(options: { token?: string } = {}): Request {
+function bootstrapRequest(options: { token?: string } = {}, clientIp?: string): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
     headers.set("X-Bootstrap-Owner-Token", options.token);
+  }
+  if (clientIp) {
+    headers.set("CF-Connecting-IP", clientIp);
   }
   return new Request("https://example.org/api/auth/bootstrap-owner", {
     method: "POST",
@@ -8263,6 +11523,22 @@ function bootstrapRequest(options: { token?: string } = {}): Request {
       password: "Long-enough1!"
     })
   });
+}
+
+function executionContextCapturing(tasks: Promise<unknown>[]): ExecutionContext {
+  return {
+    waitUntil(promise: Promise<unknown>) {
+      tasks.push(promise);
+    },
+    passThroughOnException() {}
+  } as unknown as ExecutionContext;
+}
+
+async function fetchAndWaitUntil(request: Request, runtime: Env): Promise<Response> {
+  const tasks: Promise<unknown>[] = [];
+  const response = await worker.fetch(request, runtime, executionContextCapturing(tasks));
+  await Promise.all(tasks);
+  return response;
 }
 
 function env(db: InMemoryD1, values: Partial<Env> = {}): Env {
@@ -8293,7 +11569,12 @@ class FakeArchiveBucket {
   readonly deleteCalls: string[] = [];
 
   async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
-    const bytes = value instanceof Uint8Array ? value : utf8Bytes(String(value));
+    const bytes =
+      value instanceof ReadableStream
+        ? new Uint8Array(await new Response(value).arrayBuffer())
+        : value instanceof Uint8Array
+          ? value
+          : utf8Bytes(String(value));
     this.objects.set(key, bytes);
     if (options?.httpMetadata?.contentType) {
       this.contentTypes.set(key, options.httpMetadata.contentType);
@@ -8340,12 +11621,55 @@ class FakeArchiveBucket {
   }
 }
 
+interface LoginRateLimitRow {
+  window_started_at: string;
+  attempt_count: number;
+  expires_at: string;
+}
+
+interface SecurityRateLimitClaimRow {
+  id: string;
+  scope: string;
+  key_hash: string;
+  subject_key_hash?: string | null;
+  claimed_at: string;
+  expires_at: string;
+}
+
+function sqliteD1(database: DatabaseSync): D1Database {
+  return {
+    prepare(query: string) {
+      let boundValues: unknown[] = [];
+      const statement = {
+        bind(...values: unknown[]) {
+          boundValues = values;
+          return statement;
+        },
+        async first<T>(): Promise<T | null> {
+          const sqliteValues = boundValues.map((value) => {
+            if (typeof value === "string" || typeof value === "number") return value;
+            throw new TypeError("SQLite D1 test adapter only supports string and number binds");
+          });
+          return (database.prepare(query).get(...sqliteValues) ?? null) as T | null;
+        }
+      };
+      return statement;
+    }
+  } as unknown as D1Database;
+}
+
 class InMemoryD1 {
   readonly users: Array<Record<string, unknown>> = [];
   readonly sessions: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
+  readonly loginRateLimits = new Map<string, LoginRateLimitRow>();
+  readonly securityRateLimitClaims: SecurityRateLimitClaimRow[] = [];
   readonly documents: DteDocumentRecord[] = [];
   readonly preparedSql: string[] = [];
+  readonly analyticsQueryLimits: Array<{
+    reader: "documents" | "intents" | "emails";
+    limit: number;
+  }> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly contingencies: Array<Record<string, unknown>> = [];
@@ -8356,13 +11680,28 @@ class InMemoryD1 {
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
+  loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
   beforePasswordRehashCas: (() => void) | null = null;
-  beforePasswordResetBatch: (() => void) | null = null;
+  beforePasswordResetBatch: (() => void | Promise<void>) | null = null;
+  beforeGuardedUserMutation: (() => void | Promise<void>) | null = null;
+  beforeCredentialGuardedSessionBatch: (() => Promise<void>) | null = null;
+  beforeCredentialGuardedResetTokenInsert: (() => Promise<void>) | null = null;
+  beforeBindingAuditCount: (() => Promise<void>) | null = null;
+  beforeDocumentRead: (() => void | Promise<void>) | null = null;
+  beforeDocumentSignedUpdate: (() => void | Promise<void>) | null = null;
+  beforeRejectedWompiClaim: (() => void | Promise<void>) | null = null;
+  beforeWompiIssuanceClaim: (() => void | Promise<void>) | null = null;
+  beforePostAcceptFinalizationClaim: (() => void | Promise<void>) | null = null;
+  beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
   failPasswordResetBatchAfterStatement: number | null = null;
+  failBindingQuarantineBatchAfterStatement: number | null = null;
+  failInvalidationCompletionBatchAfterStatement: number | null = null;
+  failNextAuditAction: string | null = null;
   passwordResetBatchCount = 0;
-  private passwordResetBatchTail: Promise<void> = Promise.resolve();
+  maxCommittedSessionRows = 0;
+  private batchTail: Promise<void> = Promise.resolve();
 
   prepare(sql: string): Statement {
     this.preparedSql.push(sql);
@@ -8370,9 +11709,53 @@ class InMemoryD1 {
   }
 
   async batch(statements: Statement[]): Promise<StatementRunResult[]> {
-    const previous = this.passwordResetBatchTail;
+    const credentialGuarded = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO sessions") &&
+        statement.sql.includes("password_hash = ?") &&
+        statement.sql.includes("password_salt = ?")
+    );
+    const passwordReset = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE users") &&
+        statement.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?")
+    );
+    const guardedUserMutation = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE users") &&
+        statement.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')")
+    );
+    const bindingQuarantine = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO audit_logs") &&
+        statement.sql.includes("DONATION_INTENT_BINDING_REJECTED") &&
+        statement.sql.includes("processed_at IS NULL")
+    );
+    const invalidationCompletion = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE dte_events") &&
+        statement.sql.includes("event_type = 'INVALIDACION'") &&
+        statement.sql.includes("SET status = ?")
+    );
+    if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
+      const beforeBatch = this.beforeCredentialGuardedSessionBatch;
+      this.beforeCredentialGuardedSessionBatch = null;
+      await beforeBatch();
+    }
+    if (passwordReset && this.beforePasswordResetBatch) {
+      const beforeBatch = this.beforePasswordResetBatch;
+      this.beforePasswordResetBatch = null;
+      await beforeBatch();
+    }
+    if (guardedUserMutation && this.beforeGuardedUserMutation) {
+      const beforeMutation = this.beforeGuardedUserMutation;
+      this.beforeGuardedUserMutation = null;
+      await beforeMutation();
+    }
+
+    const previous = this.batchTail;
     let release!: () => void;
-    this.passwordResetBatchTail = new Promise<void>((resolve) => {
+    this.batchTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     await previous;
@@ -8380,25 +11763,71 @@ class InMemoryD1 {
     const usersBefore = structuredClone(this.users);
     const sessionsBefore = structuredClone(this.sessions);
     const tokensBefore = structuredClone(this.resetTokens);
+    const auditsBefore = structuredClone(this.audits);
+    const wompiEventsBefore = structuredClone(this.wompiEvents);
+    const documentsBefore = structuredClone(this.documents);
+    const dteEventsBefore = structuredClone(this.dteEvents);
     try {
-      this.passwordResetBatchCount += 1;
-      this.beforePasswordResetBatch?.();
-      this.beforePasswordResetBatch = null;
+      if (passwordReset) {
+        this.passwordResetBatchCount += 1;
+      }
+      const transaction = new InMemoryD1();
+      transaction.users.push(...structuredClone(this.users));
+      transaction.sessions.push(...structuredClone(this.sessions));
+      transaction.resetTokens.push(...structuredClone(this.resetTokens));
+      transaction.audits.push(...structuredClone(this.audits));
+      transaction.wompiEvents.push(...structuredClone(this.wompiEvents));
+      transaction.documents.push(...structuredClone(this.documents));
+      transaction.dteEvents.push(...structuredClone(this.dteEvents));
       const results: StatementRunResult[] = [];
       for (const [index, statement] of statements.entries()) {
-        results.push(await statement.run());
-        if (this.failPasswordResetBatchAfterStatement === index + 1) {
+        results.push(await statement.withDatabase(transaction).run());
+        if (passwordReset && this.failPasswordResetBatchAfterStatement === index + 1) {
           throw new Error("injected password-reset batch failure");
         }
+        if (
+          bindingQuarantine &&
+          this.failBindingQuarantineBatchAfterStatement === index + 1
+        ) {
+          throw new Error("injected binding-quarantine batch failure");
+        }
+        if (
+          invalidationCompletion &&
+          this.failInvalidationCompletionBatchAfterStatement === index + 1
+        ) {
+          throw new Error("injected invalidation-completion batch failure");
+        }
+      }
+      this.users.splice(0, this.users.length, ...transaction.users);
+      this.sessions.splice(0, this.sessions.length, ...transaction.sessions);
+      this.resetTokens.splice(0, this.resetTokens.length, ...transaction.resetTokens);
+      this.audits.splice(0, this.audits.length, ...transaction.audits);
+      this.wompiEvents.splice(0, this.wompiEvents.length, ...transaction.wompiEvents);
+      this.documents.splice(0, this.documents.length, ...transaction.documents);
+      this.dteEvents.splice(0, this.dteEvents.length, ...transaction.dteEvents);
+      if (credentialGuarded) {
+        this.maxCommittedSessionRows = Math.max(this.maxCommittedSessionRows, this.sessions.length);
       }
       return results;
     } catch (error) {
       this.users.splice(0, this.users.length, ...usersBefore);
       this.sessions.splice(0, this.sessions.length, ...sessionsBefore);
       this.resetTokens.splice(0, this.resetTokens.length, ...tokensBefore);
+      this.audits.splice(0, this.audits.length, ...auditsBefore);
+      this.wompiEvents.splice(0, this.wompiEvents.length, ...wompiEventsBefore);
+      this.documents.splice(0, this.documents.length, ...documentsBefore);
+      this.dteEvents.splice(0, this.dteEvents.length, ...dteEventsBefore);
       throw error;
     } finally {
-      this.failPasswordResetBatchAfterStatement = null;
+      if (passwordReset) {
+        this.failPasswordResetBatchAfterStatement = null;
+      }
+      if (bindingQuarantine) {
+        this.failBindingQuarantineBatchAfterStatement = null;
+      }
+      if (invalidationCompletion) {
+        this.failInvalidationCompletionBatchAfterStatement = null;
+      }
       release();
     }
   }
@@ -8415,7 +11844,7 @@ class Statement {
 
   constructor(
     private readonly db: InMemoryD1,
-    private readonly sql: string
+    readonly sql: string
   ) {}
 
   bind(...args: unknown[]): this {
@@ -8423,7 +11852,402 @@ class Statement {
     return this;
   }
 
+  withDatabase(db: InMemoryD1): Statement {
+    return new Statement(db, this.sql).bind(...this.args);
+  }
+
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("INSERT INTO users") &&
+      this.sql.includes("WHERE NOT EXISTS (SELECT 1 FROM users)") &&
+      this.sql.includes("RETURNING id, email, name, role")
+    ) {
+      if (this.db.users.length > 0) return null;
+      const [id, email, name, passwordHash, passwordSalt] = this.args;
+      const now = new Date().toISOString();
+      const user = {
+        id,
+        email,
+        name,
+        role: "OWNER",
+        password_hash: passwordHash,
+        password_salt: passwordSalt,
+        disabled_at: null,
+        created_at: now,
+        updated_at: now
+      };
+      this.db.users.push(user);
+      return user as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_claim_id = ?, issuance_claimed_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      await this.db.beforeWompiIssuanceClaim?.();
+      const [claimId, claimedAt, eventId, staleBefore] = this.args;
+      const event = this.db.wompiEvents.find((row) => row.id === eventId);
+      const currentClaim = event?.issuance_claim_id ?? null;
+      const claimable = currentClaim === null || String(event?.issuance_claimed_at ?? "") < String(staleBefore);
+      if (!event || event.processed_at != null || event.created_document_id != null || !claimable) {
+        return null;
+      }
+      event.issuance_claim_id = String(claimId);
+      event.issuance_claimed_at = String(claimedAt);
+      return { id: event.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET issuance_claim_id = NULL, issuance_claimed_at = NULL") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [eventId, claimId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.processed_at == null &&
+          row.created_document_id == null &&
+          row.issuance_claim_id === claimId
+      );
+      if (!event) return null;
+      event.issuance_claim_id = null;
+      event.issuance_claimed_at = null;
+      return { id: event.id } as T;
+    }
+    if (
+      this.sql.includes("INSERT INTO password_reset_tokens") &&
+      this.sql.includes("auth_generation = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      if (this.db.beforeCredentialGuardedResetTokenInsert) {
+        const beforeInsert = this.db.beforeCredentialGuardedResetTokenInsert;
+        this.db.beforeCredentialGuardedResetTokenInsert = null;
+        await beforeInsert();
+      }
+      const [
+        id,
+        tokenHash,
+        expiresAt,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      ] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration) &&
+          row.password_hash === expectedPasswordHash &&
+          row.password_salt === expectedPasswordSalt
+      );
+      if (!user) return null;
+      this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
+      return { id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE donation_intents") &&
+      this.sql.includes("SET status = 'COMPLETED'") &&
+      this.sql.includes("post_accept_finalization_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [documentId, updatedAt, intentId, expectedDocumentId, ownerDocumentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === ownerDocumentId &&
+          row.status === "ACCEPTED" &&
+          (row.post_accept_finalized_at ?? null) === null &&
+          (row.fiscal_operation_claim_id ?? null) === null &&
+          row.post_accept_finalization_claim_id === claimId
+      );
+      const intent = this.db.donationIntents.find(
+        (row) =>
+          row.id === intentId &&
+          (((row.status === "LINK_CREATED" || row.status === "EXPIRED") && (row.document_id ?? null) === null) ||
+            (row.status === "COMPLETED" && row.document_id === expectedDocumentId))
+      );
+      if (!document || !intent) return null;
+      intent.status = "COMPLETED";
+      intent.document_id = documentId;
+      intent.updated_at = updatedAt;
+      return { id: intent.id } as T;
+    }
+    if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("post_accept_finalization_claim_id = ?") &&
+      this.sql.includes("ON CONFLICT(id) DO UPDATE") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [auditId, action, entityType, entityId, summary, metadataJson, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          (row.post_accept_finalized_at ?? null) === null &&
+          (row.fiscal_operation_claim_id ?? null) === null &&
+          row.post_accept_finalization_claim_id === claimId
+      );
+      if (!document) return null;
+      if (this.db.failNextAuditAction === action) {
+        this.db.failNextAuditAction = null;
+        throw new Error(`injected ${String(action)} audit failure`);
+      }
+      const existing = this.db.audits.find((row) => row.id === auditId);
+      if (!existing) {
+        this.db.audits.push({
+          id: auditId,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action,
+          entity_type: entityType,
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          rate_limit_claim_id: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+      }
+      return { id: auditId } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET post_accept_finalization_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      await this.db.beforePostAcceptFinalizationClaim?.();
+      const [claimId, claimedAt, updatedAt, documentId, staleBefore] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      const handledEvidence = this.db.emailDeliveries.some(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === "dteReceipt" &&
+          (delivery.status === "SENT" || delivery.status === "FAILED") &&
+          delivery.document_status_at_send === "ACCEPTED"
+      );
+      const skippedEvidence = this.db.audits.some(
+        (audit) =>
+          audit.action === "EMAIL_SKIPPED" &&
+          audit.entity_type === "dte_document" &&
+          audit.entity_id === documentId
+      );
+      const currentClaim = document?.post_accept_finalization_claim_id ?? null;
+      const canRecover =
+        currentClaim !== null &&
+        String(document?.post_accept_finalization_claimed_at ?? "") < String(staleBefore) &&
+        ((document?.donor_email ?? null) === null ||
+          (document?.post_accept_email_dispatch_started_at ?? null) === null ||
+          handledEvidence ||
+          skippedEvidence);
+      if (
+        !document ||
+        document.status !== "ACCEPTED" ||
+        (document.post_accept_finalized_at ?? null) !== null ||
+        (document.fiscal_operation_claim_id ?? null) !== null ||
+        (currentClaim !== null && !canRecover)
+      ) {
+        return null;
+      }
+      document.post_accept_finalization_claim_id = String(claimId);
+      document.post_accept_finalization_claimed_at = String(claimedAt);
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET post_accept_email_dispatch_started_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      await this.db.beforePostAcceptEmailDispatchMark?.();
+      const [startedAt, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          (row.post_accept_finalized_at ?? null) === null &&
+          row.post_accept_finalization_claim_id === claimId &&
+          (row.post_accept_email_dispatch_started_at ?? null) === null
+      );
+      if (!document) return null;
+      document.post_accept_email_dispatch_started_at = String(startedAt);
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET post_accept_finalization_claim_id = NULL") &&
+      this.sql.includes("post_accept_finalized_at IS NULL") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          (row.post_accept_finalized_at ?? null) === null &&
+          row.post_accept_finalization_claim_id === claimId
+      );
+      if (!document) return null;
+      document.post_accept_finalization_claim_id = null;
+      document.post_accept_finalization_claimed_at = null;
+      document.post_accept_email_dispatch_started_at = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET post_accept_finalized_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [finalizedAt, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          (row.post_accept_finalized_at ?? null) === null &&
+          (row.fiscal_operation_claim_id ?? null) === null &&
+          row.post_accept_finalization_claim_id === claimId
+      );
+      if (!document) return null;
+      document.post_accept_finalized_at = String(finalizedAt);
+      document.post_accept_finalization_claim_id = null;
+      document.post_accept_finalization_claimed_at = null;
+      document.post_accept_email_dispatch_started_at = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents SET signed_jws = ?") &&
+      this.sql.includes("fiscal_operation_claim_id IS NULL") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      await this.db.beforeDocumentSignedUpdate?.();
+      const [signedJws, updatedAt, documentId, expectedStatus] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === expectedStatus &&
+          (row.fiscal_operation_claim_id ?? null) === null
+      );
+      if (!document) return null;
+      document.signed_jws = String(signedJws);
+      document.status = "SIGNED";
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (this.sql.includes("INSERT INTO security_rate_limit_claims")) {
+      const scope = this.sql.includes("'donation_intent'")
+        ? "donation_intent"
+        : this.sql.includes("'donation_datos'")
+          ? "donation_datos"
+          : "password_reset";
+      if (scope === "password_reset" && this.sql.includes("subject_key_hash")) {
+        const [
+          id,
+          pairKeyHash,
+          accountKeyHash,
+          claimedAt,
+          expiresAt,
+          countPairKeyHash,
+          pairCutoff,
+          pairLimit,
+          countAccountKeyHash,
+          accountCutoff,
+          accountId,
+          legacyCutoff,
+          accountLimit
+        ] = this.args;
+        const pairCount = this.db.securityRateLimitClaims.filter(
+          (claim) =>
+            claim.scope === scope &&
+            claim.key_hash === countPairKeyHash &&
+            claim.claimed_at >= String(pairCutoff)
+        ).length;
+        const accountCount = this.db.securityRateLimitClaims.filter(
+          (claim) =>
+            claim.scope === scope &&
+            claim.subject_key_hash === countAccountKeyHash &&
+            claim.claimed_at >= String(accountCutoff)
+        ).length;
+        const legacyCount = this.db.audits.filter((audit) => {
+          if (
+            audit.entity_id !== accountId ||
+            !["PASSWORD_RESET_REQUESTED", "PASSWORD_RESET_EMAIL_FAILED"].includes(String(audit.action)) ||
+            String(audit.created_at) < String(legacyCutoff)
+          ) {
+            return false;
+          }
+          const linkedClaim = this.db.securityRateLimitClaims.find(
+            (claim) => claim.id === audit.rate_limit_claim_id
+          );
+          return audit.rate_limit_claim_id == null || linkedClaim?.subject_key_hash == null;
+        }).length;
+        if (pairCount >= Number(pairLimit) || accountCount + legacyCount >= Number(accountLimit)) {
+          return null;
+        }
+        const claim = {
+          id: String(id),
+          scope,
+          key_hash: String(pairKeyHash),
+          subject_key_hash: String(accountKeyHash),
+          claimed_at: String(claimedAt),
+          expires_at: String(expiresAt)
+        };
+        this.db.securityRateLimitClaims.push(claim);
+        return { id: claim.id } as T;
+      }
+      const [id, keyHash, claimedAt, expiresAt, countKeyHash, cutoff] = this.args;
+      const legacyKey = scope === "donation_intent" ? this.args[6] : null;
+      const legacyCutoff = scope === "donation_intent" ? this.args[7] : null;
+      const limitValue = scope === "donation_intent" ? this.args[8] : this.args[6];
+      const activeClaims = this.db.securityRateLimitClaims.filter(
+        (claim) =>
+          claim.scope === scope &&
+          claim.key_hash === countKeyHash &&
+          claim.claimed_at >= String(cutoff)
+      );
+      const legacyCount = scope === "donation_intent"
+        ? this.db.donationIntents.filter(
+            (intent) =>
+              intent.client_ip === legacyKey &&
+              String(intent.created_at) >= String(legacyCutoff) &&
+              (intent.rate_limit_claim_id ?? null) === null
+          ).length
+        : 0;
+      if (activeClaims.length + legacyCount >= Number(limitValue)) {
+        return null;
+      }
+      const claim = {
+        id: String(id),
+        scope,
+        key_hash: String(keyHash),
+        claimed_at: String(claimedAt),
+        expires_at: String(expiresAt)
+      };
+      this.db.securityRateLimitClaims.push(claim);
+      return { id: claim.id } as T;
+    }
+    if (this.sql.includes("INSERT INTO login_rate_limits")) {
+      const [keyHash, now, expiresAt, cutoff, , , , limitValue] = this.args;
+      const key = String(keyHash);
+      const current = this.db.loginRateLimits.get(key);
+      const limit = Number(limitValue);
+      if (!current || current.window_started_at <= String(cutoff)) {
+        const next = {
+          window_started_at: String(now),
+          attempt_count: 1,
+          expires_at: String(expiresAt)
+        };
+        this.db.loginRateLimits.set(key, next);
+        return { attempt_count: 1 } as T;
+      }
+      if (current.attempt_count >= limit) return null;
+      current.attempt_count += 1;
+      return { attempt_count: current.attempt_count } as T;
+    }
     if (
       this.sql.includes("UPDATE users") &&
       this.sql.includes("password_hash = ?") &&
@@ -8446,14 +12270,222 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE dte_documents") &&
-      this.sql.includes("status = 'REJECTED'") &&
+      this.sql.includes("SET status = 'SIGNED', fiscal_operation_claim_id = ?") &&
+      this.sql.includes("WHERE id = ? AND status = ?") &&
       this.sql.includes("RETURNING id")
     ) {
-      // claimRejectedWompiRebuild: conditional CAS that only wins while the row is
-      // still REJECTED. Returns the row (RETURNING id) on success, null when lost.
-      const [codigoGeneracion, numeroControl, plainJson, signedJws, updatedAt, documentId, wompiEventId] = this.args;
+      const [claimId, claimedAt, updatedAt, documentId, expectedStatus, signedJws] = this.args;
       const document = this.db.documents.find(
-        (row) => row.id === documentId && row.wompi_event_id === wompiEventId && row.status === "REJECTED"
+        (row) =>
+          row.id === documentId &&
+          row.status === expectedStatus &&
+          row.signed_jws === signedJws &&
+          (row.fiscal_operation_claim_id ?? null) === null
+      );
+      if (!document) return null;
+      document.status = "SIGNED";
+      document.fiscal_operation_claim_id = String(claimId);
+      document.fiscal_operation_claimed_at = String(claimedAt);
+      document.fiscal_operation_kind = "TRANSMISSION";
+      document.fiscal_operation_event_id = null;
+      document.post_accept_finalized_at = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET fiscal_operation_claim_id = ?, fiscal_operation_claimed_at = ?") &&
+      this.sql.includes("status = 'ACCEPTED'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [claimId, claimedAt, updatedAt, documentId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          row.sello_recibido != null &&
+          row.accepted_at != null &&
+          row.post_accept_finalized_at != null &&
+          (row.fiscal_operation_claim_id ?? null) === null
+      );
+      if (!document) return null;
+      document.fiscal_operation_claim_id = String(claimId);
+      document.fiscal_operation_claimed_at = String(claimedAt);
+      document.fiscal_operation_kind = "INVALIDATION";
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET fiscal_operation_event_id = ?") &&
+      this.sql.includes("fiscal_operation_kind = 'INVALIDATION'") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [eventId, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          (row.fiscal_operation_event_id ?? null) === null
+      );
+      if (!document) return null;
+      document.fiscal_operation_event_id = String(eventId);
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = ?, sello_recibido = ?") &&
+      this.sql.includes("fiscal_operation_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [status, sello, mhEstado, observaciones, acceptedAt, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "SIGNED" &&
+          row.fiscal_operation_claim_id === claimId
+      );
+      if (!document) return null;
+      document.status = String(status);
+      document.sello_recibido = sello == null ? null : String(sello);
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observaciones);
+      document.accepted_at = acceptedAt == null ? null : String(acceptedAt);
+      document.fiscal_operation_claim_id = null;
+      document.fiscal_operation_claimed_at = null;
+      document.fiscal_operation_kind = null;
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = 'FAILED'") &&
+      this.sql.includes("fiscal_operation_claim_id") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [mhEstado, observaciones, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find((row) => row.id === documentId);
+      const ownsClaim = claimId === undefined
+        ? (document?.fiscal_operation_claim_id ?? null) === null
+        : document?.fiscal_operation_claim_id === claimId;
+      if (!document || ["ACCEPTED", "REJECTED", "INVALIDATED"].includes(document.status) || !ownsClaim) return null;
+      document.status = "FAILED";
+      document.sello_recibido = null;
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observaciones);
+      document.fiscal_operation_claim_id = null;
+      document.fiscal_operation_claimed_at = null;
+      document.fiscal_operation_kind = null;
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = 'INVALIDATED'") &&
+      this.sql.includes("fiscal_operation_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.status === "ACCEPTED" && row.fiscal_operation_claim_id === claimId
+      );
+      if (!document) return null;
+      document.status = "INVALIDATED";
+      document.fiscal_operation_claim_id = null;
+      document.fiscal_operation_claimed_at = null;
+      document.fiscal_operation_kind = null;
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("transmission_deferred_at = ?") &&
+      this.sql.includes("fiscal_operation_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [deferredAt, mhEstado, observaciones, updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.status === "SIGNED" && row.fiscal_operation_claim_id === claimId
+      );
+      if (!document) return null;
+      document.transmission_deferred_at = String(deferredAt);
+      document.sello_recibido = null;
+      document.mh_estado = String(mhEstado);
+      document.mh_observaciones_json = String(observaciones);
+      document.fiscal_operation_claim_id = null;
+      document.fiscal_operation_claimed_at = null;
+      document.fiscal_operation_kind = null;
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET fiscal_operation_claim_id = NULL") &&
+      !this.sql.includes("SET status =") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [updatedAt, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && row.fiscal_operation_claim_id === claimId
+      );
+      if (!document) return null;
+      document.fiscal_operation_claim_id = null;
+      document.fiscal_operation_claimed_at = null;
+      document.fiscal_operation_kind = null;
+      document.fiscal_operation_event_id = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET fiscal_operation_claim_id = ?") &&
+      this.sql.includes("status = 'REJECTED'") &&
+      this.sql.includes("fiscal_operation_claim_id IS NULL") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      if (this.db.beforeRejectedWompiClaim) {
+        await this.db.beforeRejectedWompiClaim();
+      }
+      const [claimId, claimedAt, updatedAt, documentId, wompiEventId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.wompi_event_id === wompiEventId &&
+          row.status === "REJECTED" &&
+          (row.fiscal_operation_claim_id ?? null) === null
+      );
+      if (!document) {
+        return null;
+      }
+      document.fiscal_operation_claim_id = String(claimId);
+      document.fiscal_operation_claimed_at = String(claimedAt);
+      document.fiscal_operation_kind = "TRANSMISSION";
+      document.fiscal_operation_event_id = null;
+      document.post_accept_finalized_at = null;
+      document.updated_at = String(updatedAt);
+      return { id: document.id } as T;
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET codigo_generacion = ?") &&
+      this.sql.includes("status = 'REJECTED'") &&
+      this.sql.includes("fiscal_operation_claim_id = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [codigoGeneracion, numeroControl, plainJson, signedJws, updatedAt, documentId, wompiEventId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.wompi_event_id === wompiEventId &&
+          row.status === "REJECTED" &&
+          row.fiscal_operation_claim_id === claimId
       );
       if (!document) {
         return null;
@@ -8466,11 +12498,36 @@ class Statement {
       document.sello_recibido = null;
       document.mh_estado = null;
       document.mh_observaciones_json = "[]";
+      document.post_accept_finalized_at = null;
       document.updated_at = String(updatedAt);
       return { id: document.id } as T;
     }
     if (this.sql.includes("FROM sessions") && this.sql.includes("JOIN users")) {
-      return this.db.sessionUser as T | null;
+      if (this.db.sessionUser) {
+        return this.db.sessionUser as T;
+      }
+      const [tokenHash, nowIso] = this.args.map(String);
+      const session = this.db.sessions.find(
+        (row) =>
+          row.token_hash === tokenHash &&
+          !row.revoked_at &&
+          String(row.expires_at) > nowIso
+      );
+      if (!session) {
+        return null;
+      }
+      const user = this.db.users.find(
+        (row) => row.id === session.user_id && !row.disabled_at
+      );
+      if (!user) {
+        return null;
+      }
+      return {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role
+      } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM users")) {
       return { count: this.db.users.length } as T;
@@ -8479,7 +12536,15 @@ class Statement {
       return (this.db.users.find((user) => user.id === this.args[0]) ?? null) as T | null;
     }
     if (this.sql.includes("FROM users WHERE email = ?")) {
+      this.db.loginCredentialReads += 1;
       return (this.db.users.find((user) => String(user.email).toLowerCase() === String(this.args[0]).toLowerCase()) ?? null) as T | null;
+    }
+    if (this.sql.includes("SELECT id FROM audit_logs WHERE action = ?") && this.sql.includes("entity_type = ?")) {
+      const [action, entityType, entityId] = this.args;
+      const audit = this.db.audits.find(
+        (row) => row.action === action && row.entity_type === entityType && row.entity_id === entityId
+      );
+      return (audit ? { id: audit.id } : null) as T | null;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("actor_ip IS ?")) {
       const [action, entityId, sinceIso, actorIp] = this.args;
@@ -8503,6 +12568,12 @@ class Statement {
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
+      if (
+        action === "DONATION_INTENT_BINDING_REJECTED" &&
+        this.db.beforeBindingAuditCount
+      ) {
+        await this.db.beforeBindingAuditCount();
+      }
       return { count: this.db.audits.filter((audit) => audit.action === action && audit.entity_id === entityId).length } as T;
     }
     if (this.sql.includes("FROM password_reset_tokens") && this.sql.includes("JOIN users")) {
@@ -8524,7 +12595,9 @@ class Statement {
     }
     if (this.sql.includes("SELECT * FROM dte_documents WHERE id = ?")) {
       this.db.documentLookupCount += 1;
-      return (this.db.documents.find((document) => document.id === this.args[0]) ?? null) as T | null;
+      await this.db.beforeDocumentRead?.();
+      const document = this.db.documents.find((candidate) => candidate.id === this.args[0]);
+      return (document ? structuredClone(document) : null) as T | null;
     }
     if (this.sql.includes("SELECT * FROM donation_intents WHERE id = ?")) {
       return (this.db.donationIntents.find((intent) => intent.id === this.args[0]) ?? null) as T | null;
@@ -8570,19 +12643,15 @@ class Statement {
       intent.donor_pais = donorPais == null ? null : String(donorPais);
       intent.datos_token_hash = null;
       intent.updated_at = String(updatedAt);
-      return { id: String(id) } as T;
+      return {
+        id: String(id),
+        wompi_url_enlace: intent.wompi_url_enlace,
+        wompi_url_enlace_largo: intent.wompi_url_enlace_largo
+      } as T;
     }
     if (this.sql.includes("FROM donation_intents WHERE document_id = ?") && this.sql.includes("status = 'COMPLETED'")) {
       const documentId = String(this.args[0]);
       return (this.db.donationIntents.find((intent) => intent.document_id === documentId && intent.status === "COMPLETED") ?? null) as T | null;
-    }
-    if (this.sql.includes("SELECT COUNT(*) AS count FROM donation_intents") && this.sql.includes("client_ip = ?")) {
-      const [clientIp, sinceIso] = this.args.map(String);
-      return {
-        count: this.db.donationIntents.filter(
-          (intent) => intent.client_ip === clientIp && String(intent.created_at) >= sinceIso
-        ).length
-      } as T;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
       return (this.db.wompiEvents.find((event) => event.id === this.args[0]) ?? null) as T | null;
@@ -8594,10 +12663,17 @@ class Statement {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
     if (this.sql.includes("FROM email_deliveries") && this.sql.includes("email_type = ?")) {
-      // hasSentEmail dedupe lookup: SENT delivery of a given evidence type for a document.
-      const [documentId, emailType] = this.args.map(String);
+      // Receipt dedupe lookup: either SENT only or any terminal handling evidence.
+      const [documentId, emailType, documentStatusAtSend] = this.args.map(String);
+      const allowedStatuses = this.sql.includes("status IN ('SENT', 'FAILED')")
+        ? new Set(["SENT", "FAILED"])
+        : new Set(["SENT"]);
       return (this.db.emailDeliveries.find(
-        (row) => row.document_id === documentId && row.email_type === emailType && row.status === "SENT"
+        (row) =>
+          row.document_id === documentId &&
+          row.email_type === emailType &&
+          allowedStatuses.has(String(row.status)) &&
+          (!this.sql.includes("document_status_at_send = ?") || row.document_status_at_send === documentStatusAtSend)
       ) ?? null) as T | null;
     }
     if (this.sql.includes("FROM contingency_periods WHERE environment = ?")) {
@@ -8622,6 +12698,39 @@ class Statement {
   }
 
   async all<T>(): Promise<{ results: T[] }> {
+    if (
+      this.sql.includes("FROM dte_documents") &&
+      this.sql.includes("post_accept_finalized_at IS NULL") &&
+      this.sql.includes("ORDER BY created_at ASC, id ASC LIMIT ?")
+    ) {
+      const staleBefore = String(this.args[0]);
+      const limit = Number(this.args[1] ?? 100);
+      const documents = this.db.documents
+        .filter((document) => {
+          const handledEvidence = this.db.emailDeliveries.some(
+            (delivery) =>
+              delivery.document_id === document.id &&
+              delivery.email_type === "dteReceipt" &&
+              (delivery.status === "SENT" || delivery.status === "FAILED") &&
+              delivery.document_status_at_send === "ACCEPTED"
+          );
+          const claimId = document.post_accept_finalization_claim_id ?? null;
+          const claimable =
+            claimId === null ||
+            (String(document.post_accept_finalization_claimed_at ?? "") < staleBefore &&
+              ((document.donor_email ?? null) === null ||
+                (document.post_accept_email_dispatch_started_at ?? null) === null ||
+                handledEvidence));
+          return document.status === "ACCEPTED" &&
+            (document.post_accept_finalized_at ?? null) === null &&
+            (document.fiscal_operation_claim_id ?? null) === null &&
+            claimable;
+        })
+        .sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)))
+        .slice(0, limit)
+        .map((document) => ({ ...document }));
+      return { results: documents as T[] };
+    }
     // ----- Analítica (carril Wompi) -----
     // Documentos: dte_documents con wompi_event_id, LEFT JOIN a donation_intents por
     // document_id, filtrado por environment + ventana issued_at, paginado por (issued_at, id).
@@ -8630,6 +12739,7 @@ class Statement {
       let documents = this.db.documents.filter(
         (document) =>
           document.wompi_event_id != null &&
+          (document.fiscal_operation_claim_id ?? null) === null &&
           document.environment === environment &&
           String(document.issued_at) >= startIso &&
           String(document.issued_at) < endIso
@@ -8642,24 +12752,10 @@ class Statement {
       }
       documents.sort((left, right) => String(left.issued_at).localeCompare(String(right.issued_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
-      const rows = documents.slice(0, limit).map((document) => {
-        const intent = this.db.donationIntents.find((candidate) => candidate.document_id === document.id);
-        return {
-          id: document.id,
-          wompi_event_id: document.wompi_event_id,
-          environment: document.environment,
-          status: document.status,
-          donor_email: document.donor_email ?? null,
-          donor_name: document.donor_name ?? null,
-          amount_cents: document.amount_cents,
-          issued_at: document.issued_at,
-          accepted_at: document.accepted_at ?? null,
-          transmission_deferred_at: document.transmission_deferred_at ?? null,
-          direccion_departamento: intent?.direccion_departamento ?? null,
-          donor_pais: intent?.donor_pais ?? null,
-          gift_type: intent?.gift_type ?? null
-        };
-      });
+      this.db.analyticsQueryLimits.push({ reader: "documents", limit });
+      const rows = documents
+        .slice(0, limit)
+        .map((document) => analyticsDocumentRow(document, this.db.donationIntents));
       return { results: rows as T[] };
     }
     // Intents: donation_intents LEFT JOIN dte_documents, filtrado por ventana created_at
@@ -8680,17 +12776,8 @@ class Statement {
       }
       intents.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
-      const rows = intents.slice(0, limit).map((intent) => ({
-        id: intent.id,
-        status: intent.status,
-        document_id: intent.document_id ?? null,
-        donor_document: intent.donor_document ?? null,
-        gift_type: intent.gift_type ?? null,
-        created_at: intent.created_at,
-        paid_at: intent.paid_at ?? null,
-        direccion_departamento: intent.direccion_departamento ?? null,
-        donor_pais: intent.donor_pais ?? null
-      }));
+      this.db.analyticsQueryLimits.push({ reader: "intents", limit });
+      const rows = intents.slice(0, limit).map(analyticsIntentRow);
       return { results: rows as T[] };
     }
     // Emails: email_deliveries JOIN dte_documents (carril Wompi + environment), ventana created_at.
@@ -8714,6 +12801,7 @@ class Statement {
       }
       deliveries.sort((left, right) => String(left.created_at).localeCompare(String(right.created_at)) || String(left.id).localeCompare(String(right.id)));
       const limit = Number(this.args.at(-1) ?? 500);
+      this.db.analyticsQueryLimits.push({ reader: "emails", limit });
       const rows = deliveries.slice(0, limit).map((delivery) => ({
         id: delivery.id,
         document_id: delivery.document_id,
@@ -8838,7 +12926,11 @@ class Statement {
     }
     if (this.sql.includes("FROM dte_documents") && this.sql.includes("ORDER BY issued_at ASC, id ASC")) {
       // Annual donor certificate aggregation (Task 4): keyset-paged ACCEPTED-in-year read.
-      let documents = this.db.documents.filter((document) => document.status === "ACCEPTED");
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.status === "ACCEPTED" &&
+          (document.fiscal_operation_claim_id ?? null) === null
+      );
       const [startIso, endIso] = [String(this.args[0]), String(this.args[1])];
       documents = documents.filter((document) => document.issued_at >= startIso && document.issued_at < endIso);
       if (this.sql.includes("(issued_at, id) > (?, ?)")) {
@@ -8862,6 +12954,7 @@ class Statement {
       let documents = this.db.documents.filter(
         (document) =>
           document.status === "ACCEPTED" &&
+          (document.fiscal_operation_claim_id ?? null) === null &&
           document.wompi_event_id != null &&
           document.environment === environment &&
           document.issued_at >= startIso
@@ -8949,6 +13042,9 @@ class Statement {
       if (this.sql.includes("status = 'ACCEPTED'")) {
         documents = documents.filter((document) => document.status === "ACCEPTED");
       }
+      if (this.sql.includes("fiscal_operation_claim_id IS NULL")) {
+        documents = documents.filter((document) => (document.fiscal_operation_claim_id ?? null) === null);
+      }
       if (this.sql.includes("sello_recibido IS NOT NULL")) {
         documents = documents.filter((document) => document.sello_recibido !== null);
       }
@@ -9016,6 +13112,208 @@ class Statement {
 
   async run(): Promise<StatementRunResult> {
     let changes = 0;
+    if (
+      this.sql.includes("INSERT INTO dte_events") &&
+      this.sql.includes("FROM dte_documents") &&
+      this.sql.includes("fiscal_operation_kind = 'INVALIDATION'")
+    ) {
+      const [eventId, environment, codigoGeneracion, plainJson, signedJws, legalDeadlineAt, createdBy, documentId, claimId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          (row.fiscal_operation_event_id ?? null) === null
+      );
+      if (document) {
+        this.db.dteEvents.push({
+          id: eventId,
+          document_id: documentId,
+          event_type: "INVALIDACION",
+          environment,
+          codigo_generacion: codigoGeneracion,
+          status: "SIGNED",
+          plain_json: plainJson,
+          signed_jws: signedJws,
+          sello_recibido: null,
+          mh_estado: null,
+          mh_observaciones_json: "[]",
+          legal_deadline_at: legalDeadlineAt,
+          created_by: createdBy,
+          created_at: "2026-06-26T01:46:47.015Z",
+          accepted_at: null
+        });
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET fiscal_operation_event_id = ?, updated_at = ?") &&
+      this.sql.includes("EXISTS (")
+    ) {
+      const [eventId, updatedAt, documentId, claimId, eventGuardId] = this.args;
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventGuardId &&
+          row.document_id === documentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === "SIGNED"
+      );
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          (row.fiscal_operation_event_id ?? null) === null
+      );
+      if (document && event) {
+        document.fiscal_operation_event_id = eventId == null ? null : String(eventId);
+        document.updated_at = String(updatedAt);
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE dte_events") &&
+      this.sql.includes("SET status = 'FAILED'") &&
+      this.sql.includes("PRE_DISPATCH_FAILED")
+    ) {
+      const [observacionesJson, eventId, documentId, documentGuardId, claimId, eventGuardId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentGuardId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          row.fiscal_operation_event_id === eventGuardId
+      );
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.document_id === documentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === "SIGNED"
+      );
+      if (document && event) {
+        event.status = "FAILED";
+        event.sello_recibido = null;
+        event.mh_estado = "PRE_DISPATCH_FAILED";
+        event.mh_observaciones_json = observacionesJson;
+        event.accepted_at = null;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("fiscal_operation_claim_id = NULL") &&
+      this.sql.includes("PRE_DISPATCH_FAILED")
+    ) {
+      const [updatedAt, documentId, claimId, eventId, eventGuardId] = this.args;
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventGuardId &&
+          row.document_id === documentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === "FAILED" &&
+          row.mh_estado === "PRE_DISPATCH_FAILED"
+      );
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          row.fiscal_operation_event_id === eventId
+      );
+      if (document && event) {
+        document.fiscal_operation_claim_id = null;
+        document.fiscal_operation_claimed_at = null;
+        document.fiscal_operation_kind = null;
+        document.fiscal_operation_event_id = null;
+        document.updated_at = String(updatedAt);
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE dte_events") &&
+      this.sql.includes("SET status = ?") &&
+      this.sql.includes("event_type = 'INVALIDACION'")
+    ) {
+      const [status, sello, mhEstado, observacionesJson, acceptedAt, eventId, documentId, documentGuardId, claimId, eventGuardId] = this.args;
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentGuardId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          row.fiscal_operation_event_id === eventGuardId
+      );
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.document_id === documentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === "SIGNED"
+      );
+      if (document && event) {
+        event.status = status;
+        event.sello_recibido = sello;
+        event.mh_estado = mhEstado;
+        event.mh_observaciones_json = observacionesJson;
+        event.accepted_at = acceptedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = ?, fiscal_operation_claim_id = NULL") &&
+      this.sql.includes("event_type = 'INVALIDACION'")
+    ) {
+      const [status, updatedAt, documentId, claimId, eventId, eventGuardId, eventStatus] = this.args;
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventGuardId &&
+          row.document_id === documentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === eventStatus
+      );
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === "ACCEPTED" &&
+          row.fiscal_operation_claim_id === claimId &&
+          row.fiscal_operation_kind === "INVALIDATION" &&
+          row.fiscal_operation_event_id === eventId
+      );
+      if (document && event) {
+        document.status = String(status);
+        document.fiscal_operation_claim_id = null;
+        document.fiscal_operation_claimed_at = null;
+        document.fiscal_operation_kind = null;
+        document.fiscal_operation_event_id = null;
+        document.updated_at = String(updatedAt);
+        changes = 1;
+      }
+    }
+    if (this.sql.includes("DELETE FROM security_rate_limit_claims")) {
+      const [now] = this.args.map(String);
+      for (let index = this.db.securityRateLimitClaims.length - 1; index >= 0; index -= 1) {
+        if (this.db.securityRateLimitClaims[index].expires_at <= now) {
+          this.db.securityRateLimitClaims.splice(index, 1);
+          changes += 1;
+        }
+      }
+    }
+    if (this.sql.includes("DELETE FROM login_rate_limits")) {
+      const [now] = this.args.map(String);
+      for (const [key, row] of this.db.loginRateLimits) {
+        if (row.expires_at <= now) {
+          this.db.loginRateLimits.delete(key);
+          changes += 1;
+        }
+      }
+    }
     if (this.sql.includes("INSERT INTO users")) {
       const [id, email, name, role, passwordHash, passwordSalt] = this.args.map(String);
       this.db.users.push({
@@ -9032,16 +13330,119 @@ class Statement {
       const [id, userId, tokenHash, expiresAt] = this.args.map(String);
       this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
     }
+    if (
+      this.sql.includes("DELETE FROM sessions") &&
+      this.sql.includes("revoked_at IS NOT NULL OR expires_at <= ?")
+    ) {
+      const [userId, expiresAt, guardUserId, passwordHash, passwordSalt, expectedEmail, expectedAuthGeneration] = this.args;
+      const currentCredentials = this.db.users.some(
+        (row) =>
+          row.id === guardUserId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration)
+      );
+      if (currentCredentials) {
+        for (let index = this.db.sessions.length - 1; index >= 0; index -= 1) {
+          const session = this.db.sessions[index];
+          if (
+            session.user_id === userId &&
+            (Boolean(session.revoked_at) || String(session.expires_at) <= String(expiresAt))
+          ) {
+            this.db.sessions.splice(index, 1);
+            changes += 1;
+          }
+        }
+      }
+    }
+    if (
+      this.sql.includes("DELETE FROM sessions") &&
+      this.sql.includes("LIMIT -1 OFFSET 7")
+    ) {
+      const [userId, expiresAt, guardUserId, passwordHash, passwordSalt, expectedEmail, expectedAuthGeneration] = this.args;
+      const currentCredentials = this.db.users.some(
+        (row) =>
+          row.id === guardUserId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration)
+      );
+      if (currentCredentials) {
+        const prunedIds = new Set(
+          this.db.sessions
+            .filter(
+              (row) =>
+                row.user_id === userId &&
+                !row.revoked_at &&
+                String(row.expires_at) > String(expiresAt)
+            )
+            .sort(
+              (left, right) =>
+                String(right.created_at).localeCompare(String(left.created_at)) ||
+                String(right.id).localeCompare(String(left.id))
+            )
+            .slice(7)
+            .map((row) => row.id)
+        );
+        for (let index = this.db.sessions.length - 1; index >= 0; index -= 1) {
+          if (prunedIds.has(this.db.sessions[index].id)) {
+            this.db.sessions.splice(index, 1);
+            changes += 1;
+          }
+        }
+      }
+    }
+    if (
+      this.sql.includes("INSERT INTO sessions") &&
+      this.sql.includes("password_hash = ?") &&
+      this.sql.includes("password_salt = ?")
+    ) {
+      const [id, tokenHash, expiresAt, createdAt, userId, passwordHash, passwordSalt, expectedEmail, expectedAuthGeneration] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.password_hash === passwordHash &&
+          row.password_salt === passwordSalt &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration)
+      );
+      if (user) {
+        this.db.sessions.push({
+          id,
+          user_id: user.id,
+          token_hash: tokenHash,
+          expires_at: expiresAt,
+          created_at: createdAt,
+          revoked_at: null
+        });
+        changes = 1;
+      }
+    }
     if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
       if (this.sql.includes("WHERE user_id = ?")) {
-        const [usedAt, userId, markerUserId, passwordHash, passwordSalt, updatedAt] = this.args.map(String);
-        const marker = this.db.users.some(
-          (row) =>
-            row.id === markerUserId &&
-            row.password_hash === passwordHash &&
-            row.password_salt === passwordSalt &&
-            row.updated_at === updatedAt
-        );
+        const [usedAt, userId, markerUserId, expectedValue, expectedState, expectedVersion] = this.args;
+        const marker = !this.sql.includes("EXISTS (")
+          ? true
+          : this.sql.includes("AND email = ?")
+            ? this.db.users.some(
+                (row) =>
+                  row.id === markerUserId &&
+                  row.email === expectedValue &&
+                  (row.disabled_at ?? null) === (expectedState ?? null) &&
+                  Number(row.auth_generation ?? 0) === Number(expectedVersion)
+              )
+            : this.db.users.some(
+                (row) =>
+                  row.id === markerUserId &&
+                  row.password_hash === expectedValue &&
+                  row.password_salt === expectedState &&
+                  row.updated_at === expectedVersion
+              );
         if (marker) {
           for (const token of this.db.resetTokens.filter((row) => row.user_id === userId && !row.used_at)) {
             token.used_at = usedAt;
@@ -9057,8 +13458,79 @@ class Statement {
         }
       }
     }
-    if (this.sql.includes("INSERT INTO audit_logs")) {
-      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext] = this.args;
+    if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("SELECT ?, 'USER'") &&
+      this.sql.includes("event_type = 'INVALIDACION'")
+    ) {
+      const [id, actorId, action, entityId, summary, metadataJson, eventId, eventDocumentId, eventStatus, documentId, documentStatus] = this.args;
+      const event = this.db.dteEvents.find(
+        (row) =>
+          row.id === eventId &&
+          row.document_id === eventDocumentId &&
+          row.event_type === "INVALIDACION" &&
+          row.status === eventStatus
+      );
+      const document = this.db.documents.find(
+        (row) =>
+          row.id === documentId &&
+          row.status === documentStatus &&
+          (row.fiscal_operation_claim_id ?? null) === null
+      );
+      if (event && document && !this.db.audits.some((audit) => audit.id === id)) {
+        this.db.audits.push({
+          id,
+          actor_type: "USER",
+          actor_id: actorId,
+          action,
+          entity_type: "dte_document",
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          rate_limit_claim_id: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("DONATION_INTENT_BINDING_REJECTED") &&
+      this.sql.includes("processed_at IS NULL")
+    ) {
+      const [id, entityId, summary, metadataJson, eventGuardId, auditGuardEntityId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) => row.id === eventGuardId && row.processed_at == null
+      );
+      const existingAudit = this.db.audits.some(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === auditGuardEntityId
+      );
+      const idConflict = this.db.audits.some((row) => row.id === id);
+      if (event && !existingAudit && !idConflict) {
+        this.db.audits.push({
+          id,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "DONATION_INTENT_BINDING_REJECTED",
+          entity_type: "wompi_event",
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: null,
+          actor_context: null,
+          created_at: "2026-06-26T01:46:47.015Z"
+        });
+        changes = 1;
+      }
+    } else if (this.sql.includes("INSERT INTO audit_logs")) {
+      const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson, actorIp, actorContext, rateLimitClaimId] = this.args;
+      if (this.db.failNextAuditAction === action) {
+        this.db.failNextAuditAction = null;
+        throw new Error(`injected ${String(action)} audit failure`);
+      }
       this.db.audits.push({
         id,
         actor_type: actorType,
@@ -9070,6 +13542,7 @@ class Statement {
         metadata_json: metadataJson,
         actor_ip: actorIp ?? null,
         actor_context: actorContext ?? null,
+        rate_limit_claim_id: rateLimitClaimId ?? null,
         created_at: "2026-06-26T01:46:47.015Z"
       });
     }
@@ -9150,7 +13623,8 @@ class Statement {
         clientIp,
         expiresAt,
         giftType,
-        datosTokenHash
+        datosTokenHash,
+        rateLimitClaimId
       ] = this.args;
       this.db.donationIntents.push({
         id: String(id),
@@ -9175,6 +13649,7 @@ class Statement {
         document_id: null,
         client_ip: clientIp == null ? null : String(clientIp),
         datos_token_hash: datosTokenHash == null ? null : String(datosTokenHash),
+        rate_limit_claim_id: rateLimitClaimId == null ? null : String(rateLimitClaimId),
         // paid_at (migration 0016): stamped only by the webhook's markIntentPaid,
         // never on create — a fresh intent has not been paid.
         paid_at: null,
@@ -9223,13 +13698,19 @@ class Statement {
         intent.updated_at = String(updatedAt);
       }
     }
-    if (this.sql.includes("UPDATE donation_intents SET status = 'COMPLETED'")) {
-      const [documentId, updatedAt, id] = this.args;
-      const intent = this.db.donationIntents.find((row) => row.id === id);
+    if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("SET status = 'COMPLETED'")) {
+      const [documentId, updatedAt, id, expectedDocumentId] = this.args;
+      const intent = this.db.donationIntents.find(
+        (row) =>
+          row.id === id &&
+          (((row.status === "LINK_CREATED" || row.status === "EXPIRED") && (row.document_id ?? null) === null) ||
+            (row.status === "COMPLETED" && row.document_id === expectedDocumentId))
+      );
       if (intent) {
         intent.status = "COMPLETED";
         intent.document_id = documentId == null ? null : String(documentId);
         intent.updated_at = String(updatedAt);
+        changes = 1;
       }
     }
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("SET paid_at = ?")) {
@@ -9263,7 +13744,53 @@ class Statement {
         intent.updated_at = updatedAt;
       }
     }
-    if (this.sql.includes("INSERT INTO dte_documents")) {
+    if (this.sql.includes("INSERT INTO dte_documents") && this.sql.includes("FROM wompi_events")) {
+      const [
+        id,
+        environment,
+        codigoGeneracion,
+        numeroControl,
+        plainJson,
+        donorEmail,
+        donorName,
+        amountCents,
+        issuedAt,
+        wompiEventId,
+        expectedDocumentId
+      ] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.created_document_id === expectedDocumentId &&
+          row.issuance_claim_id == null
+      );
+      if (event) {
+        this.db.documents.push({
+          id: String(id),
+          wompi_event_id: String(wompiEventId),
+          tipo_dte: "15",
+          environment: environment === "01" ? "01" : "00",
+          codigo_generacion: String(codigoGeneracion),
+          numero_control: String(numeroControl),
+          status: "PENDING",
+          plain_json: String(plainJson),
+          signed_jws: null,
+          sello_recibido: null,
+          mh_estado: null,
+          mh_observaciones_json: "[]",
+          donor_email: donorEmail === null ? null : String(donorEmail),
+          donor_name: donorName === null ? null : String(donorName),
+          amount_cents: Number(amountCents),
+          issued_at: String(issuedAt),
+          accepted_at: null,
+          contingency_period_id: null,
+          transmission_deferred_at: null,
+          created_at: String(issuedAt),
+          updated_at: String(issuedAt)
+        });
+        changes = 1;
+      }
+    } else if (this.sql.includes("INSERT INTO dte_documents")) {
       const [id, wompiEventId, environment, codigoGeneracion, numeroControl, status, plainJson, donorEmail, donorName, amountCents, issuedAt, contingencyPeriodId] = this.args;
       this.db.documents.push({
         id: String(id),
@@ -9288,8 +13815,9 @@ class Statement {
         created_at: String(issuedAt),
         updated_at: String(issuedAt)
       });
+      changes = 1;
     }
-    if (this.sql.includes("INSERT INTO dte_events")) {
+    if (this.sql.includes("INSERT INTO dte_events") && !this.sql.includes("FROM dte_documents")) {
       const [id, documentId, eventType, environment, codigoGeneracion, status, plainJson, signedJws, legalDeadlineAt, createdBy] = this.args;
       this.db.dteEvents.push({
         id,
@@ -9367,11 +13895,45 @@ class Statement {
         updated_at: "2026-06-26T01:46:47.015Z"
       });
     }
-    if (this.sql.includes("UPDATE wompi_events SET processed_at = ?")) {
-      const [processedAt, wompiEventId] = this.args;
-      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
-      if (event && !event.processed_at) {
+    if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET created_document_id = ?, processed_at = ?") &&
+      this.sql.includes("issuance_claim_id = NULL")
+    ) {
+      const [documentId, processedAt, wompiEventId, issuanceClaimId] = this.args;
+      const event = this.db.wompiEvents.find(
+        (row) =>
+          row.id === wompiEventId &&
+          row.issuance_claim_id === issuanceClaimId &&
+          row.processed_at == null &&
+          row.created_document_id == null
+      );
+      if (event) {
+        event.created_document_id = documentId;
         event.processed_at = processedAt;
+        event.issuance_claim_id = null;
+        event.issuance_claimed_at = null;
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("UPDATE wompi_events") &&
+      this.sql.includes("SET processed_at = ?")
+    ) {
+      const [processedAt, wompiEventId, auditEntityId] = this.args;
+      const event = this.db.wompiEvents.find((row) => row.id === wompiEventId);
+      const auditRequired = this.sql.includes("DONATION_INTENT_BINDING_REJECTED");
+      const auditExists = this.db.audits.some(
+        (row) =>
+          row.action === "DONATION_INTENT_BINDING_REJECTED" &&
+          row.entity_id === auditEntityId
+      );
+      if (
+        event &&
+        event.processed_at == null &&
+        (!auditRequired || auditExists)
+      ) {
+        event.processed_at = processedAt;
+        changes = 1;
       }
     }
     if (this.sql.includes("UPDATE wompi_events SET created_document_id")) {
@@ -9395,16 +13957,6 @@ class Statement {
         document.updated_at = String(updatedAt);
       }
     }
-    if (this.sql.includes("UPDATE dte_documents SET signed_jws = ?")) {
-      // updateDocumentSigned: persists the JWS and flips the doc to SIGNED.
-      const [signedJws, updatedAt, documentId] = this.args;
-      const document = this.db.documents.find((row) => row.id === documentId);
-      if (document) {
-        document.signed_jws = String(signedJws);
-        document.status = "SIGNED";
-        document.updated_at = String(updatedAt);
-      }
-    }
     if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET codigo_generacion = ?")) {
       const [codigoGeneracion, numeroControl, plainJson, signedJws, status, updatedAt, documentId] = this.args;
       const document = this.db.documents.find((row) => row.id === documentId);
@@ -9417,12 +13969,15 @@ class Statement {
         document.updated_at = String(updatedAt);
       }
     }
-    if (this.sql.includes("UPDATE dte_documents SET donor_email")) {
+    if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET donor_email = ?")) {
       const [email, updatedAt, documentId] = this.args;
-      const document = this.db.documents.find((row) => row.id === documentId);
+      const document = this.db.documents.find(
+        (row) => row.id === documentId && (row.post_accept_finalization_claim_id ?? null) === null
+      );
       if (document) {
         document.donor_email = String(email);
         document.updated_at = String(updatedAt);
+        changes = 1;
       }
     }
     if (this.sql.includes("UPDATE users SET name = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")) {
@@ -9435,15 +13990,33 @@ class Statement {
         user.updated_at = updatedAt;
       }
     }
-    if (this.sql.includes("UPDATE users SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ? WHERE id = ?")) {
-      const [name, email, role, disabledAt, updatedAt, userId] = this.args;
-      const user = this.db.users.find((row) => row.id === userId);
+    if (this.sql.includes("SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?")) {
+      if (this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") && this.db.beforeGuardedUserMutation) {
+        const beforeMutation = this.db.beforeGuardedUserMutation;
+        this.db.beforeGuardedUserMutation = null;
+        await beforeMutation();
+      }
+      const [name, email, role, disabledAt, updatedAt, authGenerationDelta, userId, allowOwnerTarget, expectedEmail, expectedDisabledAt, expectedAuthGeneration, expectedName, expectedRole] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          (!this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") ||
+            Number(allowOwnerTarget) === 1 ||
+            ["VIEWER", "OPERATOR", "ADMIN"].includes(String(row.role))) &&
+          row.email === expectedEmail &&
+          (row.disabled_at ?? null) === (expectedDisabledAt ?? null) &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration) &&
+          row.name === expectedName &&
+          row.role === expectedRole
+      );
       if (user) {
         user.name = name;
         user.email = email;
         user.role = role;
         user.disabled_at = disabledAt;
         user.updated_at = updatedAt;
+        user.auth_generation = Number(user.auth_generation ?? 0) + Number(authGenerationDelta);
+        changes = 1;
       }
     }
     if (
@@ -9451,8 +14024,22 @@ class Statement {
       this.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?") &&
       !this.sql.includes("RETURNING id")
     ) {
+      if (this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") && this.db.beforeGuardedUserMutation) {
+        const beforeMutation = this.db.beforeGuardedUserMutation;
+        this.db.beforeGuardedUserMutation = null;
+        await beforeMutation();
+      }
       const [passwordHash, passwordSalt, updatedAt, userId] = this.args;
-      const user = this.db.users.find((row) => row.id === userId);
+      const allowOwnerTarget = this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')")
+        ? this.args[4]
+        : 1;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          (!this.sql.includes("role IN ('VIEWER','OPERATOR','ADMIN')") ||
+            Number(allowOwnerTarget) === 1 ||
+            ["VIEWER", "OPERATOR", "ADMIN"].includes(String(row.role)))
+      );
       if (this.sql.includes("FROM password_reset_tokens")) {
         const [, , , , tokenUserId, tokenHash, expiresAfter] = this.args;
         const activeToken = this.db.resetTokens.some(
@@ -9478,17 +14065,39 @@ class Statement {
     if (
       this.sql.includes("UPDATE sessions") &&
       this.sql.includes("SET revoked_at = ?") &&
+      this.sql.includes("WHERE token_hash = ?")
+    ) {
+      const [revokedAt, tokenHash] = this.args;
+      const session = this.db.sessions.find(
+        (row) => row.token_hash === tokenHash && !row.revoked_at
+      );
+      if (session) {
+        session.revoked_at = revokedAt;
+        changes = 1;
+      }
+    }
+    if (
+      this.sql.includes("UPDATE sessions") &&
+      this.sql.includes("SET revoked_at = ?") &&
       this.sql.includes("WHERE user_id = ?")
     ) {
       const [revokedAt, userId] = this.args;
       const marker = this.sql.includes("SELECT 1")
-        ? this.db.users.some(
-            (row) =>
-              row.id === this.args[2] &&
-              row.password_hash === this.args[3] &&
-              row.password_salt === this.args[4] &&
-              row.updated_at === this.args[5]
-          )
+        ? this.sql.includes("AND email = ?")
+          ? this.db.users.some(
+              (row) =>
+                row.id === this.args[2] &&
+                row.email === this.args[3] &&
+                (row.disabled_at ?? null) === (this.args[4] ?? null) &&
+                Number(row.auth_generation ?? 0) === Number(this.args[5])
+            )
+          : this.db.users.some(
+              (row) =>
+                row.id === this.args[2] &&
+                row.password_hash === this.args[3] &&
+                row.password_salt === this.args[4] &&
+                row.updated_at === this.args[5]
+            )
         : true;
       if (marker) {
         for (const session of this.db.sessions.filter((row) => row.user_id === userId && !row.revoked_at)) {
@@ -9497,7 +14106,7 @@ class Statement {
         }
       }
     }
-    if (this.sql.includes("UPDATE dte_events")) {
+    if (this.sql.includes("UPDATE dte_events") && !this.sql.includes("event_type = 'INVALIDACION'")) {
       const [status, sello, mhEstado, observacionesJson, acceptedAt, eventId] = this.args;
       const event = this.db.dteEvents.find((row) => row.id === eventId);
       if (event) {
@@ -9508,7 +14117,11 @@ class Statement {
         event.accepted_at = acceptedAt;
       }
     }
-    if (this.sql.includes("UPDATE dte_documents") && this.sql.includes("SET status = ?")) {
+    if (
+      this.sql.includes("UPDATE dte_documents") &&
+      this.sql.includes("SET status = ?") &&
+      !this.sql.includes("event_type = 'INVALIDACION'")
+    ) {
       const [status, sello, mhEstado, observacionesJson, acceptedAt, updatedAt, documentId] = this.args;
       const document = this.db.documents.find((row) => row.id === documentId);
       if (document) {
@@ -9680,7 +14293,7 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
     status: "PENDING",
     signed_jws: null,
     plain_json: JSON.stringify({
-      emisor: { nombre: "ExamplePerson1" },
+      emisor: advancedCdeDraft().emisor,
       receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
       resumen: { valorTotal: 100 },
       identificacion: {
@@ -9691,6 +14304,79 @@ function advancedFailingDocument(id: string): DteDocumentRecord {
         numeroControl: "DTE-15-M001P004-000000000000999"
       }
     })
+  };
+}
+
+function testAnalyticsIntent(
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    id: "di_analytics",
+    status: "COMPLETED",
+    document_id: null,
+    donor_document: "10000000-1",
+    gift_type: "DIEZMO",
+    created_at: "2026-06-10T17:50:00.000Z",
+    paid_at: "2026-06-10T17:55:00.000Z",
+    direccion_departamento: "06",
+    donor_pais: null,
+    ...overrides
+  };
+}
+
+function analyticsDocumentRow(
+  document: DteDocumentRecord,
+  intents: Array<Record<string, unknown>>
+): Record<string, unknown> {
+  const intent = intents.find(
+    (candidate) => candidate.document_id === document.id
+  );
+  return {
+    id: document.id,
+    wompi_event_id: document.wompi_event_id,
+    environment: document.environment,
+    status: document.status,
+    donor_email: document.donor_email ?? null,
+    donor_name: document.donor_name ?? null,
+    amount_cents: document.amount_cents,
+    issued_at: document.issued_at,
+    accepted_at: document.accepted_at ?? null,
+    transmission_deferred_at: document.transmission_deferred_at ?? null,
+    direccion_departamento: intent?.direccion_departamento ?? null,
+    donor_pais: intent?.donor_pais ?? null,
+    gift_type: intent?.gift_type ?? null
+  };
+}
+
+function analyticsIntentRow(intent: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: intent.id,
+    status: intent.status,
+    document_id: intent.document_id ?? null,
+    donor_document: intent.donor_document ?? null,
+    gift_type: intent.gift_type ?? null,
+    created_at: intent.created_at,
+    paid_at: intent.paid_at ?? null,
+    direccion_departamento: intent.direccion_departamento ?? null,
+    donor_pais: intent.donor_pais ?? null
+  };
+}
+
+function analyticsIntentWithSerializedBytes(
+  serializedBytes: number
+): Record<string, unknown> {
+  const intent = testAnalyticsIntent({
+    id: "di_exact_byte_budget",
+    donor_document: ""
+  });
+  const baseBytes =
+    utf8Bytes(JSON.stringify(analyticsIntentRow(intent))).byteLength + 1;
+  if (serializedBytes < baseBytes) {
+    throw new Error("El presupuesto de prueba no alcanza para la fila base");
+  }
+  return {
+    ...intent,
+    donor_document: "a".repeat(serializedBytes - baseBytes)
   };
 }
 
@@ -9720,6 +14406,7 @@ function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRe
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
     transmission_deferred_at: null,
+    post_accept_finalized_at: "2026-06-26T01:46:49.000Z",
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z",
     ...overrides

@@ -139,8 +139,8 @@ const ENTITY_LABELS: Record<string, string> = {
 const ERROR_LABELS: Record<string, string> = {
   Authentication_required: "Debe iniciar sesión.",
   "Authentication required": "Debe iniciar sesión.",
-  Cloudflare_EMAIL_binding_or_EMAIL_API_URL_and_EMAIL_API_KEY_are_required_when_mock_mode_is_disabled: "Configure el servicio de correo antes de enviar comprobantes.",
-  "Cloudflare EMAIL binding or EMAIL_API_URL and EMAIL_API_KEY are required when mock mode is disabled": "Configure el servicio de correo antes de enviar comprobantes.",
+  Cloudflare_EMAIL_binding_or_EMAIL_PROVIDER_URL_and_EMAIL_API_KEY_are_required_when_mock_mode_is_disabled: "Configure el servicio de correo antes de enviar comprobantes.",
+  "Cloudflare EMAIL binding or EMAIL_PROVIDER_URL and EMAIL_API_KEY are required when mock mode is disabled": "Configure el servicio de correo antes de enviar comprobantes.",
   "Cloudflare secret writer is not configured for this Worker": "El escritor de secretos de Cloudflare no está configurado para este Worker.",
   bootstrap_token_required: "Ingrese el token de configuración.",
   "CDE resumen.valorTotal must be a positive number": "CDE resumen.valorTotal debe ser un número positivo.",

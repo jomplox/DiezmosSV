@@ -12,7 +12,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
-[![Node](https://img.shields.io/badge/Node.js-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node](https://img.shields.io/badge/Node.js-%E2%89%A522.16.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Status](https://img.shields.io/badge/status-early%20release-orange)](#-project-status)
@@ -183,7 +183,7 @@ DiezmosSV/
 
 ## 🚀 Quick start (local)
 
-**Requirements:** Node.js 22+, npm, a Cloudflare account, a Wompi account with webhook access, and
+**Requirements:** Node.js 22.16+, npm, a Cloudflare account, a Wompi account with webhook access, and
 MH DTE API credentials for the environment you intend to use. Wrangler is installed with the project.
 
 ```bash
@@ -205,13 +205,19 @@ npm run dev          # Vite UI, proxies /api and /webhooks to the Worker
 
 Open the Vite URL and use **`Crear owner`** on first run to bootstrap the initial admin account.
 The setup form requires the `BOOTSTRAP_OWNER_TOKEN` value from your private local operator env file.
+Generate a fresh 32-byte base64url token; the Worker accepts only the `bt_` prefix followed by the
+43-character encoded value:
+
+```bash
+printf 'bt_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"
+```
 
 A starter operator env looks like this. Local execution is locked to MH TEST (`ambiente=00`), so do
 not place production API credentials in the local file:
 
 ```bash
 WOMPI_API_SECRET="..."
-BOOTSTRAP_OWNER_TOKEN="..."
+BOOTSTRAP_OWNER_TOKEN="bt_<43-character-base64url-value>"
 CLOUDFLARE_ACCOUNT_ID="..."
 CLOUDFLARE_API_TOKEN="..."
 MH_CERT_PASSWORD="..."
@@ -221,8 +227,9 @@ MH_CERT_XML="<CertificadoMH>...</CertificadoMH>"
 
 MH_USER_TEST="..."
 MH_PASSWORD_TEST="..."
-# Optional fallback when Cloudflare Email Service is limited to verified destination addresses.
-# EMAIL_API_URL="https://email-provider.example/send"
+# Optional deployment-owned alternative selected before dispatch when Cloudflare cannot address arbitrary recipients.
+# Must be an absolute HTTPS URL without embedded credentials; never set it from the credentials panel.
+# EMAIL_PROVIDER_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="..."
 EMAIL_FROM="dte@example.org"
 
@@ -292,14 +299,16 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env staging
 npx wrangler secret put MH_CERT_XML_PART_2 --env staging
 npx wrangler secret put MH_USER_TEST --env staging
 npx wrangler secret put MH_PASSWORD_TEST --env staging
-npx wrangler secret put EMAIL_API_URL --env staging   # optional fallback
-npx wrangler secret put EMAIL_API_KEY --env staging   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
+npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
-# 4 - Apply migrations and deploy the Worker + ASSETS
+# 4 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
+export FISCAL_CUTOVER_QUIESCED=1
 npm run cf:migrate:staging
 npm run cf:deploy:staging
+unset FISCAL_CUTOVER_QUIESCED
 
 # 5 - Run the deployed edge smoke test
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
@@ -342,14 +351,16 @@ npx wrangler secret put MH_CERT_XML_PART_1 --env production
 npx wrangler secret put MH_CERT_XML_PART_2 --env production
 npx wrangler secret put MH_USER_PROD --env production
 npx wrangler secret put MH_PASSWORD_PROD --env production
-npx wrangler secret put EMAIL_API_URL --env production   # optional fallback
-npx wrangler secret put EMAIL_API_KEY --env production   # optional fallback
+npx wrangler secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned alternative
+npx wrangler secret put EMAIL_API_KEY --env production   # optional alternative-provider token
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
 
-# 3 - Apply migrations and deploy after staging approval
+# 3 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
+export FISCAL_CUTOVER_QUIESCED=1
 npm run cf:migrate:prod
 npm run cf:deploy:prod
+unset FISCAL_CUTOVER_QUIESCED
 ```
 
 Do one controlled low-value production issuance with live monitoring before enabling normal volume.
@@ -366,7 +377,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | Variable | Purpose |
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
-| `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. Rotate or remove it after the owner account exists. |
+| `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. It must be generated from 32 random bytes and formatted as `bt_` plus 43 base64url characters. Rotate or remove it after the owner account exists. |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account target used by the OWNER-only credential UI when saving Worker secrets. |
 | `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token used by the OWNER-only credential UI to call the Worker secret bulk-update endpoint. |
 | `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). Works locally and remotely only when it fits Cloudflare's 5 KB Worker variable limit. |
@@ -374,8 +385,8 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
-| `EMAIL_API_URL` / `EMAIL_API_KEY` | Optional fallback transactional provider used when Cloudflare Email Service rejects arbitrary donor recipients. Receives a `POST` JSON body with an `Authorization: Bearer` header. |
-| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service and the HTTP fallback. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml`. |
+| `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional alternative transactional provider selected before dispatch when Cloudflare arbitrary-recipient delivery is not enabled. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
+| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service or the selected HTTP provider. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml` when Cloudflare is selected. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
@@ -397,16 +408,23 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
-Remote staging/production email delivery uses Cloudflare Email Service first. The binding is declared
-as `send_email` in `wrangler.toml` and is restricted to the configured `EMAIL_FROM` sender. To send
-receipts to arbitrary donor addresses, the Cloudflare account must have Email Sending enabled for the
-sender domain; otherwise Cloudflare may only permit delivery to verified destination addresses. If
-Cloudflare returns `destination address is not a verified address`, the Worker can fall back to
-`EMAIL_API_URL` / `EMAIL_API_KEY` so donors do not need to be pre-verified in Cloudflare.
+Remote staging/production email delivery selects exactly one provider before dispatch. When both are
+configured, set `EMAIL_ARBITRARY_RECIPIENTS=true` only after the Cloudflare `send_email` binding can
+reach arbitrary donor addresses; that selects Cloudflare, while an unset marker selects the configured
+HTTP provider. If Cloudflare is the only configured provider, it remains the sole dispatch path, but
+the credential status does not call arbitrary-recipient delivery ready until the marker is set. The
+Worker never retries the same receipt through a second provider after a dispatch attempt, because an
+error may arrive after the first provider accepted it.
+
+`EMAIL_PROVIDER_URL` is deployment-owned. Set it with Wrangler or the Cloudflare deployment
+configuration, not from the application credentials panel. After the release is deployed and the
+new binding is verified, delete the superseded email-endpoint secret left by earlier releases from
+each deployment. This repository change does not modify staging or production configuration.
 
 The admin UI includes an OWNER-only **Credenciales** screen for updating MH test/production API
 credentials, the signer certificate/password, issuer config JSON, Wompi HMAC, and the Email Service
-sender/fallback settings. Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
+sender/alternative-provider token. It shows the deployment-owned alternative destination as read-only status.
+Cloudflare Worker secrets are write-only: the screen only shows configured/pending status,
 never the secret values. Blank fields preserve the existing secret, and successful updates are audited
 by secret name only. If `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_SCRIPT_NAME`, or
 `CLOUDFLARE_API_TOKEN` is missing, the screen remains read-only and tells the owner that the

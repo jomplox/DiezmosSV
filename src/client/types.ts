@@ -20,6 +20,16 @@ export interface DteDocument {
   // Deferred-transmission marker: deferred = SIGNED + this timestamp (kept after
   // resolution as historical evidence). The UI renders it as "En trámite".
   transmission_deferred_at: string | null;
+  // Non-null means an MH-facing call has an ambiguous external outcome. Automatic
+  // retry/invalidation remains blocked until deployment-operator reconciliation.
+  fiscal_operation_claim_id?: string | null;
+  fiscal_operation_claimed_at?: string | null;
+  fiscal_operation_kind?: "TRANSMISSION" | "INVALIDATION" | null;
+  fiscal_operation_event_id?: string | null;
+  post_accept_finalized_at?: string | null;
+  post_accept_finalization_claim_id?: string | null;
+  post_accept_finalization_claimed_at?: string | null;
+  post_accept_email_dispatch_started_at?: string | null;
   created_at: string;
   updated_at: string;
   // Set by the document detail fetch when a completed donation intent produced this
