@@ -33,6 +33,10 @@ export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
 export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
 
 export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
+// The US door's quick amounts bridge toward the Givebutter campaign's own presets
+// ($100–$2,000): the chip prefills the embed, so wildly different anchors on two
+// consecutive screens read as a mistake. $50 keeps an accessible low option.
+export const DONAR_AMOUNT_CHIPS_US = [50, 100, 250, 500] as const;
 export const DONAR_MIN_AMOUNT = 1;
 
 // ── Step wizard (Givebutter-style structure, monochrome Gotham skin) ─────────
@@ -53,6 +57,13 @@ export const DONAR_HERO_PLACEHOLDER = "0.00";
 export function donarStepIndicator(step: number, total: number): string {
   return `Paso ${step} de ${total}`;
 }
+
+// Working-step titles (steps ≥2): the step's task takes the H1 and the brand
+// demotes to a small line, so the form starts near the top instead of below a
+// ~600px ceremonial header on a phone. "Su entrega" — never "pago" — per the
+// donor-facing wording rule.
+export const DONAR_STEP_TITLE_DATOS = "Sus datos";
+export const DONAR_STEP_TITLE_ENTREGA = "Su entrega";
 
 // The Paso 3 summary figure ("Diezmo · $125.00"). Only rendered after Paso 1
 // validated the amount, but degrades to $0.00 rather than NaN just in case.
@@ -114,8 +125,11 @@ export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
 // tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
+// The SV flag is rendered as an inline SVG badge after this text (flag EMOJI are
+// unreliable: Windows renders them as bare letters, other platforms as a blank
+// box — the landing showed "El Salvador  ." with an orphaned period).
 export const DONAR_LANDING_UNIFIER =
-  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador 🇸🇻.";
+  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
 export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";
@@ -249,6 +263,17 @@ export const DONAR_FOREIGN_GEOGRAPHY_CODE = "00";
 // resides in El Salvador must pick their real departamento/municipio/distrito.
 export const DONAR_FOREIGN_COUNTRIES = CAT020_COUNTRIES.filter((option) => option.code !== "SV");
 
+// The país select is the full CAT-020 catalog (~240 entries). A "Frecuentes"
+// optgroup surfaces the countries where the Salvadoran diaspora actually lives so
+// nobody scrolls a government list to find Estados Unidos or Guatemala. The codes
+// stay in the full list too — duplicate options are standard in country selects.
+export const DONAR_FREQUENT_COUNTRY_CODES = ["US", "CA", "ES", "GT", "MX", "HN", "IT", "AU"] as const;
+export const DONAR_FREQUENT_COUNTRIES = DONAR_FREQUENT_COUNTRY_CODES.map((code) =>
+  DONAR_FOREIGN_COUNTRIES.find((option) => option.code === code)
+).filter((option): option is (typeof DONAR_FOREIGN_COUNTRIES)[number] => option !== undefined);
+export const DONAR_FREQUENT_COUNTRIES_GROUP_LABEL = "Frecuentes";
+export const DONAR_ALL_COUNTRIES_GROUP_LABEL = "Todos los países";
+
 // Domestic departamento choices: the "00 — Otro (Para extranjeros)" pseudo-code is
 // reachable only through the extranjero toggle, never as a domestic selection (it
 // would trip the server's foreign-path validation without a país).
@@ -295,16 +320,67 @@ export function donationAmountValidationMessage(amount: string): string {
   return "";
 }
 
-// Paso 1 (SV door): diezmo/ofrenda choice + amount. The wizard's "Continuar"
-// advances only when this returns "".
-export function donationStep1ValidationMessage(input: Pick<DonationFormInput, "giftType" | "amount">): string {
+// ── Per-field validation ────────────────────────────────────────────────────
+//
+// The wizard shows EVERY invalid field at once, each message under its own
+// control (aria-describedby), and clears a field's error the moment the donor
+// edits it — no one-error-at-a-time whack-a-mole, no stale messages. The
+// single-message validators below reduce these maps in field order, so the
+// server mirror and the pre-wizard message contract stay byte-identical.
+
+// Every donor-form control that can carry its own inline error.
+export type DonationField =
+  | "giftType"
+  | "amount"
+  | "donorDocument"
+  | "donorName"
+  | "pais"
+  | "departamento"
+  | "municipio"
+  | "distrito"
+  | "complemento";
+
+export type DonationFieldErrors = Partial<Record<DonationField, string>>;
+
+// Focus-first-invalid order — identical to the legacy first-error-wins order.
+export const DONATION_STEP1_FIELD_ORDER: readonly DonationField[] = ["giftType", "amount"];
+export const DONATION_STEP2_FIELD_ORDER: readonly DonationField[] = [
+  "donorDocument",
+  "donorName",
+  "pais",
+  "departamento",
+  "municipio",
+  "distrito",
+  "complemento"
+];
+
+export function firstDonationFieldError(
+  errors: DonationFieldErrors,
+  order: readonly DonationField[]
+): DonationField | null {
+  for (const field of order) {
+    if (errors[field]) {
+      return field;
+    }
+  }
+  return null;
+}
+
+// Paso 1 (SV door): diezmo/ofrenda choice + amount. The US door has no gift
+// type, so its Paso 1 uses donationAmountValidationMessage alone.
+export function donationStep1FieldErrors(input: Pick<DonationFormInput, "giftType" | "amount">): DonationFieldErrors {
+  const errors: DonationFieldErrors = {};
   // The SV form requires the donor to state whether the gift is a diezmo or an
   // ofrenda before anything else. (The US/Givebutter path renders no fiscal form and
   // never reaches this validator.)
   if (input.giftType !== "DIEZMO" && input.giftType !== "OFRENDA") {
-    return "Seleccione si es diezmo u ofrenda.";
+    errors.giftType = "Seleccione si es diezmo u ofrenda.";
   }
-  return donationAmountValidationMessage(input.amount);
+  const amountMessage = donationAmountValidationMessage(input.amount);
+  if (amountMessage) {
+    errors.amount = amountMessage;
+  }
+  return errors;
 }
 
 // Mirrors the server-side validation codes (src/worker/services/donations.ts) but
@@ -314,59 +390,109 @@ export function donationStep1ValidationMessage(input: Pick<DonationFormInput, "g
 // Otro (37). Name and email are NOT validated here — the donor enters them on
 // Wompi's hosted sheet (razón social is the one exception, for NIT donors).
 // Paso 2 (SV door): identity + address. Ignores the Paso-1 fields entirely.
-export function donationStep2ValidationMessage(input: DonationFormInput): string {
+export function donationStep2FieldErrors(input: DonationFormInput): DonationFieldErrors {
+  const errors: DonationFieldErrors = {};
   if (input.donorDocumentType === "13") {
     if (!isValidDui(input.donorDocument)) {
-      return "Revise el número de DUI.";
+      errors.donorDocument = "Revise el número de DUI.";
     }
   } else if (input.donorDocumentType === "36") {
     // Donor-facing framing: the select labels 36 as "Empresa", so the copy asks for
     // the empresa's NIT (a natural person's document is the DUI post-reform).
     if (!isValidNitFormat(input.donorDocument)) {
-      return "Ingrese el NIT de la empresa (14 dígitos).";
+      errors.donorDocument = "Ingrese el NIT de la empresa (14 dígitos).";
     }
     if (!input.donorName.trim()) {
-      return "Ingrese la razón social.";
-    }
-    if (input.donorName.trim().length > 200) {
-      return "La razón social no debe exceder 200 caracteres.";
+      errors.donorName = "Ingrese la razón social.";
+    } else if (input.donorName.trim().length > 200) {
+      errors.donorName = "La razón social no debe exceder 200 caracteres.";
     }
   } else if (input.donorDocumentType === "03" || input.donorDocumentType === "02") {
     const documentLength = input.donorDocument.trim().length;
     if (documentLength < 5 || documentLength > 30) {
-      return "Ingrese su documento (entre 5 y 30 caracteres).";
+      errors.donorDocument = "Ingrese su documento (entre 5 y 30 caracteres).";
     }
   } else if (!input.donorDocument.trim()) {
-    return "Ingrese su documento.";
+    errors.donorDocument = "Ingrese su documento.";
   } else if (input.donorDocument.trim().length > 50) {
-    return "El documento no debe exceder 50 caracteres.";
+    errors.donorDocument = "El documento no debe exceder 50 caracteres.";
   }
 
   if (input.foreignResident) {
     if (!input.pais) {
-      return "Seleccione su país de residencia.";
+      errors.pais = "Seleccione su país de residencia.";
     }
   } else {
     if (!input.departamento) {
-      return "Seleccione un departamento.";
+      errors.departamento = "Seleccione un departamento.";
     }
     if (!input.municipio) {
-      return "Seleccione un municipio.";
+      errors.municipio = "Seleccione un municipio.";
     }
     if (!input.distrito) {
-      return "Seleccione un distrito.";
+      errors.distrito = "Seleccione un distrito.";
     }
   }
   if (!input.complemento.trim()) {
-    return "Ingrese su dirección.";
-  }
-  // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters; mirror the
-  // server cap so the donor hears it before paying, not at CDE build time.
-  if (input.complemento.trim().length > 200) {
-    return "La dirección no debe exceder 200 caracteres.";
+    errors.complemento = "Ingrese su dirección.";
+  } else if (input.complemento.trim().length > 200) {
+    // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters; mirror the
+    // server cap so the donor hears it before paying, not at CDE build time.
+    errors.complemento = "La dirección no debe exceder 200 caracteres.";
   }
 
-  return "";
+  return errors;
+}
+
+// Editing a field must clear its own error — and only errors its edit can affect.
+// Changing the document TYPE re-scopes the document/razón rules; toggling the
+// extranjero checkbox swaps which geography fields exist. A new departamento
+// clears only ITS error even though it resets the dependent municipio/distrito
+// values: "Seleccione un municipio." is still true of the reset (empty) child, and
+// keeping it visible walks the donor down the cascade instead of resurfacing it on
+// the next submit.
+export const DONATION_FIELD_ERROR_CLEARERS: Record<keyof DonationFormInput, readonly DonationField[]> = {
+  amount: ["amount"],
+  giftType: ["giftType"],
+  donorDocumentType: ["donorDocument", "donorName"],
+  donorDocument: ["donorDocument"],
+  donorName: ["donorName"],
+  donorPhone: [],
+  foreignResident: ["pais", "departamento", "municipio", "distrito"],
+  pais: ["pais"],
+  departamento: ["departamento"],
+  municipio: ["municipio"],
+  distrito: ["distrito"],
+  complemento: ["complemento"]
+};
+
+export function clearDonationFieldErrors(
+  errors: DonationFieldErrors,
+  changed: readonly (keyof DonationFormInput)[]
+): DonationFieldErrors {
+  const cleared = changed.flatMap((key) => DONATION_FIELD_ERROR_CLEARERS[key] ?? []);
+  if (!cleared.some((field) => errors[field])) {
+    return errors;
+  }
+  const next = { ...errors };
+  for (const field of cleared) {
+    delete next[field];
+  }
+  return next;
+}
+
+// Legacy single-message validators: first field error in order. Kept because the
+// whole-form contract (and its tests) pin the exact message sequence.
+export function donationStep1ValidationMessage(input: Pick<DonationFormInput, "giftType" | "amount">): string {
+  const errors = donationStep1FieldErrors(input);
+  const first = firstDonationFieldError(errors, DONATION_STEP1_FIELD_ORDER);
+  return first ? errors[first]! : "";
+}
+
+export function donationStep2ValidationMessage(input: DonationFormInput): string {
+  const errors = donationStep2FieldErrors(input);
+  const first = firstDonationFieldError(errors, DONATION_STEP2_FIELD_ORDER);
+  return first ? errors[first]! : "";
 }
 
 // The whole-form validator is exactly Paso 1 then Paso 2 — same messages, same

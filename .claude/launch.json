@@ -8,6 +8,12 @@
       "port": 8787
     },
     {
+      "name": "worker-mock",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-lc", "DIEZMOSSV_ENV_FILE=.dev.vars.ci node scripts/run-worker-dev.mjs --port 8787 --ip 127.0.0.1"],
+      "port": 8787
+    },
+    {
       "name": "web",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
