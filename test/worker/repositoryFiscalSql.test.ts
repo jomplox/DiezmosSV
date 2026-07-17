@@ -310,6 +310,100 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("deduplicates a deliberate resend request and only retries proven-safe outcomes", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_manual_resend", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const repository = new Repository(d1.database);
+    const input = {
+      documentId: "doc_manual_resend",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "11111111-1111-4111-8111-111111111111"
+    };
+
+    const first = await repository.claimManualEmailDelivery(input);
+    expect(first).toMatchObject({
+      kind: "claimed",
+      id: expect.any(String),
+      idempotencyKey: expect.stringMatching(/^dsv-receipt-resend-v1-[a-f0-9]{64}$/),
+      claimToken: expect.any(String),
+      attemptNo: 1
+    });
+    if (first.kind !== "claimed") throw new Error("expected first manual resend claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(first.id, first.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(first.id, first.claimToken, {
+      status: "SENT",
+      providerResponse: { messageId: "manual-resend-1" },
+      emailType: input.emailType,
+      documentStatusAtSend: input.documentStatusAtSend,
+      providerDeliveryId: "manual-resend-1"
+    });
+
+    await expect(repository.claimManualEmailDelivery(input)).resolves.toMatchObject({
+      kind: "already_sent",
+      id: first.id,
+      attemptNo: 1
+    });
+    await expect(repository.claimManualEmailDelivery({
+      ...input,
+      toEmail: "other@example.org"
+    })).resolves.toMatchObject({
+      kind: "conflict",
+      id: first.id
+    });
+
+    const retryInput = {
+      ...input,
+      resendRequestId: "70000003-2222-4222-8222-700000032222"
+    };
+    const retryFirst = await repository.claimManualEmailDelivery(retryInput);
+    if (retryFirst.kind !== "claimed") throw new Error("expected retry-safe manual resend claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(retryFirst.id, retryFirst.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(retryFirst.id, retryFirst.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_HEADER_NOT_ALLOWED" },
+      emailType: retryInput.emailType,
+      documentStatusAtSend: retryInput.documentStatusAtSend,
+      outcomeClass: "NOT_SENT",
+      failureCode: "E_HEADER_NOT_ALLOWED",
+      retrySafe: true
+    });
+    await expect(repository.claimManualEmailDelivery(retryInput)).resolves.toMatchObject({
+      kind: "claimed",
+      id: retryFirst.id,
+      idempotencyKey: retryFirst.idempotencyKey,
+      claimToken: expect.any(String),
+      attemptNo: 2
+    });
+
+    const reviewInput = {
+      ...input,
+      resendRequestId: "33333333-3333-4333-8333-333333333333"
+    };
+    const reviewFirst = await repository.claimManualEmailDelivery(reviewInput);
+    if (reviewFirst.kind !== "claimed") throw new Error("expected manual-review resend claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(reviewFirst.id, reviewFirst.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(reviewFirst.id, reviewFirst.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_INTERNAL_SERVER_ERROR" },
+      emailType: reviewInput.emailType,
+      documentStatusAtSend: reviewInput.documentStatusAtSend,
+      outcomeClass: "UNKNOWN",
+      failureCode: "E_INTERNAL_SERVER_ERROR",
+      retrySafe: false
+    });
+    await expect(repository.claimManualEmailDelivery(reviewInput)).resolves.toMatchObject({
+      kind: "manual_review",
+      id: reviewFirst.id,
+      attemptNo: 1,
+      outcomeClass: "UNKNOWN"
+    });
+
+    database.close();
+  });
+
   it("skips more than one page of reconciliation-locked fiscal work", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);

@@ -171,7 +171,11 @@ async function main() {
 
   logStep("Resending email receipt");
   try {
-    await jsonRequest(`/api/documents/${targetDoc.id}/resend`, { method: "POST", token: auth.token, body: {} });
+    await jsonRequest(`/api/documents/${targetDoc.id}/resend`, {
+      method: "POST",
+      token: auth.token,
+      body: { resendRequestId: randomUUID() }
+    });
     results.push({ check: "email_resend", ok: true });
   } catch (error) {
     if (!config.allowEmailFailure) throw error;

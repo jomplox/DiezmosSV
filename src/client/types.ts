@@ -31,6 +31,9 @@ export interface DteDocument {
   post_accept_finalization_claimed_at?: string | null;
   post_accept_email_dispatch_started_at?: string | null;
   receipt_email_status?: "PENDING" | "SENT" | "FAILED" | null;
+  receipt_email_outcome_class?: "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN" | null;
+  receipt_email_failure_code?: string | null;
+  receipt_email_retry_safe?: 0 | 1 | null;
   created_at: string;
   updated_at: string;
   // Set by the document detail fetch when a completed donation intent produced this

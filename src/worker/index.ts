@@ -21,7 +21,7 @@ import {
   validateDraftIntentInput,
   validateIntentInput
 } from "./services/donations";
-import { EmailService } from "./services/email";
+import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
@@ -1920,6 +1920,16 @@ function normalizeEmail(value: unknown): string | null {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
+function normalizeResendRequestId(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const requestId = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
+    ? requestId
+    : null;
+}
+
 function donorEmailField(input: DirectCdeInput): { donorEmail?: string } | Response {
   const donorEmail = typeof input.donorEmail === "string" ? input.donorEmail.trim() : "";
   if (donorEmail && !normalizeEmail(donorEmail)) {
@@ -2118,18 +2128,125 @@ async function handleDocumentRoute(
         { status: 409 }
       );
     }
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { email?: string };
-    const toEmail = body.email ?? document.donor_email;
-    if (!toEmail) {
-      return jsonResponse({ error: "missing_email" }, { status: 400 });
+    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as {
+      email?: string;
+      resendRequestId?: string;
+    };
+    const resendRequestId = normalizeResendRequestId(body.resendRequestId);
+    if (!resendRequestId) {
+      return jsonResponse(
+        {
+          error: "invalid_resend_request_id",
+          message: "El reenvío requiere un identificador único generado por esta acción."
+        },
+        { status: 400 }
+      );
     }
+    const toEmail = normalizeEmail(body.email ?? document.donor_email);
+    if (!toEmail) {
+      return jsonResponse({ error: "missing_email", message: "Ingrese un correo válido." }, { status: 400 });
+    }
+    const emailType =
+      document.status === "SIGNED" && document.transmission_deferred_at
+        ? "dteReceiptTransitorio"
+        : "dteReceipt";
+    const claim = await repo.claimManualEmailDelivery({
+      documentId: document.id,
+      toEmail,
+      emailType,
+      documentStatusAtSend: document.status,
+      resendRequestId
+    });
+    if (claim.kind === "already_sent") {
+      return jsonResponse({ ok: true, duplicateSuppressed: true, attemptNo: claim.attemptNo });
+    }
+    if (claim.kind === "conflict") {
+      return jsonResponse(
+        {
+          error: "resend_request_conflict",
+          message: "Este identificador de reenvío ya pertenece a otra solicitud."
+        },
+        { status: 409 }
+      );
+    }
+    if (claim.kind === "in_progress") {
+      return jsonResponse(
+        {
+          error: "resend_in_progress",
+          message: "Este reenvío ya está en curso.",
+          attemptNo: claim.attemptNo
+        },
+        { status: 409 }
+      );
+    }
+    if (claim.kind === "manual_review") {
+      return jsonResponse(
+        {
+          error: "resend_requires_review",
+          message: "El resultado anterior no permite reenviar automáticamente; requiere revisión manual.",
+          outcomeClass: claim.outcomeClass,
+          attemptNo: claim.attemptNo
+        },
+        { status: 409 }
+      );
+    }
+
+    let providerDispatchStarted = false;
+    let response: EmailDeliveryResult;
     try {
       const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(repo, env);
-      const response = await new EmailService(env, templates, branding).sendReceipt(document, toEmail);
-      await repo.recordEmailDelivery({
-        documentId: document.id,
+      response = await new EmailService(env, templates, branding).sendReceipt(
+        document,
         toEmail,
+        claim.idempotencyKey,
+        async () => {
+          const marked = await repo.markEmailDeliveryDispatchStarted(claim.id, claim.claimToken);
+          if (!marked) {
+            throw new Error("La reserva del reenvío perdió propiedad antes del envío");
+          }
+          providerDispatchStarted = true;
+        }
+      );
+    } catch (error) {
+      const failure = classifyEmailDispatchError(error, providerDispatchStarted);
+      await repo.finalizeEmailDeliveryClaim(claim.id, claim.claimToken, {
+        status: "FAILED",
+        providerResponse: failure.providerResponse,
+        emailType,
+        documentStatusAtSend: document.status,
+        outcomeClass: failure.outcomeClass,
+        failureCode: failure.code,
+        retrySafe: failure.retrySafe
+      });
+      await repo.createAudit({
+        actorType: "USER",
+        actorId: actor.id,
+        action: "EMAIL_RESEND_FAILED",
+        entityType: "dte_document",
+        entityId: document.id,
+        summary: failure.message,
+        metadata: {
+          toEmail,
+          resendRequestId,
+          attemptNo: claim.attemptNo,
+          outcomeClass: failure.outcomeClass,
+          failureCode: failure.code
+        }
+      });
+      return jsonResponse(
+        {
+          error: "email_send_failed",
+          message: failure.message,
+          outcomeClass: failure.outcomeClass,
+          manualReview: !failure.retrySafe,
+          attemptNo: claim.attemptNo
+        },
+        { status: 502 }
+      );
+    }
+
+    await repo.finalizeEmailDeliveryClaim(claim.id, claim.claimToken, {
         status: "SENT",
         providerResponse: response.providerResponse,
         emailType: response.emailType,
@@ -2140,22 +2257,22 @@ async function handleDocumentRoute(
         dteJsonSha256: response.dteJsonSha256,
         providerDeliveryId: response.providerDeliveryId
       });
-      await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "EMAIL_RESENT", entityType: "dte_document", entityId: document.id, summary: `Reenviado a ${toEmail}`, metadata: response });
-      return jsonResponse({ ok: true });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      await repo.recordEmailDelivery({ documentId: document.id, toEmail, status: "FAILED", providerResponse: { error: message } });
+    try {
       await repo.createAudit({
         actorType: "USER",
         actorId: actor.id,
-        action: "EMAIL_RESEND_FAILED",
+        action: "EMAIL_RESENT",
         entityType: "dte_document",
         entityId: document.id,
-        summary: message,
-        metadata: { toEmail }
+        summary: `Reenviado a ${toEmail}`,
+        metadata: { ...response, resendRequestId, attemptNo: claim.attemptNo }
       });
-      return jsonResponse({ error: "email_send_failed", message }, { status: 502 });
+    } catch (error) {
+      // SENT is the side-effect authority. An audit failure must not permit another
+      // provider dispatch when the browser repeats the same resend request.
+      console.error("Manual receipt resend audit failed", document.id, error);
     }
+    return jsonResponse({ ok: true, duplicateSuppressed: false, attemptNo: claim.attemptNo });
   }
 
   if (action === "retry" && request.method === "POST") {

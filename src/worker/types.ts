@@ -137,6 +137,9 @@ export interface DteDocumentRecord {
   post_accept_finalization_claimed_at?: string | null;
   post_accept_email_dispatch_started_at?: string | null;
   receipt_email_status?: "PENDING" | "SENT" | "FAILED" | null;
+  receipt_email_outcome_class?: "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN" | null;
+  receipt_email_failure_code?: string | null;
+  receipt_email_retry_safe?: 0 | 1 | null;
   transmission_claim_id: string | null;
   created_at: string;
   updated_at: string;
