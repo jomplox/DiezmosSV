@@ -297,6 +297,99 @@ describe("email dispatch outcome classification", () => {
       retrySafe: true
     });
   });
+
+  it("classifies an explicit HTTP validation rejection as not sent without storing its body", async () => {
+    const providerFetch = vi.fn(async () =>
+      new Response(JSON.stringify({ error: "private provider detail" }), { status: 422 })
+    );
+    vi.stubGlobal("fetch", providerFetch);
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await expect(service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      })).rejects.toMatchObject({
+        code: "HTTP_422",
+        outcomeClass: "NOT_SENT",
+        retrySafe: true,
+        providerResponse: {
+          code: "HTTP_422",
+          error: "El proveedor HTTP rechazó el correo antes de aceptarlo (HTTP 422)"
+        }
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("classifies HTTP server errors as unknown and never retry-safe", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response("internal provider details", { status: 503 })
+    ));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await expect(service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      })).rejects.toMatchObject({
+        code: "HTTP_503",
+        outcomeClass: "UNKNOWN",
+        retrySafe: false,
+        providerResponse: {
+          code: "HTTP_503",
+          error: "El proveedor HTTP respondió HTTP 503; no se puede confirmar el resultado"
+        }
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("sanitizes HTTP transport errors as unknown", async () => {
+    const privateUrl = "https://mail.example/private-token/send";
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      throw new Error(`socket closed while calling ${privateUrl}`);
+    }));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: privateUrl,
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      const outcome = await service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      }).catch((error: unknown) => error);
+      expect(outcome).toMatchObject({
+        code: "HTTP_PROVIDER_TRANSPORT_ERROR",
+        outcomeClass: "UNKNOWN",
+        retrySafe: false
+      });
+      expect(String((outcome as Error).message)).not.toContain(privateUrl);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("certificateEmailHtml", () => {
