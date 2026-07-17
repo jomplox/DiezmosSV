@@ -6,7 +6,7 @@ import {
   renderEmailTemplate,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
-import { EmailService } from "../../src/worker/services/email";
+import { classifyEmailDispatchError, EmailService } from "../../src/worker/services/email";
 import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
@@ -243,6 +243,59 @@ describe("email subject boundary", () => {
     ).rejects.toThrow("simulated worker stop at provider boundary");
     expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("email dispatch outcome classification", () => {
+  it("marks Cloudflare header validation as proven not sent and retry-safe", () => {
+    expect(classifyEmailDispatchError(
+      Object.assign(new Error("header rejected"), { code: "E_HEADER_NOT_ALLOWED" }),
+      true
+    )).toMatchObject({
+      code: "E_HEADER_NOT_ALLOWED",
+      message: "header rejected",
+      outcomeClass: "NOT_SENT",
+      retrySafe: true,
+      providerResponse: {
+        code: "E_HEADER_NOT_ALLOWED",
+        error: "header rejected"
+      }
+    });
+  });
+
+  it("keeps an explicit delivery failure out of automatic retries", () => {
+    expect(classifyEmailDispatchError(
+      Object.assign(new Error("delivery failed"), { code: "E_DELIVERY_FAILED" }),
+      true
+    )).toMatchObject({
+      code: "E_DELIVERY_FAILED",
+      outcomeClass: "NOT_DELIVERED",
+      retrySafe: false
+    });
+  });
+
+  it("treats internal and untyped post-dispatch errors as unknown", () => {
+    expect(classifyEmailDispatchError(
+      Object.assign(new Error("internal"), { code: "E_INTERNAL_SERVER_ERROR" }),
+      true
+    )).toMatchObject({
+      code: "E_INTERNAL_SERVER_ERROR",
+      outcomeClass: "UNKNOWN",
+      retrySafe: false
+    });
+    expect(classifyEmailDispatchError(new Error("response channel closed"), true)).toMatchObject({
+      code: "EMAIL_DISPATCH_UNKNOWN",
+      outcomeClass: "UNKNOWN",
+      retrySafe: false
+    });
+  });
+
+  it("marks preparation and ownership errors before dispatch as retry-safe", () => {
+    expect(classifyEmailDispatchError(new Error("render failed"), false)).toMatchObject({
+      code: "EMAIL_PRE_DISPATCH_FAILED",
+      outcomeClass: "NOT_SENT",
+      retrySafe: true
+    });
   });
 });
 
