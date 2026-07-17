@@ -25,6 +25,7 @@ import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } fr
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
+import { stagingSmokeRunId } from "./services/stagingSmoke";
 import {
   assertDeploymentCanCollectPayments,
   assertDeploymentAllowsAmbiente,
@@ -1297,7 +1298,9 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
       return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
     }
-    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput;
+    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput & {
+      smokeRunId?: unknown;
+    };
     const donorFields = directDonorFields(input);
     if (donorFields instanceof Response) return donorFields;
     const config = getEmisorConfig(env);
@@ -1330,6 +1333,16 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
       summary: dte.numero_control,
       metadata: { source: "quick_direct_generation" }
     });
+    const smokeRunId = stagingSmokeRunId(env, input.smokeRunId);
+    if (smokeRunId) {
+      await repo.createAuditIfAbsent({
+        action: "STAGING_SMOKE_RUN",
+        entityType: "dte_document",
+        entityId: dte.id,
+        summary: "CDE creado por la prueba integral de staging",
+        metadata: { runId: smokeRunId, path: "admin", source: "staging-smoke" }
+      });
+    }
     await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
     return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
   }

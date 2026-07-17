@@ -6820,6 +6820,57 @@ describe("advanced CDE generation", () => {
     expect(queued).toEqual([{ advancedDocumentId: db.documents[0].id }]);
   });
 
+  it("records smoke provenance only for a valid staging admin run ID", async () => {
+    const runId = "44444444-4444-4444-8444-444444444444";
+    const create = async (appEnv: string, smokeRunId: string) => {
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      const response = await worker.fetch(
+        new Request("https://example.org/api/test/dte", {
+          method: "POST",
+          headers: {
+            Authorization: "Bearer test-token",
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            amount: "1.00",
+            donorName: "Staging Smoke",
+            donorDocument: "100000001",
+            donorEmail: "smoke@example.org",
+            donorPhone: "70000005",
+            smokeRunId
+          })
+        }),
+        env(db, {
+          APP_ENV: appEnv,
+          EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig())
+        })
+      );
+      return { db, response };
+    };
+
+    const staging = await create("staging", runId);
+    expect(staging.response.status).toBe(202);
+    expect(staging.db.audits).toContainEqual(expect.objectContaining({
+      action: "STAGING_SMOKE_RUN",
+      entity_type: "dte_document",
+      entity_id: staging.db.documents[0].id,
+      metadata_json: JSON.stringify({
+        runId,
+        path: "admin",
+        source: "staging-smoke"
+      })
+    }));
+
+    const invalid = await create("staging", "not-a-uuid");
+    expect(invalid.response.status).toBe(202);
+    expect(invalid.db.audits.some((audit) => audit.action === "STAGING_SMOKE_RUN")).toBe(false);
+
+    const local = await create("local", runId);
+    expect(local.response.status).toBe(202);
+    expect(local.db.audits.some((audit) => audit.action === "STAGING_SMOKE_RUN")).toBe(false);
+  });
+
   it("accepts a quick DTE donor document type outside DUI and NIT", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
@@ -7715,6 +7766,52 @@ describe("donation intent correlation", () => {
     ).toHaveLength(1);
     expect(db.documents).toHaveLength(0);
   }
+
+  it("records one webhook smoke provenance marker only for a valid signed staging identity", async () => {
+    const runId = "55555555-5555-4555-8555-555555555555";
+    const staging = new InMemoryD1();
+    seedIntentRow(staging);
+    const stagingEventId = seedWompiEvent(
+      staging,
+      correlationWebhook({ IdTransaccion: `SMOKE-WEBHOOK-${runId}` })
+    );
+    const stagingRuntime = { ...(await pipelineEnv(staging)), APP_ENV: "staging" };
+
+    const document = await new IssuancePipeline(stagingRuntime).processWompiEvent(stagingEventId);
+    await new IssuancePipeline(stagingRuntime).processWompiEvent(stagingEventId);
+
+    expect(document).not.toBeNull();
+    expect(staging.audits.filter((audit) => audit.action === "STAGING_SMOKE_RUN")).toEqual([
+      expect.objectContaining({
+        entity_type: "dte_document",
+        entity_id: document!.id,
+        metadata_json: JSON.stringify({
+          runId,
+          path: "webhook",
+          source: "staging-smoke"
+        })
+      })
+    ]);
+
+    const invalid = new InMemoryD1();
+    seedIntentRow(invalid);
+    const invalidEventId = seedWompiEvent(
+      invalid,
+      correlationWebhook({ IdTransaccion: "SMOKE-WEBHOOK-not-a-uuid" })
+    );
+    await new IssuancePipeline({ ...(await pipelineEnv(invalid)), APP_ENV: "staging" })
+      .processWompiEvent(invalidEventId);
+    expect(invalid.audits.some((audit) => audit.action === "STAGING_SMOKE_RUN")).toBe(false);
+
+    const local = new InMemoryD1();
+    seedIntentRow(local);
+    const localEventId = seedWompiEvent(
+      local,
+      correlationWebhook({ IdTransaccion: `SMOKE-WEBHOOK-${runId}` })
+    );
+    await new IssuancePipeline(await pipelineEnv(local)).processWompiEvent(localEventId);
+    expect(local.audits.some((audit) => audit.action === "STAGING_SMOKE_RUN")).toBe(false);
+  });
 
   it("marks a non-approved Wompi event as ignored", async () => {
     const db = new InMemoryD1();

@@ -22,6 +22,16 @@ describe("staging smoke disposable VIEWER password", () => {
   });
 });
 
+describe("staging smoke provenance", () => {
+  it("uses one run UUID across the admin and signed-webhook paths", () => {
+    expect(smokeSource.match(/const smokeRunId = randomUUID\(\);/g)).toHaveLength(1);
+    expect(smokeSource).toContain("`SMOKE-WEBHOOK-${smokeRunId}`");
+    expect(smokeSource).toContain("smokeRunId");
+    expect(smokeSource).toMatch(/runAdminPath\([^)]*smokeRunId/);
+    expect(smokeSource).toMatch(/runWebhookPath\([^)]*smokeRunId/);
+  });
+});
+
 describe("staging smoke private environment file", () => {
   it("loads required values from DIEZMOSSV_ENV_FILE without printing secrets", () => {
     const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-"));

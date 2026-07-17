@@ -87,6 +87,7 @@ const config = {
   retryDocumentId: process.env.SMOKE_RETRY_DOCUMENT_ID,
   allowEmailFailure: process.env.SMOKE_ALLOW_EMAIL_FAILURE === "1"
 };
+const smokeRunId = randomUUID();
 
 if (dryRun) {
   const payload = buildWompiPayload(config, "DRY-RUN");
@@ -145,12 +146,12 @@ async function main() {
   const acceptedDocs = [];
   for (const path of config.paths) {
     if (path === "webhook") {
-      const doc = await runWebhookPath(auth.token, startedAt);
+      const doc = await runWebhookPath(auth.token, startedAt, smokeRunId);
       acceptedDocs.push(doc);
       results.push({ check: "webhook_to_accepted_dte", ok: true, documentId: doc.id, sello: doc.sello_recibido });
     }
     if (path === "admin") {
-      const doc = await runAdminPath(auth.token, startedAt);
+      const doc = await runAdminPath(auth.token, startedAt, smokeRunId);
       acceptedDocs.push(doc);
       results.push({ check: "admin_test_to_accepted_dte", ok: true, documentId: doc.id, sello: doc.sello_recibido });
     }
@@ -239,9 +240,9 @@ async function login() {
   });
 }
 
-async function runWebhookPath(token, startedAt) {
+async function runWebhookPath(token, startedAt, smokeRunId) {
   logStep("Posting signed Wompi TEST webhook");
-  const payload = buildWompiPayload(config, `SMOKE-WEBHOOK-${Date.now()}`);
+  const payload = buildWompiPayload(config, `SMOKE-WEBHOOK-${smokeRunId}`);
   const rawBody = JSON.stringify(payload);
   const response = await jsonRequest("/webhooks/wompi", {
     method: "POST",
@@ -256,7 +257,7 @@ async function runWebhookPath(token, startedAt) {
   return pollAcceptedDocument(token, payload.Cliente.EMail, startedAt);
 }
 
-async function runAdminPath(token, startedAt) {
+async function runAdminPath(token, startedAt, smokeRunId) {
   logStep("Posting admin-generated TEST DTE");
   const email = withTag(config.donorEmail, "admin");
   const response = await jsonRequest("/api/test/dte", {
@@ -267,7 +268,8 @@ async function runAdminPath(token, startedAt) {
       donorName: config.donorName,
       donorEmail: email,
       donorDocument: config.donorDocument,
-      donorPhone: config.donorPhone
+      donorPhone: config.donorPhone,
+      smokeRunId
     }
   });
   assert(response.queued === true, `Admin TEST DTE was not queued: ${JSON.stringify(response)}`);
@@ -312,7 +314,7 @@ function buildWompiPayload(input, transactionId) {
     IdCuenta: "diezmossv-staging-resource-example",
     FechaTransaccion: new Date().toISOString(),
     Monto: input.amount,
-    IdTransaccion: `${transactionId}-${randomUUID()}`,
+    IdTransaccion: transactionId,
     ResultadoTransaccion: "ExitosaAprobada",
     CodigoAutorizacion: "STAGING",
     IdIntentoPago: randomUUID(),
