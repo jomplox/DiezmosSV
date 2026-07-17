@@ -11,7 +11,7 @@ import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
-import { EmailService, type EmailDeliveryResult } from "./email";
+import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
@@ -964,6 +964,7 @@ export class IssuancePipeline {
     }
 
     let response: EmailDeliveryResult;
+    let providerDispatchStarted = false;
     try {
       const templates = parseEmailTemplates(await this.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
       const branding = await loadEmailBranding(this.repo, this.env);
@@ -971,29 +972,42 @@ export class IssuancePipeline {
         record,
         record.donor_email,
         deliveryClaim.idempotencyKey,
-        beforeProviderDispatch
+        async () => {
+          await beforeProviderDispatch?.();
+          const marked = await this.repo.markEmailDeliveryDispatchStarted(
+            deliveryClaim.id,
+            deliveryClaim.claimToken
+          );
+          if (!marked) {
+            throw new Error("La reserva de correo perdió propiedad antes del envío");
+          }
+          providerDispatchStarted = true;
+        }
       );
     } catch (error) {
       if (error instanceof PostAcceptFinalizationOwnershipError) {
         throw error;
       }
-      const failureMessage = error instanceof Error ? error.message : String(error);
+      const failure = classifyEmailDispatchError(error, providerDispatchStarted);
       await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
         status: "FAILED",
-        providerResponse: { error: failureMessage },
+        providerResponse: failure.providerResponse,
         emailType,
-        documentStatusAtSend: record.status
+        documentStatusAtSend: record.status,
+        outcomeClass: failure.outcomeClass,
+        failureCode: failure.code,
+        retrySafe: failure.retrySafe
       });
       await this.repo.createAudit({
         action: "EMAIL_FAILED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: failureMessage
+        summary: failure.message
       });
       await sendOperationalAlert(this.env, this.repo, {
         kind: "EMAIL_FAILED",
         title: "Fallo al enviar comprobante",
-        detail: `El comprobante ${record.numero_control} no pudo enviarse al donante: ${failureMessage}`,
+        detail: `El comprobante ${record.numero_control} no pudo enviarse al donante: ${failure.message}`,
         entityType: "dte_document",
         entityId: record.id
       });

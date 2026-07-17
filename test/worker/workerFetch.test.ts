@@ -8690,6 +8690,66 @@ describe("donation intent correlation", () => {
     expect(db.documents[0].post_accept_email_dispatch_started_at ?? null).toBeNull();
   });
 
+  it("records a retry-safe NOT_SENT outcome when Cloudflare rejects receipt headers before acceptance", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    const providerError = Object.assign(
+      new Error("custom header 'Idempotency-Key' is not allowed"),
+      { code: "E_HEADER_NOT_ALLOWED" }
+    );
+    const send = vi.fn(async () => {
+      throw providerError;
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send } as SendEmail
+    });
+
+    const result = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(result).toEqual({ finalized: 1, failed: 0 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      status: "FAILED",
+      provider_dispatch_started_at: expect.any(String),
+      outcome_class: "NOT_SENT",
+      failure_code: "E_HEADER_NOT_ALLOWED",
+      retry_safe: 1
+    }));
+  });
+
+  it("records an UNKNOWN manual-review outcome for an internal provider error after dispatch starts", async () => {
+    const db = new InMemoryD1();
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    const providerError = Object.assign(
+      new Error("internal provider failure"),
+      { code: "E_INTERNAL_SERVER_ERROR" }
+    );
+    const send = vi.fn(async () => {
+      throw providerError;
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send } as SendEmail
+    });
+
+    const result = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(result).toEqual({ finalized: 1, failed: 0 });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: "doc_1",
+      status: "FAILED",
+      provider_dispatch_started_at: expect.any(String),
+      outcome_class: "UNKNOWN",
+      failure_code: "E_INTERNAL_SERVER_ERROR",
+      retry_safe: 0
+    }));
+  });
+
   it("sends an operational alert when an accepted receipt delivery fails", async () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
@@ -13948,6 +14008,23 @@ class Statement {
       return { id: claim.id } as T;
     }
     if (
+      this.sql.includes("UPDATE email_deliveries") &&
+      this.sql.includes("SET provider_dispatch_started_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [startedAt, id, claimToken] = this.args;
+      const delivery = this.db.emailDeliveries.find(
+        (row) =>
+          row.id === id &&
+          row.status === "PENDING" &&
+          row.claim_token === claimToken &&
+          (row.provider_dispatch_started_at ?? null) === null
+      );
+      if (!delivery) return null;
+      delivery.provider_dispatch_started_at = String(startedAt);
+      return { id: delivery.id } as T;
+    }
+    if (
       this.sql.includes("INSERT INTO email_deliveries") &&
       this.sql.includes("ON CONFLICT(idempotency_key)") &&
       this.sql.includes("RETURNING id, idempotency_key, claim_token")
@@ -13988,11 +14065,14 @@ class Statement {
         (delivery) => delivery.idempotency_key === idempotencyKey
       );
       if (existing) {
-        const reclaimable = existing.status === "FAILED" || (
-          existing.status === "PENDING" &&
-          existing.claim_attempted_at != null &&
-          String(existing.claim_attempted_at) < staleBefore
-        );
+        const reclaimable =
+          (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+          (
+            existing.status === "PENDING" &&
+            (existing.provider_dispatch_started_at ?? null) === null &&
+            existing.claim_attempted_at != null &&
+            String(existing.claim_attempted_at) < staleBefore
+          );
         if (!reclaimable) return null;
         existing.to_email = toEmail;
         existing.status = "PENDING";
@@ -14000,6 +14080,10 @@ class Statement {
         existing.document_status_at_send = documentStatusAtSend;
         existing.claim_attempted_at = claimAttemptedAt;
         existing.claim_token = claimToken;
+        existing.provider_dispatch_started_at = null;
+        existing.outcome_class = null;
+        existing.failure_code = null;
+        existing.retry_safe = 0;
         return { id: String(existing.id), idempotency_key: idempotencyKey, claim_token: claimToken } as T;
       }
 
@@ -14019,7 +14103,13 @@ class Statement {
         provider_delivery_id: null,
         claim_attempted_at: claimAttemptedAt,
         idempotency_key: idempotencyKey,
-        claim_token: claimToken
+        claim_token: claimToken,
+        provider_dispatch_started_at: null,
+        outcome_class: null,
+        failure_code: null,
+        retry_safe: 0,
+        resend_request_id: null,
+        attempt_no: 1
       });
       return { id, idempotency_key: idempotencyKey, claim_token: claimToken } as T;
     }
@@ -15777,6 +15867,9 @@ class Statement {
         pdfSha256,
         dteJsonSha256,
         providerDeliveryId,
+        outcomeClass,
+        failureCode,
+        retrySafe,
         id,
         claimToken
       ] = this.args;
@@ -15797,6 +15890,9 @@ class Statement {
         delivery.pdf_sha256 = pdfSha256;
         delivery.dte_json_sha256 = dteJsonSha256;
         delivery.provider_delivery_id = providerDeliveryId;
+        delivery.outcome_class = outcomeClass;
+        delivery.failure_code = failureCode;
+        delivery.retry_safe = retrySafe;
         changes = 1;
       }
     }

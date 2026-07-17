@@ -16,6 +16,75 @@ export interface EmailDeliveryResult {
   providerDeliveryId: string | null;
 }
 
+export type EmailDeliveryOutcomeClass = "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN";
+
+export class EmailDispatchError extends Error {
+  readonly providerResponse: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly outcomeClass: EmailDeliveryOutcomeClass,
+    readonly retrySafe: boolean
+  ) {
+    super(message);
+    this.name = "EmailDispatchError";
+    this.providerResponse = { code, error: message };
+  }
+}
+
+const CLOUDFLARE_NOT_SENT_CODES = new Set([
+  "E_VALIDATION_ERROR",
+  "E_FIELD_MISSING",
+  "E_TOO_MANY_RECIPIENTS",
+  "E_TOO_MANY_ATTACHMENTS",
+  "E_SENDER_NOT_VERIFIED",
+  "E_RECIPIENT_NOT_ALLOWED",
+  "E_RECIPIENT_SUPPRESSED",
+  "E_SENDER_DOMAIN_NOT_AVAILABLE",
+  "E_CONTENT_TOO_LARGE",
+  "E_RATE_LIMIT_EXCEEDED",
+  "E_DAILY_LIMIT_EXCEEDED",
+  "E_HEADER_NOT_ALLOWED",
+  "E_HEADER_USE_API_FIELD",
+  "E_HEADER_VALUE_INVALID",
+  "E_HEADER_VALUE_TOO_LONG",
+  "E_HEADER_NAME_INVALID",
+  "E_HEADERS_TOO_LARGE",
+  "E_HEADERS_TOO_MANY"
+]);
+
+export function classifyEmailDispatchError(
+  error: unknown,
+  providerDispatchStarted: boolean
+): EmailDispatchError {
+  const message = error instanceof Error ? error.message : String(error);
+  const providerCode =
+    isRecord(error) && typeof error.code === "string" && error.code.trim()
+      ? error.code.trim()
+      : null;
+  if (!providerDispatchStarted) {
+    return new EmailDispatchError(
+      message,
+      providerCode ?? "EMAIL_PRE_DISPATCH_FAILED",
+      "NOT_SENT",
+      true
+    );
+  }
+  if (providerCode && CLOUDFLARE_NOT_SENT_CODES.has(providerCode)) {
+    return new EmailDispatchError(message, providerCode, "NOT_SENT", true);
+  }
+  if (providerCode === "E_DELIVERY_FAILED") {
+    return new EmailDispatchError(message, providerCode, "NOT_DELIVERED", false);
+  }
+  return new EmailDispatchError(
+    message,
+    providerCode ?? "EMAIL_DISPATCH_UNKNOWN",
+    "UNKNOWN",
+    false
+  );
+}
+
 // White-label chrome for every email this service sends. Callers that already load
 // settings before a send (receipt/invalidation/certificate/reset) thread the church's
 // branding here; the defaults keep an unbranded deployment on the historical identity.
