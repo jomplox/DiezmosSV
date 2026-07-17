@@ -53,11 +53,28 @@ const CLOUDFLARE_NOT_SENT_CODES = new Set([
   "E_HEADERS_TOO_LARGE",
   "E_HEADERS_TOO_MANY"
 ]);
+const HTTP_PROVIDER_NOT_SENT_STATUSES = new Set([
+  400,
+  401,
+  403,
+  404,
+  405,
+  406,
+  410,
+  413,
+  415,
+  422,
+  429
+]);
+const HTTP_PROVIDER_TIMEOUT_MS = 15_000;
 
 export function classifyEmailDispatchError(
   error: unknown,
   providerDispatchStarted: boolean
 ): EmailDispatchError {
+  if (error instanceof EmailDispatchError) {
+    return error;
+  }
   const message = error instanceof Error ? error.message : String(error);
   const providerCode =
     isRecord(error) && typeof error.code === "string" && error.code.trim()
@@ -312,10 +329,9 @@ export class EmailService {
     );
     if (cloudflareSelected && this.env.EMAIL) {
       await beforeProviderDispatch?.();
-      // Once Cloudflare Email is invoked, a rejected promise is outcome-ambiguous:
-      // the provider may already have accepted the message. Crossing to the HTTP
-      // provider here could deliver the same receipt twice, so recovery remains on
-      // this provider's durable FAILED evidence instead of automatic fallback.
+      // Never cross to the HTTP provider after invoking Cloudflare. Documented
+      // validation codes can prove a pre-accept rejection, but every unrecognized
+      // rejection remains outcome-ambiguous and requires durable review.
       const result = await this.env.EMAIL.send({
         from: payload.from,
         to: payload.to,
@@ -352,24 +368,52 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unk
   if (!providerUrl || !env.EMAIL_API_KEY?.trim()) {
     throw new Error("Configure un endpoint HTTPS de correo administrado por el despliegue.");
   }
-  const response = await fetch(providerUrl.toString(), {
-    method: "POST",
-    redirect: "error",
-    headers: {
-      Authorization: `Bearer ${env.EMAIL_API_KEY}`,
-      "Content-Type": "application/json",
-      ...(payload.idempotencyKey ? { "Idempotency-Key": payload.idempotencyKey } : {})
-    },
-    body: JSON.stringify(providerPayload(payload))
-  });
-  const responseBody = await response.text();
-  const parsed = parseProviderResponse(responseBody);
+  let response: Response;
+  try {
+    response = await fetch(providerUrl.toString(), {
+      method: "POST",
+      redirect: "error",
+      headers: {
+        Authorization: `Bearer ${env.EMAIL_API_KEY}`,
+        "Content-Type": "application/json",
+        ...(payload.idempotencyKey ? { "Idempotency-Key": payload.idempotencyKey } : {})
+      },
+      body: JSON.stringify(providerPayload(payload)),
+      signal: AbortSignal.timeout(HTTP_PROVIDER_TIMEOUT_MS)
+    });
+  } catch {
+    throw new EmailDispatchError(
+      "No se pudo confirmar el resultado del proveedor HTTP",
+      "HTTP_PROVIDER_TRANSPORT_ERROR",
+      "UNKNOWN",
+      false
+    );
+  }
   if (!response.ok) {
-    throw new Error(`Falló el proveedor de correo: ${response.status} ${responseBody}`);
+    const retrySafe = HTTP_PROVIDER_NOT_SENT_STATUSES.has(response.status);
+    throw new EmailDispatchError(
+      retrySafe
+        ? `El proveedor HTTP rechazó el correo antes de aceptarlo (HTTP ${response.status})`
+        : `El proveedor HTTP respondió HTTP ${response.status}; no se puede confirmar el resultado`,
+      `HTTP_${response.status}`,
+      retrySafe ? "NOT_SENT" : "UNKNOWN",
+      retrySafe
+    );
+  }
+  let responseBody: string;
+  try {
+    responseBody = await response.text();
+  } catch {
+    throw new EmailDispatchError(
+      "El proveedor HTTP aceptó la solicitud, pero no se pudo confirmar su respuesta",
+      "HTTP_PROVIDER_RESPONSE_ERROR",
+      "UNKNOWN",
+      false
+    );
   }
   return {
     provider: "http-email",
-    response: parsed
+    response: parseProviderResponse(responseBody)
   };
 }
 
