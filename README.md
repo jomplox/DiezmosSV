@@ -427,11 +427,21 @@ the credential status does not call arbitrary-recipient delivery ready until the
 Worker never retries the same receipt through a second provider after a dispatch attempt, because an
 error may arrive after the first provider accepted it.
 
+The alternative HTTP provider must return JSON with an explicit acceptance contract. A successful
+send is recognized only for HTTP `200` or `202` with
+`{"status":"accepted","id":"<provider-id>"}` (or `messageId` instead of `id`). A pre-acceptance
+rejection is retry-safe only for an HTTP `4xx` JSON response shaped as
+`{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}`. Empty, malformed, oversized,
+non-JSON, generic `4xx`, unrecognized `2xx`, timeout, network, and `5xx` responses are outcome-unknown
+and require manual review; the Worker does not auto-retry them.
+
 Operational alert email and webhook delivery are independent. A failure in one channel does not
-prevent the other from running. Successful and failed channel outcomes are written to the audit log
-with a stable incident identifier, so the same incident is not sent forever while a later incident
-for the same CDE can alert again. The webhook payload contains only the alert summary, internal entity
-identity, and admin origin; it never contains the webhook URL or provider credentials.
+prevent the other from running. Each recipient/channel uses a durable dispatch claim keyed to the
+incident, and post-dispatch uncertainty is never reclaimed automatically. Audit rows are secondary
+operator history rather than the duplicate-send fence. The same incident is therefore suppressed
+after a confirmed send while a later incident for the same CDE can alert again. The webhook payload
+contains only redacted alert text, redacted internal entity display, and the admin origin; it never
+contains the webhook URL, raw provider errors, donor addresses, or provider credentials.
 
 `EMAIL_PROVIDER_URL` is deployment-owned. Set it with Wrangler or the Cloudflare deployment
 configuration, not from the application credentials panel. After the release is deployed and the

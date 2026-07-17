@@ -180,7 +180,10 @@ describe("email subject boundary", () => {
 
   it("uses caller-scoped HTTP idempotency without suppressing manual resends", async () => {
     const providerFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      new Response(JSON.stringify({ id: "email_http_1" }), { status: 202 })
+      new Response(JSON.stringify({ status: "accepted", id: "email_http_1" }), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      })
     );
     vi.stubGlobal("fetch", providerFetch);
     const service = new EmailService({
@@ -249,18 +252,22 @@ describe("email subject boundary", () => {
 describe("email dispatch outcome classification", () => {
   it("marks Cloudflare header validation as proven not sent and retry-safe", () => {
     expect(classifyEmailDispatchError(
-      Object.assign(new Error("header rejected"), { code: "E_HEADER_NOT_ALLOWED" }),
+      Object.assign(new Error("header rejected for ana@example.org"), { code: "E_HEADER_NOT_ALLOWED" }),
       true
     )).toMatchObject({
       code: "E_HEADER_NOT_ALLOWED",
-      message: "header rejected",
       outcomeClass: "NOT_SENT",
       retrySafe: true,
       providerResponse: {
-        code: "E_HEADER_NOT_ALLOWED",
-        error: "header rejected"
+        code: "E_HEADER_NOT_ALLOWED"
       }
     });
+    const classified = classifyEmailDispatchError(
+      Object.assign(new Error("header rejected for ana@example.org"), { code: "E_HEADER_NOT_ALLOWED" }),
+      true
+    );
+    expect(classified.message).not.toContain("ana@example.org");
+    expect(JSON.stringify(classified.providerResponse)).not.toContain("ana@example.org");
   });
 
   it("keeps an explicit delivery failure out of automatic retries", () => {
@@ -298,9 +305,17 @@ describe("email dispatch outcome classification", () => {
     });
   });
 
-  it("classifies an explicit HTTP validation rejection as not sent without storing its body", async () => {
+  it("classifies only a machine-confirmed HTTP rejection as not sent without storing its body", async () => {
     const providerFetch = vi.fn(async () =>
-      new Response(JSON.stringify({ error: "private provider detail" }), { status: 422 })
+      new Response(JSON.stringify({
+        status: "rejected",
+        accepted: false,
+        code: "INVALID_RECIPIENT",
+        detail: "private recipient detail"
+      }), {
+        status: 422,
+        headers: { "content-type": "application/json" }
+      })
     );
     vi.stubGlobal("fetch", providerFetch);
     const service = new EmailService({
@@ -317,13 +332,113 @@ describe("email dispatch outcome classification", () => {
         text: "Body",
         html: "<p>Body</p>"
       })).rejects.toMatchObject({
-        code: "HTTP_422",
+        code: "HTTP_PROVIDER_INVALID_RECIPIENT",
         outcomeClass: "NOT_SENT",
         retrySafe: true,
         providerResponse: {
-          code: "HTTP_422",
-          error: "El proveedor HTTP rechazó el correo antes de aceptarlo (HTTP 422)"
+          code: "HTTP_PROVIDER_INVALID_RECIPIENT"
         }
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("treats an undocumented HTTP 4xx body as unknown", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ error: "private provider detail" }), {
+        status: 422,
+        headers: { "content-type": "application/json" }
+      })
+    ));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await expect(service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      })).rejects.toMatchObject({
+        code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
+        outcomeClass: "UNKNOWN",
+        retrySafe: false,
+        providerResponse: {
+          code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED"
+        }
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    ["empty", "", "application/json"],
+    ["malformed", "not-json", "text/plain"],
+    ["error-shaped", JSON.stringify({ error: "queued but uncertain" }), "application/json"],
+    ["missing-id", JSON.stringify({ status: "accepted" }), "application/json"]
+  ])("treats an %s HTTP 2xx response as unknown", async (_label, body, contentType) => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(body, {
+        status: 202,
+        headers: { "content-type": contentType }
+      })
+    ));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await expect(service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      })).rejects.toMatchObject({
+        code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
+        outcomeClass: "UNKNOWN",
+        retrySafe: false
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("persists only the accepted HTTP provider identity", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({
+        status: "accepted",
+        id: "email_http_contract_1",
+        private: "must-not-be-persisted"
+      }), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      })
+    ));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      await expect(service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      })).resolves.toEqual({
+        provider: "http-email",
+        messageId: "email_http_contract_1"
       });
     } finally {
       vi.unstubAllGlobals();
@@ -352,8 +467,7 @@ describe("email dispatch outcome classification", () => {
         outcomeClass: "UNKNOWN",
         retrySafe: false,
         providerResponse: {
-          code: "HTTP_503",
-          error: "El proveedor HTTP respondió HTTP 503; no se puede confirmar el resultado"
+          code: "HTTP_503"
         }
       });
     } finally {

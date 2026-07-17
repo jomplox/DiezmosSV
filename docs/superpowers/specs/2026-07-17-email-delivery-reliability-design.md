@@ -114,10 +114,19 @@ For the native Cloudflare binding:
 
 For the optional HTTP provider:
 
-- a response that explicitly rejects a validated request before acceptance may be
+- only HTTP `200` or `202` with JSON
+  `{"status":"accepted","id":"<provider-id>"}` (or `messageId`) is `SENT`;
+- only an HTTP `4xx` JSON response
+  `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}` proves
   `NOT_SENT`;
 - network failures, timeouts, server errors, and unrecognized responses are
-  `UNKNOWN`.
+  `UNKNOWN`;
+- empty, malformed, oversized, non-JSON, generic `4xx`, or unrecognized `2xx`
+  responses are also `UNKNOWN`.
+
+Persisted failure evidence contains only the normalized machine code. Provider
+exception text is never stored because it may echo recipient addresses, private
+URLs, headers, or credentials.
 
 Any local failure before `provider_dispatch_started_at` is set is `NOT_SENT`.
 Ownership fencing errors remain ownership errors and are not converted into
@@ -212,8 +221,11 @@ rows after a read-only identity check. No CDE row is deleted or modified.
 
 ## Operational Alerts
 
-Alert deduplication becomes per `(kind, entity, incidentId, channel)` instead of
-per `(kind, entity)` forever.
+Alert deduplication becomes per
+`(kind, entity, incidentId, channel, target)` instead of per `(kind, entity)`
+forever. The durable claim table stores only hashes for entity and recipient
+identity. Audit rows remain secondary operator history and are not used as the
+duplicate-send fence.
 
 Every caller supplies a stable incident ID for the triggering attempt or episode:
 
@@ -223,9 +235,12 @@ Every caller supplies a stable incident ID for the triggering attempt or episode
 - certificate expiry plus threshold for certificate alerts;
 - verification/export attempt identity for retention alerts.
 
-Email and webhook channels execute independently. A failure in one cannot prevent
-the other. Each channel writes `ALERT_SENT:<kind>` or `ALERT_FAILED:<kind>` audit
-evidence with `incidentId` and `channel` metadata.
+Email recipients and the webhook execute independently. A slow or failed target
+cannot prevent another target from starting. Each target is fenced before provider
+dispatch; a confirmed pre-acceptance rejection may be reclaimed, while timeout,
+internal failure, or any post-dispatch uncertainty remains manual-review-only.
+Each channel writes `ALERT_SENT:<kind>` or `ALERT_FAILED:<kind>` audit evidence
+with `incidentId` and `channel` metadata when that secondary audit write succeeds.
 
 The webhook is optional. Its credential-bearing URL is a deployment secret and
 its non-secret provider format is a deployment variable:
@@ -233,11 +248,12 @@ its non-secret provider format is a deployment variable:
 - `ALERT_WEBHOOK_URL` secret;
 - `ALERT_WEBHOOK_KIND` variable, either `slack` or `discord`.
 
-Payloads contain the alert title, detail, kind, entity type, entity ID, and admin
-origin, but no credentials or full provider response. Slack receives `text`;
-Discord receives `content`. Non-HTTPS URLs, credential-bearing URLs, unsupported
-kinds, non-2xx responses, timeouts, and malformed configuration record a webhook
-failure without blocking the email channel or the triggering business flow.
+Payloads contain redacted alert title/detail, kind, redacted entity display, and
+admin origin, but no credentials, donor address, raw provider text, or full
+provider response. Slack receives `text`; Discord receives `content`. Non-HTTPS
+URLs, credential-bearing URLs, unsupported kinds, non-2xx responses, timeouts,
+and malformed configuration record a webhook failure without blocking the email
+channel or the triggering business flow.
 
 ## Recovery Procedure
 

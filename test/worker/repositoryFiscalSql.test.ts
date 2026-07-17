@@ -7,48 +7,70 @@ import { Repository } from "../../src/worker/storage/repository";
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
 describe("fiscal repository SQL on SQLite", () => {
-  it("scopes successful operational alerts by incident and channel", async () => {
+  it("durably fences operational alerts by incident, channel, and target", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);
     const repository = new Repository(d1.database);
-
-    await repository.createAudit({
-      action: "ALERT_SENT:EMAIL_FAILED",
-      entityType: "dte_document",
-      entityId: "doc_alert",
-      summary: "sent",
-      metadata: { incidentId: "delivery_1", channel: "email" }
-    });
-    await repository.createAudit({
-      action: "ALERT_FAILED:EMAIL_FAILED",
-      entityType: "dte_document",
-      entityId: "doc_alert",
-      summary: "failed",
-      metadata: { incidentId: "delivery_2", channel: "webhook" }
-    });
-
-    expect(await repository.hasOperationalAlertChannelResult({
-      action: "ALERT_SENT:EMAIL_FAILED",
+    const input = {
+      kind: "EMAIL_FAILED",
       entityType: "dte_document",
       entityId: "doc_alert",
       incidentId: "delivery_1",
-      channel: "email"
-    })).toBe(true);
-    expect(await repository.hasOperationalAlertChannelResult({
-      action: "ALERT_SENT:EMAIL_FAILED",
-      entityType: "dte_document",
-      entityId: "doc_alert",
-      incidentId: "delivery_1",
-      channel: "webhook"
-    })).toBe(false);
-    expect(await repository.hasOperationalAlertChannelResult({
-      action: "ALERT_SENT:EMAIL_FAILED",
-      entityType: "dte_document",
-      entityId: "doc_alert",
-      incidentId: "delivery_2",
-      channel: "email"
-    })).toBe(false);
+      channel: "email" as const,
+      targetKey: "email:owner@example.org"
+    };
+    const first = await repository.claimOperationalAlertDelivery(input);
+    expect(first).toMatchObject({ kind: "claimed" });
+    if (first.kind !== "claimed") throw new Error("expected alert claim");
+    await expect(repository.claimOperationalAlertDelivery(input)).resolves.toMatchObject({
+      kind: "in_progress",
+      id: first.id
+    });
+    expect(await repository.markOperationalAlertDispatchStarted(first.id, first.claimToken)).toBe(true);
+    await repository.finalizeOperationalAlertDelivery(first.id, first.claimToken, {
+      status: "SENT"
+    });
+    await expect(repository.claimOperationalAlertDelivery(input)).resolves.toMatchObject({
+      kind: "already_sent",
+      id: first.id
+    });
+    await expect(repository.claimOperationalAlertDelivery({
+      ...input,
+      incidentId: "delivery_2"
+    })).resolves.toMatchObject({ kind: "claimed" });
 
+    database.close();
+  });
+
+  it("reclaims only an operational alert proven not sent", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const repository = new Repository(d1.database);
+    const input = {
+      kind: "EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert_retry",
+      incidentId: "delivery_retry",
+      channel: "email" as const,
+      targetKey: "email:owner@example.org"
+    };
+    const first = await repository.claimOperationalAlertDelivery(input);
+    if (first.kind !== "claimed") throw new Error("expected alert claim");
+    expect(await repository.markOperationalAlertDispatchStarted(first.id, first.claimToken)).toBe(true);
+    await repository.finalizeOperationalAlertDelivery(first.id, first.claimToken, {
+      status: "FAILED",
+      outcomeClass: "NOT_SENT",
+      failureCode: "E_RECIPIENT_NOT_ALLOWED",
+      retrySafe: true
+    });
+
+    const retried = await repository.claimOperationalAlertDelivery(input);
+    expect(retried).toMatchObject({
+      kind: "claimed",
+      id: first.id
+    });
+    if (retried.kind !== "claimed") throw new Error("expected alert retry claim");
+    expect(retried.claimToken).not.toBe(first.claimToken);
     database.close();
   });
 
@@ -415,12 +437,22 @@ describe("fiscal repository SQL on SQLite", () => {
       failureCode: "E_HEADER_NOT_ALLOWED",
       retrySafe: true
     });
-    await expect(repository.claimManualEmailDelivery(retryInput)).resolves.toMatchObject({
+    const retrySecond = await repository.claimManualEmailDelivery(retryInput);
+    expect(retrySecond).toMatchObject({
       kind: "claimed",
       id: retryFirst.id,
       idempotencyKey: retryFirst.idempotencyKey,
       claimToken: expect.any(String),
-      attemptNo: 2
+      attemptNo: 3
+    });
+    if (retrySecond.kind !== "claimed") throw new Error("expected retry-safe reclaim");
+    expect(await repository.markEmailDeliveryDispatchStarted(retrySecond.id, retrySecond.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(retrySecond.id, retrySecond.claimToken, {
+      status: "SENT",
+      providerResponse: { messageId: "manual-resend-retry" },
+      emailType: retryInput.emailType,
+      documentStatusAtSend: retryInput.documentStatusAtSend,
+      providerDeliveryId: "manual-resend-retry"
     });
 
     const reviewInput = {
@@ -442,10 +474,159 @@ describe("fiscal repository SQL on SQLite", () => {
     await expect(repository.claimManualEmailDelivery(reviewInput)).resolves.toMatchObject({
       kind: "manual_review",
       id: reviewFirst.id,
-      attemptNo: 1,
+      attemptNo: 4,
       outcomeClass: "UNKNOWN"
     });
 
+    database.close();
+  });
+
+  it("allocates a new document-wide attempt number for a deliberate resend after success", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_attempt_sequence", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const repository = new Repository(d1.database);
+    const input = {
+      documentId: "doc_attempt_sequence",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "44444444-4444-4444-8444-444444444444"
+    };
+    const first = await repository.claimManualEmailDelivery(input);
+    expect(first).toMatchObject({ kind: "claimed", attemptNo: 1 });
+    if (first.kind !== "claimed") throw new Error("expected first manual claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(first.id, first.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(first.id, first.claimToken, {
+      status: "SENT",
+      providerResponse: { messageId: "attempt-1" },
+      emailType: input.emailType,
+      documentStatusAtSend: input.documentStatusAtSend,
+      providerDeliveryId: "attempt-1"
+    });
+
+    await expect(repository.claimManualEmailDelivery({
+      ...input,
+      resendRequestId: "70000005-7777-4777-8777-700000057777"
+    })).resolves.toMatchObject({
+      kind: "claimed",
+      attemptNo: 2
+    });
+    database.close();
+  });
+
+  it("blocks different resend IDs while a receipt attempt is active or ambiguous", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_manual_fence", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const repository = new Repository(d1.database);
+    const firstInput = {
+      documentId: "doc_manual_fence",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "55555555-5555-4555-8555-555555555555"
+    };
+    const competingInput = {
+      ...firstInput,
+      resendRequestId: "66666666-6666-4666-8666-666666666666"
+    };
+
+    const first = await repository.claimManualEmailDelivery(firstInput);
+    expect(first).toMatchObject({ kind: "claimed", attemptNo: 1 });
+    if (first.kind !== "claimed") throw new Error("expected first manual claim");
+
+    await expect(repository.claimManualEmailDelivery(competingInput)).resolves.toMatchObject({
+      kind: "in_progress",
+      id: first.id,
+      attemptNo: 1
+    });
+
+    expect(await repository.markEmailDeliveryDispatchStarted(first.id, first.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(first.id, first.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "EMAIL_DISPATCH_UNKNOWN" },
+      emailType: firstInput.emailType,
+      documentStatusAtSend: firstInput.documentStatusAtSend,
+      outcomeClass: "UNKNOWN",
+      failureCode: "EMAIL_DISPATCH_UNKNOWN",
+      retrySafe: false
+    });
+
+    await expect(repository.claimManualEmailDelivery(competingInput)).resolves.toMatchObject({
+      kind: "manual_review",
+      id: first.id,
+      attemptNo: 1,
+      outcomeClass: "UNKNOWN"
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM email_deliveries WHERE document_id = ?"
+    ).get("doc_manual_fence")).toEqual({ count: 1 });
+    database.close();
+  });
+
+  it("orders the latest receipt outcome by document attempt number before tied timestamps", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_latest_attempt", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, outcome_class, failure_code,
+         retry_safe, attempt_no, created_at
+       ) VALUES (?, ?, ?, ?, '{}', 'dteReceipt', 'ACCEPTED', ?, ?, ?, ?, ?)`
+    ).run(
+      "email_z_older_attempt",
+      "doc_latest_attempt",
+      "donor@example.org",
+      "FAILED",
+      "UNKNOWN",
+      "EMAIL_DISPATCH_UNKNOWN",
+      0,
+      1,
+      "2026-07-17T17:00:00.000Z"
+    );
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, retry_safe, attempt_no, created_at
+       ) VALUES (?, ?, ?, 'SENT', '{}', 'dteReceipt', 'ACCEPTED', 0, ?, ?)`
+    ).run(
+      "email_a_newer_attempt",
+      "doc_latest_attempt",
+      "donor@example.org",
+      2,
+      "2026-07-17T17:00:00.000Z"
+    );
+    const repository = new Repository(d1.database);
+
+    await expect(repository.listDteDocuments({ attention: "failures" })).resolves.toMatchObject({
+      documents: []
+    });
+    database.close();
+  });
+
+  it("upgrades a populated pre-0025 database with duplicate legacy failures", () => {
+    const database = migratedDatabaseThrough("0024");
+    seedAcceptedDocument(database, "doc_legacy_delivery", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const insert = database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, created_at
+       ) VALUES (?, 'doc_legacy_delivery', 'donor@example.org', 'FAILED', '{}',
+                 'dteReceipt', 'ACCEPTED', ?)`
+    );
+    insert.run("legacy_failure_1", "2026-07-17T17:00:00.000Z");
+    insert.run("legacy_failure_2", "2026-07-17T17:01:00.000Z");
+
+    expect(() => database.exec(
+      readFileSync(resolve(migrationsDirectory, "0025_email_delivery_recovery.sql"), "utf8")
+    )).not.toThrow();
+    expect(database.prepare(
+      `SELECT retry_safe, attempt_no
+         FROM email_deliveries
+        WHERE id = 'legacy_failure_1'`
+    ).get()).toEqual({ retry_safe: 0, attempt_no: 1 });
     database.close();
   });
 
@@ -602,9 +783,16 @@ class SqliteStatement {
 }
 
 function migratedDatabase(): DatabaseSync {
+  return migratedDatabaseThrough(null);
+}
+
+function migratedDatabaseThrough(lastMigrationPrefix: string | null): DatabaseSync {
   const database = new DatabaseSync(":memory:");
   database.exec("PRAGMA foreign_keys = ON");
   for (const filename of readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
+    if (lastMigrationPrefix && filename.slice(0, 4) > lastMigrationPrefix) {
+      break;
+    }
     database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
   }
   database.prepare(
