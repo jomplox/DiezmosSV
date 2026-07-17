@@ -699,11 +699,11 @@ describe("donar thank-you page", () => {
 
 describe("donar wizard source contract", () => {
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
-    // Religious framing: the heading names the aportación, flagged with an INLINE
-    // SVG badge — flag EMOJI render as a blank box (or bare "SV"/"US" letters on
-    // Windows), which left an orphaned period on the landing. Both doors share the
-    // same general title — only the lane flag differs.
-    expect(donarSource).toContain('<DonarFlagBadge country={usDonation ? "us" : "sv"} />');
+    // Religious framing: the heading names the aportación. The SV lane reuses the
+    // chooser's globe + official flag artwork; the US lane keeps its inline SVG
+    // badge. Both avoid flag emoji, which render as blank boxes or bare letters.
+    expect(donarSource).toContain("<SvTitleWorldIcon />");
+    expect(donarSource).toContain('<UsFlagIcon className="donar-title-lane-flag" />');
     expect(donarSource).not.toContain("🇸🇻");
     expect(donarSource).not.toContain("Entregue su diezmo u ofrenda");
     expect(donarSource).toContain("Tipo de documento");
@@ -791,7 +791,7 @@ describe("donar wizard source contract", () => {
     // Right under the Paso 1 heading, a Gotham Book gray subtitle names the
     // comprobante that path yields — reassurance of the door they just chose.
     // Formal register mirroring the US lane's "recibo oficial ... (IRS 501c3)".
-    expect(donarSource).toContain("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.");
+    expect(donarSource).toContain("Recibirá por correo electrónico un comprobante de donación oficial (DTE), con validez fiscal únicamente en El Salvador.");
     expect(donarSource).toContain("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.");
     expect(donarSource).toContain("donar-assurance");
   });

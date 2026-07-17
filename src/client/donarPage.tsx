@@ -271,11 +271,8 @@ function OrganizationLogo() {
   );
 }
 
-// Door 1 icon: the official El Salvador flag (flag-icons sv 1:1, MIT — full escudo
-// with the "REPUBLICA DE EL SALVADOR" ring) cropped to a circle, overlapping the
-// lower-right of a thin monochrome line-art globe. Referenced as an <image> asset so
-// its internal SVG ids stay encapsulated. aria-hidden: the door button's text label
-// is the single accessible name.
+// Home chooser artwork: preserve its original globe with the official SV flag
+// overlapping at the lower-right. The secondary screen has its own component below.
 function SvWorldIcon() {
   return (
     <svg
@@ -285,7 +282,6 @@ function SvWorldIcon() {
       focusable="false"
       xmlns="http://www.w3.org/2000/svg"
     >
-      {/* Line-art globe behind the flag. */}
       <g fill="none" stroke="#595959" strokeWidth="1.5">
         <circle cx="42" cy="38" r="30" />
         <ellipse cx="42" cy="38" rx="12" ry="30" />
@@ -294,8 +290,6 @@ function SvWorldIcon() {
         <path d="M 17 23 Q 42 31 67 23" />
         <path d="M 17 53 Q 42 45 67 53" />
       </g>
-      {/* Official flag, circle-cropped, lower-right, with a white ring separating it
-          from the globe lines. */}
       <clipPath id="sv-flag-circle">
         <circle cx="69" cy="69" r="25" />
       </clipPath>
@@ -308,6 +302,42 @@ function SvWorldIcon() {
         height="50"
         preserveAspectRatio="xMidYMid slice"
         clipPath="url(#sv-flag-circle)"
+      />
+    </svg>
+  );
+}
+
+// SV secondary-header artwork: flag first/upper-left, globe lower-right, with a
+// deliberate overlap. The globe paints first so the official flag stays on top.
+function SvTitleWorldIcon() {
+  return (
+    <svg
+      className="donar-title-world-icon"
+      viewBox="0 0 140 88"
+      aria-hidden="true"
+      focusable="false"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <g fill="none" stroke="#595959" strokeWidth="1.5">
+        <circle cx="94" cy="34" r="24" />
+        <ellipse cx="94" cy="34" rx="10" ry="24" />
+        <ellipse cx="94" cy="34" rx="19" ry="24" />
+        <line x1="70" y1="34" x2="118" y2="34" />
+        <path d="M 74 22 Q 94 28 114 22" />
+        <path d="M 74 46 Q 94 40 114 46" />
+      </g>
+      <clipPath id="sv-title-flag-circle">
+        <circle cx="48" cy="34" r="32" />
+      </clipPath>
+      <circle cx="48" cy="34" r="34" fill="#ffffff" />
+      <image
+        href={svFlag}
+        x="16"
+        y="2"
+        width="64"
+        height="64"
+        preserveAspectRatio="xMidYMid slice"
+        clipPath="url(#sv-title-flag-circle)"
       />
     </svg>
   );
@@ -342,8 +372,8 @@ function UsFlagIcon({ className = "donar-door-icon" }: { className?: string }) {
   );
 }
 
-// Inline circle-flag badge replacing the SV/US flag EMOJI in headings and the
-// landing unifier: flag emoji render as a blank box on platforms without flag
+// Inline circle-flag badge replacing the SV/US flag EMOJI in the landing unifier:
+// flag emoji render as a blank box on platforms without flag
 // glyphs (and as bare "SV"/"US" letters on Windows), which left an orphaned
 // period on the landing. Decorative (aria-hidden) — the text carries the meaning.
 function DonarFlagBadge({ country }: { country: "sv" | "us" }) {
@@ -915,16 +945,18 @@ export function DonarPage() {
         </div>
 
         {/* The ceremonial header is identical on every step — centered shield,
-            big brand title. The flag is an inline SVG badge (emoji render as a
-            blank box or bare "SV"/"US" letters on platforms without flag glyphs).
+            big brand title. The SV lane reuses the chooser's globe + flag artwork;
+            the US lane keeps its inline SVG flag badge (emoji render as a blank
+            box or bare "SV"/"US" letters on platforms without flag glyphs).
             Working steps add a small caps-tracked step label UNDER the title for
             orientation; a brand-demoting compact header was tried and read as a
             regression (the brand looked like a fake subtitle of the step). */}
         <div className="donar-glyph">
           <ShieldCheck size={28} />
         </div>
-        <h1>
-          {DONAR_LANDING_HEADING} <DonarFlagBadge country={usDonation ? "us" : "sv"} />
+        <h1 className="donar-wizard-title">
+          <span>{DONAR_LANDING_HEADING}</span>
+          {usDonation ? <UsFlagIcon className="donar-title-lane-flag" /> : <SvTitleWorldIcon />}
         </h1>
         {step > 1 && (
           <p className="donar-step-label">
@@ -938,7 +970,7 @@ export function DonarPage() {
           <p className="donar-assurance">
             {usDonation
               ? "Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico."
-              : "Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico."}
+              : "Recibirá por correo electrónico un comprobante de donación oficial (DTE), con validez fiscal únicamente en El Salvador."}
           </p>
         )}
 
@@ -995,7 +1027,12 @@ export function DonarPage() {
                 ref={heroInputRef}
                 id={donarFieldDomId("amount")}
                 value={form.amount}
-                onChange={(event) => update({ amount: event.target.value })}
+                onChange={(event) => {
+                  const amount = event.target.value;
+                  if (/^[0-9]*(?:\.[0-9]{0,2})?$/.test(amount)) {
+                    update({ amount });
+                  }
+                }}
                 placeholder={DONAR_HERO_PLACEHOLDER}
                 aria-label="Monto"
                 aria-invalid={fieldErrors.amount ? true : undefined}
