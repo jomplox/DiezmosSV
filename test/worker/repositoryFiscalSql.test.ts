@@ -602,6 +602,60 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("does not reclaim an older retry-safe request after a newer ambiguous attempt", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_stale_safe_replay", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const repository = new Repository(d1.database);
+    const safeInput = {
+      documentId: "doc_stale_safe_replay",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "99999999-9999-4999-8999-999999999999"
+    };
+    const safeClaim = await repository.claimManualEmailDelivery(safeInput);
+    if (safeClaim.kind !== "claimed") throw new Error("expected retry-safe claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(safeClaim.id, safeClaim.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(safeClaim.id, safeClaim.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_HEADER_NOT_ALLOWED" },
+      emailType: safeInput.emailType,
+      documentStatusAtSend: safeInput.documentStatusAtSend,
+      outcomeClass: "NOT_SENT",
+      failureCode: "E_HEADER_NOT_ALLOWED",
+      retrySafe: true
+    });
+
+    const ambiguousInput = {
+      ...safeInput,
+      resendRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    };
+    const ambiguousClaim = await repository.claimManualEmailDelivery(ambiguousInput);
+    if (ambiguousClaim.kind !== "claimed") throw new Error("expected ambiguous claim");
+    expect(await repository.markEmailDeliveryDispatchStarted(ambiguousClaim.id, ambiguousClaim.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(ambiguousClaim.id, ambiguousClaim.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_INTERNAL_SERVER_ERROR" },
+      emailType: ambiguousInput.emailType,
+      documentStatusAtSend: ambiguousInput.documentStatusAtSend,
+      outcomeClass: "UNKNOWN",
+      failureCode: "E_INTERNAL_SERVER_ERROR",
+      retrySafe: false
+    });
+
+    await expect(repository.claimManualEmailDelivery(safeInput)).resolves.toMatchObject({
+      kind: "manual_review",
+      id: ambiguousClaim.id,
+      attemptNo: 2,
+      outcomeClass: "UNKNOWN"
+    });
+    expect(database.prepare(
+      "SELECT status, attempt_no FROM email_deliveries WHERE id = ?"
+    ).get(safeClaim.id)).toEqual({ status: "FAILED", attempt_no: 1 });
+    database.close();
+  });
+
   it("orders the latest receipt outcome by document attempt number before tied timestamps", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);
@@ -736,6 +790,51 @@ describe("fiscal repository SQL on SQLite", () => {
       { id: "legacy_failure_1", claim_token: null },
       { id: "legacy_failure_2", claim_token: "legacy-claim-2" }
     ]);
+    database.close();
+  });
+
+  it("clears an older ambiguous claim when a newer terminal legacy receipt supersedes it", async () => {
+    const database = migratedDatabaseThrough("0024");
+    seedAcceptedDocument(database, "doc_legacy_superseded", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, claim_attempted_at,
+         idempotency_key, claim_token, created_at
+       ) VALUES ('legacy_ambiguous_claim', 'doc_legacy_superseded',
+                 'donor@example.org', 'FAILED', '{}', 'dteReceipt',
+                 'ACCEPTED', '2026-07-17T17:00:00.000Z',
+                 'legacy-ambiguous-key', 'legacy-ambiguous-claim',
+                 '2026-07-17T17:00:00.000Z')`
+    ).run();
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, sent_at, created_at
+       ) VALUES ('legacy_later_sent', 'doc_legacy_superseded',
+                 'donor@example.org', 'SENT', '{}', 'dteReceipt',
+                 'ACCEPTED', '2026-07-17T17:01:00.000Z',
+                 '2026-07-17T17:01:00.000Z')`
+    ).run();
+
+    database.exec(
+      readFileSync(resolve(migrationsDirectory, "0025_email_delivery_recovery.sql"), "utf8")
+    );
+    expect(database.prepare(
+      "SELECT claim_token FROM email_deliveries WHERE id = 'legacy_ambiguous_claim'"
+    ).get()).toEqual({ claim_token: null });
+
+    const repository = new Repository(new SqliteD1(database).database);
+    await expect(repository.claimManualEmailDelivery({
+      documentId: "doc_legacy_superseded",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    })).resolves.toMatchObject({
+      kind: "claimed",
+      attemptNo: 2
+    });
     database.close();
   });
 

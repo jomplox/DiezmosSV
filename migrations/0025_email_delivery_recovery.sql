@@ -21,15 +21,18 @@ CREATE INDEX idx_email_deliveries_latest_receipt
   ON email_deliveries(document_id, email_type, attempt_no DESC, created_at DESC, id DESC);
 
 -- Pre-0025 could contain more than one claimed failure for the same receipt
--- identity because only the idempotency key was unique. Keep the newest claim as
--- the conservative unresolved fence and preserve every older evidence row without
--- claim ownership so the partial unique index can be created on populated D1 data.
+-- identity, or an older claimed ambiguity followed by a newer append-only terminal
+-- resend. Keep claim ownership only on the latest receipt row. Preserve every older
+-- evidence row without ownership so populated D1 data can satisfy the new fence.
 UPDATE email_deliveries
    SET claim_token = NULL
  WHERE id IN (
    SELECT id
      FROM (
        SELECT id,
+              claim_token,
+              status,
+              outcome_class,
               ROW_NUMBER() OVER (
                 PARTITION BY document_id, email_type
                 ORDER BY COALESCE(
@@ -41,11 +44,17 @@ UPDATE email_deliveries
                          id DESC
               ) AS unresolved_rank
          FROM email_deliveries
-        WHERE claim_token IS NOT NULL
-          AND email_type IN ('dteReceipt', 'dteReceiptTransitorio')
-          AND status IN ('PENDING', 'FAILED')
+        WHERE email_type IN ('dteReceipt', 'dteReceiptTransitorio')
      )
     WHERE unresolved_rank > 1
+      AND claim_token IS NOT NULL
+      AND (
+        status = 'PENDING'
+        OR (
+          status = 'FAILED'
+          AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
+        )
+      )
  );
 
 -- A current or ambiguous claimed receipt is a hard document/type fence.

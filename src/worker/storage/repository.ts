@@ -2563,6 +2563,21 @@ export class Repository {
            AND to_email = ?
            AND email_type = ?
            AND document_status_at_send = ?
+           AND id = (
+             SELECT candidate.id
+               FROM email_deliveries AS candidate
+              WHERE candidate.document_id = email_deliveries.document_id
+                AND candidate.email_type = email_deliveries.email_type
+              ORDER BY candidate.attempt_no DESC,
+                       COALESCE(
+                         candidate.finalized_at,
+                         candidate.claim_attempted_at,
+                         candidate.created_at
+                       ) DESC,
+                       candidate.created_at DESC,
+                       candidate.id DESC
+              LIMIT 1
+           )
            AND (
              (
                status = 'FAILED'
@@ -2697,77 +2712,71 @@ export class Repository {
         outcome_class: EmailDeliveryOutcomeClass | null;
         attempt_no: number;
       }>();
-    if (!existing) {
-      const blocker = await this.db
-        .prepare(
-          `SELECT id, status, outcome_class, attempt_no
-             FROM email_deliveries
-            WHERE id = (
-              SELECT candidate.id
-                FROM email_deliveries AS candidate
-               WHERE candidate.document_id = ?
-                 AND candidate.email_type = ?
-               ORDER BY candidate.attempt_no DESC,
-                        COALESCE(
-                          candidate.finalized_at,
-                          candidate.claim_attempted_at,
-                          candidate.created_at
-                        ) DESC,
-                        candidate.created_at DESC,
-                        candidate.id DESC
-               LIMIT 1
-            )
-              AND (
-                status = 'PENDING'
-                OR (
-                  status = 'FAILED'
-                  AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
-                )
-              )
-            LIMIT 1`
-        )
-        .bind(input.documentId, input.emailType)
-        .first<{
-          id: string;
-          status: "PENDING" | "FAILED";
-          outcome_class: EmailDeliveryOutcomeClass | null;
-          attempt_no: number;
-        }>();
-      if (blocker?.status === "PENDING") {
-        return {
-          kind: "in_progress",
-          id: blocker.id,
-          attemptNo: Number(blocker.attempt_no)
-        };
-      }
-      if (blocker) {
-        return {
-          kind: "manual_review",
-          id: blocker.id,
-          attemptNo: Number(blocker.attempt_no),
-          outcomeClass: blocker.outcome_class
-        };
-      }
-      throw new Error("No se pudo recuperar la reserva del reenvío");
-    }
-    const attemptNo = Number(existing.attempt_no);
-    const sameRequest =
+    const attemptNo = Number(existing?.attempt_no ?? 0);
+    const sameRequest = existing &&
       existing.document_id === input.documentId &&
       existing.to_email === input.toEmail &&
       existing.email_type === input.emailType &&
       existing.document_status_at_send === input.documentStatusAtSend;
-    if (!sameRequest) {
+    if (existing && !sameRequest) {
       return { kind: "conflict", id: existing.id, attemptNo };
     }
-    if (existing.status === "SENT") {
+    if (existing?.status === "SENT") {
       return { kind: "already_sent", id: existing.id, attemptNo };
     }
-    if (
-      existing.status === "PENDING" &&
-      existing.claim_attempted_at !== null &&
-      existing.claim_attempted_at >= staleBefore
-    ) {
-      return { kind: "in_progress", id: existing.id, attemptNo };
+
+    const blocker = await this.db
+      .prepare(
+        `SELECT id, status, outcome_class, attempt_no
+           FROM email_deliveries
+          WHERE id = (
+            SELECT candidate.id
+              FROM email_deliveries AS candidate
+             WHERE candidate.document_id = ?
+               AND candidate.email_type = ?
+             ORDER BY candidate.attempt_no DESC,
+                      COALESCE(
+                        candidate.finalized_at,
+                        candidate.claim_attempted_at,
+                        candidate.created_at
+                      ) DESC,
+                      candidate.created_at DESC,
+                      candidate.id DESC
+             LIMIT 1
+          )
+            AND (
+              status = 'PENDING'
+              OR (
+                status = 'FAILED'
+                AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
+              )
+            )
+          LIMIT 1`
+      )
+      .bind(input.documentId, input.emailType)
+      .first<{
+        id: string;
+        status: "PENDING" | "FAILED";
+        outcome_class: EmailDeliveryOutcomeClass | null;
+        attempt_no: number;
+      }>();
+    if (blocker?.status === "PENDING") {
+      return {
+        kind: "in_progress",
+        id: blocker.id,
+        attemptNo: Number(blocker.attempt_no)
+      };
+    }
+    if (blocker) {
+      return {
+        kind: "manual_review",
+        id: blocker.id,
+        attemptNo: Number(blocker.attempt_no),
+        outcomeClass: blocker.outcome_class
+      };
+    }
+    if (!existing) {
+      throw new Error("No se pudo recuperar la reserva del reenvío");
     }
     return {
       kind: "manual_review",

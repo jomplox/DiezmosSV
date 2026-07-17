@@ -4431,7 +4431,10 @@ function emailResendDb(): InMemoryD1 {
 
 const TEST_RESEND_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
 
-function resendDocument(runtime: Env): Promise<Response> {
+function resendDocument(
+  runtime: Env,
+  resendRequestId = TEST_RESEND_REQUEST_ID
+): Promise<Response> {
   return worker.fetch(
     new Request("https://example.org/api/documents/doc_1/resend", {
       method: "POST",
@@ -4439,7 +4442,7 @@ function resendDocument(runtime: Env): Promise<Response> {
         Authorization: "Bearer test-token",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
+      body: JSON.stringify({ resendRequestId })
     }),
     runtime
   );
@@ -4630,6 +4633,50 @@ describe("document email resend", () => {
       response: failedBody
     });
     expect(persisted).not.toContain("https://private.example/token/abc");
+  });
+
+  it("blocks replay of an older retry-safe request after a newer ambiguous attempt", async () => {
+    const db = emailResendDb();
+    const olderRequestId = "99999999-9999-4999-8999-999999999999";
+    const newerRequestId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const send = vi.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("safe rejection"), {
+        code: "E_HEADER_NOT_ALLOWED"
+      }))
+      .mockRejectedValueOnce(Object.assign(new Error("ambiguous provider result"), {
+        code: "E_INTERNAL_SERVER_ERROR"
+      }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    expect((await resendDocument(runtime, olderRequestId)).status).toBe(502);
+    expect((await resendDocument(runtime, newerRequestId)).status).toBe(502);
+    const replay = await resendDocument(runtime, olderRequestId);
+
+    expect(replay.status).toBe(409);
+    await expect(replay.json()).resolves.toMatchObject({
+      error: "resend_requires_review",
+      outcomeClass: "UNKNOWN",
+      attemptNo: 2
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(db.emailDeliveries).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        resend_request_id: olderRequestId,
+        status: "FAILED",
+        outcome_class: "NOT_SENT",
+        attempt_no: 1
+      }),
+      expect.objectContaining({
+        resend_request_id: newerRequestId,
+        status: "FAILED",
+        outcome_class: "UNKNOWN",
+        attempt_no: 2
+      })
+    ]));
   });
 
   it("blocks a fresh resend ID when the latest legacy receipt failure is ambiguous", async () => {
@@ -14634,6 +14681,27 @@ class Statement {
       const existing = this.db.emailDeliveries.find(
         (delivery) => delivery.resend_request_id === resendRequestId
       );
+      const latest = this.db.emailDeliveries
+        .filter(
+          (delivery) =>
+            delivery.document_id === documentId &&
+            delivery.email_type === emailType
+        )
+        .sort((left, right) => {
+          const attemptOrder = Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1);
+          if (attemptOrder !== 0) return attemptOrder;
+          const leftOccurredAt = String(
+            left.finalized_at ?? left.claim_attempted_at ?? left.created_at ?? ""
+          );
+          const rightOccurredAt = String(
+            right.finalized_at ?? right.claim_attempted_at ?? right.created_at ?? ""
+          );
+          return (
+            rightOccurredAt.localeCompare(leftOccurredAt) ||
+            String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")) ||
+            String(right.id ?? "").localeCompare(String(left.id ?? ""))
+          );
+        })[0];
       const sameRequest =
         existing?.document_id === documentId &&
         existing.to_email === toEmail &&
@@ -14647,7 +14715,7 @@ class Statement {
           existing.claim_attempted_at != null &&
           String(existing.claim_attempted_at) < staleBefore
         );
-      if (!sameRequest || !reclaimable) return null;
+      if (!sameRequest || !reclaimable || existing !== latest) return null;
       existing.status = "PENDING";
       existing.provider_response_json = "{}";
       existing.sent_at = null;

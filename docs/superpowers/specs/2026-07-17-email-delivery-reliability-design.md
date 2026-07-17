@@ -93,10 +93,12 @@ It must not reclaim:
 - any stale `PENDING` row whose provider dispatch began;
 - legacy `PENDING` rows without enough evidence to prove safety.
 
-Migration `0025` preserves every legacy delivery row. If historical data contains
-multiple claimed unresolved receipt rows for the same document and email type, it
-keeps the newest claim and clears only the older duplicate claim tokens before
-creating the partial unique index. No delivery evidence is deleted.
+Migration `0025` preserves every legacy delivery row. It ranks the complete
+receipt history for each document and email type, keeps claim ownership only when
+the claimed unresolved row is also the latest receipt, and clears only superseded
+claim tokens before creating the partial unique index. This covers both duplicate
+claimed failures and an older claimed ambiguity followed by a newer append-only
+terminal resend. No delivery evidence is deleted.
 
 ### Outcome classification
 
@@ -187,6 +189,11 @@ when the outcome is `NOT_SENT` or `UNKNOWN`. A confirmed `NOT_DELIVERED` result
 clears the ID so a later deliberate user action creates a new attempt; retaining
 the old ID would only return the terminal result. Success also clears the ID.
 The staging smoke runner supplies its own UUID for the same reason.
+
+A retry-safe row may be reclaimed only while it is still the latest receipt
+attempt. Replaying an older safe request ID after any newer attempt cannot promote
+the older row or cross the provider boundary; a newer ambiguous attempt continues
+to return manual review.
 
 ## Fallos and Detail UI
 
