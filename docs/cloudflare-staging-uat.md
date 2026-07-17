@@ -68,9 +68,13 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 
    `EMAIL_PROVIDER_URL` is deployment-owned. It must be an absolute HTTPS URL without embedded
    credentials. Set it with Wrangler or the Cloudflare deployment configuration, not from the
-   application credentials panel. After the release is deployed and the new binding is verified,
-   delete the superseded email-endpoint secret left by earlier releases from the deployment. This
-   repository change does not modify staging or production configuration.
+   application credentials panel. Its response contract is strict: HTTP `200`/`202` must return
+   JSON `{"status":"accepted","id":"<provider-id>"}` (or `messageId`). Only a `4xx` JSON response
+   `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}` proves a retry-safe rejection.
+   Every malformed, generic, timed-out, `5xx`, or otherwise unrecognized response remains
+   manual-review-only. After the release is deployed and the new binding is verified, delete the
+   superseded email-endpoint secret left by earlier releases from the deployment. This repository
+   change does not modify staging or production configuration.
 
 6. Apply the schema and deploy:
 

@@ -16,6 +16,13 @@ export interface EmailDeliveryResult {
   providerDeliveryId: string | null;
 }
 
+export function emailDeliveryAuditEvidence(
+  result: EmailDeliveryResult
+): Omit<EmailDeliveryResult, "providerResponse"> {
+  const { providerResponse: _providerResponse, ...evidence } = result;
+  return evidence;
+}
+
 export type EmailDeliveryOutcomeClass = "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN";
 
 export class EmailDispatchError extends Error {
@@ -29,7 +36,9 @@ export class EmailDispatchError extends Error {
   ) {
     super(message);
     this.name = "EmailDispatchError";
-    this.providerResponse = { code, error: message };
+    // Persist only a stable machine code. Provider exception text can echo
+    // recipients, headers, URLs, or credentials and is never durable evidence.
+    this.providerResponse = { code };
   }
 }
 
@@ -53,20 +62,11 @@ const CLOUDFLARE_NOT_SENT_CODES = new Set([
   "E_HEADERS_TOO_LARGE",
   "E_HEADERS_TOO_MANY"
 ]);
-const HTTP_PROVIDER_NOT_SENT_STATUSES = new Set([
-  400,
-  401,
-  403,
-  404,
-  405,
-  406,
-  410,
-  413,
-  415,
-  422,
-  429
-]);
+const HTTP_PROVIDER_ACCEPTED_STATUSES = new Set([200, 202]);
 const HTTP_PROVIDER_TIMEOUT_MS = 15_000;
+const HTTP_PROVIDER_RESPONSE_MAX_CHARS = 16_384;
+const PROVIDER_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+const PROVIDER_DELIVERY_ID_MAX_CHARS = 256;
 
 export function classifyEmailDispatchError(
   error: unknown,
@@ -75,27 +75,38 @@ export function classifyEmailDispatchError(
   if (error instanceof EmailDispatchError) {
     return error;
   }
-  const message = error instanceof Error ? error.message : String(error);
   const providerCode =
-    isRecord(error) && typeof error.code === "string" && error.code.trim()
+    isRecord(error) &&
+    typeof error.code === "string" &&
+    PROVIDER_CODE_PATTERN.test(error.code.trim())
       ? error.code.trim()
       : null;
   if (!providerDispatchStarted) {
     return new EmailDispatchError(
-      message,
+      "El correo no pudo prepararse antes del envío.",
       providerCode ?? "EMAIL_PRE_DISPATCH_FAILED",
       "NOT_SENT",
       true
     );
   }
   if (providerCode && CLOUDFLARE_NOT_SENT_CODES.has(providerCode)) {
-    return new EmailDispatchError(message, providerCode, "NOT_SENT", true);
+    return new EmailDispatchError(
+      "El proveedor rechazó el correo antes de aceptarlo.",
+      providerCode,
+      "NOT_SENT",
+      true
+    );
   }
   if (providerCode === "E_DELIVERY_FAILED") {
-    return new EmailDispatchError(message, providerCode, "NOT_DELIVERED", false);
+    return new EmailDispatchError(
+      "El proveedor confirmó que el correo no pudo entregarse.",
+      providerCode,
+      "NOT_DELIVERED",
+      false
+    );
   }
   return new EmailDispatchError(
-    message,
+    "No se pudo confirmar el resultado del envío con el proveedor.",
     providerCode ?? "EMAIL_DISPATCH_UNKNOWN",
     "UNKNOWN",
     false
@@ -139,7 +150,12 @@ export class EmailService {
       return this.env.EMAIL_FROM ?? "";
     }
     if (!this.env.EMAIL_FROM) {
-      throw new Error("EMAIL_FROM es requerido para enviar correos");
+      throw new EmailDispatchError(
+        "Configure el remitente de correo antes de enviar.",
+        "EMAIL_FROM_REQUIRED",
+        "NOT_SENT",
+        true
+      );
     }
     return this.env.EMAIL_FROM;
   }
@@ -301,7 +317,10 @@ export class EmailService {
     return this.dispatch(payload, []);
   }
 
-  async sendOperationalAlert(input: { to: string; subject: string; text: string; html: string }): Promise<unknown> {
+  async sendOperationalAlert(
+    input: { to: string; subject: string; text: string; html: string },
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<unknown> {
     const payload: EmailPayload = {
       from: this.resolveFrom(),
       to: input.to,
@@ -310,7 +329,7 @@ export class EmailService {
       html: input.html,
       attachments: []
     };
-    return this.dispatch(payload, []);
+    return this.dispatch(payload, [], beforeProviderDispatch);
   }
 
   private async dispatch(
@@ -320,7 +339,7 @@ export class EmailService {
   ): Promise<unknown> {
     assertSafeEmailSubject(payload.subject);
     if (isMockMode(this.env)) {
-      return { mock: true, toEmail: payload.to, subject: payload.subject };
+      return { provider: "mock-email", messageId: "mock-email-accepted" };
     }
     const httpProviderConfigured = hasHttpProvider(this.env);
     const cloudflareSelected = Boolean(
@@ -341,13 +360,27 @@ export class EmailService {
         ...(payload.html ? { html: payload.html } : {}),
         ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
       });
-      return { provider: "cloudflare-email", messageId: result.messageId };
+      const messageId = normalizeProviderDeliveryId(result.messageId);
+      if (!messageId) {
+        throw new EmailDispatchError(
+          "Cloudflare aceptó la llamada, pero no devolvió una identidad de entrega válida.",
+          "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED",
+          "UNKNOWN",
+          false
+        );
+      }
+      return { provider: "cloudflare-email", messageId };
     }
     if (httpProviderConfigured) {
       await beforeProviderDispatch?.();
       return sendViaHttpProvider(this.env, payload);
     }
-    throw new Error("Configure el servicio de correo antes de enviar comprobantes.");
+    throw new EmailDispatchError(
+      "Configure el servicio de correo antes de enviar comprobantes.",
+      "EMAIL_PROVIDER_NOT_CONFIGURED",
+      "NOT_SENT",
+      true
+    );
   }
 }
 
@@ -390,31 +423,84 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unk
     );
   }
   if (!response.ok) {
-    const retrySafe = HTTP_PROVIDER_NOT_SENT_STATUSES.has(response.status);
+    const body = await readHttpProviderResponse(response);
+    const rejectionCode = httpProviderRejectionCode(response.status, body);
+    if (rejectionCode) {
+      throw new EmailDispatchError(
+        "El proveedor HTTP rechazó el correo antes de aceptarlo.",
+        rejectionCode,
+        "NOT_SENT",
+        true
+      );
+    }
     throw new EmailDispatchError(
-      retrySafe
-        ? `El proveedor HTTP rechazó el correo antes de aceptarlo (HTTP ${response.status})`
-        : `El proveedor HTTP respondió HTTP ${response.status}; no se puede confirmar el resultado`,
-      `HTTP_${response.status}`,
-      retrySafe ? "NOT_SENT" : "UNKNOWN",
-      retrySafe
+      "El proveedor HTTP respondió sin confirmar si aceptó el correo.",
+      response.status >= 500
+        ? `HTTP_${response.status}`
+        : "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
+      "UNKNOWN",
+      false
     );
   }
-  let responseBody: string;
-  try {
-    responseBody = await response.text();
-  } catch {
+  const body = await readHttpProviderResponse(response);
+  const acceptedId = httpProviderAcceptedId(response.status, body);
+  if (!acceptedId) {
     throw new EmailDispatchError(
-      "El proveedor HTTP aceptó la solicitud, pero no se pudo confirmar su respuesta",
-      "HTTP_PROVIDER_RESPONSE_ERROR",
+      "El proveedor HTTP respondió sin una confirmación de aceptación válida.",
+      "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
       "UNKNOWN",
       false
     );
   }
   return {
     provider: "http-email",
-    response: parseProviderResponse(responseBody)
+    messageId: acceptedId
   };
+}
+
+async function readHttpProviderResponse(response: Response): Promise<unknown> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("application/json")) {
+    return null;
+  }
+  let responseBody: string;
+  try {
+    responseBody = await response.text();
+  } catch {
+    return null;
+  }
+  if (!responseBody || responseBody.length > HTTP_PROVIDER_RESPONSE_MAX_CHARS) {
+    return null;
+  }
+  try {
+    return JSON.parse(responseBody) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function httpProviderAcceptedId(status: number, body: unknown): string | null {
+  if (!HTTP_PROVIDER_ACCEPTED_STATUSES.has(status) || !isRecord(body)) {
+    return null;
+  }
+  if (body.status !== "accepted") {
+    return null;
+  }
+  return normalizeProviderDeliveryId(body.id ?? body.messageId);
+}
+
+function httpProviderRejectionCode(status: number, body: unknown): string | null {
+  if (status < 400 || status > 499 || !isRecord(body)) {
+    return null;
+  }
+  if (body.status !== "rejected" || body.accepted !== false) {
+    return null;
+  }
+  const code =
+    typeof body.code === "string" && PROVIDER_CODE_PATTERN.test(body.code.trim())
+      ? body.code.trim()
+      : null;
+  return code ? `HTTP_PROVIDER_${code}` : null;
 }
 
 function providerIdentityHeaders(idempotencyKey: string): Record<string, string> {
@@ -471,17 +557,6 @@ function emailProviderUrl(env: Env): URL | null {
   }
 }
 
-function parseProviderResponse(responseBody: string): unknown {
-  if (!responseBody) {
-    return { ok: true };
-  }
-  try {
-    return JSON.parse(responseBody) as unknown;
-  } catch {
-    return { text: responseBody };
-  }
-}
-
 async function templateVersion(emailType: EmailEvidenceType, template: EmailTemplateValue): Promise<string> {
   const payload = JSON.stringify({ emailType, subject: template.subject, body: template.body });
   return `${emailType}:sha256:${await sha256Hex(utf8Bytes(payload))}`;
@@ -489,18 +564,22 @@ async function templateVersion(emailType: EmailEvidenceType, template: EmailTemp
 
 function deliveryIdFromProvider(providerResponse: unknown): string | null {
   if (!isRecord(providerResponse)) return null;
-  const messageId = stringValue(providerResponse.messageId);
-  if (messageId) return messageId;
-  const id = stringValue(providerResponse.id);
-  if (id) return id;
-  const response = providerResponse.response;
-  return isRecord(response) ? stringValue(response.id) ?? stringValue(response.messageId) : null;
+  return normalizeProviderDeliveryId(providerResponse.messageId);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
+function normalizeProviderDeliveryId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (
+    !trimmed ||
+    trimmed.length > PROVIDER_DELIVERY_ID_MAX_CHARS ||
+    /[\u0000-\u001f\u007f]/.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
 }

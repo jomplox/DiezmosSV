@@ -317,6 +317,7 @@ class InMemoryRetentionD1 {
   readonly contingencyBatchLines: Array<Record<string, unknown>> = [];
   readonly documentSequences: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
+  readonly alertDeliveries: Array<Record<string, unknown>> = [];
   readonly settings: Array<Record<string, unknown>> = [];
   readonly preparedSql: string[] = [];
   readonly appliedLimits: number[] = [];
@@ -359,17 +360,100 @@ class RetentionStatement {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
-    if (this.sql.includes("SELECT 1 AS found") && this.sql.includes("json_extract(metadata_json")) {
-      const [action, entityType, entityId, incidentId, channel] = this.args.map(String);
-      const found = this.db.audits.some((audit) => {
-        const metadata = JSON.parse(String(audit.metadata_json ?? "{}")) as Record<string, unknown>;
-        return audit.action === action
-          && audit.entity_type === entityType
-          && audit.entity_id === entityId
-          && metadata.incidentId === incidentId
-          && metadata.channel === channel;
-      });
-      return (found ? { found: 1 } : null) as T | null;
+    if (
+      this.sql.includes("INSERT INTO operational_alert_deliveries") &&
+      this.sql.includes("RETURNING id, claim_token")
+    ) {
+      const [
+        id,
+        kind,
+        entityType,
+        entityKeyHash,
+        incidentId,
+        channel,
+        targetKeyHash,
+        claimToken,
+        claimAttemptedAt,
+        staleBefore
+      ] = this.args;
+      const existing = this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      );
+      if (!existing) {
+        this.db.alertDeliveries.push({
+          id,
+          kind,
+          entity_type: entityType,
+          entity_key_hash: entityKeyHash,
+          incident_id: incidentId,
+          channel,
+          target_key_hash: targetKeyHash,
+          status: "PENDING",
+          claim_token: claimToken,
+          claim_attempted_at: claimAttemptedAt,
+          provider_dispatch_started_at: null,
+          finalized_at: null,
+          outcome_class: null,
+          failure_code: null,
+          retry_safe: 0
+        });
+        return { id, claim_token: claimToken } as T;
+      }
+      const reclaimable =
+        (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+        (
+          existing.status === "PENDING" &&
+          existing.provider_dispatch_started_at == null &&
+          String(existing.claim_attempted_at) < String(staleBefore)
+        );
+      if (!reclaimable) return null;
+      existing.status = "PENDING";
+      existing.claim_token = claimToken;
+      existing.claim_attempted_at = claimAttemptedAt;
+      existing.provider_dispatch_started_at = null;
+      existing.finalized_at = null;
+      existing.outcome_class = null;
+      existing.failure_code = null;
+      existing.retry_safe = 0;
+      return { id: existing.id, claim_token: claimToken } as T;
+    }
+    if (
+      this.sql.includes("SELECT id, status, outcome_class") &&
+      this.sql.includes("FROM operational_alert_deliveries")
+    ) {
+      const [kind, entityType, entityKeyHash, incidentId, channel, targetKeyHash] = this.args;
+      return (this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      ) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET provider_dispatch_started_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [startedAt, id, claimToken] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken &&
+          delivery.provider_dispatch_started_at == null
+      );
+      if (!row) return null;
+      row.provider_dispatch_started_at = startedAt;
+      return { id } as T;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
@@ -428,6 +512,37 @@ class RetentionStatement {
   }
 
   async run(): Promise<Record<string, never>> {
+    if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET status = ?, finalized_at = ?")
+    ) {
+      const [
+        status,
+        finalizedAt,
+        outcomeClass,
+        failureCode,
+        retrySafe,
+        id,
+        claimToken
+      ] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken
+      );
+      if (row) {
+        row.status = status;
+        row.finalized_at = finalizedAt;
+        row.outcome_class = outcomeClass;
+        row.failure_code = failureCode;
+        row.retry_safe = retrySafe;
+      }
+      return {
+        success: true,
+        meta: { changes: row ? 1 : 0 }
+      } as unknown as Record<string, never>;
+    }
     if (this.sql.includes("INSERT INTO audit_logs")) {
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson] = this.args;
       this.db.audits.push({

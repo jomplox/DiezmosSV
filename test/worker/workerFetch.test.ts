@@ -3790,6 +3790,58 @@ describe("document detail donor-data-verified flag", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ donorDataVerified: false });
   });
+
+  it("returns the authoritative latest receipt delivery without relying on an audit row", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(testDocument({ id: "doc_email_failure" }));
+    db.emailDeliveries.push({
+      id: "email_failure_authority",
+      document_id: "doc_email_failure",
+      to_email: "donor@example.org",
+      status: "FAILED",
+      provider_response_json: JSON.stringify({ code: "E_HEADER_NOT_ALLOWED" }),
+      sent_at: null,
+      email_type: "dteReceipt",
+      document_status_at_send: "ACCEPTED",
+      template_version: null,
+      pdf_renderer_version: null,
+      pdf_sha256: null,
+      dte_json_sha256: null,
+      provider_delivery_id: null,
+      claim_attempted_at: "2026-07-17T17:00:00.000Z",
+      idempotency_key: "delivery-authority",
+      claim_token: "delivery-authority-claim",
+      provider_dispatch_started_at: "2026-07-17T17:00:01.000Z",
+      finalized_at: "2026-07-17T17:00:02.000Z",
+      outcome_class: "NOT_SENT",
+      failure_code: "E_HEADER_NOT_ALLOWED",
+      retry_safe: 1,
+      resend_request_id: null,
+      attempt_no: 2,
+      created_at: "2026-07-17T17:00:00.000Z"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_email_failure", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      audit: [],
+      receiptEmailDelivery: {
+        status: "FAILED",
+        outcomeClass: "NOT_SENT",
+        failureCode: "E_HEADER_NOT_ALLOWED",
+        retrySafe: true,
+        attemptNo: 2,
+        occurredAt: "2026-07-17T17:00:02.000Z"
+      }
+    });
+  });
 });
 
 describe("user administration", () => {
@@ -4447,6 +4499,9 @@ describe("document email resend", () => {
       attempt_no: 1,
       status: "SENT"
     });
+    const resendAudit = db.audits.find((row) => row.action === "EMAIL_RESENT");
+    expect(resendAudit).toBeTruthy();
+    expect(JSON.stringify(resendAudit)).not.toContain("legacy-contact-2@example.com");
   });
 
   it("reports an in-progress duplicate while the first resend owns the provider call", async () => {
@@ -4534,7 +4589,9 @@ describe("document email resend", () => {
   it("blocks repeat dispatch after an ambiguous manual resend outcome", async () => {
     const db = emailResendDb();
     const send = vi.fn(async () => {
-      throw Object.assign(new Error("internal provider failure"), {
+      throw Object.assign(new Error(
+        "internal failure for legacy-contact-2@example.com at https://private.example/token/abc"
+      ), {
         code: "E_INTERNAL_SERVER_ERROR"
       });
     });
@@ -4548,7 +4605,8 @@ describe("document email resend", () => {
     const repeated = await resendDocument(runtime);
 
     expect(failed.status).toBe(502);
-    await expect(failed.json()).resolves.toMatchObject({
+    const failedBody = await failed.json();
+    expect(failedBody).toMatchObject({
       error: "email_send_failed",
       outcomeClass: "UNKNOWN",
       manualReview: true,
@@ -4566,6 +4624,12 @@ describe("document email resend", () => {
       outcome_class: "UNKNOWN",
       retry_safe: 0
     }));
+    const persisted = JSON.stringify({
+      deliveries: db.emailDeliveries,
+      audits: db.audits,
+      response: failedBody
+    });
+    expect(persisted).not.toContain("https://private.example/token/abc");
   });
 
   it("sends receipts through the Cloudflare Email Service binding", async () => {
@@ -4745,7 +4809,10 @@ describe("document email resend", () => {
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
     db.documents.push(testDocument());
     const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ id: "email_http_1" }), { status: 202 })
+      new Response(JSON.stringify({ status: "accepted", id: "email_http_1" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" }
+      })
     );
     const cloudflareSend = vi.fn(async () => {
       throw new Error("provider accepted message before response channel closed");
@@ -4773,7 +4840,7 @@ describe("document email resend", () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: "email_send_failed",
-      message: expect.stringContaining("response channel closed")
+      message: "No se pudo confirmar el resultado del envío con el proveedor."
     });
     expect(cloudflareSend).toHaveBeenCalledTimes(1);
     expect(providerFetch).not.toHaveBeenCalled();
@@ -4781,7 +4848,7 @@ describe("document email resend", () => {
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
       status: "FAILED",
-      provider_response_json: expect.stringContaining("response channel closed")
+      provider_response_json: JSON.stringify({ code: "EMAIL_DISPATCH_UNKNOWN" })
     }));
   });
 
@@ -4789,7 +4856,10 @@ describe("document email resend", () => {
     const db = emailResendDb();
     const cloudflareSend = vi.fn(async () => ({ messageId: "must-not-use-cloudflare" }));
     const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ id: "email_http_selected" }), { status: 202 })
+      new Response(JSON.stringify({ status: "accepted", id: "email_http_selected" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" }
+      })
     );
 
     const response = await resendDocument(
@@ -4811,7 +4881,7 @@ describe("document email resend", () => {
       status: "SENT",
       provider_response_json: JSON.stringify({
         provider: "http-email",
-        response: { id: "email_http_selected" }
+        messageId: "email_http_selected"
       })
     }));
   });
@@ -4819,7 +4889,10 @@ describe("document email resend", () => {
   it("passes a receipt claim's stable provider identity to the HTTP provider", async () => {
     const db = new InMemoryD1();
     const providerFetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ id: "email_http_stable" }), { status: 202 })
+      new Response(JSON.stringify({ status: "accepted", id: "email_http_stable" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" }
+      })
     );
     const idempotencyKey = `dsv-receipt-v1-${"a".repeat(64)}`;
 
@@ -4941,7 +5014,7 @@ describe("document email resend", () => {
     expect(response.status).toBe(502);
     await expect(response.json()).resolves.toMatchObject({
       error: "email_send_failed",
-      message: expect.stringContaining("EMAIL_FROM es requerido para enviar correos")
+      message: "Configure el remitente de correo antes de enviar."
     });
     expect(sentMessages).toHaveLength(0);
     expect(db.emailDeliveries).toHaveLength(1);
@@ -9098,7 +9171,9 @@ describe("donation intent correlation", () => {
     expect(sent[1]).toMatchObject({
       to: "owner@example.org",
       subject: "Fallo al enviar comprobante",
-      text: expect.stringContaining("custom header rejected by provider")
+      text: expect.stringContaining(
+        "No se pudo confirmar el resultado del envío con el proveedor."
+      )
     });
     expect(sent[1].headers).toBeUndefined();
     expect(db.audits).toContainEqual(
@@ -11304,7 +11379,9 @@ describe("issuance dead-letter and stalled-event sweep", () => {
         send: async (message: unknown) => {
           attempt += 1;
           if (attempt === 1) {
-            throw new Error("SMTP unavailable");
+            throw Object.assign(new Error("recipient rejected before acceptance"), {
+              code: "E_RECIPIENT_NOT_ALLOWED"
+            });
           }
           sentAlerts.push(message as { to: string; subject: string });
           return { messageId: "alert-stalled-retry" };
@@ -11312,7 +11389,8 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       } as SendEmail
     });
 
-    // Tick 1: email provider throws — WOMPI_EVENT_STALLED audit is written but the alert send fails.
+    // Tick 1: the provider proves rejection before acceptance, so the same incident
+    // remains safe to retry on a later tick.
     await worker.scheduled({} as ScheduledEvent, scheduledEnv);
     expect(sentAlerts).toHaveLength(0);
     expect(db.audits).toContainEqual(
@@ -13818,6 +13896,7 @@ class InMemoryD1 {
     limit: number;
   }> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
+  readonly alertDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly contingencies: Array<Record<string, unknown>> = [];
   readonly contingencyBatches: Array<Record<string, unknown>> = [];
@@ -14008,6 +14087,101 @@ class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("INSERT INTO operational_alert_deliveries") &&
+      this.sql.includes("RETURNING id, claim_token")
+    ) {
+      const [
+        id,
+        kind,
+        entityType,
+        entityKeyHash,
+        incidentId,
+        channel,
+        targetKeyHash,
+        claimToken,
+        claimAttemptedAt,
+        staleBefore
+      ] = this.args;
+      const existing = this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      );
+      if (!existing) {
+        this.db.alertDeliveries.push({
+          id,
+          kind,
+          entity_type: entityType,
+          entity_key_hash: entityKeyHash,
+          incident_id: incidentId,
+          channel,
+          target_key_hash: targetKeyHash,
+          status: "PENDING",
+          claim_token: claimToken,
+          claim_attempted_at: claimAttemptedAt,
+          provider_dispatch_started_at: null,
+          finalized_at: null,
+          outcome_class: null,
+          failure_code: null,
+          retry_safe: 0
+        });
+        return { id, claim_token: claimToken } as T;
+      }
+      const reclaimable =
+        (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+        (
+          existing.status === "PENDING" &&
+          existing.provider_dispatch_started_at == null &&
+          String(existing.claim_attempted_at) < String(staleBefore)
+        );
+      if (!reclaimable) return null;
+      existing.status = "PENDING";
+      existing.claim_token = claimToken;
+      existing.claim_attempted_at = claimAttemptedAt;
+      existing.provider_dispatch_started_at = null;
+      existing.finalized_at = null;
+      existing.outcome_class = null;
+      existing.failure_code = null;
+      existing.retry_safe = 0;
+      return { id: existing.id, claim_token: claimToken } as T;
+    }
+    if (
+      this.sql.includes("SELECT id, status, outcome_class") &&
+      this.sql.includes("FROM operational_alert_deliveries")
+    ) {
+      const [kind, entityType, entityKeyHash, incidentId, channel, targetKeyHash] = this.args;
+      return (this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      ) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET provider_dispatch_started_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [startedAt, id, claimToken] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken &&
+          delivery.provider_dispatch_started_at == null
+      );
+      if (!row) return null;
+      row.provider_dispatch_started_at = startedAt;
+      return { id } as T;
+    }
     if (
       this.sql.includes("INSERT INTO users") &&
       this.sql.includes("WHERE NOT EXISTS (SELECT 1 FROM users)") &&
@@ -14382,66 +14556,32 @@ class Statement {
       return { id: claim.id } as T;
     }
     if (
-      this.sql.includes("INSERT INTO email_deliveries") &&
-      this.sql.includes("ON CONFLICT(resend_request_id)") &&
+      this.sql.includes("UPDATE email_deliveries") &&
+      this.sql.includes("WHERE resend_request_id = ?") &&
       this.sql.includes("RETURNING id, idempotency_key, claim_token, attempt_no")
     ) {
       const [
-        id,
+        claimAttemptedAt,
+        claimToken,
+        resendRequestId,
         documentId,
         toEmail,
         emailType,
         documentStatusAtSend,
-        claimAttemptedAt,
-        idempotencyKey,
-        claimToken,
-        resendRequestId,
         staleBefore
       ] = this.args.map(String);
       const existing = this.db.emailDeliveries.find(
         (delivery) => delivery.resend_request_id === resendRequestId
       );
-      if (!existing) {
-        this.db.emailDeliveries.push({
-          id,
-          document_id: documentId,
-          to_email: toEmail,
-          status: "PENDING",
-          provider_response_json: "{}",
-          sent_at: null,
-          email_type: emailType,
-          document_status_at_send: documentStatusAtSend,
-          template_version: null,
-          pdf_renderer_version: null,
-          pdf_sha256: null,
-          dte_json_sha256: null,
-          provider_delivery_id: null,
-          claim_attempted_at: claimAttemptedAt,
-          idempotency_key: idempotencyKey,
-          claim_token: claimToken,
-          provider_dispatch_started_at: null,
-          outcome_class: null,
-          failure_code: null,
-          retry_safe: 0,
-          resend_request_id: resendRequestId,
-          attempt_no: 1
-        });
-        return {
-          id,
-          idempotency_key: idempotencyKey,
-          claim_token: claimToken,
-          attempt_no: 1
-        } as T;
-      }
       const sameRequest =
-        existing.document_id === documentId &&
+        existing?.document_id === documentId &&
         existing.to_email === toEmail &&
         existing.email_type === emailType &&
         existing.document_status_at_send === documentStatusAtSend;
       const reclaimable =
-        (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+        (existing?.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
         (
-          existing.status === "PENDING" &&
+          existing?.status === "PENDING" &&
           (existing.provider_dispatch_started_at ?? null) === null &&
           existing.claim_attempted_at != null &&
           String(existing.claim_attempted_at) < staleBefore
@@ -14461,12 +14601,91 @@ class Statement {
       existing.pdf_sha256 = null;
       existing.dte_json_sha256 = null;
       existing.provider_delivery_id = null;
-      existing.attempt_no = Number(existing.attempt_no) + 1;
+      existing.finalized_at = null;
+      existing.attempt_no = Math.max(
+        ...this.db.emailDeliveries
+          .filter((delivery) => delivery.document_id === documentId)
+          .map((delivery) => Number(delivery.attempt_no ?? 1)),
+        0
+      ) + 1;
       return {
         id: String(existing.id),
         idempotency_key: String(existing.idempotency_key),
         claim_token: claimToken,
         attempt_no: Number(existing.attempt_no)
+      } as T;
+    }
+    if (
+      this.sql.includes("INSERT OR IGNORE INTO email_deliveries") &&
+      this.sql.includes("resend_request_id") &&
+      this.sql.includes("RETURNING id, idempotency_key, claim_token, attempt_no")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend,
+        claimAttemptedAt,
+        idempotencyKey,
+        claimToken,
+        resendRequestId
+      ] = this.args.map(String);
+      const duplicateRequest = this.db.emailDeliveries.some(
+        (delivery) => delivery.resend_request_id === resendRequestId
+      );
+      const blocker = this.db.emailDeliveries.find(
+        (delivery) =>
+          delivery.document_id === documentId &&
+          delivery.email_type === emailType &&
+          delivery.claim_token != null &&
+          delivery.resend_request_id !== resendRequestId &&
+          (
+            delivery.status === "PENDING" ||
+            (
+              delivery.status === "FAILED" &&
+              ((delivery.outcome_class ?? null) === null || delivery.outcome_class === "UNKNOWN")
+            )
+          )
+      );
+      if (duplicateRequest || blocker) return null;
+      const attemptNo = Math.max(
+        ...this.db.emailDeliveries
+          .filter((delivery) => delivery.document_id === documentId)
+          .map((delivery) => Number(delivery.attempt_no ?? 1)),
+        0
+      ) + 1;
+      this.db.emailDeliveries.push({
+        id,
+        document_id: documentId,
+        to_email: toEmail,
+        status: "PENDING",
+        provider_response_json: "{}",
+        sent_at: null,
+        email_type: emailType,
+        document_status_at_send: documentStatusAtSend,
+        template_version: null,
+        pdf_renderer_version: null,
+        pdf_sha256: null,
+        dte_json_sha256: null,
+        provider_delivery_id: null,
+        claim_attempted_at: claimAttemptedAt,
+        idempotency_key: idempotencyKey,
+        claim_token: claimToken,
+        provider_dispatch_started_at: null,
+        finalized_at: null,
+        outcome_class: null,
+        failure_code: null,
+        retry_safe: 0,
+        resend_request_id: resendRequestId,
+        attempt_no: attemptNo,
+        created_at: "2026-07-17T17:00:00.000Z"
+      });
+      return {
+        id,
+        idempotency_key: idempotencyKey,
+        claim_token: claimToken,
+        attempt_no: attemptNo
       } as T;
     }
     if (
@@ -14477,6 +14696,61 @@ class Statement {
         (delivery) => delivery.resend_request_id === this.args[0]
       );
       return (existing ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("SELECT id, status, outcome_class, attempt_no") &&
+      this.sql.includes("FROM email_deliveries")
+    ) {
+      const [documentId, emailType] = this.args;
+      const blocker = this.db.emailDeliveries
+        .filter(
+          (delivery) =>
+            delivery.document_id === documentId &&
+            delivery.email_type === emailType &&
+            delivery.claim_token != null &&
+            (
+              delivery.status === "PENDING" ||
+              (
+                delivery.status === "FAILED" &&
+                ((delivery.outcome_class ?? null) === null || delivery.outcome_class === "UNKNOWN")
+              )
+            )
+        )
+        .sort((left, right) => Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1))[0];
+      return (blocker ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("COALESCE(") &&
+      this.sql.includes("finalized_at") &&
+      this.sql.includes("FROM email_deliveries") &&
+      this.sql.includes("dteReceiptTransitorio")
+    ) {
+      const documentId = this.args[0];
+      const latest = this.db.emailDeliveries
+        .filter(
+          (delivery) =>
+            delivery.document_id === documentId &&
+            ["dteReceipt", "dteReceiptTransitorio"].includes(String(delivery.email_type))
+        )
+        .sort((left, right) => {
+          const attempt = Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1);
+          if (attempt !== 0) return attempt;
+          return String(right.created_at ?? "").localeCompare(String(left.created_at ?? ""));
+        })[0];
+      if (!latest) return null;
+      return {
+        status: latest.status,
+        outcome_class: latest.outcome_class ?? null,
+        failure_code: latest.failure_code ?? null,
+        retry_safe: Number(latest.retry_safe ?? 0),
+        attempt_no: Number(latest.attempt_no ?? 1),
+        occurred_at:
+          latest.finalized_at ??
+          latest.sent_at ??
+          latest.provider_dispatch_started_at ??
+          latest.claim_attempted_at ??
+          latest.created_at
+      } as T;
     }
     if (
       this.sql.includes("UPDATE email_deliveries") &&
@@ -14511,6 +14785,7 @@ class Statement {
         claimToken,
         ,
         ,
+        ,
         blockerDocumentStatus,
         staleBefore
       ] = this.args.map(String);
@@ -14524,10 +14799,12 @@ class Statement {
             (
               delivery.status === "PENDING" &&
               (
-                delivery.claim_attempted_at == null ||
+              delivery.claim_attempted_at == null ||
+                delivery.provider_dispatch_started_at != null ||
                 String(delivery.claim_attempted_at) >= staleBefore
               )
             )
+            || (delivery.status === "FAILED" && Number(delivery.retry_safe ?? 0) === 0)
           )
       );
       if (blocker) return null;
@@ -14552,9 +14829,16 @@ class Statement {
         existing.claim_attempted_at = claimAttemptedAt;
         existing.claim_token = claimToken;
         existing.provider_dispatch_started_at = null;
+        existing.finalized_at = null;
         existing.outcome_class = null;
         existing.failure_code = null;
         existing.retry_safe = 0;
+        existing.attempt_no = Math.max(
+          ...this.db.emailDeliveries
+            .filter((delivery) => delivery.document_id === documentId)
+            .map((delivery) => Number(delivery.attempt_no ?? 1)),
+          0
+        ) + 1;
         return { id: String(existing.id), idempotency_key: idempotencyKey, claim_token: claimToken } as T;
       }
 
@@ -14576,11 +14860,18 @@ class Statement {
         idempotency_key: idempotencyKey,
         claim_token: claimToken,
         provider_dispatch_started_at: null,
+        finalized_at: null,
         outcome_class: null,
         failure_code: null,
         retry_safe: 0,
         resend_request_id: null,
-        attempt_no: 1
+        attempt_no: Math.max(
+          ...this.db.emailDeliveries
+            .filter((delivery) => delivery.document_id === documentId)
+            .map((delivery) => Number(delivery.attempt_no ?? 1)),
+          0
+        ) + 1,
+        created_at: "2026-07-17T17:00:00.000Z"
       });
       return { id, idempotency_key: idempotencyKey, claim_token: claimToken } as T;
     }
@@ -15699,6 +15990,34 @@ class Statement {
   async run(): Promise<StatementRunResult> {
     let changes = 0;
     if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET status = ?, finalized_at = ?")
+    ) {
+      const [
+        status,
+        finalizedAt,
+        outcomeClass,
+        failureCode,
+        retrySafe,
+        id,
+        claimToken
+      ] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken
+      );
+      if (row) {
+        row.status = status;
+        row.finalized_at = finalizedAt;
+        row.outcome_class = outcomeClass;
+        row.failure_code = failureCode;
+        row.retry_safe = retrySafe;
+        changes = 1;
+      }
+    }
+    if (
       this.sql.includes("INSERT INTO dte_events") &&
       this.sql.includes("FROM dte_documents") &&
       this.sql.includes("fiscal_operation_kind = 'INVALIDATION'")
@@ -16346,6 +16665,7 @@ class Statement {
         status,
         providerResponseJson,
         sentAt,
+        finalizedAt,
         emailType,
         documentStatusAtSend,
         templateVersion,
@@ -16369,6 +16689,7 @@ class Statement {
         delivery.status = status;
         delivery.provider_response_json = providerResponseJson;
         delivery.sent_at = sentAt;
+        delivery.finalized_at = finalizedAt;
         delivery.email_type = emailType;
         delivery.document_status_at_send = documentStatusAtSend;
         delivery.template_version = templateVersion;

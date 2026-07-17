@@ -21,7 +21,7 @@ import {
   validateDraftIntentInput,
   validateIntentInput
 } from "./services/donations";
-import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } from "./services/email";
+import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./services/email";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
@@ -2082,8 +2082,17 @@ async function handleDocumentRoute(
   if (!action && request.method === "GET") {
     // donorDataVerified: this CDE was produced from a completed donation-intent, so
     // the donor's data came from the validated /donar form rather than the raw webhook.
-    const donorDataVerified = (await repo.getCompletedIntentForDocument(document.id)) !== null;
-    return jsonResponse({ document, donorDataVerified, audit: await listAuditForUser(repo, actor, "dte_document", document.id) });
+    const [completedIntent, receiptEmailDelivery, audit] = await Promise.all([
+      repo.getCompletedIntentForDocument(document.id),
+      repo.getLatestReceiptEmailDelivery(document.id),
+      listAuditForUser(repo, actor, "dte_document", document.id)
+    ]);
+    return jsonResponse({
+      document,
+      donorDataVerified: completedIntent !== null,
+      receiptEmailDelivery,
+      audit
+    });
   }
 
   if (action === "pdf" && request.method === "GET") {
@@ -2126,8 +2135,8 @@ async function handleDocumentRoute(
       action: "DTE_EMAIL_UPDATED",
       entityType: "dte_document",
       entityId: document.id,
-      summary: `Correo de envío actualizado a ${email}`,
-      metadata: { previousEmail: document.donor_email, email }
+      summary: "Correo de envío actualizado.",
+      metadata: { changed: true }
     });
     return jsonResponse({ document: await repo.getDteDocument(document.id) });
   }
@@ -2247,7 +2256,6 @@ async function handleDocumentRoute(
         entityId: document.id,
         summary: failure.message,
         metadata: {
-          toEmail,
           resendRequestId,
           attemptNo: claim.attemptNo,
           outcomeClass: failure.outcomeClass,
@@ -2292,8 +2300,12 @@ async function handleDocumentRoute(
         action: "EMAIL_RESENT",
         entityType: "dte_document",
         entityId: document.id,
-        summary: `Reenviado a ${toEmail}`,
-        metadata: { ...response, resendRequestId, attemptNo: claim.attemptNo }
+        summary: "Comprobante reenviado al correo registrado.",
+        metadata: {
+          ...emailDeliveryAuditEvidence(response),
+          resendRequestId,
+          attemptNo: claim.attemptNo
+        }
       });
     } catch (error) {
       // SENT is the side-effect authority. An audit failure must not permit another
@@ -2517,13 +2529,20 @@ async function handleDocumentRoute(
             action: "EMAIL_INVALIDATION_SENT",
             entityType: "dte_document",
             entityId: document.id,
-            summary: `Aviso de invalidación enviado a ${invalidatedDocument.donor_email}`,
-            metadata: emailResponse
+            summary: "Aviso de invalidación enviado al correo registrado.",
+            metadata: emailDeliveryAuditEvidence(emailResponse)
           });
           emailSent = true;
         } catch (error) {
-          emailError = error instanceof Error ? error.message : String(error);
-          await repo.recordEmailDelivery({ documentId: document.id, toEmail: invalidatedDocument.donor_email, status: "FAILED", providerResponse: { error: emailError } });
+          emailError = "No se pudo enviar el aviso de invalidación.";
+          await repo.recordEmailDelivery({
+            documentId: document.id,
+            toEmail: invalidatedDocument.donor_email,
+            status: "FAILED",
+            providerResponse: { code: "EMAIL_INVALIDATION_SEND_FAILED" },
+            emailType: "dteInvalidation",
+            documentStatusAtSend: invalidatedDocument.status
+          });
           await repo.createAudit({
             actorType: "USER",
             actorId: actor.id,
@@ -2531,7 +2550,7 @@ async function handleDocumentRoute(
             entityType: "dte_document",
             entityId: document.id,
             summary: emailError,
-            metadata: { toEmail: invalidatedDocument.donor_email }
+            metadata: { failureCode: "EMAIL_INVALIDATION_SEND_FAILED" }
           });
         }
       }

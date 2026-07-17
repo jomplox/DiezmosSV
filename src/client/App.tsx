@@ -35,7 +35,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, User, WompiIssuanceFailureItem } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
@@ -96,30 +96,6 @@ const TOAST_DISMISS_MS = 6000;
 // dedicated Fallos view uses the server-side attention filter so it can also include
 // accepted CDEs whose latest receipt email failed.
 export const FAILURE_VIEW_STATUSES = "FAILED,REJECTED";
-
-type ReceiptEmailAuditRow = Pick<AuditRow, "action" | "summary" | "created_at">;
-
-const RECEIPT_EMAIL_AUDIT_ACTIONS = new Set(["EMAIL_FAILED", "EMAIL_RESEND_FAILED", "EMAIL_SENT", "EMAIL_RESENT"]);
-const RECEIPT_EMAIL_FAILURE_ACTIONS = new Set(["EMAIL_FAILED", "EMAIL_RESEND_FAILED"]);
-
-export function latestReceiptEmailFailure(
-  audit: ReceiptEmailAuditRow[]
-): { summary: string; failedAt: string } | null {
-  let latest: ReceiptEmailAuditRow | null = null;
-  let latestTime = Number.NEGATIVE_INFINITY;
-  for (const row of audit) {
-    if (!RECEIPT_EMAIL_AUDIT_ACTIONS.has(row.action)) continue;
-    const rowTime = Date.parse(row.created_at);
-    if (!Number.isFinite(rowTime) || rowTime <= latestTime) continue;
-    latest = row;
-    latestTime = rowTime;
-  }
-  if (!latest || !RECEIPT_EMAIL_FAILURE_ACTIONS.has(latest.action)) return null;
-  return {
-    summary: latest.summary.trim() || "El proveedor de correo rechazó el envío.",
-    failedAt: latest.created_at
-  };
-}
 
 export function receiptEmailFailureGuidance(
   outcome: DteDocument["receipt_email_outcome_class"]
@@ -318,6 +294,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [backupVerifyByMonth, setBackupVerifyByMonth] = useState<Record<string, BackupVerifyResult>>({});
   const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
   const [selectedDocumentAudit, setSelectedDocumentAudit] = useState<AuditRow[]>([]);
+  const [selectedReceiptEmailDelivery, setSelectedReceiptEmailDelivery] = useState<ReceiptEmailDeliveryState | null>(null);
+  const [selectedDocumentDetailVersion, setSelectedDocumentDetailVersion] = useState(0);
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
@@ -490,28 +468,36 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!token || !documentId) {
       setDonorVerifiedDocId(null);
       setSelectedDocumentAudit([]);
+      setSelectedReceiptEmailDelivery(null);
       return;
     }
     setDonorVerifiedDocId(null);
     setSelectedDocumentAudit([]);
+    setSelectedReceiptEmailDelivery(null);
     let cancelled = false;
-    void accountApi<{ donorDataVerified?: boolean; audit?: AuditRow[] }>(`/api/documents/${documentId}`)
+    void accountApi<{
+      donorDataVerified?: boolean;
+      receiptEmailDelivery?: ReceiptEmailDeliveryState | null;
+      audit?: AuditRow[];
+    }>(`/api/documents/${documentId}`)
       .then((detail) => {
         if (!cancelled) {
           setDonorVerifiedDocId(detail.donorDataVerified ? documentId : null);
+          setSelectedReceiptEmailDelivery(detail.receiptEmailDelivery ?? null);
           setSelectedDocumentAudit(Array.isArray(detail.audit) ? detail.audit : []);
         }
       })
       .catch((error) => {
         if (!cancelled && !(error instanceof StaleAccountStateError)) {
           setDonorVerifiedDocId(null);
+          setSelectedReceiptEmailDelivery(null);
           setSelectedDocumentAudit([]);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [token, selected?.id]);
+  }, [token, selected?.id, selectedDocumentDetailVersion]);
 
   useEffect(() => {
     if (token) {
@@ -848,8 +834,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
       if (action === "invalidate") setPendingInvalidationId(null);
-      await refresh();
+      if (action !== "resend") {
+        await refresh();
+      }
     });
+    if (action === "resend") {
+      setSelectedDocumentDetailVersion((current) => current + 1);
+      await refresh();
+    }
   }
 
   async function saveDocumentEmail(target = selected) {
@@ -1399,6 +1391,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               <DetailPanel
                 selected={selected}
                 audit={selectedDocumentAudit}
+                receiptEmailDelivery={selectedReceiptEmailDelivery}
                 donorDataVerified={selected?.id === donorVerifiedDocId}
                 busy={busy}
                 now={now}
@@ -4456,6 +4449,7 @@ function StackedCell({ primary, secondary }: { primary: string; secondary?: stri
 function DetailPanel({
   selected,
   audit,
+  receiptEmailDelivery,
   donorDataVerified,
   busy,
   now,
@@ -4471,6 +4465,7 @@ function DetailPanel({
 }: {
   selected?: DteDocument;
   audit: AuditRow[];
+  receiptEmailDelivery?: ReceiptEmailDeliveryState | null;
   donorDataVerified?: boolean;
   busy: string;
   now: Date;
@@ -4490,7 +4485,9 @@ function DetailPanel({
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const rejectionDetail = rejectionDetailForDocument(selected, audit);
-  const emailFailure = latestReceiptEmailFailure(audit);
+  const emailFailure = receiptEmailDelivery?.status === "FAILED"
+    ? receiptEmailDelivery
+    : null;
   const emailEditing = emailEditingId === selected.id;
   const fiscalOutcomePending = Boolean(selected.fiscal_operation_claim_id);
   const postAcceptFinalizationPending = selected.status === "ACCEPTED" && !selected.post_accept_finalized_at;
@@ -4537,17 +4534,22 @@ function DetailPanel({
           <AlertTriangle size={17} />
           <div>
             <strong>Falló el envío del correo</strong>
-            <span>{receiptEmailFailureGuidance(selected.receipt_email_outcome_class)}</span>
-            <small>Detalle: {emailFailure.summary}</small>
-            <small>Falló: {formatElSalvadorDateTime(emailFailure.failedAt)} hora El Salvador</small>
+            <span>{receiptEmailFailureGuidance(emailFailure.outcomeClass)}</span>
+            {emailFailure.failureCode && <small>Código: {emailFailure.failureCode}</small>}
+            <small>Falló: {formatElSalvadorDateTime(emailFailure.occurredAt)} hora El Salvador</small>
             <button
               type="button"
               className="email-recovery-action"
-              disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"}
+              disabled={
+                emailFailure.outcomeClass === "UNKNOWN" ||
+                fiscalOutcomePending ||
+                postAcceptFinalizationPending ||
+                busy === "resend"
+              }
               onClick={() => onAction("resend")}
             >
               <Mail size={16} />
-              Reenviar ahora
+              {emailFailure.outcomeClass === "UNKNOWN" ? "Revisión necesaria" : "Reenviar ahora"}
             </button>
           </div>
         </div>

@@ -13,6 +13,15 @@ export interface DteDocumentListPage {
   limit: number;
 }
 
+export interface ReceiptEmailDeliveryState {
+  status: "PENDING" | "SENT" | "FAILED";
+  outcomeClass: EmailDeliveryOutcomeClass | null;
+  failureCode: string | null;
+  retrySafe: boolean;
+  attemptNo: number;
+  occurredAt: string;
+}
+
 interface DteDocumentCursor {
   createdAt: string;
   id: string;
@@ -78,6 +87,16 @@ export type ManualEmailDeliveryClaim =
       outcomeClass: EmailDeliveryOutcomeClass | null;
     }
   | { kind: "conflict"; id: string; attemptNo: number };
+
+export type OperationalAlertDeliveryClaim =
+  | { kind: "claimed"; id: string; claimToken: string }
+  | { kind: "already_sent"; id: string }
+  | { kind: "in_progress"; id: string }
+  | {
+      kind: "manual_review";
+      id: string;
+      outcomeClass: EmailDeliveryOutcomeClass | null;
+    };
 
 async function emailDeliveryIdempotencyKey(
   documentId: string,
@@ -1128,6 +1147,44 @@ export class Repository {
     return this.db.prepare("SELECT * FROM dte_documents WHERE wompi_event_id = ?").bind(id).first<DteDocumentRecord>();
   }
 
+  async getLatestReceiptEmailDelivery(documentId: string): Promise<ReceiptEmailDeliveryState | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT status, outcome_class, failure_code, retry_safe, attempt_no,
+                COALESCE(
+                  finalized_at,
+                  sent_at,
+                  provider_dispatch_started_at,
+                  claim_attempted_at,
+                  created_at
+                ) AS occurred_at
+           FROM email_deliveries
+          WHERE document_id = ?
+            AND email_type IN ('dteReceipt', 'dteReceiptTransitorio')
+          ORDER BY attempt_no DESC, created_at DESC, id DESC
+          LIMIT 1`
+      )
+      .bind(documentId)
+      .first<{
+        status: "PENDING" | "SENT" | "FAILED";
+        outcome_class: EmailDeliveryOutcomeClass | null;
+        failure_code: string | null;
+        retry_safe: number;
+        attempt_no: number;
+        occurred_at: string;
+      }>();
+    return row
+      ? {
+          status: row.status,
+          outcomeClass: row.outcome_class,
+          failureCode: row.failure_code,
+          retrySafe: Number(row.retry_safe) === 1,
+          attemptNo: Number(row.attempt_no),
+          occurredAt: row.occurred_at
+        }
+      : null;
+  }
+
   async listDteDocuments(params: {
     status?: string | null;
     attention?: "failures" | null;
@@ -1188,7 +1245,8 @@ export class Repository {
                retry_safe,
                ROW_NUMBER() OVER (
                  PARTITION BY document_id
-                 ORDER BY COALESCE(claim_attempted_at, created_at) DESC,
+                 ORDER BY attempt_no DESC,
+                          COALESCE(finalized_at, claim_attempted_at, created_at) DESC,
                           created_at DESC,
                           id DESC
                ) AS row_num
@@ -2353,12 +2411,16 @@ export class Repository {
     );
     const row = await this.db
       .prepare(
-        `INSERT INTO email_deliveries (
+         `INSERT INTO email_deliveries (
            id, document_id, to_email, status, provider_response_json,
            email_type, document_status_at_send, claim_attempted_at,
-           idempotency_key, claim_token
+           idempotency_key, claim_token, attempt_no
          )
-         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?,
+                COALESCE((
+                  SELECT MAX(attempt_no) FROM email_deliveries
+                   WHERE document_id = ?
+                ), 0) + 1
          WHERE NOT EXISTS (
            SELECT 1 FROM email_deliveries
            WHERE document_id = ? AND email_type = ? AND document_status_at_send = ?
@@ -2366,8 +2428,13 @@ export class Repository {
                status = 'SENT'
                OR (
                  status = 'PENDING'
-                 AND (claim_attempted_at IS NULL OR claim_attempted_at >= ?)
+                 AND (
+                   provider_dispatch_started_at IS NOT NULL
+                   OR claim_attempted_at IS NULL
+                   OR claim_attempted_at >= ?
+                 )
                )
+               OR (status = 'FAILED' AND retry_safe = 0)
              )
          )
          ON CONFLICT(idempotency_key) WHERE idempotency_key IS NOT NULL
@@ -2379,9 +2446,11 @@ export class Repository {
            claim_attempted_at = excluded.claim_attempted_at,
            claim_token = excluded.claim_token,
            provider_dispatch_started_at = NULL,
+           finalized_at = NULL,
            outcome_class = NULL,
            failure_code = NULL,
-           retry_safe = 0
+           retry_safe = 0,
+           attempt_no = excluded.attempt_no
          WHERE (
               email_deliveries.status = 'FAILED'
               AND email_deliveries.retry_safe = 1
@@ -2403,6 +2472,7 @@ export class Repository {
         claimedAt,
         idempotencyKey,
         claimToken,
+        input.documentId,
         input.documentId,
         input.emailType,
         input.documentStatusAtSend,
@@ -2436,21 +2506,17 @@ export class Repository {
       input.documentId,
       input.resendRequestId
     );
-    const claimed = await this.db
+    const reclaimed = await this.db
       .prepare(
-        `INSERT INTO email_deliveries (
-           id, document_id, to_email, status, provider_response_json,
-           email_type, document_status_at_send, claim_attempted_at,
-           idempotency_key, claim_token, resend_request_id, attempt_no
-         ) VALUES (?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?, ?, 1)
-         ON CONFLICT(resend_request_id) WHERE resend_request_id IS NOT NULL
-         DO UPDATE SET
+        `UPDATE email_deliveries
+         SET
            status = 'PENDING',
            provider_response_json = '{}',
            sent_at = NULL,
-           claim_attempted_at = excluded.claim_attempted_at,
-           claim_token = excluded.claim_token,
+           claim_attempted_at = ?,
+           claim_token = ?,
            provider_dispatch_started_at = NULL,
+           finalized_at = NULL,
            outcome_class = NULL,
            failure_code = NULL,
            retry_safe = 0,
@@ -2459,23 +2525,83 @@ export class Repository {
            pdf_sha256 = NULL,
            dte_json_sha256 = NULL,
            provider_delivery_id = NULL,
-           attempt_no = email_deliveries.attempt_no + 1
-         WHERE email_deliveries.document_id = excluded.document_id
-           AND email_deliveries.to_email = excluded.to_email
-           AND email_deliveries.email_type = excluded.email_type
-           AND email_deliveries.document_status_at_send = excluded.document_status_at_send
+           attempt_no = COALESCE((
+             SELECT MAX(other.attempt_no)
+               FROM email_deliveries AS other
+              WHERE other.document_id = email_deliveries.document_id
+           ), 0) + 1
+         WHERE resend_request_id = ?
+           AND document_id = ?
+           AND to_email = ?
+           AND email_type = ?
+           AND document_status_at_send = ?
            AND (
              (
-               email_deliveries.status = 'FAILED'
-               AND email_deliveries.retry_safe = 1
+               status = 'FAILED'
+               AND retry_safe = 1
              )
              OR (
-               email_deliveries.status = 'PENDING'
-               AND email_deliveries.provider_dispatch_started_at IS NULL
-               AND email_deliveries.claim_attempted_at IS NOT NULL
-               AND email_deliveries.claim_attempted_at < ?
+               status = 'PENDING'
+               AND provider_dispatch_started_at IS NULL
+               AND claim_attempted_at IS NOT NULL
+               AND claim_attempted_at < ?
              )
            )
+         RETURNING id, idempotency_key, claim_token, attempt_no`
+      )
+      .bind(
+        claimedAt,
+        claimToken,
+        input.resendRequestId,
+        input.documentId,
+        input.toEmail,
+        input.emailType,
+        input.documentStatusAtSend,
+        staleBefore
+      )
+      .first<{
+        id: string;
+        idempotency_key: string;
+        claim_token: string;
+        attempt_no: number;
+      }>();
+    if (reclaimed) {
+      return {
+        kind: "claimed",
+        id: reclaimed.id,
+        idempotencyKey: reclaimed.idempotency_key,
+        claimToken: reclaimed.claim_token,
+        attemptNo: Number(reclaimed.attempt_no)
+      };
+    }
+
+    const claimed = await this.db
+      .prepare(
+        `INSERT OR IGNORE INTO email_deliveries (
+           id, document_id, to_email, status, provider_response_json,
+           email_type, document_status_at_send, claim_attempted_at,
+           idempotency_key, claim_token, resend_request_id, attempt_no
+         )
+         SELECT ?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?, ?,
+                COALESCE((
+                  SELECT MAX(attempt_no) FROM email_deliveries
+                   WHERE document_id = ?
+                ), 0) + 1
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM email_deliveries
+             WHERE document_id = ?
+               AND email_type = ?
+               AND claim_token IS NOT NULL
+               AND resend_request_id IS NOT ?
+               AND (
+                 status = 'PENDING'
+                 OR (
+                   status = 'FAILED'
+                   AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
+                 )
+               )
+          )
          RETURNING id, idempotency_key, claim_token, attempt_no`
       )
       .bind(
@@ -2488,7 +2614,10 @@ export class Repository {
         idempotencyKey,
         claimToken,
         input.resendRequestId,
-        staleBefore
+        input.documentId,
+        input.documentId,
+        input.emailType,
+        input.resendRequestId
       )
       .first<{
         id: string;
@@ -2528,6 +2657,45 @@ export class Repository {
         attempt_no: number;
       }>();
     if (!existing) {
+      const blocker = await this.db
+        .prepare(
+          `SELECT id, status, outcome_class, attempt_no
+             FROM email_deliveries
+            WHERE document_id = ?
+              AND email_type = ?
+              AND claim_token IS NOT NULL
+              AND (
+                status = 'PENDING'
+                OR (
+                  status = 'FAILED'
+                  AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
+                )
+              )
+            ORDER BY attempt_no DESC, created_at DESC, id DESC
+            LIMIT 1`
+        )
+        .bind(input.documentId, input.emailType)
+        .first<{
+          id: string;
+          status: "PENDING" | "FAILED";
+          outcome_class: EmailDeliveryOutcomeClass | null;
+          attempt_no: number;
+        }>();
+      if (blocker?.status === "PENDING") {
+        return {
+          kind: "in_progress",
+          id: blocker.id,
+          attemptNo: Number(blocker.attempt_no)
+        };
+      }
+      if (blocker) {
+        return {
+          kind: "manual_review",
+          id: blocker.id,
+          attemptNo: Number(blocker.attempt_no),
+          outcomeClass: blocker.outcome_class
+        };
+      }
       throw new Error("No se pudo recuperar la reserva del reenvío");
     }
     const attemptNo = Number(existing.attempt_no);
@@ -2598,6 +2766,7 @@ export class Repository {
       .prepare(
         `UPDATE email_deliveries
          SET status = ?, provider_response_json = ?, sent_at = ?,
+             finalized_at = ?,
              email_type = ?, document_status_at_send = ?, template_version = ?,
              pdf_renderer_version = ?, pdf_sha256 = ?, dte_json_sha256 = ?,
              provider_delivery_id = ?, outcome_class = ?, failure_code = ?,
@@ -2608,6 +2777,7 @@ export class Repository {
         input.status,
         JSON.stringify(input.providerResponse ?? {}),
         input.status === "SENT" ? nowIso() : null,
+        nowIso(),
         input.emailType,
         input.documentStatusAtSend,
         input.templateVersion ?? null,
@@ -3125,33 +3295,160 @@ export class Repository {
     return Number(row?.count ?? 0);
   }
 
-  async hasOperationalAlertChannelResult(input: {
-    action: string;
+  async claimOperationalAlertDelivery(input: {
+    kind: string;
     entityType: string;
     entityId: string;
     incidentId: string;
     channel: "email" | "webhook";
-  }): Promise<boolean> {
-    const row = await this.db
+    targetKey: string;
+  }): Promise<OperationalAlertDeliveryClaim> {
+    const id = newId("alert_delivery");
+    const claimToken = newId("alert_claim");
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - EMAIL_DELIVERY_CLAIM_LEASE_MS).toISOString();
+    const entityKeyHash = await sha256Hex(
+      utf8Bytes(`${input.entityType}:${input.entityId}`)
+    );
+    const targetKeyHash = await sha256Hex(utf8Bytes(input.targetKey));
+    const claimed = await this.db
       .prepare(
-        `SELECT 1 AS found
-         FROM audit_logs
-         WHERE action = ?
-           AND entity_type = ?
-           AND entity_id = ?
-           AND json_extract(metadata_json, '$.incidentId') = ?
-           AND json_extract(metadata_json, '$.channel') = ?
-         LIMIT 1`
+        `INSERT INTO operational_alert_deliveries (
+           id, kind, entity_type, entity_key_hash, incident_id, channel,
+           target_key_hash, status, claim_token, claim_attempted_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+         ON CONFLICT(
+           kind, entity_type, entity_key_hash, incident_id, channel, target_key_hash
+         ) DO UPDATE SET
+           status = 'PENDING',
+           claim_token = excluded.claim_token,
+           claim_attempted_at = excluded.claim_attempted_at,
+           provider_dispatch_started_at = NULL,
+           finalized_at = NULL,
+           outcome_class = NULL,
+           failure_code = NULL,
+           retry_safe = 0
+         WHERE (
+           operational_alert_deliveries.status = 'FAILED'
+           AND operational_alert_deliveries.retry_safe = 1
+         ) OR (
+           operational_alert_deliveries.status = 'PENDING'
+           AND operational_alert_deliveries.provider_dispatch_started_at IS NULL
+           AND operational_alert_deliveries.claim_attempted_at < ?
+         )
+         RETURNING id, claim_token`
       )
       .bind(
-        input.action,
+        id,
+        input.kind,
         input.entityType,
-        input.entityId,
+        entityKeyHash,
         input.incidentId,
-        input.channel
+        input.channel,
+        targetKeyHash,
+        claimToken,
+        claimedAt,
+        staleBefore
       )
-      .first<{ found: number }>();
-    return Boolean(row?.found);
+      .first<{ id: string; claim_token: string }>();
+    if (claimed) {
+      return {
+        kind: "claimed",
+        id: claimed.id,
+        claimToken: claimed.claim_token
+      };
+    }
+    const existing = await this.db
+      .prepare(
+        `SELECT id, status, outcome_class
+           FROM operational_alert_deliveries
+          WHERE kind = ?
+            AND entity_type = ?
+            AND entity_key_hash = ?
+            AND incident_id = ?
+            AND channel = ?
+            AND target_key_hash = ?`
+      )
+      .bind(
+        input.kind,
+        input.entityType,
+        entityKeyHash,
+        input.incidentId,
+        input.channel,
+        targetKeyHash
+      )
+      .first<{
+        id: string;
+        status: "PENDING" | "SENT" | "FAILED";
+        outcome_class: EmailDeliveryOutcomeClass | null;
+      }>();
+    if (!existing) {
+      throw new Error("No se pudo recuperar la reserva de alerta");
+    }
+    if (existing.status === "SENT") {
+      return { kind: "already_sent", id: existing.id };
+    }
+    if (existing.status === "PENDING") {
+      return { kind: "in_progress", id: existing.id };
+    }
+    return {
+      kind: "manual_review",
+      id: existing.id,
+      outcomeClass: existing.outcome_class
+    };
+  }
+
+  async markOperationalAlertDispatchStarted(
+    id: string,
+    claimToken: string
+  ): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE operational_alert_deliveries
+            SET provider_dispatch_started_at = ?
+          WHERE id = ?
+            AND status = 'PENDING'
+            AND claim_token = ?
+            AND provider_dispatch_started_at IS NULL
+          RETURNING id`
+      )
+      .bind(nowIso(), id, claimToken)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async finalizeOperationalAlertDelivery(
+    id: string,
+    claimToken: string,
+    input: {
+      status: "SENT" | "FAILED";
+      outcomeClass?: EmailDeliveryOutcomeClass | null;
+      failureCode?: string | null;
+      retrySafe?: boolean;
+    }
+  ): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_alert_deliveries
+            SET status = ?, finalized_at = ?, outcome_class = ?,
+                failure_code = ?, retry_safe = ?
+          WHERE id = ?
+            AND status = 'PENDING'
+            AND claim_token = ?`
+      )
+      .bind(
+        input.status,
+        nowIso(),
+        input.outcomeClass ?? null,
+        input.failureCode ?? null,
+        input.retrySafe ? 1 : 0,
+        id,
+        claimToken
+      )
+      .run();
+    if (Number(result.meta?.changes ?? 0) !== 1) {
+      throw new Error(`La reserva de alerta ${id} ya no está pendiente`);
+    }
   }
 
   // Windowed variant for the auth rate limiter: counts (action, entity_id) audits

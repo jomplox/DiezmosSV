@@ -11,7 +11,7 @@ import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
-import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } from "./email";
+import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./email";
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
@@ -1058,8 +1058,8 @@ export class IssuancePipeline {
         action: "EMAIL_SENT",
         entityType: "dte_document",
         entityId: record.id,
-        summary: `Comprobante enviado a ${record.donor_email}`,
-        metadata: response
+        summary: "Comprobante enviado al correo registrado.",
+        metadata: emailDeliveryAuditEvidence(response)
       });
     } catch (error) {
       // The durable SENT delivery is the side-effect authority. A secondary audit

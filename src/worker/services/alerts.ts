@@ -2,7 +2,7 @@ import type { Env } from "../types";
 import type { Repository } from "../storage/repository";
 import { brandingOrigin, loadEmailBranding } from "./branding";
 import { operationalAlertHtml } from "./emailHtml";
-import { EmailService } from "./email";
+import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
 
 export const ALERT_EMAIL_SETTING_KEY = "alert_email";
 const ALERT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -18,6 +18,11 @@ export interface OperationalAlert {
 }
 
 type AlertChannel = "email" | "webhook";
+type AlertTargetResult = {
+  channel: AlertChannel;
+  executed: boolean;
+  status: "SENT" | "FAILED" | "SKIPPED";
+};
 
 export function normalizeAlertRecipients(value: unknown): string | null {
   if (typeof value !== "string") {
@@ -36,59 +41,149 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
   if (!incidentId) {
     return;
   }
+  const safeAlert = sanitizeOperationalAlert(alert);
+  const displayAlert = sanitizeOperationalAlertIdentity(safeAlert);
 
   let recipients: string[] = [];
   try {
     recipients = parseAlertRecipients(await repo.getSetting(ALERT_EMAIL_SETTING_KEY)) ?? [];
-  } catch (error) {
-    await recordChannelResult(repo, alert, incidentId, "email", "FAILED", error);
+  } catch {
+    await recordChannelResult(repo, safeAlert, incidentId, "email", "FAILED");
   }
 
+  const targets: Array<Promise<AlertTargetResult>> = [];
   if (recipients.length > 0) {
-    await dispatchChannel(repo, alert, incidentId, "email", async () => {
+    const emailContext = (async () => {
       const branding = await loadEmailBranding(repo, env);
-      const html = operationalAlertHtml(alert, originUrl(env), branding);
-      const email = new EmailService(env, undefined, branding);
-      for (const recipient of recipients) {
-        await email.sendOperationalAlert({
+      return {
+        html: operationalAlertHtml(displayAlert, originUrl(env), branding),
+        email: new EmailService(env, undefined, branding)
+      };
+    })();
+    for (const recipient of recipients) {
+      targets.push(dispatchTarget(
+        repo,
+        safeAlert,
+        incidentId,
+        "email",
+        `email:${recipient.toLowerCase()}`,
+        async (beforeProviderDispatch) => {
+          const context = await emailContext;
+          await context.email.sendOperationalAlert({
           to: recipient,
-          subject: alert.title,
-          text: alert.detail,
-          html
-        });
-      }
-    });
+            subject: safeAlert.title,
+            text: safeAlert.detail,
+            html: context.html
+          }, beforeProviderDispatch);
+        }
+      ));
+    }
   }
 
   if (env.ALERT_WEBHOOK_URL?.trim()) {
-    await dispatchChannel(repo, alert, incidentId, "webhook", async () => {
-      await sendAlertWebhook(env, alert);
-    });
+    targets.push(dispatchTarget(
+      repo,
+      safeAlert,
+      incidentId,
+      "webhook",
+      `webhook:${env.ALERT_WEBHOOK_KIND ?? "unconfigured"}`,
+      async (beforeProviderDispatch) => {
+        await sendAlertWebhook(env, displayAlert, beforeProviderDispatch);
+      }
+    ));
+  }
+
+  const settled = await Promise.allSettled(targets);
+  const results = settled.map<AlertTargetResult>((result) =>
+    result.status === "fulfilled"
+      ? result.value
+      : { channel: "email", executed: false, status: "FAILED" }
+  );
+  for (const channel of ["email", "webhook"] as const) {
+    const channelResults = results.filter((result) => result.channel === channel);
+    if (!channelResults.some((result) => result.executed)) {
+      continue;
+    }
+    const status = channelResults.every(
+      (result) => result.status === "SENT" || result.status === "SKIPPED"
+    )
+      ? "SENT"
+      : "FAILED";
+    await recordChannelResult(repo, safeAlert, incidentId, channel, status);
   }
 }
 
-async function dispatchChannel(
+async function dispatchTarget(
   repo: Repository,
   alert: OperationalAlert,
   incidentId: string,
   channel: AlertChannel,
-  dispatch: () => Promise<void>
-): Promise<void> {
+  targetKey: string,
+  dispatch: (beforeProviderDispatch: () => Promise<void>) => Promise<void>
+): Promise<AlertTargetResult> {
+  let claim;
   try {
-    const alreadySent = await repo.hasOperationalAlertChannelResult({
-      action: `ALERT_SENT:${alert.kind}`,
+    claim = await repo.claimOperationalAlertDelivery({
+      kind: alert.kind,
       entityType: alert.entityType,
       entityId: alert.entityId,
       incidentId,
-      channel
+      channel,
+      targetKey
     });
-    if (alreadySent) {
-      return;
-    }
-    await dispatch();
-    await recordChannelResult(repo, alert, incidentId, channel, "SENT");
+  } catch {
+    return { channel, executed: false, status: "FAILED" };
+  }
+  if (claim.kind === "already_sent") {
+    return { channel, executed: false, status: "SENT" };
+  }
+  if (claim.kind !== "claimed") {
+    return { channel, executed: false, status: "SKIPPED" };
+  }
+
+  let providerDispatchStarted = false;
+  try {
+    await dispatch(async () => {
+      const marked = await repo.markOperationalAlertDispatchStarted(
+        claim.id,
+        claim.claimToken
+      );
+      if (!marked) {
+        throw new Error("La reserva de alerta perdió propiedad antes del envío");
+      }
+      providerDispatchStarted = true;
+    });
+    await repo.finalizeOperationalAlertDelivery(claim.id, claim.claimToken, {
+      status: "SENT"
+    });
+    return { channel, executed: true, status: "SENT" };
   } catch (error) {
-    await recordChannelResult(repo, alert, incidentId, channel, "FAILED", error);
+    const failure =
+      channel === "email" || error instanceof EmailDispatchError
+        ? classifyEmailDispatchError(error, providerDispatchStarted)
+        : providerDispatchStarted
+          ? {
+              outcomeClass: "UNKNOWN" as const,
+              code: "ALERT_DISPATCH_UNKNOWN",
+              retrySafe: false
+            }
+          : {
+              outcomeClass: "NOT_SENT" as const,
+              code: "ALERT_PRE_DISPATCH_FAILED",
+              retrySafe: true
+            };
+    try {
+      await repo.finalizeOperationalAlertDelivery(claim.id, claim.claimToken, {
+        status: "FAILED",
+        outcomeClass: failure.outcomeClass,
+        failureCode: failure.code,
+        retrySafe: failure.retrySafe
+      });
+    } catch {
+      // A post-dispatch PENDING claim is intentionally fail-closed. Its durable
+      // dispatch marker prevents a duplicate alert if finalization also failed.
+    }
+    return { channel, executed: true, status: "FAILED" };
   }
 }
 
@@ -97,15 +192,16 @@ async function recordChannelResult(
   alert: OperationalAlert,
   incidentId: string,
   channel: AlertChannel,
-  status: "SENT" | "FAILED",
-  error?: unknown
+  status: "SENT" | "FAILED"
 ): Promise<void> {
   try {
     await repo.createAudit({
       action: `ALERT_${status}:${alert.kind}`,
       entityType: alert.entityType,
       entityId: alert.entityId,
-      summary: status === "SENT" ? alert.title : errorMessage(error),
+      summary: status === "SENT"
+        ? alert.title
+        : `No se pudo entregar la alerta por ${channel}.`,
       metadata: { incidentId, channel }
     });
   } catch {
@@ -114,7 +210,11 @@ async function recordChannelResult(
   }
 }
 
-async function sendAlertWebhook(env: Env, alert: OperationalAlert): Promise<void> {
+async function sendAlertWebhook(
+  env: Env,
+  alert: OperationalAlert,
+  beforeProviderDispatch: () => Promise<void>
+): Promise<void> {
   let url: URL;
   try {
     url = new URL(env.ALERT_WEBHOOK_URL ?? "");
@@ -143,6 +243,7 @@ async function sendAlertWebhook(env: Env, alert: OperationalAlert): Promise<void
   }
   let response: Response;
   try {
+    await beforeProviderDispatch();
     response = await fetch(url.toString(), {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -158,8 +259,35 @@ async function sendAlertWebhook(env: Env, alert: OperationalAlert): Promise<void
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function sanitizeOperationalAlert(alert: OperationalAlert): OperationalAlert {
+  return {
+    ...alert,
+    title: sanitizeAlertText(alert.title, "Alerta operativa", 180),
+    detail: sanitizeAlertText(
+      alert.detail,
+      "Revise el panel de administración para consultar el incidente.",
+      1_000
+    )
+  };
+}
+
+function sanitizeOperationalAlertIdentity(alert: OperationalAlert): OperationalAlert {
+  return {
+    ...alert,
+    entityType: sanitizeAlertText(alert.entityType, "entidad", 80),
+    entityId: sanitizeAlertText(alert.entityId, "identificador protegido", 180)
+  };
+}
+
+function sanitizeAlertText(value: string, fallback: string, maxChars: number): string {
+  const redacted = value
+    .replace(/authorization\s*:\s*bearer\s+\S+/gi, "Authorization: [REDACTADO]")
+    .replace(/\bbearer\s+\S+/gi, "Bearer [REDACTADO]")
+    .replace(/\bhttps?:\/\/[^\s<>"']+/gi, "[URL]")
+    .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[CORREO]")
+    .replace(/\b(?:sk|pk|api|token)[-_][A-Za-z0-9_-]{8,}\b/gi, "[SECRETO]")
+    .trim();
+  return (redacted || fallback).slice(0, maxChars);
 }
 
 // The alert body links back to the admin panel with a trailing slash (historical form);

@@ -338,6 +338,200 @@ describe("operational alert dispatch", () => {
     expect(auditChannels(db, "ALERT_SENT:DTE_FAILED")).toEqual(["email", "webhook"]);
   });
 
+  it("atomically suppresses concurrent dispatches for the same incident and recipient", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    let releaseProvider!: () => void;
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const send = vi.fn(async () => {
+      await providerGate;
+      return { messageId: "concurrent-alert" };
+    });
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+    const alert = {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_concurrent",
+      incidentId: "attempt_concurrent"
+    };
+
+    const first = sendOperationalAlert(env, repo, alert);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const second = sendOperationalAlert(env, repo, alert);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const callsBeforeRelease = send.mock.calls.length;
+    releaseProvider();
+    await Promise.all([first, second]);
+
+    expect(callsBeforeRelease).toBe(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts the webhook while the independent email channel is still stalled", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    let releaseEmail!: () => void;
+    const emailGate = new Promise<void>((resolve) => {
+      releaseEmail = resolve;
+    });
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
+      ALERT_WEBHOOK_KIND: "slack",
+      EMAIL: {
+        send: async () => {
+          await emailGate;
+          return { messageId: "slow-email" };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+
+    const pending = sendOperationalAlert(env, repo, {
+      kind: "EMAIL_FAILED",
+      title: "Fallo al enviar comprobante",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_parallel_channels",
+      incidentId: "attempt_parallel_channels"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const webhookCallsWhileEmailStalled = fetchMock.mock.calls.length;
+    releaseEmail();
+    await pending;
+
+    expect(webhookCallsWhileEmailStalled).toBe(1);
+  });
+
+  it("does not resend after a successful provider call whose audit write fails", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.failNextAuditInsert = true;
+    const send = vi.fn(async () => ({ messageId: "sent-before-audit-failure" }));
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+    const alert = {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_audit_failure",
+      incidentId: "attempt_audit_failure"
+    };
+
+    await sendOperationalAlert(env, repo, alert);
+    await sendOperationalAlert(env, repo, alert);
+
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries only the recipient proven not sent after a partial multi-recipient failure", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org, admin@example.org" });
+    const attempts: string[] = [];
+    let rejectAdminOnce = true;
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          const recipient = String((message as { to?: unknown }).to);
+          attempts.push(recipient);
+          if (recipient === "admin@example.org" && rejectAdminOnce) {
+            rejectAdminOnce = false;
+            throw Object.assign(new Error("private recipient rejection"), {
+              code: "E_RECIPIENT_NOT_ALLOWED"
+            });
+          }
+          return { messageId: `alert-${attempts.length}` };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+    const alert = {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_partial",
+      incidentId: "attempt_partial"
+    };
+
+    await sendOperationalAlert(env, repo, alert);
+    await sendOperationalAlert(env, repo, alert);
+
+    expect(attempts.filter((recipient) => recipient === "owner@example.org")).toHaveLength(1);
+    expect(attempts.filter((recipient) => recipient === "admin@example.org")).toHaveLength(2);
+  });
+
+  it("redacts addresses, URLs, and bearer tokens from alert channels and audits", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const emails: unknown[] = [];
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
+      ALERT_WEBHOOK_KIND: "discord",
+      EMAIL: {
+        send: async (message: unknown) => {
+          emails.push(message);
+          return { messageId: "redacted-alert" };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+    const privateDetail =
+      "Falló ana@example.org en https://private.example/token/abc con Authorization: Bearer secret-token";
+
+    await sendOperationalAlert(env, repo, {
+      kind: "EMAIL_FAILED",
+      title: "Fallo al enviar comprobante",
+      detail: privateDetail,
+      entityType: "dte_document",
+      entityId: "dte_redaction",
+      incidentId: "attempt_redaction"
+    });
+
+    const durable = JSON.stringify({ emails, webhook: await webhookBody(fetchMock), audits: db.audits });
+    expect(durable).not.toContain("ana@example.org");
+    expect(durable).not.toContain("https://private.example/token/abc");
+    expect(durable).not.toContain("secret-token");
+  });
+
   it.each([
     ["non-HTTPS", "http://hooks.example.test/alerts", "slack"],
     ["credential-bearing", "https://user:secret@hooks.example.test/alerts", "discord"],
@@ -460,6 +654,8 @@ function auditChannels(db: InMemoryAlertD1, action: string): string[] {
 class InMemoryAlertD1 {
   readonly settings: Array<Record<string, unknown>> = [];
   readonly audits: Array<Record<string, unknown>> = [];
+  readonly alertDeliveries: Array<Record<string, unknown>> = [];
+  failNextAuditInsert = false;
 
   prepare(sql: string): AlertStatement {
     return new AlertStatement(this, sql);
@@ -482,6 +678,101 @@ class AlertStatement {
   async first<T>(): Promise<T | null> {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("INSERT INTO operational_alert_deliveries") &&
+      this.sql.includes("RETURNING id, claim_token")
+    ) {
+      const [
+        id,
+        kind,
+        entityType,
+        entityKeyHash,
+        incidentId,
+        channel,
+        targetKeyHash,
+        claimToken,
+        claimAttemptedAt,
+        staleBefore
+      ] = this.args;
+      const existing = this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      );
+      if (!existing) {
+        this.db.alertDeliveries.push({
+          id,
+          kind,
+          entity_type: entityType,
+          entity_key_hash: entityKeyHash,
+          incident_id: incidentId,
+          channel,
+          target_key_hash: targetKeyHash,
+          status: "PENDING",
+          claim_token: claimToken,
+          claim_attempted_at: claimAttemptedAt,
+          provider_dispatch_started_at: null,
+          finalized_at: null,
+          outcome_class: null,
+          failure_code: null,
+          retry_safe: 0
+        });
+        return { id, claim_token: claimToken } as T;
+      }
+      const reclaimable =
+        (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+        (
+          existing.status === "PENDING" &&
+          existing.provider_dispatch_started_at == null &&
+          String(existing.claim_attempted_at) < String(staleBefore)
+        );
+      if (!reclaimable) return null;
+      existing.status = "PENDING";
+      existing.claim_token = claimToken;
+      existing.claim_attempted_at = claimAttemptedAt;
+      existing.provider_dispatch_started_at = null;
+      existing.finalized_at = null;
+      existing.outcome_class = null;
+      existing.failure_code = null;
+      existing.retry_safe = 0;
+      return { id: existing.id, claim_token: claimToken } as T;
+    }
+    if (
+      this.sql.includes("SELECT id, status, outcome_class") &&
+      this.sql.includes("FROM operational_alert_deliveries")
+    ) {
+      const [kind, entityType, entityKeyHash, incidentId, channel, targetKeyHash] = this.args;
+      return (this.db.alertDeliveries.find(
+        (row) =>
+          row.kind === kind &&
+          row.entity_type === entityType &&
+          row.entity_key_hash === entityKeyHash &&
+          row.incident_id === incidentId &&
+          row.channel === channel &&
+          row.target_key_hash === targetKeyHash
+      ) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET provider_dispatch_started_at = ?") &&
+      this.sql.includes("RETURNING id")
+    ) {
+      const [startedAt, id, claimToken] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken &&
+          delivery.provider_dispatch_started_at == null
+      );
+      if (!row) return null;
+      row.provider_dispatch_started_at = startedAt;
+      return { id } as T;
     }
     if (this.sql.includes("SELECT 1 AS found") && this.sql.includes("json_extract(metadata_json")) {
       const [action, entityType, entityId, incidentId, channel] = this.args.map(String);
@@ -517,6 +808,10 @@ class AlertStatement {
       }
     }
     if (this.sql.includes("INSERT INTO audit_logs")) {
+      if (this.db.failNextAuditInsert) {
+        this.db.failNextAuditInsert = false;
+        throw new Error("injected alert audit failure");
+      }
       const [id, actorType, actorId, action, entityType, entityId, summary, metadataJson] = this.args;
       this.db.audits.push({
         id,
@@ -529,6 +824,37 @@ class AlertStatement {
         metadata_json: metadataJson,
         created_at: "2026-07-04T00:00:00.000Z"
       });
+    }
+    if (
+      this.sql.includes("UPDATE operational_alert_deliveries") &&
+      this.sql.includes("SET status = ?, finalized_at = ?")
+    ) {
+      const [
+        status,
+        finalizedAt,
+        outcomeClass,
+        failureCode,
+        retrySafe,
+        id,
+        claimToken
+      ] = this.args;
+      const row = this.db.alertDeliveries.find(
+        (delivery) =>
+          delivery.id === id &&
+          delivery.status === "PENDING" &&
+          delivery.claim_token === claimToken
+      );
+      if (row) {
+        row.status = status;
+        row.finalized_at = finalizedAt;
+        row.outcome_class = outcomeClass;
+        row.failure_code = failureCode;
+        row.retry_safe = retrySafe;
+      }
+      return {
+        success: true,
+        meta: { changes: row ? 1 : 0 }
+      } as unknown as Record<string, never>;
     }
     return {};
   }

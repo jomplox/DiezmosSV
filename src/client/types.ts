@@ -41,6 +41,15 @@ export interface DteDocument {
   donorDataVerified?: boolean;
 }
 
+export interface ReceiptEmailDeliveryState {
+  status: "PENDING" | "SENT" | "FAILED";
+  outcomeClass: "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN" | null;
+  failureCode: string | null;
+  retrySafe: boolean;
+  attemptNo: number;
+  occurredAt: string;
+}
+
 type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
 
 export interface DonationIntentListItem {
