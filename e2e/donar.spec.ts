@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -27,6 +27,15 @@ const DONOR = {
   dui: "10000001-9"
 };
 
+async function renderedSvFlagDiameter(icon: Locator): Promise<number> {
+  return icon.evaluate((element) => {
+    const svg = element as SVGSVGElement;
+    const flag = svg.querySelector("clipPath circle");
+    const radius = Number(flag?.getAttribute("r"));
+    return radius * 2 * (svg.getBoundingClientRect().width / svg.viewBox.baseVal.width);
+  });
+}
+
 test.beforeEach(async ({ context }) => {
   // Keep everything inside the sandbox: stub the mock hosted-payment host (the
   // embed iframe src in mock mode) so no real network egress occurs.
@@ -45,11 +54,120 @@ test("the direct SV route leaves the amount unfocused until the donor taps it", 
   const amount = page.getByLabel("Monto");
   // The heading's flag is an aria-hidden inline SVG badge (emoji rendered as a
   // blank box off-Apple), so the accessible name is the bare title.
-  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  const heading = page.getByRole("heading", { name: "Diezmos y Ofrendas" });
+  await expect(heading).toBeVisible();
+  const worldIcon = heading.locator("svg.donar-title-world-icon");
+  await expect(worldIcon).toBeVisible();
+  const globe = worldIcon.locator("g > circle");
+  const flag = worldIcon.locator("clipPath circle");
+  const globeRadius = Number(await globe.getAttribute("r"));
+  const flagRadius = Number(await flag.getAttribute("r"));
+  const globeX = Number(await globe.getAttribute("cx"));
+  const flagX = Number(await flag.getAttribute("cx"));
+  const globeY = Number(await globe.getAttribute("cy"));
+  const flagY = Number(await flag.getAttribute("cy"));
+  expect({ x: flagX, y: flagY, radius: flagRadius }).toEqual({ x: 48, y: 34, radius: 32 });
+  expect({ x: globeX, y: globeY, radius: globeRadius }).toEqual({ x: 94, y: 34, radius: 24 });
+  expect(flagX).toBeLessThan(globeX);
+  expect(flagY).toBe(globeY);
+  expect(flagRadius).toBeGreaterThan(globeRadius);
+  expect(Math.hypot(globeX - flagX, globeY - flagY)).toBeLessThan(flagRadius + globeRadius);
   await expect(amount).not.toBeFocused();
 
   await amount.click();
   await expect(amount).toBeFocused();
+});
+
+test("the amount fields accept only dollars and cents in both donation lanes", async ({ page }) => {
+  for (const route of ["sv", "eeuu"]) {
+    await page.goto(`/donar?ruta=${route}`);
+    const amount = page.getByLabel("Monto");
+
+    await amount.fill("aaza");
+    await expect(amount).toHaveValue("");
+
+    await amount.fill("12.34");
+    await expect(amount).toHaveValue("12.34");
+
+    await amount.fill("12.345");
+    await expect(amount).toHaveValue("12.34");
+  }
+});
+
+test("keeps the home chooser artwork unchanged", async ({ page }) => {
+  await page.goto("/donar");
+
+  const svDoorIcon = page
+    .getByRole("button", { name: "El Salvador y el mundo Comprobante de donación DTE salvadoreño", exact: true })
+    .locator("svg");
+  const usDoorFlag = page
+    .getByRole("button", { name: "EE. UU. Recibo oficial deducible de impuestos (IRS 501c3)", exact: true })
+    .locator("svg");
+  await expect(svDoorIcon).toBeVisible();
+  await expect(usDoorFlag).toBeVisible();
+  await expect(svDoorIcon).toHaveAttribute("viewBox", "0 0 96 96");
+  await expect(usDoorFlag).toHaveClass("donar-door-icon");
+  const svDoorGlobe = svDoorIcon.locator("g > circle");
+  const svDoorFlag = svDoorIcon.locator("clipPath circle");
+  const svDoorGlobeX = Number(await svDoorGlobe.getAttribute("cx"));
+  const svDoorGlobeY = Number(await svDoorGlobe.getAttribute("cy"));
+  const svDoorGlobeRadius = Number(await svDoorGlobe.getAttribute("r"));
+  const svDoorFlagX = Number(await svDoorFlag.getAttribute("cx"));
+  const svDoorFlagY = Number(await svDoorFlag.getAttribute("cy"));
+  const svDoorFlagRadius = Number(await svDoorFlag.getAttribute("r"));
+  expect({ x: svDoorGlobeX, y: svDoorGlobeY, radius: svDoorGlobeRadius }).toEqual({ x: 42, y: 38, radius: 30 });
+  expect({ x: svDoorFlagX, y: svDoorFlagY, radius: svDoorFlagRadius }).toEqual({ x: 69, y: 69, radius: 25 });
+  expect(Math.hypot(svDoorGlobeX - svDoorFlagX, svDoorGlobeY - svDoorFlagY)).toBeLessThan(
+    svDoorGlobeRadius + svDoorFlagRadius
+  );
+});
+
+test("matches the EE. UU. secondary heading flag size to the SV secondary heading", async ({ page }) => {
+
+  await page.goto("/donar?ruta=sv");
+  const svTitleIcon = page.locator("svg.donar-title-world-icon");
+  await expect(svTitleIcon).toBeVisible();
+  const svTitleFlagDiameter = await renderedSvFlagDiameter(svTitleIcon);
+
+  await page.goto("/donar?ruta=eeuu");
+  const usTitleFlag = page.locator("svg.donar-title-lane-flag");
+  await expect(usTitleFlag).toBeVisible();
+  const usTitleFlagBox = await usTitleFlag.boundingBox();
+  expect(usTitleFlagBox).not.toBeNull();
+  expect(Math.abs(usTitleFlagBox!.width - svTitleFlagDiameter)).toBeLessThanOrEqual(1);
+});
+
+test("keeps the home chooser's original spacing", async ({ page }) => {
+  await page.goto("/donar");
+
+  await expect(page.locator(".donar-logo")).toHaveCSS("margin-bottom", "2px");
+  const subtitle = page.locator(".donar-landing-subtitle");
+  await expect(subtitle).toHaveCSS("margin-top", "0px");
+  await expect(subtitle).toHaveCSS("margin-bottom", "6px");
+});
+
+test("keeps the desktop chooser doors equal-height with the annotated U.S. padding", async ({ page }) => {
+  await page.setViewportSize({ width: 852, height: 987 });
+  await page.goto("/donar");
+
+  await expect(page.locator(".donar-doors")).toHaveCSS("align-items", "stretch");
+  const svDoor = page.locator(".donar-door").nth(0);
+  const usDoor = page.locator(".donar-door").nth(1);
+  await expect(svDoor).toHaveCSS("padding-top", "24px");
+  await expect(svDoor).toHaveCSS("padding-bottom", "24px");
+  await expect(usDoor).toHaveCSS("padding-top", "35px");
+  await expect(usDoor).toHaveCSS("padding-bottom", "35px");
+
+  const [svBox, usBox] = await Promise.all([svDoor.boundingBox(), usDoor.boundingBox()]);
+  expect(svBox).not.toBeNull();
+  expect(usBox).not.toBeNull();
+  expect(svBox!.height).toBe(usBox!.height);
+  expect(usBox!.x - (svBox!.x + svBox!.width)).toBeCloseTo(14, 5);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.locator(".donar-door").nth(1)).toHaveCSS("padding-top", "14px");
+  await expect(page.locator(".donar-door").nth(1)).toHaveCSS("padding-bottom", "14px");
 });
 
 test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) => {
@@ -67,7 +185,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   // The assurance subtitle names the comprobante this SV path produces (user-centered
   // copy: donors know "DTE", not the CDE initials).
-  await expect(page.getByText("Recibirá un comprobante de donación oficial (DTE) en su dirección de correo electrónico.")).toBeVisible();
+  await expect(page.getByText("Recibirá por correo electrónico un comprobante de donación oficial (DTE), con validez fiscal únicamente en El Salvador.")).toBeVisible();
   await expect(page.getByText("Paso 1 de 3")).toBeVisible();
   await expect(page.getByRole("radiogroup", { name: "Tipo" })).toBeVisible();
   // Diezmo is preselected on mount.
