@@ -445,6 +445,71 @@ describe("email dispatch outcome classification", () => {
     }
   });
 
+  it.each([
+    "ops@example.org",
+    "https://user:secret@mail.example/private",
+    "Bearer secret-token",
+    "sk_private_provider_token"
+  ])("rejects non-opaque HTTP provider identities without persisting %s", async (providerId) => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({
+        status: "accepted",
+        id: providerId
+      }), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      })
+    ));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL_PROVIDER_URL: "https://mail.example/send",
+      EMAIL_API_KEY: "email-api-key"
+    } as unknown as Env);
+
+    try {
+      const error = await service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Alert",
+        text: "Body",
+        html: "<p>Body</p>"
+      }).catch((caught: unknown) => caught);
+      expect(error).toMatchObject({
+        code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
+        outcomeClass: "UNKNOWN",
+        retrySafe: false,
+        providerResponse: { code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED" }
+      });
+      expect(JSON.stringify(error)).not.toContain(providerId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects a Cloudflare response whose message ID is not an opaque identifier", async () => {
+    const send = vi.fn(async () => ({ messageId: "Bearer private-provider-token" }));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    const error = await service.sendOperationalAlert({
+      to: "ops@example.org",
+      subject: "Alert",
+      text: "Body",
+      html: "<p>Body</p>"
+    }).catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({
+      code: "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED",
+      outcomeClass: "UNKNOWN",
+      retrySafe: false,
+      providerResponse: { code: "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED" }
+    });
+    expect(JSON.stringify(error)).not.toContain("private-provider-token");
+  });
+
   it("classifies HTTP server errors as unknown and never retry-safe", async () => {
     vi.stubGlobal("fetch", vi.fn(async () =>
       new Response("internal provider details", { status: 503 })

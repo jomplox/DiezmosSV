@@ -606,18 +606,81 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
-  it("upgrades a populated pre-0025 database with duplicate legacy failures", () => {
+  it("surfaces post-dispatch pending receipts for manual review but not pre-dispatch work", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_pending_review", "2026-06-01T12:00:02.000Z", "donor@example.org", "5");
+    seedAcceptedDocument(database, "doc_pending_pre_dispatch", "2026-06-01T12:00:03.000Z", "donor@example.org", "6");
+    const insert = database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, claim_attempted_at,
+         provider_dispatch_started_at, idempotency_key, claim_token, attempt_no,
+         created_at
+       ) VALUES (?, ?, 'donor@example.org', 'PENDING', '{}', 'dteReceipt',
+                 'ACCEPTED', ?, ?, ?, ?, 1, ?)`
+    );
+    insert.run(
+      "email_pending_review",
+      "doc_pending_review",
+      "2026-07-17T17:00:00.000Z",
+      "2026-07-17T17:00:01.000Z",
+      "pending-review-key",
+      "pending-review-claim",
+      "2026-07-17T17:00:00.000Z"
+    );
+    insert.run(
+      "email_pending_pre_dispatch",
+      "doc_pending_pre_dispatch",
+      "2026-07-17T17:00:00.000Z",
+      null,
+      "pending-pre-dispatch-key",
+      "pending-pre-dispatch-claim",
+      "2026-07-17T17:00:00.000Z"
+    );
+    const repository = new Repository(d1.database);
+
+    await expect(repository.listDteDocuments({ attention: "failures" })).resolves.toMatchObject({
+      documents: [
+        expect.objectContaining({
+          id: "doc_pending_review",
+          receipt_email_status: "PENDING",
+          receipt_email_requires_review: 1
+        })
+      ]
+    });
+    await expect(repository.getLatestReceiptEmailDelivery("doc_pending_review")).resolves.toMatchObject({
+      status: "PENDING",
+      requiresReview: true
+    });
+    database.close();
+  });
+
+  it("upgrades a populated pre-0025 database with duplicate legacy claimed failures", () => {
     const database = migratedDatabaseThrough("0024");
     seedAcceptedDocument(database, "doc_legacy_delivery", "2026-06-01T12:00:02.000Z", "donor@example.org");
     const insert = database.prepare(
       `INSERT INTO email_deliveries (
          id, document_id, to_email, status, provider_response_json,
-         email_type, document_status_at_send, created_at
+         email_type, document_status_at_send, claim_attempted_at,
+         idempotency_key, claim_token, created_at
        ) VALUES (?, 'doc_legacy_delivery', 'donor@example.org', 'FAILED', '{}',
-                 'dteReceipt', 'ACCEPTED', ?)`
+                 'dteReceipt', 'ACCEPTED', ?, ?, ?, ?)`
     );
-    insert.run("legacy_failure_1", "2026-07-17T17:00:00.000Z");
-    insert.run("legacy_failure_2", "2026-07-17T17:01:00.000Z");
+    insert.run(
+      "legacy_failure_1",
+      "2026-07-17T17:00:00.000Z",
+      "legacy-key-1",
+      "legacy-claim-1",
+      "2026-07-17T17:00:00.000Z"
+    );
+    insert.run(
+      "legacy_failure_2",
+      "2026-07-17T17:01:00.000Z",
+      "legacy-key-2",
+      "legacy-claim-2",
+      "2026-07-17T17:01:00.000Z"
+    );
 
     expect(() => database.exec(
       readFileSync(resolve(migrationsDirectory, "0025_email_delivery_recovery.sql"), "utf8")
@@ -627,6 +690,15 @@ describe("fiscal repository SQL on SQLite", () => {
          FROM email_deliveries
         WHERE id = 'legacy_failure_1'`
     ).get()).toEqual({ retry_safe: 0, attempt_no: 1 });
+    expect(database.prepare(
+      `SELECT id, claim_token
+         FROM email_deliveries
+        WHERE document_id = 'doc_legacy_delivery'
+        ORDER BY created_at, id`
+    ).all()).toEqual([
+      { id: "legacy_failure_1", claim_token: null },
+      { id: "legacy_failure_2", claim_token: "legacy-claim-2" }
+    ]);
     database.close();
   });
 
@@ -806,9 +878,9 @@ function seedAcceptedDocument(
   database: DatabaseSync,
   id: string,
   finalizedAt: string | null,
-  donorEmail: string | null = null
+  donorEmail: string | null = null,
+  documentSuffix = id === "doc_invalidation" ? "3" : "4"
 ): void {
-  const suffix = id === "doc_invalidation" ? "3" : "4";
   database.prepare(
     `INSERT INTO dte_documents (
        id, environment, codigo_generacion, numero_control, status, plain_json,
@@ -818,8 +890,8 @@ function seedAcceptedDocument(
                'DOCUMENT-SEAL', 'PROCESADO', 2500, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
-    `33333333-3333-4333-8333-33333333333${suffix}`,
-    `DTE-15-M001P001-00000000000000${suffix}`,
+    `33333333-3333-4333-8333-33333333333${documentSuffix}`,
+    `DTE-15-M001P001-00000000000000${documentSuffix}`,
     "2026-06-01T12:00:00.000Z",
     "2026-06-01T12:00:01.000Z",
     finalizedAt,

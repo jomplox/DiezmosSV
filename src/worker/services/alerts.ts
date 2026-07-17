@@ -21,7 +21,7 @@ type AlertChannel = "email" | "webhook";
 type AlertTargetResult = {
   channel: AlertChannel;
   executed: boolean;
-  status: "SENT" | "FAILED" | "SKIPPED";
+  status: "SENT" | "FAILED" | "UNRESOLVED";
 };
 
 export function normalizeAlertRecipients(value: unknown): string | null {
@@ -70,7 +70,7 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
         async (beforeProviderDispatch) => {
           const context = await emailContext;
           await context.email.sendOperationalAlert({
-          to: recipient,
+            to: recipient,
             subject: safeAlert.title,
             text: safeAlert.detail,
             html: context.html
@@ -86,7 +86,7 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
       safeAlert,
       incidentId,
       "webhook",
-      `webhook:${env.ALERT_WEBHOOK_KIND ?? "unconfigured"}`,
+      `webhook:${env.ALERT_WEBHOOK_KIND ?? "unconfigured"}:${normalizedWebhookTarget(env.ALERT_WEBHOOK_URL)}`,
       async (beforeProviderDispatch) => {
         await sendAlertWebhook(env, displayAlert, beforeProviderDispatch);
       }
@@ -104,9 +104,7 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
     if (!channelResults.some((result) => result.executed)) {
       continue;
     }
-    const status = channelResults.every(
-      (result) => result.status === "SENT" || result.status === "SKIPPED"
-    )
+    const status = channelResults.every((result) => result.status === "SENT")
       ? "SENT"
       : "FAILED";
     await recordChannelResult(repo, safeAlert, incidentId, channel, status);
@@ -138,7 +136,7 @@ async function dispatchTarget(
     return { channel, executed: false, status: "SENT" };
   }
   if (claim.kind !== "claimed") {
-    return { channel, executed: false, status: "SKIPPED" };
+    return { channel, executed: false, status: "UNRESOLVED" };
   }
 
   let providerDispatchStarted = false;
@@ -256,6 +254,15 @@ async function sendAlertWebhook(
   }
   if (!response.ok) {
     throw new Error(`El webhook de alertas respondió HTTP ${response.status}`);
+  }
+}
+
+function normalizedWebhookTarget(value: string | undefined): string {
+  const raw = value?.trim() ?? "";
+  try {
+    return new URL(raw).toString();
+  } catch {
+    return raw;
   }
 }
 

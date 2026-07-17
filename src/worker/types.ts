@@ -142,6 +142,7 @@ export interface DteDocumentRecord {
   receipt_email_outcome_class?: "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN" | null;
   receipt_email_failure_code?: string | null;
   receipt_email_retry_safe?: 0 | 1 | null;
+  receipt_email_requires_review?: 0 | 1 | null;
   transmission_claim_id: string | null;
   created_at: string;
   updated_at: string;

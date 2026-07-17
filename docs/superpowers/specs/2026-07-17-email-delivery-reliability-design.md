@@ -93,6 +93,11 @@ It must not reclaim:
 - any stale `PENDING` row whose provider dispatch began;
 - legacy `PENDING` rows without enough evidence to prove safety.
 
+Migration `0025` preserves every legacy delivery row. If historical data contains
+multiple claimed unresolved receipt rows for the same document and email type, it
+keeps the newest claim and clears only the older duplicate claim tokens before
+creating the partial unique index. No delivery evidence is deleted.
+
 ### Outcome classification
 
 `EmailService` exposes a typed `EmailDispatchError` containing:
@@ -116,6 +121,9 @@ For the optional HTTP provider:
 
 - only HTTP `200` or `202` with JSON
   `{"status":"accepted","id":"<provider-id>"}` (or `messageId`) is `SENT`;
+- the accepted provider ID must be an opaque 1–128 character value containing
+  only ASCII letters, digits, `_`, and `-`, and must not resemble an API key,
+  bearer token, URL, or email address;
 - only an HTTP `4xx` JSON response
   `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}` proves
   `NOT_SENT`;
@@ -167,8 +175,10 @@ returns a conflict. If its row is already `SENT`, the endpoint returns success w
 manual-review conflict instead of sending.
 
 The client retains an in-flight request ID after a failed HTTP call and reuses it
-on the next retry. It clears the ID only after the server confirms success. The
-staging smoke runner supplies its own UUID for the same reason.
+when the outcome is `NOT_SENT` or `UNKNOWN`. A confirmed `NOT_DELIVERED` result
+clears the ID so a later deliberate user action creates a new attempt; retaining
+the old ID would only return the terminal result. Success also clears the ID.
+The staging smoke runner supplies its own UUID for the same reason.
 
 ## Fallos and Detail UI
 
@@ -177,7 +187,9 @@ union of:
 
 - fiscal `FAILED` documents;
 - fiscal `REJECTED` documents;
-- `ACCEPTED` documents whose latest receipt attempt is `FAILED`.
+- `ACCEPTED` documents whose latest receipt attempt is `FAILED`; and
+- `ACCEPTED` documents whose latest receipt is still `PENDING` after provider
+  dispatch began.
 
 The latest receipt is selected by attempt chronology, with a supporting
 `email_deliveries` index. The list response includes a small derived receipt
@@ -186,7 +198,8 @@ attention state; it does not expose raw provider responses.
 In the Fallos list:
 
 - an accepted fiscal document keeps its `ACEPTADO` status;
-- a separate `Correo fallido` marker explains why it is in the view;
+- a separate `Correo fallido` or `Correo por revisar` marker explains why it is
+  in the view;
 - the failure total includes each document once.
 
 In the detail pane:
@@ -194,6 +207,8 @@ In the detail pane:
 - a known `NOT_SENT` result says the provider rejected the attempt before sending;
 - `NOT_DELIVERED` says delivery failed;
 - `UNKNOWN` says the provider outcome cannot be confirmed;
+- post-dispatch `PENDING` says the result is still unconfirmed and disables
+  resend until an operator reconciles it;
 - a legacy unclassified failure uses neutral wording;
 - `Reenviar ahora` appears inside the warning;
 - the duplicate resend action is omitted from the normal action row while the
@@ -226,6 +241,12 @@ Alert deduplication becomes per
 forever. The durable claim table stores only hashes for entity and recipient
 identity. Audit rows remain secondary operator history and are not used as the
 duplicate-send fence.
+
+For webhooks, target identity includes the normalized webhook URL before hashing.
+Rotating the secret URL therefore creates a distinct target for the same incident
+without storing the URL itself. A multi-recipient channel is marked sent only
+when every configured target is confirmed sent; an unresolved target keeps the
+channel failed/manual-reviewable even if a sibling target succeeds.
 
 Every caller supplies a stable incident ID for the triggering attempt or episode:
 

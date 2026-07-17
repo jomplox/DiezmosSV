@@ -112,6 +112,15 @@ export function receiptEmailFailureGuidance(
   return "El intento de envío falló.";
 }
 
+export function shouldRetainResendRequestIdAfterFailure(
+  outcome: ReceiptEmailDeliveryState["outcomeClass"] | undefined
+): boolean {
+  // A confirmed terminal non-delivery is safe only as a new deliberate action.
+  // Proven pre-accept rejection reclaims the same attempt; ambiguous and legacy
+  // outcomes retain the UUID so a reload-free retry cannot bypass their fence.
+  return outcome !== "NOT_DELIVERED";
+}
+
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
@@ -828,7 +837,31 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         ? { resendRequestId }
         : {};
     await runAction(action, async () => {
-      const result = await accountApi<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, { method: "POST", body });
+      let result: {
+        accepted?: boolean;
+        result?: { estado?: string };
+        emailSent?: boolean;
+        emailError?: string;
+      };
+      try {
+        result = await accountApi<typeof result>(
+          `/api/documents/${target.id}/${action}`,
+          { method: "POST", body }
+        );
+      } catch (error) {
+        if (
+          action === "resend" &&
+          isApiError(error) &&
+          !shouldRetainResendRequestIdAfterFailure(
+            typeof error.details.outcomeClass === "string"
+              ? error.details.outcomeClass as ReceiptEmailDeliveryState["outcomeClass"]
+              : null
+          )
+        ) {
+          resendRequestIds.current.delete(target.id);
+        }
+        throw error;
+      }
       if (action === "resend") {
         resendRequestIds.current.delete(target.id);
       }
@@ -4338,10 +4371,15 @@ function Stats({
   preCdeFailureCount?: number;
 }) {
   const counts = countByStatus(documents);
-  const receiptFailureCount = documents.filter(
-    (document) => document.status === "ACCEPTED" && document.receipt_email_status === "FAILED"
+  const receiptAttentionCount = documents.filter(
+    (document) =>
+      document.status === "ACCEPTED" &&
+      (
+        document.receipt_email_status === "FAILED" ||
+        document.receipt_email_requires_review === 1
+      )
   ).length;
-  const failureAttentionCount = (counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + receiptFailureCount + preCdeFailureCount;
+  const failureAttentionCount = (counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + receiptAttentionCount + preCdeFailureCount;
   const fallidos = <Metric label="Fallos y rechazos" value={failureAttentionCount} tone="bad" />;
   if (onlyFailed) {
     return (
@@ -4393,8 +4431,12 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
               <td>
                 <span className="document-status-stack">
                   <StatusPill status={documentDisplayStatus(document)} />
-                  {document.receipt_email_status === "FAILED" && (
-                    <span className="receipt-email-failure">Correo fallido</span>
+                  {(document.receipt_email_status === "FAILED" || document.receipt_email_requires_review === 1) && (
+                    <span className="receipt-email-failure">
+                      {document.receipt_email_requires_review === 1
+                        ? "Correo por revisar"
+                        : "Correo fallido"}
+                    </span>
                   )}
                 </span>
               </td>
@@ -4485,7 +4527,8 @@ function DetailPanel({
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const rejectionDetail = rejectionDetailForDocument(selected, audit);
-  const emailFailure = receiptEmailDelivery?.status === "FAILED"
+  const emailAttention =
+    receiptEmailDelivery?.status === "FAILED" || receiptEmailDelivery?.requiresReview
     ? receiptEmailDelivery
     : null;
   const emailEditing = emailEditingId === selected.id;
@@ -4529,19 +4572,32 @@ function DetailPanel({
           </div>
         </div>
       )}
-      {emailFailure && (
+      {emailAttention && (
         <div className="legal-box expired" role="alert">
           <AlertTriangle size={17} />
           <div>
-            <strong>Falló el envío del correo</strong>
-            <span>{receiptEmailFailureGuidance(emailFailure.outcomeClass)}</span>
-            {emailFailure.failureCode && <small>Código: {emailFailure.failureCode}</small>}
-            <small>Falló: {formatElSalvadorDateTime(emailFailure.occurredAt)} hora El Salvador</small>
+            <strong>
+              {emailAttention.status === "PENDING"
+                ? "Resultado del correo pendiente"
+                : "Falló el envío del correo"}
+            </strong>
+            <span>
+              {emailAttention.status === "PENDING"
+                ? "El proveedor pudo aceptar el correo, pero el sistema no pudo confirmar el resultado. Requiere revisión técnica."
+                : receiptEmailFailureGuidance(emailAttention.outcomeClass)}
+            </span>
+            {emailAttention.failureCode && <small>Código: {emailAttention.failureCode}</small>}
+            <small>
+              {emailAttention.status === "PENDING" ? "Iniciado" : "Falló"}:{" "}
+              {formatElSalvadorDateTime(emailAttention.occurredAt)} hora El Salvador
+            </small>
             <button
               type="button"
               className="email-recovery-action"
               disabled={
-                emailFailure.outcomeClass === "UNKNOWN" ||
+                emailAttention.status !== "FAILED" ||
+                emailAttention.outcomeClass === null ||
+                emailAttention.outcomeClass === "UNKNOWN" ||
                 fiscalOutcomePending ||
                 postAcceptFinalizationPending ||
                 busy === "resend"
@@ -4549,7 +4605,11 @@ function DetailPanel({
               onClick={() => onAction("resend")}
             >
               <Mail size={16} />
-              {emailFailure.outcomeClass === "UNKNOWN" ? "Revisión necesaria" : "Reenviar ahora"}
+              {emailAttention.status !== "FAILED" ||
+              emailAttention.outcomeClass === null ||
+              emailAttention.outcomeClass === "UNKNOWN"
+                ? "Revisión necesaria"
+                : "Reenviar ahora"}
             </button>
           </div>
         </div>
@@ -4593,7 +4653,7 @@ function DetailPanel({
         </div>
       </div>
       <div className="actions">
-        {!emailFailure && (
+        {!emailAttention && (
           <button disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : "Reenviar el comprobante al correo del donante"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
         )}
         <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar DTE</button>
@@ -5080,13 +5140,22 @@ async function api<T>(path: string, token: string, options: { method?: string; b
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new ApiError(response.status, userFacingErrorMessage(String(data.message ?? data.error ?? `HTTP ${response.status}`)));
+    const details = recordValue(data);
+    throw new ApiError(
+      response.status,
+      userFacingErrorMessage(String(details.message ?? details.error ?? `HTTP ${response.status}`)),
+      details
+    );
   }
   return data as T;
 }
 
 class ApiError extends Error {
-  constructor(readonly status: number, message: string) {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly details: Record<string, unknown> = {}
+  ) {
     super(message);
     this.name = "ApiError";
   }
