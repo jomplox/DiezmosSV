@@ -22,7 +22,7 @@ export interface RetentionExportResult {
   error?: string;
 }
 
-export interface TableManifestEntry {
+interface TableManifestEntry {
   rowCount: number;
   sha256: string;
 }
@@ -38,7 +38,7 @@ export interface RetentionManifest {
 // export writes them: retention/<YYYY>/<YYYY-MM>/{manifest.json,<table>.ndjson}.
 export const RETENTION_KEY_ROOT = "retention";
 
-export function retentionMonthPrefix(month: string): string {
+function retentionMonthPrefix(month: string): string {
   return `${RETENTION_KEY_ROOT}/${month.slice(0, 4)}/${month}`;
 }
 

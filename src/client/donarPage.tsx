@@ -1342,7 +1342,7 @@ export function DonarPage() {
   );
 }
 
-export function DonarThankYou({ monto }: { monto?: string }) {
+function DonarThankYou({ monto }: { monto?: string }) {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks">

@@ -17,7 +17,7 @@ export interface CredentialUpdateInput {
   emailFrom?: string;
 }
 
-export interface SecretStatusItem {
+interface SecretStatusItem {
   name: string;
   label: string;
   configured: boolean;
@@ -25,7 +25,7 @@ export interface SecretStatusItem {
   protected?: boolean;
 }
 
-export interface SecretStatusGroup {
+interface SecretStatusGroup {
   label: string;
   ready: boolean;
   items: SecretStatusItem[];

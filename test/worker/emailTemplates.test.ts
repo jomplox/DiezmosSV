@@ -204,6 +204,24 @@ describe("email subject boundary", () => {
     }
   });
 
+  it("uses a Cloudflare-allowed custom header for receipt idempotency", async () => {
+    const send = vi.fn(async (_message: unknown) => ({ messageId: "email_cf_1" }));
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    await service.sendReceipt(fakeRecord(), "ana@example.org", "dte-email:doc_1:dteReceipt");
+
+    const message = send.mock.calls[0][0] as { headers?: Record<string, string> };
+    expect(message.headers).toEqual({
+      "X-Idempotency-Key": "dte-email:doc_1:dteReceipt"
+    });
+    expect(message.headers).not.toHaveProperty("Idempotency-Key");
+    expect(message.headers).not.toHaveProperty("Message-ID");
+  });
+
   it("runs the receipt hook after preparation and before the provider side effect", async () => {
     const send = vi.fn(async () => ({ messageId: "must-not-send" }));
     const beforeProviderDispatch = vi.fn(async () => {

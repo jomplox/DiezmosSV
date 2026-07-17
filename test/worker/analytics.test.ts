@@ -7,7 +7,6 @@ import {
   elSalvadorHourOfWeek,
   type AnalyticsDocumentRow,
   type AnalyticsIntentRow,
-  type AnalyticsEmailRow,
   type AnalyticsRange
 } from "../../src/worker/services/analytics";
 

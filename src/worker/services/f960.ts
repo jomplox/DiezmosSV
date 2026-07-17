@@ -22,7 +22,7 @@ export interface F960Filters {
   endDate?: string | null;
 }
 
-export interface F960Row {
+interface F960Row {
   tipoOperacion: string;
   nit: string;
   nombre: string;

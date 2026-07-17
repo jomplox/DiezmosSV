@@ -75,7 +75,7 @@ export function analyticsRangePresets(now: Date): AnalyticsRangePreset[] {
   ];
 }
 
-export interface MonthlyChartPoint {
+interface MonthlyChartPoint {
   key: string;
   label: string;
   totalCents: number;

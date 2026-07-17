@@ -8,19 +8,14 @@ import { EmailService } from "./email";
 import { certificateEmailHtml } from "./emailHtml";
 import { renderDtePdf } from "./pdf";
 
-export const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
-export const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
-export const DONOR_CERTIFICATE_ENTITY_TYPE = "donor_certificate";
+const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
+const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
+const DONOR_CERTIFICATE_ENTITY_TYPE = "donor_certificate";
 
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
-// v2 bundles the complete dossier: the summary page(s) followed by every related
-// CDE PDF appended one per page. Bumped from v1 (summary only) because the emitted
-// output changed — the version is evidence of which renderer produced a certificate.
-export const CERTIFICATE_PDF_RENDERER_VERSION = "annual-certificate:v2";
-
-export interface CertificateDonation {
+interface CertificateDonation {
   issuedAt: string;
   dateLabel: string;
   numeroControl: string;
@@ -47,7 +42,7 @@ export interface DonorCertificateSummary {
   documents: DteDocumentRecord[];
 }
 
-export interface CertificateEmisor {
+interface CertificateEmisor {
   nombre: string;
   numDocumento: string;
 }
@@ -85,7 +80,7 @@ function elSalvadorYear(date: Date): number {
 }
 
 // dd/mm/yyyy in El Salvador local time for a stored ISO instant.
-export function elSalvadorDateLabel(iso: string): string {
+function elSalvadorDateLabel(iso: string): string {
   const parts = new Intl.DateTimeFormat("es-SV", {
     timeZone: EL_SALVADOR_TIME_ZONE,
     day: "2-digit",
@@ -176,7 +171,7 @@ function normalizeText(value: string | null | undefined): string | null {
   return trimmed.length ? trimmed : null;
 }
 
-export function formatCents(cents: number): string {
+function formatCents(cents: number): string {
   return (cents / 100).toFixed(2);
 }
 
@@ -356,7 +351,7 @@ function formatDocument(value: string | null | undefined): string {
   return value ?? "";
 }
 
-export interface AnnualCertificatePreviewDonor {
+interface AnnualCertificatePreviewDonor {
   // The donor grouping key (email, else name) — the single-donor send addresses a
   // donor by this exact value, so the preview row carries it for the per-row button.
   groupKey: string;
@@ -388,7 +383,7 @@ export interface AnnualCertificatePreview {
 // A busy year can have thousands of donors; the preview table (and its JSON payload)
 // collapses at that scale, so the preview returns at most this many donor rows. The
 // summary counts and matchCount still describe the full set.
-export const ANNUAL_PREVIEW_LIMIT = 50;
+const ANNUAL_PREVIEW_LIMIT = 50;
 
 // Fold accents and lowercase so a search for "jose" finds "José". NFD splits a base
 // letter from its combining diacritic; stripping the U+0300–U+036F combining range

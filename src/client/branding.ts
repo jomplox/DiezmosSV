@@ -16,8 +16,8 @@ export const CLIENT_BRANDING_DEFAULTS = {
 // where teal literals became var(--accent, …) and color-mix derivations).
 export const BRANDING_ACCENT_CSS_VAR = "--accent";
 
-export const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
-export const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
+const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
+const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
 export const BRANDING_LOGO_MAX_BYTES = 512 * 1024;
 export const BRANDING_LOGO_ACCEPT = ".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg";
 
@@ -92,20 +92,4 @@ export function brandingDonorLogoSrc(donorLogoVersion: string | null): string | 
 export function applyBranding(branding: Branding, doc: Document = document): void {
   doc.documentElement.style.setProperty(BRANDING_ACCENT_CSS_VAR, branding.accentColor);
   doc.title = branding.displayName;
-}
-
-// Fetch + apply in one call for the admin boot path. Never throws: a failed fetch
-// leaves the defaults in place so the login screen still renders.
-export async function loadAndApplyBranding(doc: Document = document): Promise<Branding> {
-  let branding: Branding = { ...CLIENT_BRANDING_DEFAULTS, logoVersion: null, donorLogoVersion: null };
-  try {
-    const response = await fetch("/api/branding");
-    if (response.ok) {
-      branding = parseBrandingResponse(await response.json());
-    }
-  } catch {
-    // Network failure: keep the defaults.
-  }
-  applyBranding(branding, doc);
-  return branding;
 }

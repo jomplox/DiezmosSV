@@ -6,7 +6,7 @@ export function generationCode(): string {
   return crypto.randomUUID().toUpperCase();
 }
 
-export function padControlSequence(value: number): string {
+function padControlSequence(value: number): string {
   return String(value).padStart(15, "0");
 }
 

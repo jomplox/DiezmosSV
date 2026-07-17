@@ -34,7 +34,7 @@ export function getEmisorConfig(env: Env): EmisorConfig {
   return config as EmisorConfig;
 }
 
-export function validateEmisorConfig(value: unknown): asserts value is EmisorConfig {
+function validateEmisorConfig(value: unknown): asserts value is EmisorConfig {
   const config = requiredRecord(value, "emisor");
   const direccion = requiredRecord(config.direccion, "emisor.direccion");
   const responsable = requiredRecord(config.responsable, "emisor.responsable");

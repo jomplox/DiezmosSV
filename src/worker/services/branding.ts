@@ -21,8 +21,8 @@ export const BRANDING_DEFAULTS = {
   supportEmail: "legacy-contact-1@example.com"
 } as const;
 
-export const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
-export const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
+const BRANDING_DISPLAY_NAME_MAX_LENGTH = 80;
+const BRANDING_SUPPORT_EMAIL_MAX_LENGTH = 100;
 // 512 KB: comfortably fits a logo (SVG/optimized PNG/JPEG) while keeping the R2
 // object — and the unauthenticated /api/branding/logo stream — cheap to serve.
 export const BRANDING_LOGO_MAX_BYTES = 512 * 1024;
@@ -163,7 +163,7 @@ export function brandingOrigin(env: BrandingOriginEnv): string {
 
 // Absolute, version-qualified logo URL for email chrome. Trims a trailing slash on the
 // origin so the path has exactly one separator; the ?v= busts the short public cache.
-export function brandingLogoUrl(env: BrandingOriginEnv, version: string): string {
+function brandingLogoUrl(env: BrandingOriginEnv, version: string): string {
   const origin = brandingOrigin(env).replace(/\/+$/, "");
   return `${origin}/api/branding/logo?v=${version}`;
 }

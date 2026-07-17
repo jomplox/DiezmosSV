@@ -76,7 +76,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
     addressLines: [receptorContactLine(receptor, foreignAddressFromApendice(document))]
   });
 
-  drawItemsTable(page, item, amount, regular, bold);
+  drawItemsTable(page, item, amount, regular);
   drawTotals(page, amount, document.resumen?.totalLetras, regular, bold);
   if (record.status === "INVALIDATED") {
     drawInvalidatedWatermark(page, bold);
@@ -271,7 +271,7 @@ function clampLines(lines: string[], maxLines: number, font: PDFFont, size: numb
   return kept;
 }
 
-function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont, bold: PDFFont): void {
+function drawItemsTable(page: PDFPage, item: CdeItem, amount: number, regular: PDFFont): void {
   const black = rgb(0, 0, 0);
   drawRoundedRectangle(page, { x: 18, y: 548, width: 576, height: 22, radius: 5, color: black });
   drawTextSafe(page, "CANTIDAD", { x: 24, y: 555, size: 8.3, font: regular, color: rgb(1, 1, 1) });

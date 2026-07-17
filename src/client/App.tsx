@@ -98,6 +98,30 @@ const TOAST_DISMISS_MS = 6000;
 // trámite) are excluded on purpose — they are awaiting transmission, not failed.
 export const FAILURE_VIEW_STATUSES = "FAILED,REJECTED";
 
+type ReceiptEmailAuditRow = Pick<AuditRow, "action" | "summary" | "created_at">;
+
+const RECEIPT_EMAIL_AUDIT_ACTIONS = new Set(["EMAIL_FAILED", "EMAIL_RESEND_FAILED", "EMAIL_SENT", "EMAIL_RESENT"]);
+const RECEIPT_EMAIL_FAILURE_ACTIONS = new Set(["EMAIL_FAILED", "EMAIL_RESEND_FAILED"]);
+
+export function latestReceiptEmailFailure(
+  audit: ReceiptEmailAuditRow[]
+): { summary: string; failedAt: string } | null {
+  let latest: ReceiptEmailAuditRow | null = null;
+  let latestTime = Number.NEGATIVE_INFINITY;
+  for (const row of audit) {
+    if (!RECEIPT_EMAIL_AUDIT_ACTIONS.has(row.action)) continue;
+    const rowTime = Date.parse(row.created_at);
+    if (!Number.isFinite(rowTime) || rowTime <= latestTime) continue;
+    latest = row;
+    latestTime = rowTime;
+  }
+  if (!latest || !RECEIPT_EMAIL_FAILURE_ACTIONS.has(latest.action)) return null;
+  return {
+    summary: latest.summary.trim() || "El proveedor de correo rechazó el envío.",
+    failedAt: latest.created_at
+  };
+}
+
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
@@ -4426,6 +4450,7 @@ function DetailPanel({
   const plain = JSON.parse(selected.plain_json);
   const invalidationWindow = invalidationWindowInfo(selected, now);
   const rejectionDetail = rejectionDetailForDocument(selected, audit);
+  const emailFailure = latestReceiptEmailFailure(audit);
   const emailEditing = emailEditingId === selected.id;
   const fiscalOutcomePending = Boolean(selected.fiscal_operation_claim_id);
   const postAcceptFinalizationPending = selected.status === "ACCEPTED" && !selected.post_accept_finalized_at;
@@ -4464,6 +4489,18 @@ function DetailPanel({
           <div>
             <strong>Completando el comprobante aceptado</strong>
             <span>El envío definitivo y la trazabilidad local se reintentan automáticamente.</span>
+          </div>
+        </div>
+      )}
+      {emailFailure && (
+        <div className="legal-box expired" role="alert">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>Falló el envío del correo</strong>
+            <span>El comprobante no se entregó al correo del donante.</span>
+            <small>Detalle: {emailFailure.summary}</small>
+            <small>Falló: {formatElSalvadorDateTime(emailFailure.failedAt)} hora El Salvador</small>
+            <small>Use “Reenviar correo” para intentarlo de nuevo.</small>
           </div>
         </div>
       )}

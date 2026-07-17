@@ -37,7 +37,7 @@ export interface DteDocument {
   donorDataVerified?: boolean;
 }
 
-export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
+type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
 
 export interface DonationIntentListItem {
   id: string;
@@ -61,7 +61,7 @@ export interface DocumentListPage {
   limit: number;
 }
 
-export type WompiIssuanceStatus =
+type WompiIssuanceStatus =
   | "PROCESSING"
   | "FAILED"
   | "DEAD_LETTERED"
@@ -129,100 +129,6 @@ export interface AuditActorContext {
   userAgent?: string;
 }
 
-export interface ContingencyPeriod {
-  id: string;
-  environment: "00" | "01";
-  status: string;
-  reason: string;
-  tipo_contingencia: number;
-  started_at: string;
-  ended_at: string | null;
-  event_id: string | null;
-  event_sello: string | null;
-  transmit_deadline_at: string | null;
-  event_deadline_at: string | null;
-  created_at: string;
-}
-
-export interface ContingencyEvent {
-  id: string;
-  document_id: string | null;
-  event_type: "CONTINGENCIA";
-  environment: "00" | "01";
-  codigo_generacion: string;
-  status: string;
-  sello_recibido: string | null;
-  mh_estado: string | null;
-  mh_observaciones_json: string;
-  legal_deadline_at: string | null;
-  created_by: string | null;
-  created_at: string;
-  accepted_at: string | null;
-}
-
-export interface ContingencyBatch {
-  id: string;
-  contingency_period_id: string;
-  environment: "00" | "01";
-  id_envio: string;
-  status: string;
-  codigo_lote: string | null;
-  request_json: string;
-  response_json: string;
-  last_error: string | null;
-  line_count: number;
-  accepted_count: number;
-  rejected_count: number;
-  pending_count: number;
-  created_at: string;
-  submitted_at: string | null;
-  last_polled_at: string | null;
-  updated_at: string;
-}
-
-export interface ContingencyBatchLine {
-  id: string;
-  batch_id: string;
-  contingency_period_id: string;
-  document_id: string;
-  line_no: number;
-  status: string;
-  codigo_generacion: string;
-  tipo_dte: "15";
-  signed_jws: string | null;
-  sello_recibido: string | null;
-  mh_estado: string | null;
-  mh_observaciones_json: string;
-  last_error: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ContingencySummary {
-  pending: number;
-  open: number;
-  eventAccepted: number;
-  closed: number;
-  failed: number;
-  eventsAccepted: number;
-  eventsRejected: number;
-  batches: number;
-  batchAccepted: number;
-  batchPending: number;
-  batchRejected: number;
-}
-
-export interface ContingencyState {
-  active: ContingencyPeriod | null;
-  pendingDocuments: DteDocument[];
-  batches: ContingencyBatch[];
-  batchLines: ContingencyBatchLine[];
-  periods: ContingencyPeriod[];
-  events: ContingencyEvent[];
-  audit: AuditRow[];
-  summary: ContingencySummary;
-}
-
 export interface CredentialStatusItem {
   name: string;
   label: string;
@@ -231,7 +137,7 @@ export interface CredentialStatusItem {
   protected?: boolean;
 }
 
-export interface CredentialStatusGroup {
+interface CredentialStatusGroup {
   label: string;
   ready: boolean;
   items: CredentialStatusItem[];
@@ -261,7 +167,7 @@ export interface EmailTemplateValue {
   body: string;
 }
 
-export interface EmailTemplateDefinition {
+interface EmailTemplateDefinition {
   type: string;
   label: string;
   description: string;
@@ -279,7 +185,7 @@ export interface AlertEmailState {
   alertEmail: string;
 }
 
-export type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
+type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
 
 export interface BackupMonth {
   month: string;
@@ -293,7 +199,7 @@ export interface BackupsGrid {
   months: BackupMonth[];
 }
 
-export interface BackupVerifyFile {
+interface BackupVerifyFile {
   table: string;
   ok: boolean;
   expected: string;
@@ -315,20 +221,20 @@ export interface AnalyticsMonthlyPoint {
   averageCents: number;
 }
 
-export interface AnalyticsWeeklyPoint {
+interface AnalyticsWeeklyPoint {
   key: string;
   totalCents: number;
   count: number;
 }
 
-export interface AnalyticsGiftSplitPoint {
+interface AnalyticsGiftSplitPoint {
   key: string;
   diezmoCents: number;
   ofrendaCents: number;
   otherCents: number;
 }
 
-export interface AnalyticsDonorMixPoint {
+interface AnalyticsDonorMixPoint {
   key: string;
   newDonors: number;
   returningDonors: number;
@@ -340,14 +246,14 @@ export interface AnalyticsYoyPoint {
   priorCents: number;
 }
 
-export interface AnalyticsTopDonor {
+interface AnalyticsTopDonor {
   donorName: string;
   donorEmail: string | null;
   count: number;
   totalCents: number;
 }
 
-export interface AnalyticsGeoBucket {
+interface AnalyticsGeoBucket {
   code: string;
   label: string;
   count: number;
@@ -365,14 +271,14 @@ export interface AnalyticsFunnel {
   medianMinutesToPay: number;
 }
 
-export interface AnalyticsMhHealth {
+interface AnalyticsMhHealth {
   medianLatencySeconds: number;
   p90LatencySeconds: number;
   weeklyRejections: Array<{ key: string; count: number }>;
   weeklyDeferred: Array<{ key: string; count: number }>;
 }
 
-export interface AnalyticsEmailWeeklyPoint {
+interface AnalyticsEmailWeeklyPoint {
   key: string;
   sent: number;
   failed: number;
@@ -384,7 +290,7 @@ export interface AnalyticsCohortRow {
   retention: number[];
 }
 
-export interface AnalyticsLapsedDonor {
+interface AnalyticsLapsedDonor {
   donorName: string;
   donorEmail: string | null;
   totalCents: number;
@@ -397,7 +303,7 @@ export interface AnalyticsHeatmapCell {
   count: number;
 }
 
-export interface AnalyticsProjection {
+interface AnalyticsProjection {
   currentMonthKey: string;
   currentMonthCents: number;
   movingAverageCents: number;

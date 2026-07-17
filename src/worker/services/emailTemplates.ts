@@ -2,7 +2,7 @@ import type { DteDocumentRecord } from "../types";
 
 export const EMAIL_TEMPLATES_SETTING_KEY = "email_templates_json";
 
-export type EmailTemplateType = "dteReceipt" | "dteInvalidation";
+type EmailTemplateType = "dteReceipt" | "dteInvalidation";
 
 // Evidence types recorded in email_deliveries.email_type: the transitorio receipt
 // (documento diferido: SIGNED + transmission_deferred_at, sin sello) se distingue del comprobante
@@ -59,7 +59,7 @@ export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
   }
 ];
 
-export const EMAIL_TEMPLATE_PLACEHOLDERS = [
+const EMAIL_TEMPLATE_PLACEHOLDERS = [
   "{{numeroControl}}",
   "{{codigoGeneracion}}",
   "{{donante}}",

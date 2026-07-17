@@ -17,13 +17,10 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     MH_CERT_XML_PART_1?: string;
     MH_CERT_XML_PART_2?: string;
     MH_CERT_PASSWORD?: string;
-    MH_USER?: string;
-    MH_PASSWORD?: string;
     MH_USER_TEST?: string;
     MH_PASSWORD_TEST?: string;
     MH_USER_PROD?: string;
     MH_PASSWORD_PROD?: string;
-    MH_CONTINGENCIA_URL_PROD?: string;
     EMAIL_PROVIDER_URL?: string;
     EMAIL_API_KEY?: string;
     EMAIL_FROM?: string;
@@ -182,7 +179,7 @@ export interface ContingencyBatchLineRecord {
   updated_at: string;
 }
 
-export type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
+type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
 
 // The five CAT-022 receptor document types the public /donar form accepts
 // (mirrors the CHECK constraint from migration 0011).
@@ -262,7 +259,7 @@ export interface WompiPaymentLink {
   urlEnlaceLargo: string;
 }
 
-export type WompiIssuanceStatus =
+type WompiIssuanceStatus =
   | "PROCESSING"
   | "FAILED"
   | "DEAD_LETTERED"
@@ -328,9 +325,4 @@ export interface MhResponse {
   selloRecibido: string | null;
   observaciones: string[];
   raw: unknown;
-}
-
-export interface SignedArtifact {
-  plainJson: Record<string, unknown>;
-  jws: string;
 }

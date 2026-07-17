@@ -93,7 +93,7 @@ export interface AnalyticsIntentRow {
   paid_at: string | null;
 }
 
-export interface AnalyticsEmailRow {
+interface AnalyticsEmailRow {
   document_id: string;
   status: string;
   created_at: string;
@@ -188,54 +188,54 @@ function percentile(values: number[], p: number): number {
 
 // ----- Public metric shapes -----
 
-export interface MonthlyPoint {
+interface MonthlyPoint {
   key: string; // YYYY-MM
   totalCents: number;
   count: number;
   averageCents: number;
 }
 
-export interface WeeklyPoint {
+interface WeeklyPoint {
   key: string; // Monday YYYY-MM-DD
   totalCents: number;
   count: number;
 }
 
-export interface GiftSplitPoint {
+interface GiftSplitPoint {
   key: string;
   diezmoCents: number;
   ofrendaCents: number;
   otherCents: number;
 }
 
-export interface DonorMixPoint {
+interface DonorMixPoint {
   key: string;
   newDonors: number;
   returningDonors: number;
 }
 
-export interface YoyPoint {
+interface YoyPoint {
   // month-of-year label (01..12) with current-year and prior-year totals overlaid.
   month: string; // MM
   currentCents: number;
   priorCents: number;
 }
 
-export interface TopDonor {
+interface TopDonor {
   donorName: string;
   donorEmail: string | null;
   count: number;
   totalCents: number;
 }
 
-export interface GeoBucket {
+interface GeoBucket {
   code: string;
   label: string;
   count: number;
   totalCents: number;
 }
 
-export interface FunnelMetrics {
+interface FunnelMetrics {
   created: number;
   datos: number;
   paid: number;
@@ -247,40 +247,40 @@ export interface FunnelMetrics {
   medianMinutesToPay: number;
 }
 
-export interface MhHealthMetrics {
+interface MhHealthMetrics {
   medianLatencySeconds: number;
   p90LatencySeconds: number;
   weeklyRejections: Array<{ key: string; count: number }>;
   weeklyDeferred: Array<{ key: string; count: number }>;
 }
 
-export interface EmailWeeklyPoint {
+interface EmailWeeklyPoint {
   key: string;
   sent: number;
   failed: number;
 }
 
-export interface CohortRow {
+interface CohortRow {
   cohort: string; // first-gift month YYYY-MM
   size: number;
   // retention[i] = % of the cohort that gave again i months after the first gift.
   retention: number[];
 }
 
-export interface LapsedDonor {
+interface LapsedDonor {
   donorName: string;
   donorEmail: string | null;
   totalCents: number;
   lastGiftAt: string;
 }
 
-export interface HeatmapCell {
+interface HeatmapCell {
   day: number; // 0=Mon..6=Sun
   hour: number; // 0..23
   count: number;
 }
 
-export interface ProjectionMetrics {
+interface ProjectionMetrics {
   currentMonthKey: string;
   currentMonthCents: number;
   movingAverageCents: number;
@@ -338,7 +338,6 @@ export interface BuildAnalyticsInput {
 export function buildAnalytics(input: BuildAnalyticsInput): AnalyticsResult {
   const labels = input.labels ?? DEFAULT_LABELS;
   const accepted = input.documents.filter((doc) => doc.status === "ACCEPTED");
-  const nowIso = input.now.toISOString();
 
   // Correlate each accepted doc to its intent (for gift_type / geography), keyed by id.
   const intentByDoc = new Map<string, AnalyticsIntentRow>();

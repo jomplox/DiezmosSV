@@ -37,7 +37,7 @@ export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
 // ($100–$2,000): the chip prefills the embed, so wildly different anchors on two
 // consecutive screens read as a mistake. $50 keeps an accessible low option.
 export const DONAR_AMOUNT_CHIPS_US = [50, 100, 250, 500] as const;
-export const DONAR_MIN_AMOUNT = 1;
+const DONAR_MIN_AMOUNT = 1;
 
 // ── Step wizard (Givebutter-style structure, monochrome Gotham skin) ─────────
 //
@@ -140,8 +140,8 @@ export const DONAR_CHANGE_DOOR_LABEL = "← Cambiar opción";
 // on mount; the chooser writes it back via history.replaceState so a refresh
 // keeps the door. Any other value (or absence) leaves the donor on the chooser.
 export const DONAR_ROUTE_PARAM = "ruta";
-export const DONAR_ROUTE_SV = "sv";
-export const DONAR_ROUTE_EEUU = "eeuu";
+const DONAR_ROUTE_SV = "sv";
+const DONAR_ROUTE_EEUU = "eeuu";
 
 export function doorFromSearch(search: string): DonarDoor | null {
   const value = new URLSearchParams(search).get(DONAR_ROUTE_PARAM);
@@ -175,7 +175,7 @@ export function isUsDonation(form: Pick<DonationFormInput, "foreignResident" | "
 
 // Normalizes the entered monto to a plain dollar string for Givebutter URL prefill.
 // Returns "" for a blank/invalid amount so the caller can omit the query param.
-export function givebutterAmountParam(amount: string): string {
+function givebutterAmountParam(amount: string): string {
   const parsed = Number.parseFloat(amount.trim());
   if (!Number.isFinite(parsed) || parsed <= 0) {
     return "";
@@ -245,8 +245,6 @@ export type DonorDocumentType = "13" | "36" | "37" | "03" | "02";
 // Diezmo vs Ofrenda, the REQUIRED first field on the SV (Wompi/CDE) form. "" is the
 // unselected state (the form client-validates it as required before submitting).
 export type DonarGiftType = "DIEZMO" | "OFRENDA";
-export const DONAR_GIFT_TYPE_DIEZMO = "DIEZMO" as const;
-export const DONAR_GIFT_TYPE_OFRENDA = "OFRENDA" as const;
 // Chip labels (monochrome chips, like the monto chips; active inverts to black).
 export const DONAR_GIFT_TYPE_LABEL: Record<DonarGiftType, string> = {
   DIEZMO: "Diezmo",
@@ -266,7 +264,7 @@ export const DONAR_FOREIGN_COUNTRIES = CAT020_COUNTRIES.filter((option) => optio
 // optgroup surfaces the countries where the Salvadoran diaspora actually lives so
 // nobody scrolls a government list to find Estados Unidos or Guatemala. The codes
 // stay in the full list too — duplicate options are standard in country selects.
-export const DONAR_FREQUENT_COUNTRY_CODES = ["US", "CA", "ES", "GT", "MX", "HN", "IT", "AU"] as const;
+const DONAR_FREQUENT_COUNTRY_CODES = ["US", "CA", "ES", "GT", "MX", "HN", "IT", "AU"] as const;
 export const DONAR_FREQUENT_COUNTRIES = DONAR_FREQUENT_COUNTRY_CODES.map((code) =>
   DONAR_FOREIGN_COUNTRIES.find((option) => option.code === code)
 ).filter((option): option is (typeof DONAR_FOREIGN_COUNTRIES)[number] => option !== undefined);
@@ -450,7 +448,7 @@ export function donationStep2FieldErrors(input: DonationFormInput): DonationFiel
 // values: "Seleccione un municipio." is still true of the reset (empty) child, and
 // keeping it visible walks the donor down the cascade instead of resurfacing it on
 // the next submit.
-export const DONATION_FIELD_ERROR_CLEARERS: Record<keyof DonationFormInput, readonly DonationField[]> = {
+const DONATION_FIELD_ERROR_CLEARERS: Record<keyof DonationFormInput, readonly DonationField[]> = {
   amount: ["amount"],
   giftType: ["giftType"],
   donorDocumentType: ["donorDocument", "donorName"],

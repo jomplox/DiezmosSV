@@ -1,7 +1,6 @@
 import { BarChart3, TrendingUp, Filter } from "lucide-react";
 import type { ReactNode } from "react";
 import {
-  analyticsRangePresets,
   DAY_LABELS,
   filterGiftType,
   formatCentsUsd,
