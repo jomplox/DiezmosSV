@@ -30,6 +30,7 @@ export interface DteDocument {
   post_accept_finalization_claim_id?: string | null;
   post_accept_finalization_claimed_at?: string | null;
   post_accept_email_dispatch_started_at?: string | null;
+  receipt_email_status?: "PENDING" | "SENT" | "FAILED" | null;
   created_at: string;
   updated_at: string;
   // Set by the document detail fetch when a completed donation intent produced this

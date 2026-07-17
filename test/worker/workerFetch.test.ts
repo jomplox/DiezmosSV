@@ -9378,6 +9378,105 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(body.documents.map((document) => document.id)).toEqual(["doc_rejected_list", "doc_failed_list"]);
   });
 
+  it("lists accepted receipt failures under the server-side attention filter until a later send succeeds", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      {
+        ...testDocument(),
+        id: "doc_fiscal_failed_attention",
+        codigo_generacion: "AAAAAAA1-AAAA-4AAA-8AAA-AAAAAAAAAAA1",
+        numero_control: "DTE-15-M001P004-000000000000811",
+        status: "FAILED",
+        created_at: "2026-07-17T11:01:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_fiscal_rejected_attention",
+        codigo_generacion: "BBBBBBB2-BBBB-4BBB-8BBB-BBBBBBBBBBB2",
+        numero_control: "DTE-15-M001P004-000000000000812",
+        status: "REJECTED",
+        created_at: "2026-07-17T11:02:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_receipt_failed_attention",
+        codigo_generacion: "CCCCCCC3-CCCC-4CCC-8CCC-CCCCCCCCCCC3",
+        numero_control: "DTE-15-M001P004-000000000000813",
+        status: "ACCEPTED",
+        created_at: "2026-07-17T11:03:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_receipt_recovered_attention",
+        codigo_generacion: "DDDDDDD4-DDDD-4DDD-8DDD-DDDDDDDDDDD4",
+        numero_control: "DTE-15-M001P004-000000000000814",
+        status: "ACCEPTED",
+        created_at: "2026-07-17T11:04:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_deferred_attention",
+        codigo_generacion: "EEEEEEE5-EEEE-4EEE-8EEE-EEEEEEEEEEE5",
+        numero_control: "DTE-15-M001P004-000000000000815",
+        status: "SIGNED",
+        transmission_deferred_at: "2026-07-17T11:05:00.000Z",
+        created_at: "2026-07-17T11:05:00.000Z"
+      }
+    );
+    db.emailDeliveries.push(
+      {
+        id: "delivery_failed_latest",
+        document_id: "doc_receipt_failed_attention",
+        email_type: "dteReceipt",
+        status: "FAILED",
+        provider_response_json: JSON.stringify({ error: "provider rejected" }),
+        created_at: "2026-07-17T11:06:00.000Z"
+      },
+      {
+        id: "delivery_recovered_old_failure",
+        document_id: "doc_receipt_recovered_attention",
+        email_type: "dteReceipt",
+        status: "FAILED",
+        provider_response_json: JSON.stringify({ error: "provider rejected" }),
+        created_at: "2026-07-17T11:06:00.000Z"
+      },
+      {
+        id: "delivery_recovered_latest_success",
+        document_id: "doc_receipt_recovered_attention",
+        email_type: "dteReceipt",
+        status: "SENT",
+        provider_response_json: JSON.stringify({ provider: "cloudflare-email" }),
+        created_at: "2026-07-17T11:07:00.000Z"
+      }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?attention=failures", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      documents: Array<{
+        id: string;
+        status: string;
+        receipt_email_status?: string | null;
+      }>;
+    };
+    expect(body.documents.map((document) => document.id)).toEqual([
+      "doc_receipt_failed_attention",
+      "doc_fiscal_rejected_attention",
+      "doc_fiscal_failed_attention"
+    ]);
+    expect(body.documents.find((document) => document.id === "doc_receipt_failed_attention")).toMatchObject({
+      status: "ACCEPTED",
+      receipt_email_status: "FAILED"
+    });
+  });
+
   it("surfaces deferred docs as En trámite (virtual filter) while a plain SIGNED doc stays out", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
@@ -14882,7 +14981,28 @@ class Statement {
       }
       if (this.sql.includes("ORDER BY dte_documents.created_at DESC, dte_documents.id DESC")) {
         let argIndex = 0;
-        if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
+        const latestReceipt = (documentId: string) =>
+          this.db.emailDeliveries
+            .filter(
+              (delivery) =>
+                delivery.document_id === documentId &&
+                (delivery.email_type === "dteReceipt" || delivery.email_type === "dteReceiptTransitorio")
+            )
+            .sort((left, right) => {
+              const leftAttemptedAt = String(left.claim_attempted_at ?? left.created_at ?? "");
+              const rightAttemptedAt = String(right.claim_attempted_at ?? right.created_at ?? "");
+              return (
+                rightAttemptedAt.localeCompare(leftAttemptedAt) ||
+                String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")) ||
+                String(right.id ?? "").localeCompare(String(left.id ?? ""))
+              );
+            })[0];
+        if (this.sql.includes("latest_receipt.status = 'FAILED'")) {
+          documents = documents.filter((document) => {
+            if (document.status === "FAILED" || document.status === "REJECTED") return true;
+            return document.status === "ACCEPTED" && latestReceipt(document.id)?.status === "FAILED";
+          });
+        } else if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
           // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
           documents = documents.filter((document) => document.status === "SIGNED" && document.transmission_deferred_at != null);
         } else if (this.sql.includes("status IN")) {
@@ -14908,7 +15028,12 @@ class Statement {
         }
         const limit = Number(this.args.at(-1) ?? 100);
         documents.sort((left, right) => String(right.created_at).localeCompare(String(left.created_at)) || String(right.id).localeCompare(String(left.id)));
-        return { results: documents.slice(0, limit) as T[] };
+        return {
+          results: documents.slice(0, limit).map((document) => ({
+            ...document,
+            receipt_email_status: latestReceipt(document.id)?.status ?? null
+          })) as T[]
+        };
       }
       if (this.sql.includes("status = ?")) {
         const status = String(this.args[0]);
