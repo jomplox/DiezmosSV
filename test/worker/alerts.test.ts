@@ -73,7 +73,10 @@ describe("operational alert dispatch", () => {
       incidentId: "attempt_multi"
     });
 
-    expect(sent.map((message) => message.to)).toEqual(["owner@example.org", "admin@example.org"]);
+    expect(sent.map((message) => message.to).sort()).toEqual([
+      "admin@example.org",
+      "owner@example.org"
+    ]);
     expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:DTE_FAILED")).toHaveLength(1);
   });
 
