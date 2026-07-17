@@ -24,6 +24,8 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     EMAIL_PROVIDER_URL?: string;
     EMAIL_API_KEY?: string;
     EMAIL_FROM?: string;
+    ALERT_WEBHOOK_URL?: string;
+    ALERT_WEBHOOK_KIND?: "slack" | "discord";
     EMISOR_CONFIG_JSON?: string;
   };
 

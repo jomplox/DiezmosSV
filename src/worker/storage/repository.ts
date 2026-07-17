@@ -3125,6 +3125,35 @@ export class Repository {
     return Number(row?.count ?? 0);
   }
 
+  async hasOperationalAlertChannelResult(input: {
+    action: string;
+    entityType: string;
+    entityId: string;
+    incidentId: string;
+    channel: "email" | "webhook";
+  }): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `SELECT 1 AS found
+         FROM audit_logs
+         WHERE action = ?
+           AND entity_type = ?
+           AND entity_id = ?
+           AND json_extract(metadata_json, '$.incidentId') = ?
+           AND json_extract(metadata_json, '$.channel') = ?
+         LIMIT 1`
+      )
+      .bind(
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.incidentId,
+        input.channel
+      )
+      .first<{ found: number }>();
+    return Boolean(row?.found);
+  }
+
   // Windowed variant for the auth rate limiter: counts (action, entity_id) audits
   // whose created_at is at or after `sinceIso`. Reads use the (action, entity_id,
   // created_at) index added in migration 0008.

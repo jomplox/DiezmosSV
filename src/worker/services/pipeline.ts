@@ -75,7 +75,7 @@ function isTerminalDteStatus(status: string): boolean {
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
-// una alerta operativa MH_UNAVAILABLE (una sola vez por documento, vía dedupe).
+// una alerta operativa MH_UNAVAILABLE (una sola vez por episodio diferido y canal).
 const DEFERRED_ALERT_AGE_MS = 60 * 60 * 1000;
 
 export class IssuancePipeline {
@@ -121,15 +121,15 @@ export class IssuancePipeline {
           });
         }
         // Retried on every tick regardless of the WOMPI_EVENT_STALLED audit above:
-        // if the email send itself failed (ALERT_FAILED), that audit alone must not
-        // permanently suppress future attempts. sendOperationalAlert has its own
-        // ALERT_SENT:WOMPI_EVENT_STALLED dedupe, so once a send succeeds this becomes a no-op.
+        // a failed alert channel does not suppress a later attempt. Successful
+        // channels dedupe on this stable issuance epoch.
         await sendOperationalAlert(this.env, this.repo, {
           kind: "WOMPI_EVENT_STALLED",
           title: "Evento Wompi sin procesar",
           detail: summary,
           entityType: "wompi_event",
-          entityId: eventId
+          entityId: eventId,
+          incidentId: issuanceEpoch ?? eventId
         });
         continue;
       }
@@ -544,18 +544,22 @@ export class IssuancePipeline {
         if (current) return current;
       }
       const failureMessage = error instanceof Error ? error.message : String(error);
+      const failureIncidentId =
+        (await this.repo.getDteDocument(record.id))?.updated_at ?? record.updated_at;
       await this.repo.createAudit({
         action: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: failureMessage
+        summary: failureMessage,
+        metadata: { incidentId: failureIncidentId }
       });
       await sendOperationalAlert(this.env, this.repo, {
         kind: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         title: wompiBacked ? "Fallo al emitir DTE" : "Fallo al emitir CDE avanzado",
         detail: `El documento ${record.numero_control} falló: ${failureMessage}`,
         entityType: "dte_document",
-        entityId: record.id
+        entityId: record.id,
+        incidentId: failureIncidentId
       });
       throw error;
     }
@@ -698,8 +702,8 @@ export class IssuancePipeline {
   }
 
   // Alerta operativa MH_UNAVAILABLE cuando algún CDE diferido lleva más de una hora
-  // sin transmitirse. sendOperationalAlert dedupe por (kind, entityId): usar el id
-  // del documento más antiguo la dispara UNA sola vez por atasco.
+  // sin transmitirse. El id y la fecha de deferimiento del documento más antiguo
+  // forman la identidad estable de ese episodio de atasco.
   private async alertOnDeferredBacklog(): Promise<void> {
     const remaining = await this.repo.listDeferredTransmissionDocuments();
     const cutoff = new Date(Date.now() - DEFERRED_ALERT_AGE_MS).toISOString();
@@ -713,7 +717,8 @@ export class IssuancePipeline {
       title: "Ministerio de Hacienda no disponible",
       detail: `Hay ${overdue.length} CDE con transmisión diferida por más de una hora (el más antiguo: ${overdue[0].numero_control}). El sistema reintenta automáticamente cada 15 minutos; los donantes ya recibieron su comprobante transitorio.`,
       entityType: "dte_document",
-      entityId: overdue[0].id
+      entityId: overdue[0].id,
+      incidentId: `${overdue[0].id}:${overdue[0].transmission_deferred_at ?? overdue[0].created_at}`
     });
   }
 
@@ -1029,7 +1034,8 @@ export class IssuancePipeline {
         title: "Fallo al enviar comprobante",
         detail: `El comprobante ${record.numero_control} no pudo enviarse al donante: ${failure.message}`,
         entityType: "dte_document",
-        entityId: record.id
+        entityId: record.id,
+        incidentId: deliveryClaim.claimToken
       });
       return false;
     }

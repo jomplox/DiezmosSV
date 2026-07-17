@@ -24,5 +24,9 @@ MH_PASSWORD_PROD="replace-with-mh-production-api-password"
 # EMAIL_PROVIDER_URL="https://email-provider.example/send"
 # EMAIL_API_KEY="replace-with-email-provider-api-key"
 EMAIL_FROM="dte@example.org"
+# Optional independent operational-alert channel. Keep the URL private and choose
+# exactly one supported payload format when enabling it.
+# ALERT_WEBHOOK_URL="https://hooks.example.org/replace-with-private-webhook"
+# ALERT_WEBHOOK_KIND="slack"
 # Use single quotes so wrangler keeps the inner double quotes intact (no backslash escapes).
 EMISOR_CONFIG_JSON='{"tipoDocumento":"36","numDocumento":"10000000000001","nrc":null,"nombre":"Iglesia Demo","codActividad":"94910","descActividad":"Actividades de organizaciones religiosas","nombreComercial":"Iglesia Demo","direccion":{"departamento":"06","municipio":"22","distrito":"01","complemento":"San Salvador, El Salvador"},"telefono":"70000003","correo":"dte@example.org","codEstable":"0001","codEstableMH":"0001","codPuntoVenta":"01","codPuntoVentaMH":"0001","controlPrefix":"00010001","defaultReceptorTipoDocumento":"13","defaultCodPais":"SV","defaultDonationType":1,"defaultUnidadMedida":99,"paymentMethodCode":null,"responsable":{"nombre":"Responsable Legal","tipoDocumento":"13","numeroDocumento":"000000000","tipoEstablecimiento":"02"}}'

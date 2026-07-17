@@ -359,6 +359,18 @@ class RetentionStatement {
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT 1 AS found") && this.sql.includes("json_extract(metadata_json")) {
+      const [action, entityType, entityId, incidentId, channel] = this.args.map(String);
+      const found = this.db.audits.some((audit) => {
+        const metadata = JSON.parse(String(audit.metadata_json ?? "{}")) as Record<string, unknown>;
+        return audit.action === action
+          && audit.entity_type === entityType
+          && audit.entity_id === entityId
+          && metadata.incidentId === incidentId
+          && metadata.channel === channel;
+      });
+      return (found ? { found: 1 } : null) as T | null;
+    }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs")) {
       const [action, entityId] = this.args.map(String);
       return { count: this.db.audits.filter((audit) => audit.action === action && audit.entity_id === entityId).length } as T;

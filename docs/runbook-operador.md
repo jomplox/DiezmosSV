@@ -172,6 +172,9 @@ La sección **Fallos** reúne dos situaciones distintas:
 - Un CDE **Fallido** ya existe, pero tuvo un error durante el proceso. Un CDE
   **Rechazado** también existe y Hacienda respondió que no lo aceptaba. Para estos casos,
   seleccione el documento en la lista y use el panel de detalle a la derecha.
+- Un CDE **Aceptado** también aparece aquí cuando el comprobante fiscal quedó correcto
+  pero su correo no llegó. La fila muestra **Correo fallido** y el detalle explica si el
+  envío se puede intentar otra vez con seguridad o necesita revisión.
 
 En una tarjeta **CDE NO CREADO**, **Número reservado** significa que el sistema apartó ese
 número para crear el mismo comprobante al reintentar; no significa que el CDE ya fue
@@ -180,11 +183,13 @@ reservarlo. No emita otro CDE para sustituir esa tarjeta.
 
 Para un CDE **Fallido** o **Rechazado**:
 
-- Pulse **Reintentar** para volver a procesar el CDE. Es lo primero que debe intentar: la
+- Pulse **Reintentar DTE** para volver a procesar el CDE. Es lo primero que debe intentar: la
   mayoría de fallos son temporales (Hacienda ocupada, corte de red) y se resuelven al
   reintentar.
 - Si el correo al donante falló pero el CDE está **Aceptado**, corrija el correo con el
-  lápiz junto a **Correo de envío** y pulse **Reenviar correo**.
+  lápiz junto a **Correo de envío** si hace falta y pulse **Reenviar ahora** dentro del
+  aviso rojo. Púlselo una sola vez; si el sistema no puede confirmar el resultado
+  anterior, el botón queda bloqueado para evitar dos correos y pide revisión manual.
 
 **Cuándo escalar a soporte técnico:** si un mismo CDE sigue en **Fallido** o **Rechazado**
 después de dos o tres reintentos, o si el mensaje de error menciona credenciales, firma o
