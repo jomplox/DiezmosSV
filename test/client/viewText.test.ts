@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { FAILURE_VIEW_STATUSES, documentListEmptyMessage, viewSubtitle } from "../../src/client/App";
 
@@ -48,9 +50,14 @@ describe("documentListEmptyMessage", () => {
 });
 
 describe("FAILURE_VIEW_STATUSES", () => {
-  it("loads both failed and rejected documents for the Fallos view", () => {
-    // The Fallos subtitle promises errores O rechazos: REJECTED CDEs are real MH
-    // rejections that need operator action, so the view must request both statuses.
+  it("keeps the legacy combined option for the general Documents status picker", () => {
     expect(FAILURE_VIEW_STATUSES.split(",")).toEqual(["FAILED", "REJECTED"]);
+  });
+
+  it("uses the server-side requires-attention filter for the dedicated Fallos view", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+
+    expect(appSource).toContain('if (view === "failures") params.set("attention", "failures");');
+    expect(appSource).not.toContain('const filteredStatus = view === "failures" ? FAILURE_VIEW_STATUSES : status;');
   });
 });

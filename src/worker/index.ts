@@ -902,6 +902,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     requireRole(user, "VIEWER");
     return jsonResponse(await repo.listDteDocuments({
       status: url.searchParams.get("status"),
+      attention: url.searchParams.get("attention") === "failures" ? "failures" : null,
       q: url.searchParams.get("q"),
       cursor: url.searchParams.get("cursor"),
       limit: Number(url.searchParams.get("limit") ?? 50)

@@ -45,11 +45,21 @@ describe("latestReceiptEmailFailure", () => {
 });
 
 describe("document email failure notice", () => {
-  it("renders the failed delivery and recovery action in the document detail panel", () => {
+  it("renders the failed delivery and its recovery action inside the warning", () => {
     const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 
     expect(appSource).toContain("latestReceiptEmailFailure(audit)");
     expect(appSource).toContain("Falló el envío del correo");
-    expect(appSource).toContain("Use “Reenviar correo” para intentarlo de nuevo.");
+    expect(appSource).toContain("El intento de envío falló.");
+    expect(appSource).toContain("Reenviar ahora");
+    expect(appSource).toContain("{!emailFailure && (");
+    expect(appSource).toContain("Reintentar DTE");
+  });
+
+  it("marks accepted receipt failures in the document list and failure metric", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+
+    expect(appSource).toContain("Correo fallido");
+    expect(appSource).toContain('document.receipt_email_status === "FAILED"');
   });
 });

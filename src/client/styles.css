@@ -2749,6 +2749,19 @@ td.numeric, th.numeric {
   color: var(--ink-secondary);
 }
 
+.document-status-stack {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+}
+
+.receipt-email-failure {
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .status.accepted {
   background: var(--ok-tint);
   color: var(--ok-ink);
@@ -2984,6 +2997,17 @@ dd {
 .legal-box small {
   color: inherit;
   opacity: 0.78;
+}
+
+.legal-box .email-recovery-action {
+  width: fit-content;
+  min-height: 34px;
+  margin-top: 6px;
+  padding: 0 12px;
+  color: var(--surface);
+  background: var(--danger);
+  border-color: var(--danger);
+  font-size: 12px;
 }
 
 .actions {

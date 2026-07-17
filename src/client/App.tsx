@@ -92,10 +92,9 @@ type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
 const TOAST_DISMISS_MS = 6000;
-// The Fallos view lists CDE que requieren atención: both FAILED (issuance errors)
-// AND REJECTED (real MH rejections needing operator action). The list endpoint reads
-// this comma-separated value as a multi-status IN filter. Deferred SIGNED docs (En
-// trámite) are excluded on purpose — they are awaiting transmission, not failed.
+// The general Documents status picker keeps a combined fiscal failure option. The
+// dedicated Fallos view uses the server-side attention filter so it can also include
+// accepted CDEs whose latest receipt email failed.
 export const FAILURE_VIEW_STATUSES = "FAILED,REJECTED";
 
 type ReceiptEmailAuditRow = Pick<AuditRow, "action" | "summary" | "created_at">;
@@ -335,7 +334,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     () => view === "failures" ? filterPreCdeFailures(preCdeFailures, debouncedQuery) : [],
     [view, preCdeFailures, debouncedQuery]
   );
-  const filteredStatus = view === "failures" ? FAILURE_VIEW_STATUSES : status;
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
 
   useEffect(() => {
@@ -408,7 +406,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       return;
     }
     void refresh().catch(handleApiFailure);
-  }, [token, filteredStatus, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch]);
+  }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
   // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
@@ -530,9 +528,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   async function fetchDocumentPage(options: { append?: boolean; cursor?: string | null; query?: string; status?: string } = {}) {
     const params = new URLSearchParams();
-    const effectiveStatus = options.status ?? filteredStatus;
+    const effectiveStatus = options.status ?? status;
     const effectiveQuery = options.query ?? debouncedQuery;
-    if (effectiveStatus) params.set("status", effectiveStatus);
+    if (view === "failures") params.set("attention", "failures");
+    else if (effectiveStatus) params.set("status", effectiveStatus);
     if (effectiveQuery) params.set("q", effectiveQuery);
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(DOCUMENT_PAGE_SIZE));
@@ -4316,7 +4315,11 @@ function Stats({
   preCdeFailureCount?: number;
 }) {
   const counts = countByStatus(documents);
-  const fallidos = <Metric label="Fallos y rechazos" value={(counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + preCdeFailureCount} tone="bad" />;
+  const receiptFailureCount = documents.filter(
+    (document) => document.status === "ACCEPTED" && document.receipt_email_status === "FAILED"
+  ).length;
+  const failureAttentionCount = (counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + receiptFailureCount + preCdeFailureCount;
+  const fallidos = <Metric label="Fallos y rechazos" value={failureAttentionCount} tone="bad" />;
   if (onlyFailed) {
     return (
       <>
@@ -4364,7 +4367,14 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
         <tbody>
           {documents.map((document) => (
             <tr key={document.id} className={selectedId === document.id ? "selected" : ""} onClick={() => onSelect(document.id)}>
-              <td><StatusPill status={documentDisplayStatus(document)} /></td>
+              <td>
+                <span className="document-status-stack">
+                  <StatusPill status={documentDisplayStatus(document)} />
+                  {document.receipt_email_status === "FAILED" && (
+                    <span className="receipt-email-failure">Correo fallido</span>
+                  )}
+                </span>
+              </td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
               <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
               <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
@@ -4497,10 +4507,18 @@ function DetailPanel({
           <AlertTriangle size={17} />
           <div>
             <strong>Falló el envío del correo</strong>
-            <span>El comprobante no se entregó al correo del donante.</span>
+            <span>El intento de envío falló.</span>
             <small>Detalle: {emailFailure.summary}</small>
             <small>Falló: {formatElSalvadorDateTime(emailFailure.failedAt)} hora El Salvador</small>
-            <small>Use “Reenviar correo” para intentarlo de nuevo.</small>
+            <button
+              type="button"
+              className="email-recovery-action"
+              disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"}
+              onClick={() => onAction("resend")}
+            >
+              <Mail size={16} />
+              Reenviar ahora
+            </button>
           </div>
         </div>
       )}
@@ -4543,8 +4561,10 @@ function DetailPanel({
         </div>
       </div>
       <div className="actions">
-        <button disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : "Reenviar el comprobante al correo del donante"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
-        <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar</button>
+        {!emailFailure && (
+          <button disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : "Reenviar el comprobante al correo del donante"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
+        )}
+        <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar DTE</button>
         <button className="danger" disabled={fiscalOutcomePending || postAcceptFinalizationPending || !invalidationWindow.canInvalidate || busy === "invalidate"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : undefined} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>

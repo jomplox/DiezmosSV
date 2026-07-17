@@ -1098,11 +1098,25 @@ export class Repository {
     return this.db.prepare("SELECT * FROM dte_documents WHERE wompi_event_id = ?").bind(id).first<DteDocumentRecord>();
   }
 
-  async listDteDocuments(params: { status?: string | null; q?: string | null; limit?: number; cursor?: string | null } = {}): Promise<DteDocumentListPage> {
+  async listDteDocuments(params: {
+    status?: string | null;
+    attention?: "failures" | null;
+    q?: string | null;
+    limit?: number;
+    cursor?: string | null;
+  } = {}): Promise<DteDocumentListPage> {
     const limit = normalizeDocumentListLimit(params.limit);
     const filters: string[] = [];
     const bindings: Array<string | number> = [];
-    if (params.status === "TRANSMISSION_PENDING") {
+    if (params.attention === "failures") {
+      filters.push(`(
+        dte_documents.status IN ('FAILED', 'REJECTED')
+        OR (
+          dte_documents.status = 'ACCEPTED'
+          AND latest_receipt.status = 'FAILED'
+        )
+      )`);
+    } else if (params.status === "TRANSMISSION_PENDING") {
       // Estado VIRTUAL "En trámite": transmisión diferida = SIGNED + marcador. No es
       // un valor real de dte_documents.status (el CHECK no se pudo ampliar en D1);
       // un SIGNED transitorio de pipeline (sin marcador) queda fuera a propósito.
@@ -1130,11 +1144,30 @@ export class Repository {
       bindings.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const from = ftsQuery
-      ? "FROM dte_documents JOIN dte_document_search ON dte_document_search.document_id = dte_documents.id"
-      : "FROM dte_documents";
+    const from = `FROM dte_documents
+      LEFT JOIN latest_receipt
+        ON latest_receipt.document_id = dte_documents.id
+       AND latest_receipt.row_num = 1
+      ${ftsQuery ? "JOIN dte_document_search ON dte_document_search.document_id = dte_documents.id" : ""}`;
     const rows = await this.db
-      .prepare(`SELECT dte_documents.* ${from} ${where} ORDER BY dte_documents.created_at DESC, dte_documents.id DESC LIMIT ?`)
+      .prepare(`WITH latest_receipt AS (
+        SELECT document_id,
+               status,
+               ROW_NUMBER() OVER (
+                 PARTITION BY document_id
+                 ORDER BY COALESCE(claim_attempted_at, created_at) DESC,
+                          created_at DESC,
+                          id DESC
+               ) AS row_num
+          FROM email_deliveries
+         WHERE email_type IN ('dteReceipt', 'dteReceiptTransitorio')
+      )
+      SELECT dte_documents.*,
+             latest_receipt.status AS receipt_email_status
+        ${from}
+        ${where}
+       ORDER BY dte_documents.created_at DESC, dte_documents.id DESC
+       LIMIT ?`)
       .bind(...bindings, limit + 1)
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
