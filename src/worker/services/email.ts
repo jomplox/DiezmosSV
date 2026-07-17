@@ -66,9 +66,7 @@ const HTTP_PROVIDER_ACCEPTED_STATUSES = new Set([200, 202]);
 const HTTP_PROVIDER_TIMEOUT_MS = 15_000;
 const HTTP_PROVIDER_RESPONSE_MAX_CHARS = 16_384;
 const PROVIDER_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
-const PROVIDER_DELIVERY_ID_MAX_CHARS = 128;
-const PROVIDER_DELIVERY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
-const PROVIDER_DELIVERY_ID_SECRET_PREFIX = /^(?:api|bearer|pk|sk|token)[-_]/i;
+const PROVIDER_DELIVERY_ID_DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/;
 
 export function classifyEmailDispatchError(
   error: unknown,
@@ -341,7 +339,10 @@ export class EmailService {
   ): Promise<unknown> {
     assertSafeEmailSubject(payload.subject);
     if (isMockMode(this.env)) {
-      return { provider: "mock-email", messageId: "mock-email-accepted" };
+      return {
+        provider: "mock-email",
+        messageId: await hashProviderDeliveryId("mock-email-accepted")
+      };
     }
     const httpProviderConfigured = hasHttpProvider(this.env);
     const cloudflareSelected = Boolean(
@@ -362,10 +363,10 @@ export class EmailService {
         ...(payload.html ? { html: payload.html } : {}),
         ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
       });
-      const messageId = normalizeProviderDeliveryId(result.messageId);
+      const messageId = await hashProviderDeliveryId(result.messageId);
       if (!messageId) {
         throw new EmailDispatchError(
-          "Cloudflare aceptó la llamada, pero no devolvió una identidad de entrega válida.",
+          "Cloudflare aceptó la llamada, pero no devolvió una identidad de entrega.",
           "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED",
           "UNKNOWN",
           false
@@ -456,7 +457,7 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unk
   }
   return {
     provider: "http-email",
-    messageId: acceptedId
+    messageId: await hashProviderDeliveryId(acceptedId)
   };
 }
 
@@ -488,7 +489,7 @@ function httpProviderAcceptedId(status: number, body: unknown): string | null {
   if (body.status !== "accepted") {
     return null;
   }
-  return normalizeProviderDeliveryId(body.id ?? body.messageId);
+  return providerAcceptanceId(body.id ?? body.messageId);
 }
 
 function httpProviderRejectionCode(status: number, body: unknown): string | null {
@@ -566,23 +567,25 @@ async function templateVersion(emailType: EmailEvidenceType, template: EmailTemp
 
 function deliveryIdFromProvider(providerResponse: unknown): string | null {
   if (!isRecord(providerResponse)) return null;
-  return normalizeProviderDeliveryId(providerResponse.messageId);
+  return typeof providerResponse.messageId === "string" &&
+    PROVIDER_DELIVERY_ID_DIGEST_PATTERN.test(providerResponse.messageId)
+    ? providerResponse.messageId
+    : null;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function normalizeProviderDeliveryId(value: unknown): string | null {
+function providerAcceptanceId(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
-  if (
-    !trimmed ||
-    trimmed.length > PROVIDER_DELIVERY_ID_MAX_CHARS ||
-    !PROVIDER_DELIVERY_ID_PATTERN.test(trimmed) ||
-    PROVIDER_DELIVERY_ID_SECRET_PREFIX.test(trimmed)
-  ) {
-    return null;
-  }
-  return trimmed;
+  return trimmed || null;
+}
+
+async function hashProviderDeliveryId(value: unknown): Promise<string | null> {
+  const acceptedId = providerAcceptanceId(value);
+  return acceptedId
+    ? `sha256:${await sha256Hex(utf8Bytes(acceptedId))}`
+    : null;
 }

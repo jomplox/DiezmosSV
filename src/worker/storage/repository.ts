@@ -2617,16 +2617,30 @@ export class Repository {
                 ), 0) + 1
           WHERE NOT EXISTS (
             SELECT 1
-              FROM email_deliveries
-             WHERE document_id = ?
-               AND email_type = ?
-               AND claim_token IS NOT NULL
-               AND resend_request_id IS NOT ?
+              FROM email_deliveries AS latest
+             WHERE latest.id = (
+               SELECT candidate.id
+                 FROM email_deliveries AS candidate
+                WHERE candidate.document_id = ?
+                  AND candidate.email_type = ?
+                ORDER BY candidate.attempt_no DESC,
+                         COALESCE(
+                           candidate.finalized_at,
+                           candidate.claim_attempted_at,
+                           candidate.created_at
+                         ) DESC,
+                         candidate.created_at DESC,
+                         candidate.id DESC
+                LIMIT 1
+             )
                AND (
-                 status = 'PENDING'
+                 latest.status = 'PENDING'
                  OR (
-                   status = 'FAILED'
-                   AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
+                   latest.status = 'FAILED'
+                   AND (
+                     latest.outcome_class IS NULL
+                     OR latest.outcome_class = 'UNKNOWN'
+                   )
                  )
                )
           )
@@ -2644,8 +2658,7 @@ export class Repository {
         input.resendRequestId,
         input.documentId,
         input.documentId,
-        input.emailType,
-        input.resendRequestId
+        input.emailType
       )
       .first<{
         id: string;
@@ -2689,9 +2702,21 @@ export class Repository {
         .prepare(
           `SELECT id, status, outcome_class, attempt_no
              FROM email_deliveries
-            WHERE document_id = ?
-              AND email_type = ?
-              AND claim_token IS NOT NULL
+            WHERE id = (
+              SELECT candidate.id
+                FROM email_deliveries AS candidate
+               WHERE candidate.document_id = ?
+                 AND candidate.email_type = ?
+               ORDER BY candidate.attempt_no DESC,
+                        COALESCE(
+                          candidate.finalized_at,
+                          candidate.claim_attempted_at,
+                          candidate.created_at
+                        ) DESC,
+                        candidate.created_at DESC,
+                        candidate.id DESC
+               LIMIT 1
+            )
               AND (
                 status = 'PENDING'
                 OR (
@@ -2699,7 +2724,6 @@ export class Repository {
                   AND (outcome_class IS NULL OR outcome_class = 'UNKNOWN')
                 )
               )
-            ORDER BY attempt_no DESC, created_at DESC, id DESC
             LIMIT 1`
         )
         .bind(input.documentId, input.emailType)

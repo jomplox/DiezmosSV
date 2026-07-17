@@ -121,9 +121,9 @@ For the optional HTTP provider:
 
 - only HTTP `200` or `202` with JSON
   `{"status":"accepted","id":"<provider-id>"}` (or `messageId`) is `SENT`;
-- the accepted provider ID must be an opaque 1–128 character value containing
-  only ASCII letters, digits, `_`, and `-`, and must not resemble an API key,
-  bearer token, URL, or email address;
+- the accepted provider ID must be a non-empty string; its raw, provider-defined
+  format is never persisted and is replaced immediately with a fixed-length
+  `sha256:` digest;
 - only an HTTP `4xx` JSON response
   `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}` proves
   `NOT_SENT`;
@@ -135,6 +135,10 @@ For the optional HTTP provider:
 Persisted failure evidence contains only the normalized machine code. Provider
 exception text is never stored because it may echo recipient addresses, private
 URLs, headers, or credentials.
+
+Successful provider evidence likewise stores only the provider label and the
+fixed-length digest of its delivery ID. The raw provider ID remains process-local
+and is discarded before the result reaches repository or audit code.
 
 Any local failure before `provider_dispatch_started_at` is set is `NOT_SENT`.
 Ownership fencing errors remain ownership errors and are not converted into
@@ -173,6 +177,10 @@ If a request ID is reused with a different document or recipient, the server
 returns a conflict. If its row is already `SENT`, the endpoint returns success with
 `duplicateSuppressed: true`. If it is ambiguous, the endpoint returns a
 manual-review conflict instead of sending.
+
+The latest ambiguous receipt outcome is a document/type fence even for a legacy
+row that predates claim tokens. A new request UUID cannot bypass that fence; it
+requires an explicit reconciliation or audited override workflow.
 
 The client retains an in-flight request ID after a failed HTTP call and reuses it
 when the outcome is `NOT_SENT` or `UNKNOWN`. A confirmed `NOT_DELIVERED` result
