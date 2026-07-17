@@ -17,6 +17,9 @@ type LatestReceiptEmailFailure = (audit: EmailAuditEvidence[]) => {
 const latestReceiptEmailFailure = (appModule as unknown as {
   latestReceiptEmailFailure?: LatestReceiptEmailFailure;
 }).latestReceiptEmailFailure;
+const receiptEmailFailureGuidance = (appModule as unknown as {
+  receiptEmailFailureGuidance?: (outcome: string | null | undefined) => string;
+}).receiptEmailFailureGuidance;
 
 describe("latestReceiptEmailFailure", () => {
   it("returns the newest receipt-email failure", () => {
@@ -45,12 +48,22 @@ describe("latestReceiptEmailFailure", () => {
 });
 
 describe("document email failure notice", () => {
+  it("explains safe rejection, delivery failure, and ambiguous provider outcomes", () => {
+    expect(receiptEmailFailureGuidance).toBeTypeOf("function");
+    if (!receiptEmailFailureGuidance) return;
+
+    expect(receiptEmailFailureGuidance("NOT_SENT")).toContain("antes de enviarlo");
+    expect(receiptEmailFailureGuidance("NOT_DELIVERED")).toContain("no pudo entregarse");
+    expect(receiptEmailFailureGuidance("UNKNOWN")).toContain("No podemos confirmar");
+    expect(receiptEmailFailureGuidance(null)).toContain("intento de envío falló");
+  });
+
   it("renders the failed delivery and its recovery action inside the warning", () => {
     const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 
     expect(appSource).toContain("latestReceiptEmailFailure(audit)");
     expect(appSource).toContain("Falló el envío del correo");
-    expect(appSource).toContain("El intento de envío falló.");
+    expect(appSource).toContain("receiptEmailFailureGuidance(selected.receipt_email_outcome_class)");
     expect(appSource).toContain("Reenviar ahora");
     expect(appSource).toContain("{!emailFailure && (");
     expect(appSource).toContain("Reintentar DTE");
@@ -61,5 +74,14 @@ describe("document email failure notice", () => {
 
     expect(appSource).toContain("Correo fallido");
     expect(appSource).toContain('document.receipt_email_status === "FAILED"');
+  });
+
+  it("reuses one resend request ID until the server confirms success", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+
+    expect(appSource).toContain("const resendRequestIds = useRef(new Map<string, string>())");
+    expect(appSource).toContain("resendRequestIds.current.get(target.id) ?? crypto.randomUUID()");
+    expect(appSource).toContain("? { resendRequestId }");
+    expect(appSource).toContain("resendRequestIds.current.delete(target.id)");
   });
 });

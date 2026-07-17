@@ -61,6 +61,24 @@ const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
 
 export type EmailDeliveryOutcomeClass = "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN";
 
+export type ManualEmailDeliveryClaim =
+  | {
+      kind: "claimed";
+      id: string;
+      idempotencyKey: string;
+      claimToken: string;
+      attemptNo: number;
+    }
+  | { kind: "already_sent"; id: string; attemptNo: number }
+  | { kind: "in_progress"; id: string; attemptNo: number }
+  | {
+      kind: "manual_review";
+      id: string;
+      attemptNo: number;
+      outcomeClass: EmailDeliveryOutcomeClass | null;
+    }
+  | { kind: "conflict"; id: string; attemptNo: number };
+
 async function emailDeliveryIdempotencyKey(
   documentId: string,
   emailType: string,
@@ -73,6 +91,16 @@ async function emailDeliveryIdempotencyKey(
     : `${emailType}:${documentStatusAtSend}`;
   const digest = await sha256Hex(utf8Bytes(`example-worker:receipt:v1:${documentId}:${evidenceType}`));
   return `dsv-receipt-v1-${digest}`;
+}
+
+async function manualEmailDeliveryIdempotencyKey(
+  documentId: string,
+  resendRequestId: string
+): Promise<string> {
+  const digest = await sha256Hex(
+    utf8Bytes(`example-worker:receipt-resend:v1:${documentId}:${resendRequestId}`)
+  );
+  return `dsv-receipt-resend-v1-${digest}`;
 }
 
 const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
@@ -1155,6 +1183,9 @@ export class Repository {
       .prepare(`WITH latest_receipt AS (
         SELECT document_id,
                status,
+               outcome_class,
+               failure_code,
+               retry_safe,
                ROW_NUMBER() OVER (
                  PARTITION BY document_id
                  ORDER BY COALESCE(claim_attempted_at, created_at) DESC,
@@ -1165,7 +1196,10 @@ export class Repository {
          WHERE email_type IN ('dteReceipt', 'dteReceiptTransitorio')
       )
       SELECT dte_documents.*,
-             latest_receipt.status AS receipt_email_status
+             latest_receipt.status AS receipt_email_status,
+             latest_receipt.outcome_class AS receipt_email_outcome_class,
+             latest_receipt.failure_code AS receipt_email_failure_code,
+             latest_receipt.retry_safe AS receipt_email_retry_safe
         ${from}
         ${where}
        ORDER BY dte_documents.created_at DESC, dte_documents.id DESC
@@ -2381,6 +2415,146 @@ export class Repository {
       idempotencyKey: row.idempotency_key,
       claimToken: row.claim_token
     } : null;
+  }
+
+  // One resendRequestId represents one deliberate operator action. Repeated HTTP
+  // requests reuse its row and provider identity; a new operator action uses a new
+  // request ID. Only proven NOT_SENT failures or stale pre-dispatch work can reclaim
+  // the row. SENT is a successful duplicate, while ambiguous work requires review.
+  async claimManualEmailDelivery(input: {
+    documentId: string;
+    toEmail: string;
+    emailType: string;
+    documentStatusAtSend: string;
+    resendRequestId: string;
+  }): Promise<ManualEmailDeliveryClaim> {
+    const id = newId("email");
+    const claimToken = newId("email_claim");
+    const claimedAt = nowIso();
+    const staleBefore = new Date(Date.now() - EMAIL_DELIVERY_CLAIM_LEASE_MS).toISOString();
+    const idempotencyKey = await manualEmailDeliveryIdempotencyKey(
+      input.documentId,
+      input.resendRequestId
+    );
+    const claimed = await this.db
+      .prepare(
+        `INSERT INTO email_deliveries (
+           id, document_id, to_email, status, provider_response_json,
+           email_type, document_status_at_send, claim_attempted_at,
+           idempotency_key, claim_token, resend_request_id, attempt_no
+         ) VALUES (?, ?, ?, 'PENDING', '{}', ?, ?, ?, ?, ?, ?, 1)
+         ON CONFLICT(resend_request_id) WHERE resend_request_id IS NOT NULL
+         DO UPDATE SET
+           status = 'PENDING',
+           provider_response_json = '{}',
+           sent_at = NULL,
+           claim_attempted_at = excluded.claim_attempted_at,
+           claim_token = excluded.claim_token,
+           provider_dispatch_started_at = NULL,
+           outcome_class = NULL,
+           failure_code = NULL,
+           retry_safe = 0,
+           template_version = NULL,
+           pdf_renderer_version = NULL,
+           pdf_sha256 = NULL,
+           dte_json_sha256 = NULL,
+           provider_delivery_id = NULL,
+           attempt_no = email_deliveries.attempt_no + 1
+         WHERE email_deliveries.document_id = excluded.document_id
+           AND email_deliveries.to_email = excluded.to_email
+           AND email_deliveries.email_type = excluded.email_type
+           AND email_deliveries.document_status_at_send = excluded.document_status_at_send
+           AND (
+             (
+               email_deliveries.status = 'FAILED'
+               AND email_deliveries.retry_safe = 1
+             )
+             OR (
+               email_deliveries.status = 'PENDING'
+               AND email_deliveries.provider_dispatch_started_at IS NULL
+               AND email_deliveries.claim_attempted_at IS NOT NULL
+               AND email_deliveries.claim_attempted_at < ?
+             )
+           )
+         RETURNING id, idempotency_key, claim_token, attempt_no`
+      )
+      .bind(
+        id,
+        input.documentId,
+        input.toEmail,
+        input.emailType,
+        input.documentStatusAtSend,
+        claimedAt,
+        idempotencyKey,
+        claimToken,
+        input.resendRequestId,
+        staleBefore
+      )
+      .first<{
+        id: string;
+        idempotency_key: string;
+        claim_token: string;
+        attempt_no: number;
+      }>();
+    if (claimed) {
+      return {
+        kind: "claimed",
+        id: claimed.id,
+        idempotencyKey: claimed.idempotency_key,
+        claimToken: claimed.claim_token,
+        attemptNo: Number(claimed.attempt_no)
+      };
+    }
+
+    const existing = await this.db
+      .prepare(
+        `SELECT id, document_id, to_email, status, email_type,
+                document_status_at_send, claim_attempted_at,
+                provider_dispatch_started_at, outcome_class, attempt_no
+           FROM email_deliveries
+          WHERE resend_request_id = ?`
+      )
+      .bind(input.resendRequestId)
+      .first<{
+        id: string;
+        document_id: string;
+        to_email: string;
+        status: "PENDING" | "SENT" | "FAILED";
+        email_type: string;
+        document_status_at_send: string;
+        claim_attempted_at: string | null;
+        provider_dispatch_started_at: string | null;
+        outcome_class: EmailDeliveryOutcomeClass | null;
+        attempt_no: number;
+      }>();
+    if (!existing) {
+      throw new Error("No se pudo recuperar la reserva del reenvío");
+    }
+    const attemptNo = Number(existing.attempt_no);
+    const sameRequest =
+      existing.document_id === input.documentId &&
+      existing.to_email === input.toEmail &&
+      existing.email_type === input.emailType &&
+      existing.document_status_at_send === input.documentStatusAtSend;
+    if (!sameRequest) {
+      return { kind: "conflict", id: existing.id, attemptNo };
+    }
+    if (existing.status === "SENT") {
+      return { kind: "already_sent", id: existing.id, attemptNo };
+    }
+    if (
+      existing.status === "PENDING" &&
+      existing.claim_attempted_at !== null &&
+      existing.claim_attempted_at >= staleBefore
+    ) {
+      return { kind: "in_progress", id: existing.id, attemptNo };
+    }
+    return {
+      kind: "manual_review",
+      id: existing.id,
+      attemptNo,
+      outcomeClass: existing.outcome_class
+    };
   }
 
   async markEmailDeliveryDispatchStarted(id: string, claimToken: string): Promise<boolean> {

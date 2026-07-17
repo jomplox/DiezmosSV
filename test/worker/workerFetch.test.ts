@@ -4377,6 +4377,8 @@ function emailResendDb(): InMemoryD1 {
   return db;
 }
 
+const TEST_RESEND_REQUEST_ID = "11111111-1111-4111-8111-111111111111";
+
 function resendDocument(runtime: Env): Promise<Response> {
   return worker.fetch(
     new Request("https://example.org/api/documents/doc_1/resend", {
@@ -4385,13 +4387,187 @@ function resendDocument(runtime: Env): Promise<Response> {
         Authorization: "Bearer test-token",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({})
+      body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
     }),
     runtime
   );
 }
 
 describe("document email resend", () => {
+  it("requires a client-generated resend request ID", async () => {
+    const db = emailResendDb();
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({})
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_resend_request_id"
+    });
+    expect(db.emailDeliveries).toHaveLength(0);
+  });
+
+  it("suppresses a repeated HTTP request with the same deliberate resend ID", async () => {
+    const db = emailResendDb();
+    const send = vi.fn(async () => ({ messageId: "cf-manual-resend-once" }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    const first = await resendDocument(runtime);
+    const repeated = await resendDocument(runtime);
+
+    expect(first.status).toBe(200);
+    await expect(first.json()).resolves.toMatchObject({
+      ok: true,
+      duplicateSuppressed: false,
+      attemptNo: 1
+    });
+    expect(repeated.status).toBe(200);
+    await expect(repeated.json()).resolves.toMatchObject({
+      ok: true,
+      duplicateSuppressed: true,
+      attemptNo: 1
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      resend_request_id: TEST_RESEND_REQUEST_ID,
+      attempt_no: 1,
+      status: "SENT"
+    });
+  });
+
+  it("reports an in-progress duplicate while the first resend owns the provider call", async () => {
+    const db = emailResendDb();
+    let releaseProvider!: () => void;
+    let providerEntered!: () => void;
+    const providerStarted = new Promise<void>((resolve) => {
+      providerEntered = resolve;
+    });
+    const providerRelease = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    const send = vi.fn(async () => {
+      providerEntered();
+      await providerRelease;
+      return { messageId: "cf-manual-resend-concurrent" };
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    const firstPromise = resendDocument(runtime);
+    await providerStarted;
+    const repeated = await resendDocument(runtime);
+    releaseProvider();
+    const first = await firstPromise;
+
+    expect(first.status).toBe(200);
+    expect(repeated.status).toBe(409);
+    await expect(repeated.json()).resolves.toMatchObject({
+      error: "resend_in_progress",
+      attemptNo: 1
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries the same deliberate request only after a proven NOT_SENT outcome", async () => {
+    const db = emailResendDb();
+    const send = vi.fn()
+      .mockRejectedValueOnce(Object.assign(
+        new Error("header rejected before provider acceptance"),
+        { code: "E_HEADER_NOT_ALLOWED" }
+      ))
+      .mockResolvedValueOnce({ messageId: "cf-manual-resend-recovered" });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    const rejected = await resendDocument(runtime);
+    const recovered = await resendDocument(runtime);
+    const repeated = await resendDocument(runtime);
+
+    expect(rejected.status).toBe(502);
+    await expect(rejected.json()).resolves.toMatchObject({
+      error: "email_send_failed",
+      outcomeClass: "NOT_SENT",
+      manualReview: false,
+      attemptNo: 1
+    });
+    expect(recovered.status).toBe(200);
+    await expect(recovered.json()).resolves.toMatchObject({
+      ok: true,
+      duplicateSuppressed: false,
+      attemptNo: 2
+    });
+    expect(repeated.status).toBe(200);
+    await expect(repeated.json()).resolves.toMatchObject({
+      ok: true,
+      duplicateSuppressed: true,
+      attemptNo: 2
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(db.emailDeliveries).toHaveLength(1);
+    expect(db.emailDeliveries[0]).toMatchObject({
+      status: "SENT",
+      resend_request_id: TEST_RESEND_REQUEST_ID,
+      attempt_no: 2
+    });
+  });
+
+  it("blocks repeat dispatch after an ambiguous manual resend outcome", async () => {
+    const db = emailResendDb();
+    const send = vi.fn(async () => {
+      throw Object.assign(new Error("internal provider failure"), {
+        code: "E_INTERNAL_SERVER_ERROR"
+      });
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    const failed = await resendDocument(runtime);
+    const repeated = await resendDocument(runtime);
+
+    expect(failed.status).toBe(502);
+    await expect(failed.json()).resolves.toMatchObject({
+      error: "email_send_failed",
+      outcomeClass: "UNKNOWN",
+      manualReview: true,
+      attemptNo: 1
+    });
+    expect(repeated.status).toBe(409);
+    await expect(repeated.json()).resolves.toMatchObject({
+      error: "resend_requires_review",
+      outcomeClass: "UNKNOWN",
+      attemptNo: 1
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      status: "FAILED",
+      outcome_class: "UNKNOWN",
+      retry_safe: 0
+    }));
+  });
+
   it("sends receipts through the Cloudflare Email Service binding", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
@@ -4405,7 +4581,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
@@ -4425,6 +4601,9 @@ describe("document email resend", () => {
     expect(sentMessages[0]).toMatchObject({
       from: "legacy-contact-6@example.com",
       to: "legacy-contact-2@example.com",
+      headers: {
+        "X-Idempotency-Key": expect.stringMatching(/^dsv-receipt-resend-v1-[a-f0-9]{64}$/)
+      },
       subject: "Comprobante de su donación",
       text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       html: expect.stringContaining("DTE-15-M001P004-000000000000009"),
@@ -4493,7 +4672,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
@@ -4532,7 +4711,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
@@ -4579,7 +4758,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
@@ -4713,7 +4892,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, { MOCK_EXTERNAL_SERVICES: "false", EMAIL_FROM: "legacy-contact-6@example.com" })
     );
@@ -4745,7 +4924,7 @@ describe("document email resend", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({})
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, {
         MOCK_EXTERNAL_SERVICES: "false",
@@ -5562,7 +5741,7 @@ describe("document invalidation", () => {
       new Request("https://example.org/api/documents/doc_1/resend", {
         method: "POST",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: "{}"
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db)
     );
@@ -6536,7 +6715,7 @@ describe("advanced CDE generation", () => {
       new Request(`https://example.org${path}`, {
         method: "POST",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: "{}"
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db, { APP_ENV: appEnv, ISSUANCE_QUEUE: { send } as unknown as Queue })
     );
@@ -8629,7 +8808,7 @@ describe("donation intent correlation", () => {
           Authorization: "Bearer test-token",
           "Content-Type": "application/json"
         },
-        body: "{}"
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
       }),
       env(db)
     );
@@ -9490,6 +9669,9 @@ describe("deferred transmission when MH is unavailable", () => {
         document_id: "doc_receipt_failed_attention",
         email_type: "dteReceipt",
         status: "FAILED",
+        outcome_class: "UNKNOWN",
+        failure_code: "E_INTERNAL_SERVER_ERROR",
+        retry_safe: 0,
         provider_response_json: JSON.stringify({ error: "provider rejected" }),
         created_at: "2026-07-17T11:06:00.000Z"
       },
@@ -9524,6 +9706,8 @@ describe("deferred transmission when MH is unavailable", () => {
         id: string;
         status: string;
         receipt_email_status?: string | null;
+        receipt_email_outcome_class?: string | null;
+        receipt_email_failure_code?: string | null;
       }>;
     };
     expect(body.documents.map((document) => document.id)).toEqual([
@@ -9533,7 +9717,9 @@ describe("deferred transmission when MH is unavailable", () => {
     ]);
     expect(body.documents.find((document) => document.id === "doc_receipt_failed_attention")).toMatchObject({
       status: "ACCEPTED",
-      receipt_email_status: "FAILED"
+      receipt_email_status: "FAILED",
+      receipt_email_outcome_class: "UNKNOWN",
+      receipt_email_failure_code: "E_INTERNAL_SERVER_ERROR"
     });
   });
 
@@ -14008,6 +14194,103 @@ class Statement {
       return { id: claim.id } as T;
     }
     if (
+      this.sql.includes("INSERT INTO email_deliveries") &&
+      this.sql.includes("ON CONFLICT(resend_request_id)") &&
+      this.sql.includes("RETURNING id, idempotency_key, claim_token, attempt_no")
+    ) {
+      const [
+        id,
+        documentId,
+        toEmail,
+        emailType,
+        documentStatusAtSend,
+        claimAttemptedAt,
+        idempotencyKey,
+        claimToken,
+        resendRequestId,
+        staleBefore
+      ] = this.args.map(String);
+      const existing = this.db.emailDeliveries.find(
+        (delivery) => delivery.resend_request_id === resendRequestId
+      );
+      if (!existing) {
+        this.db.emailDeliveries.push({
+          id,
+          document_id: documentId,
+          to_email: toEmail,
+          status: "PENDING",
+          provider_response_json: "{}",
+          sent_at: null,
+          email_type: emailType,
+          document_status_at_send: documentStatusAtSend,
+          template_version: null,
+          pdf_renderer_version: null,
+          pdf_sha256: null,
+          dte_json_sha256: null,
+          provider_delivery_id: null,
+          claim_attempted_at: claimAttemptedAt,
+          idempotency_key: idempotencyKey,
+          claim_token: claimToken,
+          provider_dispatch_started_at: null,
+          outcome_class: null,
+          failure_code: null,
+          retry_safe: 0,
+          resend_request_id: resendRequestId,
+          attempt_no: 1
+        });
+        return {
+          id,
+          idempotency_key: idempotencyKey,
+          claim_token: claimToken,
+          attempt_no: 1
+        } as T;
+      }
+      const sameRequest =
+        existing.document_id === documentId &&
+        existing.to_email === toEmail &&
+        existing.email_type === emailType &&
+        existing.document_status_at_send === documentStatusAtSend;
+      const reclaimable =
+        (existing.status === "FAILED" && Number(existing.retry_safe ?? 0) === 1) ||
+        (
+          existing.status === "PENDING" &&
+          (existing.provider_dispatch_started_at ?? null) === null &&
+          existing.claim_attempted_at != null &&
+          String(existing.claim_attempted_at) < staleBefore
+        );
+      if (!sameRequest || !reclaimable) return null;
+      existing.status = "PENDING";
+      existing.provider_response_json = "{}";
+      existing.sent_at = null;
+      existing.claim_attempted_at = claimAttemptedAt;
+      existing.claim_token = claimToken;
+      existing.provider_dispatch_started_at = null;
+      existing.outcome_class = null;
+      existing.failure_code = null;
+      existing.retry_safe = 0;
+      existing.template_version = null;
+      existing.pdf_renderer_version = null;
+      existing.pdf_sha256 = null;
+      existing.dte_json_sha256 = null;
+      existing.provider_delivery_id = null;
+      existing.attempt_no = Number(existing.attempt_no) + 1;
+      return {
+        id: String(existing.id),
+        idempotency_key: String(existing.idempotency_key),
+        claim_token: claimToken,
+        attempt_no: Number(existing.attempt_no)
+      } as T;
+    }
+    if (
+      this.sql.includes("FROM email_deliveries") &&
+      this.sql.includes("WHERE resend_request_id = ?")
+    ) {
+      const existing = this.db.emailDeliveries.find(
+        (delivery) => delivery.resend_request_id === this.args[0]
+      );
+      return (existing ?? null) as T | null;
+    }
+    if (
       this.sql.includes("UPDATE email_deliveries") &&
       this.sql.includes("SET provider_dispatch_started_at = ?") &&
       this.sql.includes("RETURNING id")
@@ -15121,7 +15404,10 @@ class Statement {
         return {
           results: documents.slice(0, limit).map((document) => ({
             ...document,
-            receipt_email_status: latestReceipt(document.id)?.status ?? null
+            receipt_email_status: latestReceipt(document.id)?.status ?? null,
+            receipt_email_outcome_class: latestReceipt(document.id)?.outcome_class ?? null,
+            receipt_email_failure_code: latestReceipt(document.id)?.failure_code ?? null,
+            receipt_email_retry_safe: latestReceipt(document.id)?.retry_safe ?? null
           })) as T[]
         };
       }

@@ -121,6 +121,21 @@ export function latestReceiptEmailFailure(
   };
 }
 
+export function receiptEmailFailureGuidance(
+  outcome: DteDocument["receipt_email_outcome_class"]
+): string {
+  if (outcome === "NOT_SENT") {
+    return "El proveedor rechazó el mensaje antes de enviarlo. Puede intentarlo de nuevo.";
+  }
+  if (outcome === "NOT_DELIVERED") {
+    return "El proveedor confirmó que el mensaje no pudo entregarse. Revise el correo antes de reenviar.";
+  }
+  if (outcome === "UNKNOWN") {
+    return "No podemos confirmar si el proveedor envió el correo. Revise el caso antes de reenviar.";
+  }
+  return "El intento de envío falló.";
+}
+
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
@@ -237,6 +252,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return stored ? (JSON.parse(stored) as User) : null;
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
+  const resendRequestIds = useRef(new Map<string, string>());
   // Functions from an older React render retain this version. The centralized request
   // wrapper rejects them before they can issue another request or write account data.
   const renderAccountStateVersion = accountStateGuardRef.current.capture();
@@ -814,9 +830,22 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         return;
       }
     }
-    const body = action === "invalidate" ? invalidationRequestBody(invalidationForm) : {};
+    const resendRequestId = action === "resend"
+      ? resendRequestIds.current.get(target.id) ?? crypto.randomUUID()
+      : null;
+    if (resendRequestId) {
+      resendRequestIds.current.set(target.id, resendRequestId);
+    }
+    const body = action === "invalidate"
+      ? invalidationRequestBody(invalidationForm)
+      : action === "resend"
+        ? { resendRequestId }
+        : {};
     await runAction(action, async () => {
       const result = await accountApi<{ accepted?: boolean; result?: { estado?: string }; emailSent?: boolean; emailError?: string }>(`/api/documents/${target.id}/${action}`, { method: "POST", body });
+      if (action === "resend") {
+        resendRequestIds.current.delete(target.id);
+      }
       setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
       if (action === "invalidate") setPendingInvalidationId(null);
       await refresh();
@@ -832,6 +861,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
     await runAction("email", async () => {
       await accountApi(`/api/documents/${target.id}/email`, { method: "PATCH", body: { email } });
+      resendRequestIds.current.delete(target.id);
       setToast("Correo de envío actualizado");
       setEmailEditingId(null);
       setEmailDraft("");
@@ -4507,7 +4537,7 @@ function DetailPanel({
           <AlertTriangle size={17} />
           <div>
             <strong>Falló el envío del correo</strong>
-            <span>El intento de envío falló.</span>
+            <span>{receiptEmailFailureGuidance(selected.receipt_email_outcome_class)}</span>
             <small>Detalle: {emailFailure.summary}</small>
             <small>Falló: {formatElSalvadorDateTime(emailFailure.failedAt)} hora El Salvador</small>
             <button
