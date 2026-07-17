@@ -1,7 +1,7 @@
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import type { CredentialStatus } from "./types";
 
-export type CertificateExpiryTone = "ok" | "warning" | "expired" | "pending";
+type CertificateExpiryTone = "ok" | "warning" | "expired" | "pending";
 
 export interface CertificateExpiryStatus {
   tone: CertificateExpiryTone;

@@ -1,6 +1,6 @@
 import type { AuditActorContext, AuditRow } from "./types";
 
-export type DisplayRole = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
+type DisplayRole = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 
 const STATUS_LABELS: Record<string, string> = {
   ACCEPTED: "Aceptado",

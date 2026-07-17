@@ -57,9 +57,9 @@ const POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE = `(
     )
   )
 )`;
-export const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
+const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
 
-export async function emailDeliveryIdempotencyKey(
+async function emailDeliveryIdempotencyKey(
   documentId: string,
   emailType: string,
   documentStatusAtSend: string
@@ -73,8 +73,8 @@ export async function emailDeliveryIdempotencyKey(
   return `dsv-receipt-v1-${digest}`;
 }
 
-export const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
-export const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
+const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
+const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
   "El mensaje de emisión agotó sus reintentos antes de crear el CDE.";
 
 export function legacyIssuanceAttemptId(wompiEventId: string): string {

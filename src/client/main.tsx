@@ -17,6 +17,28 @@ if (resetLocation.shouldReplace) {
 function BootstrappedApp() {
   useEffect(() => {
     document.getElementById("app-bootstrap")?.remove();
+
+    if (!window.location.pathname.startsWith("/donar")) {
+      return;
+    }
+
+    let cancelled = false;
+    let revealFrame: number | null = null;
+    void document.fonts.ready.then(() => {
+      if (cancelled) {
+        return;
+      }
+      revealFrame = window.requestAnimationFrame(() => {
+        document.documentElement.setAttribute("data-donor-ready", "");
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      if (revealFrame !== null) {
+        window.cancelAnimationFrame(revealFrame);
+      }
+    };
   }, []);
 
   return <App initialResetToken={initialResetToken} />;

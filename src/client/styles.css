@@ -96,6 +96,13 @@
   --card-shadow: 0 18px 48px rgba(0, 0, 0, 0.07);
 }
 
+/* The inline bootstrap CSS lays out the public root invisibly during a cold load.
+   React reveals it only after Gotham and the rest of the document fonts are ready,
+   preventing a transient unstyled frame from painting first. */
+html[data-bootstrap-route="donor"][data-donor-ready] #root {
+  visibility: visible;
+}
+
 * {
   box-sizing: border-box;
 }

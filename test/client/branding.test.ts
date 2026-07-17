@@ -154,9 +154,26 @@ describe("App boots branding before the session (source contract)", () => {
 });
 
 describe("static bootstrap shell", () => {
-  it("renders a neutral route-shaped shell before React loads", () => {
+  it("does not paint a donor-shaped placeholder before the public React page mounts", () => {
+    expect(indexSource).toMatch(
+      /html\[data-bootstrap-route="donor"\]\s+#app-bootstrap\s*\{\s*display:\s*none;/
+    );
+    expect(indexSource).not.toContain("bootstrap-donor-card");
+  });
+
+  it("keeps the donor root hidden until the document fonts are ready", () => {
+    expect(indexSource).toMatch(
+      /html\[data-bootstrap-route="donor"\]\s+#root\s*\{\s*visibility:\s*hidden;/
+    );
+    expect(stylesSource).toMatch(
+      /html\[data-bootstrap-route="donor"\]\[data-donor-ready\]\s+#root\s*\{\s*visibility:\s*visible;/
+    );
+    expect(mainSource).toContain("document.fonts.ready");
+    expect(mainSource).toContain('setAttribute("data-donor-ready", "")');
+  });
+
+  it("renders a neutral admin shell before React loads", () => {
     expect(indexSource).toContain('id="app-bootstrap"');
-    expect(indexSource).toContain("bootstrap-donor-card");
     expect(indexSource).toContain("bootstrap-admin-shell");
     expect(indexSource).toContain("data-bootstrap-route");
 

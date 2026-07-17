@@ -977,9 +977,10 @@ export class IssuancePipeline {
       if (error instanceof PostAcceptFinalizationOwnershipError) {
         throw error;
       }
+      const failureMessage = error instanceof Error ? error.message : String(error);
       await this.repo.finalizeEmailDeliveryClaim(deliveryClaim.id, deliveryClaim.claimToken, {
         status: "FAILED",
-        providerResponse: { error: error instanceof Error ? error.message : String(error) },
+        providerResponse: { error: failureMessage },
         emailType,
         documentStatusAtSend: record.status
       });
@@ -987,7 +988,14 @@ export class IssuancePipeline {
         action: "EMAIL_FAILED",
         entityType: "dte_document",
         entityId: record.id,
-        summary: error instanceof Error ? error.message : String(error)
+        summary: failureMessage
+      });
+      await sendOperationalAlert(this.env, this.repo, {
+        kind: "EMAIL_FAILED",
+        title: "Fallo al enviar comprobante",
+        detail: `El comprobante ${record.numero_control} no pudo enviarse al donante: ${failureMessage}`,
+        entityType: "dte_document",
+        entityId: record.id
       });
       return false;
     }

@@ -16,7 +16,6 @@ CLOUDFLARE_SCRIPT_NAME = "example-worker"
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_TEST_FALLBACK = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
-MH_CONTINGENCIA_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/contingencia"
 MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
 MH_USER_AGENT = "DiezmosSV/1.0"
 

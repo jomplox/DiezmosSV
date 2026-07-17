@@ -102,7 +102,7 @@ export interface ValidatedDraftIntentInput {
 // (Math.round) rather than rejected — friendlier for donor input. Throws
 // IntentValidationError("invalid_amount", …) on any non-finite, non-positive, or
 // out-of-range value.
-export function parseAmountCents(value: unknown): number {
+function parseAmountCents(value: unknown): number {
   const amount = typeof value === "number" ? value : typeof value === "string" ? Number.parseFloat(value.trim()) : NaN;
   if (!Number.isFinite(amount) || amount <= 0) {
     throw new IntentValidationError("invalid_amount", "Ingrese un monto válido en dólares.");

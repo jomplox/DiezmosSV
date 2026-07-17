@@ -8,7 +8,7 @@ export interface LocationCatalogOption extends CatalogOption {
 }
 
 // Source: DTE/Catálogos - Facturación Electrónica.xlsx.
-export const CAT008_DISTRICTS = [
+const CAT008_DISTRICTS = [
   { code: "00", label: "Otro (Para extranjeros)", departmentCode: "00" },
   { code: "01", label: "AHUACHAPÁN", departmentCode: "01" },
   { code: "02", label: "APANECA", departmentCode: "01" },
@@ -1468,7 +1468,7 @@ export function findCatalogOption<T extends CatalogOption>(catalog: readonly T[]
   return catalog.find((option) => option.code === code) ?? null;
 }
 
-export function isCatalogCode(catalog: readonly CatalogOption[], value: unknown): boolean {
+function isCatalogCode(catalog: readonly CatalogOption[], value: unknown): boolean {
   let codeSet = catalogCodeSets.get(catalog);
   if (!codeSet) {
     codeSet = new Set(catalog.map((option) => option.code));

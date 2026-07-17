@@ -306,8 +306,7 @@ async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unk
 
 function providerIdentityHeaders(idempotencyKey: string): Record<string, string> {
   return {
-    "Idempotency-Key": idempotencyKey,
-    "Message-ID": `<${idempotencyKey}@example-worker.invalid>`
+    "X-Idempotency-Key": idempotencyKey
   };
 }
 

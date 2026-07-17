@@ -48,6 +48,21 @@ test.beforeEach(async ({ context }) => {
   );
 });
 
+test("a clean donor load reveals only the fully styled page", async ({ page }) => {
+  await page.route("**/*.woff2", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await route.continue();
+  });
+
+  await page.goto("/donar?cold-load=1", { waitUntil: "domcontentloaded" });
+  const root = page.locator("#root");
+  await expect(root).toHaveCSS("visibility", "hidden");
+
+  await page.waitForFunction(() => document.fonts.status === "loaded");
+  await expect(root).toHaveCSS("visibility", "visible");
+  await expect(page.getByText("Elija según su lugar de residencia.")).toBeVisible();
+});
+
 test("the direct SV route leaves the amount unfocused until the donor taps it", async ({ page }) => {
   await page.goto("/donar?ruta=sv");
 

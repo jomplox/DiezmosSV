@@ -14,7 +14,7 @@ const DEFAULT_COUNTRY_LABEL = "El Salvador";
 // One correlated intent's contact fields for a Wompi-lane ACCEPTED document. All
 // nullable: a donor may have paid before the /datos completion existed, or through
 // a path that never captured the field.
-export interface ContactIntentFields {
+interface ContactIntentFields {
   donorPhone: string | null;
   direccionComplemento: string | null;
   direccionDepartamento: string | null;

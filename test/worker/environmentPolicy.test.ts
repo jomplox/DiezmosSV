@@ -65,6 +65,12 @@ describe("deployment environment policy", () => {
 });
 
 describe("deployment endpoint availability", () => {
+  it("does not configure the retired contingency transmission endpoint", () => {
+    for (const header of ["vars", "env.staging.vars", "env.production.vars"]) {
+      expect(tomlBlock(header)).not.toContain("MH_CONTINGENCIA_URL_");
+    }
+  });
+
   it("makes only TEST endpoints available to local and staging deployments", () => {
     for (const header of ["vars", "env.staging.vars"]) {
       const block = tomlBlock(header);

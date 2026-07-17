@@ -8690,6 +8690,43 @@ describe("donation intent correlation", () => {
     expect(db.documents[0].post_accept_email_dispatch_started_at ?? null).toBeNull();
   });
 
+  it("sends an operational alert when an accepted receipt delivery fails", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
+    const sent: Array<{ to: string; subject: string; text?: string; headers?: Record<string, string> }> = [];
+    const send = vi.fn(async (message: unknown) => {
+      const outbound = message as (typeof sent)[number];
+      sent.push(outbound);
+      if (outbound.subject === "Fallo al enviar comprobante") {
+        return { messageId: "alert-email-failed" };
+      }
+      throw new Error("custom header rejected by provider");
+    });
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send } as SendEmail
+    });
+
+    const result = await new IssuancePipeline(runtime).retryPendingPostAcceptFinalizations();
+
+    expect(result).toEqual({ finalized: 1, failed: 0 });
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({
+      to: "owner@example.org",
+      subject: "Fallo al enviar comprobante",
+      text: expect.stringContaining("custom header rejected by provider")
+    });
+    expect(sent[1].headers).toBeUndefined();
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "EMAIL_FAILED", entity_type: "dte_document", entity_id: "doc_1" })
+    );
+    expect(db.audits).toContainEqual(
+      expect.objectContaining({ action: "ALERT_SENT:EMAIL_FAILED", entity_type: "dte_document", entity_id: "doc_1" })
+    );
+  });
+
   it("recovers finalization after a recorded email failure without redispatching it", async () => {
     const db = new InMemoryD1();
     db.documents.push(testDocument({ wompi_event_id: null, post_accept_finalized_at: null }));
@@ -9125,9 +9162,9 @@ describe("deferred transmission when MH is unavailable", () => {
       claim_attempted_at: expect.any(String)
     });
     expect(sent[1].headers).toMatchObject({
-      "Idempotency-Key": failedDelivery!.idempotency_key,
-      "Message-ID": `<${failedDelivery!.idempotency_key}@example-worker.invalid>`
+      "X-Idempotency-Key": failedDelivery!.idempotency_key
     });
+    expect(sent[1].headers).not.toHaveProperty("Message-ID");
 
     const result = await new IssuancePipeline(runtime).retryAcceptedWompiFinalizations();
 

@@ -1,6 +1,6 @@
 import type { Ambiente, Env } from "../types";
 
-export type DeploymentAppEnvironment = "local" | "staging" | "production" | "unknown";
+type DeploymentAppEnvironment = "local" | "staging" | "production" | "unknown";
 
 export interface DeploymentEnvironmentPolicy {
   appEnv: DeploymentAppEnvironment;

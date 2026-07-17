@@ -12,7 +12,7 @@ import {
   type RetentionManifest
 } from "./retention";
 
-export type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
+type BackupMonthStatus = "archivado" | "faltante" | "en_curso";
 
 // Keep the convenience full-month ZIP endpoint within the Workers memory budget.
 // The ZIP writer is intentionally dependency-free and buffers the resulting archive,
@@ -26,7 +26,7 @@ export class BackupArchiveTooLargeError extends Error {
   }
 }
 
-export interface BackupMonth {
+interface BackupMonth {
   month: string;
   status: BackupMonthStatus;
   exportedAt: string | null;
@@ -38,7 +38,7 @@ export interface BackupsGrid {
   months: BackupMonth[];
 }
 
-export interface BackupVerifyFile {
+interface BackupVerifyFile {
   table: string;
   ok: boolean;
   expected: string;
@@ -199,7 +199,7 @@ function enforceBackupArchiveLimit(totalBytes: number): void {
   }
 }
 
-export async function getManifest(env: Env, month: string): Promise<RetentionManifest | null> {
+async function getManifest(env: Env, month: string): Promise<RetentionManifest | null> {
   const object = await env.ARCHIVE.get(retentionManifestKey(month));
   if (!object) {
     return null;

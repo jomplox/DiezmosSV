@@ -1,4 +1,4 @@
-export type PasswordPolicyId = "length" | "uppercase" | "lowercase" | "number" | "symbol";
+type PasswordPolicyId = "length" | "uppercase" | "lowercase" | "number" | "symbol";
 
 export interface PasswordPolicyRequirement {
   id: PasswordPolicyId;
@@ -7,7 +7,7 @@ export interface PasswordPolicyRequirement {
   test: (password: string) => boolean;
 }
 
-export const PASSWORD_POLICY_MIN_LENGTH = 10;
+const PASSWORD_POLICY_MIN_LENGTH = 10;
 
 export const PASSWORD_POLICY_REQUIREMENTS: PasswordPolicyRequirement[] = [
   {
