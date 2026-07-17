@@ -56,6 +56,7 @@ export function retentionTableKey(month: string, table: string): string {
 // backfill) an explicit YYYY-MM instead of "the previous calendar month".
 export async function runRetentionExport(env: Env, now: Date, options: { month?: string } = {}): Promise<RetentionExportResult> {
   const month = options.month ?? previousElSalvadorMonth(now);
+  const incidentId = `${month}:${now.toISOString()}`;
   const repo = new Repository(env.DB);
   const prefix = retentionMonthPrefix(month);
   const manifestKey = retentionManifestKey(month);
@@ -111,17 +112,19 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       action: "RETENTION_EXPORT_FAILED",
       entityType: "retention_export",
       entityId: month,
-      summary: message
+      summary: message,
+      metadata: { incidentId }
     });
-    // A failed monthly export leaves a gap in the immutable archive; alert an operator
-    // rather than waiting for someone to open the backups panel. Deduped per month via
-    // the ALERT_SENT:<kind> pattern, so repeated failing runs for the same month notify once.
+    // A failed monthly export leaves a gap in the immutable archive. The scheduled
+    // timestamp identifies this attempt, so a replay of it dedupes while a later
+    // deliberate export attempt can alert again.
     await sendOperationalAlert(env, repo, {
       kind: "RETENTION_EXPORT_FAILED",
       title: `Exportación de retención ${month} fallida`,
       detail: `La exportación de retención del mes ${month} falló: ${message}`,
       entityType: "retention_export",
-      entityId: month
+      entityId: month,
+      incidentId
     });
     return { status: "failed", month, error: message };
   }

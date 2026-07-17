@@ -65,6 +65,8 @@ MOCK_EXTERNAL_SERVICES = "false"
 CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-resource-example"
 EMAIL_ARBITRARY_RECIPIENTS = "true"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
+# Optional independent alerts stay disabled until ALERT_WEBHOOK_URL is stored as
+# a secret and ALERT_WEBHOOK_KIND is explicitly set to "slack" or "discord".
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_AUTH_URL_TEST_FALLBACK = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"

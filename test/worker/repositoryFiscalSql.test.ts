@@ -7,6 +7,51 @@ import { Repository } from "../../src/worker/storage/repository";
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
 describe("fiscal repository SQL on SQLite", () => {
+  it("scopes successful operational alerts by incident and channel", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const repository = new Repository(d1.database);
+
+    await repository.createAudit({
+      action: "ALERT_SENT:EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert",
+      summary: "sent",
+      metadata: { incidentId: "delivery_1", channel: "email" }
+    });
+    await repository.createAudit({
+      action: "ALERT_FAILED:EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert",
+      summary: "failed",
+      metadata: { incidentId: "delivery_2", channel: "webhook" }
+    });
+
+    expect(await repository.hasOperationalAlertChannelResult({
+      action: "ALERT_SENT:EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert",
+      incidentId: "delivery_1",
+      channel: "email"
+    })).toBe(true);
+    expect(await repository.hasOperationalAlertChannelResult({
+      action: "ALERT_SENT:EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert",
+      incidentId: "delivery_1",
+      channel: "webhook"
+    })).toBe(false);
+    expect(await repository.hasOperationalAlertChannelResult({
+      action: "ALERT_SENT:EMAIL_FAILED",
+      entityType: "dte_document",
+      entityId: "doc_alert",
+      incidentId: "delivery_2",
+      channel: "email"
+    })).toBe(false);
+
+    database.close();
+  });
+
   it("atomically attaches and completes an accepted invalidation", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);

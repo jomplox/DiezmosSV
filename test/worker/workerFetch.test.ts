@@ -4952,6 +4952,52 @@ describe("document email resend", () => {
     });
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_RESEND_FAILED", entity_id: "doc_1" }));
   });
+
+  it("alerts on a manual resend failure using the delivery claim as the incident", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(testDocument());
+    const sent: Array<{ to: string; subject: string }> = [];
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents/doc_1/resend", {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ resendRequestId: TEST_RESEND_REQUEST_ID })
+      }),
+      env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-6@example.com",
+        EMAIL: {
+          send: async (message: unknown) => {
+            const outbound = message as { to: string; subject: string };
+            sent.push(outbound);
+            if (outbound.subject === "Fallo al reenviar comprobante") {
+              return { messageId: "alert-manual-resend-failed" };
+            }
+            throw Object.assign(new Error("header rejected"), { code: "E_HEADER_NOT_ALLOWED" });
+          }
+        } as SendEmail
+      })
+    );
+
+    expect(response.status).toBe(502);
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toMatchObject({
+      to: "owner@example.org",
+      subject: "Fallo al reenviar comprobante"
+    });
+    const delivery = db.emailDeliveries[0];
+    const alertAudit = db.audits.find((audit) => audit.action === "ALERT_SENT:EMAIL_FAILED");
+    expect(alertAudit).toBeTruthy();
+    expect(JSON.parse(String(alertAudit?.metadata_json))).toEqual({
+      incidentId: delivery.claim_token,
+      channel: "email"
+    });
+  });
 });
 
 describe("document contact email", () => {
@@ -9061,6 +9107,12 @@ describe("donation intent correlation", () => {
     expect(db.audits).toContainEqual(
       expect.objectContaining({ action: "ALERT_SENT:EMAIL_FAILED", entity_type: "dte_document", entity_id: "doc_1" })
     );
+    const delivery = db.emailDeliveries.find((row) => row.document_id === "doc_1");
+    const alertAudit = db.audits.find((row) => row.action === "ALERT_SENT:EMAIL_FAILED");
+    expect(JSON.parse(String(alertAudit?.metadata_json))).toEqual({
+      incidentId: delivery?.claim_token,
+      channel: "email"
+    });
   });
 
   it("recovers finalization after a recorded email failure without redispatching it", async () => {
@@ -14886,6 +14938,18 @@ class Statement {
         (row) => row.action === action && row.entity_type === entityType && row.entity_id === entityId
       );
       return (audit ? { id: audit.id } : null) as T | null;
+    }
+    if (this.sql.includes("SELECT 1 AS found") && this.sql.includes("json_extract(metadata_json")) {
+      const [action, entityType, entityId, incidentId, channel] = this.args.map(String);
+      const found = this.db.audits.some((audit) => {
+        const metadata = JSON.parse(String(audit.metadata_json ?? "{}")) as Record<string, unknown>;
+        return audit.action === action
+          && audit.entity_type === entityType
+          && audit.entity_id === entityId
+          && metadata.incidentId === incidentId
+          && metadata.channel === channel;
+      });
+      return (found ? { found: 1 } : null) as T | null;
     }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("actor_ip IS ?")) {
       const [action, entityId, sinceIso, actorIp] = this.args;

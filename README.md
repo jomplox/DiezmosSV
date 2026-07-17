@@ -81,7 +81,7 @@ auditable, and cheap to run.
 | 🏷️ **White-label** | Rebrand the panel, donor pages, and donor email with your church's display name, accent color, and logos (stored in R2) from the **Marca** settings — no fork needed. |
 | 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and D1-backed rate limiting on login, password reset, and public donation endpoints — with per-claim audit provenance. |
 | 📬 **Branded email** | All donor email (receipt, invalidation notice, annual certificate, password reset) is sent as branded HTML with configurable templates. |
-| 🚨 **Operational alerting** | Emails a configurable address on emission failures, MH unavailability (deferred-transmission backlog), stalled events, and MH signer-certificate expiry (30/14/3-day warnings). |
+| 🚨 **Operational alerting** | Alerts a configurable email address and, optionally, an independent Slack or Discord webhook on emission failures, receipt-delivery failures, MH unavailability, stalled events, retention failures, and MH signer-certificate expiry. Each channel is tracked separately per incident. |
 | 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. The **Respaldos mensuales** panel browses, verifies, and downloads each month as a ZIP. |
 
 > 💸 **Run it before you have credentials.** The default (local) `wrangler.toml` config sets
@@ -396,6 +396,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
 | `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional alternative transactional provider selected before dispatch when Cloudflare arbitrary-recipient delivery is not enabled. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
 | `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service or the selected HTTP provider. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml` when Cloudflare is selected. |
+| `ALERT_WEBHOOK_URL` | Optional private Slack or Discord incoming-webhook URL for an alert path independent of receipt email. It must be HTTPS and must not contain URL credentials. Store it only as a deployment secret. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
@@ -413,6 +414,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Declared in `wrangler.toml` under `[[send_email]]`. |
 | `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export (`example-worker-archive-*`). |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker after Cloudflare Email Sending is confirmed to send to external donor addresses. |
+| `ALERT_WEBHOOK_KIND` | Optional webhook payload format: exactly `slack` or `discord`. Configure it only when the corresponding `ALERT_WEBHOOK_URL` secret exists. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
@@ -424,6 +426,12 @@ HTTP provider. If Cloudflare is the only configured provider, it remains the sol
 the credential status does not call arbitrary-recipient delivery ready until the marker is set. The
 Worker never retries the same receipt through a second provider after a dispatch attempt, because an
 error may arrive after the first provider accepted it.
+
+Operational alert email and webhook delivery are independent. A failure in one channel does not
+prevent the other from running. Successful and failed channel outcomes are written to the audit log
+with a stable incident identifier, so the same incident is not sent forever while a later incident
+for the same CDE can alert again. The webhook payload contains only the alert summary, internal entity
+identity, and admin origin; it never contains the webhook URL or provider credentials.
 
 `EMAIL_PROVIDER_URL` is deployment-owned. Set it with Wrangler or the Cloudflare deployment
 configuration, not from the application credentials panel. After the release is deployed and the

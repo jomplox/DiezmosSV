@@ -2,6 +2,7 @@ import { Repository } from "../storage/repository";
 import type { AuthUser } from "./auth";
 import type { Env } from "../types";
 import { sha256Hex } from "../utils/encoding";
+import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import {
   RETENTION_KEY_ROOT,
@@ -110,6 +111,7 @@ export async function verifyBackupMonth(env: Env, repo: Repository, month: strin
   if (!manifest) {
     return null;
   }
+  const incidentId = newId("retention_verify");
 
   const files: BackupVerifyFile[] = [];
   for (const [table, entry] of Object.entries(manifest.tables)) {
@@ -142,14 +144,15 @@ export async function verifyBackupMonth(env: Env, repo: Repository, month: strin
       entityType: "retention_export",
       entityId: month,
       summary: `Respaldo de ${month} con discrepancias: ${mismatches.join(", ")}`,
-      metadata: { month, mismatches, files }
+      metadata: { month, mismatches, files, incidentId }
     });
     await sendOperationalAlert(env, repo, {
       kind: "RETENTION_VERIFY_FAILED",
       title: `Respaldo de ${month} corrupto o alterado`,
       detail: `La verificación del respaldo de ${month} falló. Archivos con discrepancia: ${mismatches.join(", ")}.`,
       entityType: "retention_export",
-      entityId: month
+      entityId: month,
+      incidentId
     });
   }
   return { ok, files };

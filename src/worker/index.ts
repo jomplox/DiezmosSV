@@ -426,10 +426,12 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
     const wompiEventId = message.body.wompiEventId;
     const entityType = documentId ? "dte_document" : "wompi_event";
     const entityId = documentId ?? wompiEventId ?? "desconocido";
+    let incidentId = message.body.issuanceAttemptId ?? message.id ?? entityId;
     const summary = "Mensaje de emisión agotó sus reintentos en cola; conservado para revisión";
     if (wompiEventId) {
       const legacyMessage = !message.body.issuanceAttemptId;
       const attemptId = message.body.issuanceAttemptId ?? legacyIssuanceAttemptId(wompiEventId);
+      incidentId = attemptId;
       const current = await repo.markWompiIssuanceDeadLettered(
         wompiEventId,
         attemptId,
@@ -463,7 +465,8 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
       title: "Mensaje de emisión agotó reintentos",
       detail: summary,
       entityType,
-      entityId
+      entityId,
+      incidentId
     });
     message.ack();
   }
@@ -499,7 +502,8 @@ async function checkCertificateExpiry(env: Env, repo: Repository, nowMs: number)
       title: "Certificado del firmador MH por vencer",
       detail: `El certificado del firmador del Ministerio de Hacienda vence el ${formatElSalvadorDate(expiresAt)}. ${remainingLabel}.`,
       entityType: "credentials",
-      entityId: `${expiresAt}:${threshold}`
+      entityId: `${expiresAt}:${threshold}`,
+      incidentId: `${expiresAt}:${threshold}`
     });
   }
 }
@@ -2246,6 +2250,14 @@ async function handleDocumentRoute(
           outcomeClass: failure.outcomeClass,
           failureCode: failure.code
         }
+      });
+      await sendOperationalAlert(env, repo, {
+        kind: "EMAIL_FAILED",
+        title: "Fallo al reenviar comprobante",
+        detail: `El comprobante ${document.numero_control} no pudo reenviarse: ${failure.message}`,
+        entityType: "dte_document",
+        entityId: document.id,
+        incidentId: claim.claimToken
       });
       return jsonResponse(
         {
