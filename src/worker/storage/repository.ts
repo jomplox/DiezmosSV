@@ -59,6 +59,8 @@ const POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE = `(
 )`;
 const EMAIL_DELIVERY_CLAIM_LEASE_MS = 15 * 60 * 1000;
 
+export type EmailDeliveryOutcomeClass = "NOT_SENT" | "NOT_DELIVERED" | "UNKNOWN";
+
 async function emailDeliveryIdempotencyKey(
   documentId: string,
   emailType: string,
@@ -2296,10 +2298,10 @@ export class Repository {
   }
 
   // Claim one receipt type before contacting the external provider. A current
-  // PENDING claim and SENT evidence both block a competing delivery. FAILED or
-  // lease-expired PENDING work reuses the same row and provider identity. Legacy
-  // PENDING rows have no attempt timestamp and deliberately remain blocked for
-  // manual review: we cannot know whether their provider request succeeded.
+  // PENDING claim and SENT evidence both block a competing delivery. Only a FAILED
+  // outcome explicitly proven retry-safe, or a stale pre-dispatch PENDING claim,
+  // reuses the same row and provider identity. Legacy and post-dispatch PENDING rows
+  // remain blocked for manual review because provider acceptance is unknown.
   async claimEmailDelivery(input: {
     documentId: string;
     toEmail: string;
@@ -2341,10 +2343,18 @@ export class Repository {
            provider_response_json = '{}',
            document_status_at_send = excluded.document_status_at_send,
            claim_attempted_at = excluded.claim_attempted_at,
-           claim_token = excluded.claim_token
-         WHERE email_deliveries.status = 'FAILED'
+           claim_token = excluded.claim_token,
+           provider_dispatch_started_at = NULL,
+           outcome_class = NULL,
+           failure_code = NULL,
+           retry_safe = 0
+         WHERE (
+              email_deliveries.status = 'FAILED'
+              AND email_deliveries.retry_safe = 1
+            )
             OR (
               email_deliveries.status = 'PENDING'
+              AND email_deliveries.provider_dispatch_started_at IS NULL
               AND email_deliveries.claim_attempted_at IS NOT NULL
               AND email_deliveries.claim_attempted_at < ?
             )
@@ -2373,6 +2383,22 @@ export class Repository {
     } : null;
   }
 
+  async markEmailDeliveryDispatchStarted(id: string, claimToken: string): Promise<boolean> {
+    const row = await this.db
+      .prepare(
+        `UPDATE email_deliveries
+            SET provider_dispatch_started_at = ?
+          WHERE id = ?
+            AND status = 'PENDING'
+            AND claim_token = ?
+            AND provider_dispatch_started_at IS NULL
+          RETURNING id`
+      )
+      .bind(nowIso(), id, claimToken)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
   // Finalize the exact PENDING row won above. This deliberately updates instead of
   // appending a second delivery row, keeping the claim and its outcome one evidence
   // record even when the provider fails.
@@ -2389,6 +2415,9 @@ export class Repository {
       pdfSha256?: string | null;
       dteJsonSha256?: string | null;
       providerDeliveryId?: string | null;
+      outcomeClass?: EmailDeliveryOutcomeClass | null;
+      failureCode?: string | null;
+      retrySafe?: boolean;
     }
   ): Promise<void> {
     const result = await this.db
@@ -2397,7 +2426,8 @@ export class Repository {
          SET status = ?, provider_response_json = ?, sent_at = ?,
              email_type = ?, document_status_at_send = ?, template_version = ?,
              pdf_renderer_version = ?, pdf_sha256 = ?, dte_json_sha256 = ?,
-             provider_delivery_id = ?
+             provider_delivery_id = ?, outcome_class = ?, failure_code = ?,
+             retry_safe = ?
          WHERE id = ? AND status = 'PENDING' AND claim_token = ?`
       )
       .bind(
@@ -2411,6 +2441,9 @@ export class Repository {
         input.pdfSha256 ?? null,
         input.dteJsonSha256 ?? null,
         input.providerDeliveryId ?? null,
+        input.outcomeClass ?? null,
+        input.failureCode ?? null,
+        input.retrySafe ? 1 : 0,
         id,
         claimToken
       )
