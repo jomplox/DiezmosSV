@@ -81,7 +81,32 @@ describe("Wompi issuance reservation migration", () => {
     }));
   });
 
-  it("excludes an active email claim, reclaims failed/stale work with the same key, and leaves legacy PENDING manual", async () => {
+  it("persists provider-dispatch, typed outcome, and deliberate resend evidence", () => {
+    const columns = database
+      .prepare("PRAGMA table_info(email_deliveries)")
+      .all() as Array<{ name: string }>;
+    const indexes = database
+      .prepare("PRAGMA index_list(email_deliveries)")
+      .all() as Array<{ name: string; unique: number }>;
+
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "provider_dispatch_started_at",
+      "outcome_class",
+      "failure_code",
+      "retry_safe",
+      "resend_request_id",
+      "attempt_no"
+    ]));
+    expect(indexes).toContainEqual(expect.objectContaining({
+      name: "idx_email_deliveries_resend_request_id",
+      unique: 1
+    }));
+    expect(indexes).toContainEqual(expect.objectContaining({
+      name: "idx_email_deliveries_latest_receipt"
+    }));
+  });
+
+  it("excludes active or unsafe email claims, reclaims proven-safe/stale pre-dispatch work, and leaves legacy PENDING manual", async () => {
     insertAcceptedDocument(database, "wompi_a", "dte_email_claim");
     const repo = new Repository(sqliteD1(database));
     const input = {
@@ -102,6 +127,11 @@ describe("Wompi issuance reservation migration", () => {
     database.prepare(
       "UPDATE email_deliveries SET status = 'FAILED' WHERE id = ?"
     ).run(first!.id);
+    await expect(repo.claimEmailDelivery(input)).resolves.toBeNull();
+
+    database.prepare(
+      "UPDATE email_deliveries SET retry_safe = 1, outcome_class = 'NOT_SENT' WHERE id = ?"
+    ).run(first!.id);
     const failedRetry = await repo.claimEmailDelivery(input);
     expect(failedRetry).toMatchObject({
       id: first!.id,
@@ -111,7 +141,10 @@ describe("Wompi issuance reservation migration", () => {
     expect(failedRetry!.claimToken).not.toBe(first!.claimToken);
 
     database.prepare(
-      "UPDATE email_deliveries SET claim_attempted_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+      `UPDATE email_deliveries
+          SET claim_attempted_at = '2000-01-01T00:00:00.000Z',
+              provider_dispatch_started_at = NULL
+        WHERE id = ?`
     ).run(first!.id);
     const staleRetry = await repo.claimEmailDelivery(input);
     expect(staleRetry).toMatchObject({

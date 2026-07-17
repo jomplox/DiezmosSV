@@ -242,6 +242,74 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("reclaims only proven-safe or stale pre-dispatch receipt claims", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_delivery_recovery", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    const repository = new Repository(d1.database);
+
+    const safeInput = {
+      documentId: "doc_delivery_recovery",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED"
+    };
+    const safeClaim = await repository.claimEmailDelivery(safeInput);
+    expect(safeClaim).not.toBeNull();
+    expect(await repository.markEmailDeliveryDispatchStarted(safeClaim!.id, "wrong-token")).toBe(false);
+    expect(await repository.markEmailDeliveryDispatchStarted(safeClaim!.id, safeClaim!.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(safeClaim!.id, safeClaim!.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_HEADER_NOT_ALLOWED" },
+      emailType: safeInput.emailType,
+      documentStatusAtSend: safeInput.documentStatusAtSend,
+      outcomeClass: "NOT_SENT",
+      failureCode: "E_HEADER_NOT_ALLOWED",
+      retrySafe: true
+    });
+    await expect(repository.claimEmailDelivery(safeInput)).resolves.toMatchObject({
+      id: safeClaim!.id,
+      claimToken: expect.any(String)
+    });
+
+    const unknownInput = { ...safeInput, emailType: "dteReceiptUnknown" };
+    const unknownClaim = await repository.claimEmailDelivery(unknownInput);
+    expect(unknownClaim).not.toBeNull();
+    expect(await repository.markEmailDeliveryDispatchStarted(unknownClaim!.id, unknownClaim!.claimToken)).toBe(true);
+    await repository.finalizeEmailDeliveryClaim(unknownClaim!.id, unknownClaim!.claimToken, {
+      status: "FAILED",
+      providerResponse: { code: "E_INTERNAL_SERVER_ERROR" },
+      emailType: unknownInput.emailType,
+      documentStatusAtSend: unknownInput.documentStatusAtSend,
+      outcomeClass: "UNKNOWN",
+      failureCode: "E_INTERNAL_SERVER_ERROR",
+      retrySafe: false
+    });
+    await expect(repository.claimEmailDelivery(unknownInput)).resolves.toBeNull();
+
+    const preDispatchInput = { ...safeInput, emailType: "dteReceiptPreDispatch" };
+    const preDispatchClaim = await repository.claimEmailDelivery(preDispatchInput);
+    expect(preDispatchClaim).not.toBeNull();
+    database.prepare(
+      "UPDATE email_deliveries SET claim_attempted_at = ? WHERE id = ?"
+    ).run("2000-01-01T00:00:00.000Z", preDispatchClaim!.id);
+    await expect(repository.claimEmailDelivery(preDispatchInput)).resolves.toMatchObject({
+      id: preDispatchClaim!.id,
+      claimToken: expect.any(String)
+    });
+
+    const postDispatchInput = { ...safeInput, emailType: "dteReceiptPostDispatch" };
+    const postDispatchClaim = await repository.claimEmailDelivery(postDispatchInput);
+    expect(postDispatchClaim).not.toBeNull();
+    expect(await repository.markEmailDeliveryDispatchStarted(postDispatchClaim!.id, postDispatchClaim!.claimToken)).toBe(true);
+    database.prepare(
+      "UPDATE email_deliveries SET claim_attempted_at = ? WHERE id = ?"
+    ).run("2000-01-01T00:00:00.000Z", postDispatchClaim!.id);
+    await expect(repository.claimEmailDelivery(postDispatchInput)).resolves.toBeNull();
+
+    database.close();
+  });
+
   it("skips more than one page of reconciliation-locked fiscal work", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);
