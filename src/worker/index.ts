@@ -305,7 +305,10 @@ export default {
       let currentWompiAttempt = false;
       try {
         if (message.body.advancedDocumentId) {
-          await pipeline.processDteDocument(message.body.advancedDocumentId);
+          await pipeline.processDteDocument(
+            message.body.advancedDocumentId,
+            message.body.issuanceAttemptId ?? message.id
+          );
         } else if (wompiEventId && issuanceAttemptId) {
           currentWompiAttempt = await repo.markWompiIssuanceProcessing(
             wompiEventId,
@@ -321,7 +324,7 @@ export default {
             // A prior delivery may already have created/accepted the CDE and then
             // crashed during intent/email bookkeeping. Resume that persisted row
             // without reopening the pre-CDE lifecycle or retransmitting a terminal CDE.
-            await pipeline.processDteDocument(existing.id);
+            await pipeline.processDteDocument(existing.id, issuanceAttemptId);
           } else {
             await pipeline.processWompiEvent(wompiEventId, issuanceAttemptId);
           }

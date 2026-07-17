@@ -174,7 +174,7 @@ export class IssuancePipeline {
     if (existing) {
       await this.repo.markWompiDocumentCreated(wompiEventId, existing.id);
       await this.recordStagingSmokeRun(existing.id, event.transaction_id);
-      return this.processDteDocument(existing.id);
+      return this.processDteDocument(existing.id, activeAttemptId);
     }
     if (event.processed_at) {
       return null;
@@ -297,7 +297,7 @@ export class IssuancePipeline {
       await this.repo.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
       throw error;
     }
-    return this.processDteDocument(record.id);
+    return this.processDteDocument(record.id, activeAttemptId);
   }
 
   private async recordStagingSmokeRun(
@@ -434,7 +434,10 @@ export class IssuancePipeline {
     }
   }
 
-  async processDteDocument(documentId: string): Promise<DteDocumentRecord> {
+  async processDteDocument(
+    documentId: string,
+    issuanceIncidentId?: string
+  ): Promise<DteDocumentRecord> {
     let record = await this.repo.getDteDocument(documentId);
     if (!record) {
       throw new Error(`Documento DTE ${documentId} no encontrado`);
@@ -544,8 +547,7 @@ export class IssuancePipeline {
         if (current) return current;
       }
       const failureMessage = error instanceof Error ? error.message : String(error);
-      const failureIncidentId =
-        (await this.repo.getDteDocument(record.id))?.updated_at ?? record.updated_at;
+      const failureIncidentId = issuanceIncidentId ?? newId("issuance_failure");
       await this.repo.createAudit({
         action: wompiBacked ? "DTE_FAILED" : "ADVANCED_CDE_FAILED",
         entityType: "dte_document",

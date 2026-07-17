@@ -10098,10 +10098,49 @@ describe("pipeline failure alerts", () => {
       EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
     });
 
-    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_twice")).rejects.toThrow();
-    await expect(new IssuancePipeline(pipelineEnv).processDteDocument("doc_advanced_fail_twice")).rejects.toThrow();
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument(
+        "doc_advanced_fail_twice",
+        "advanced_attempt_twice"
+      )
+    ).rejects.toThrow();
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument(
+        "doc_advanced_fail_twice",
+        "advanced_attempt_twice"
+      )
+    ).rejects.toThrow();
 
     expect(sentAlerts).toHaveLength(1);
+  });
+
+  it("sends another alert when a later advanced issuance attempt fails", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    db.documents.push(advancedFailingDocument("doc_advanced_fail_later"));
+
+    const sentAlerts: unknown[] = [];
+    const pipelineEnv = env(db, {
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send: async (message: unknown) => { sentAlerts.push(message); return { messageId: "x" }; } } as SendEmail
+    });
+
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument(
+        "doc_advanced_fail_later",
+        "advanced_attempt_first"
+      )
+    ).rejects.toThrow();
+    await expect(
+      new IssuancePipeline(pipelineEnv).processDteDocument(
+        "doc_advanced_fail_later",
+        "advanced_attempt_second"
+      )
+    ).rejects.toThrow();
+
+    expect(sentAlerts).toHaveLength(2);
   });
 
   it("does not send an alert when alert_email is unset", async () => {
