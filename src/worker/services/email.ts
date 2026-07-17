@@ -66,7 +66,9 @@ const HTTP_PROVIDER_ACCEPTED_STATUSES = new Set([200, 202]);
 const HTTP_PROVIDER_TIMEOUT_MS = 15_000;
 const HTTP_PROVIDER_RESPONSE_MAX_CHARS = 16_384;
 const PROVIDER_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
-const PROVIDER_DELIVERY_ID_MAX_CHARS = 256;
+const PROVIDER_DELIVERY_ID_MAX_CHARS = 128;
+const PROVIDER_DELIVERY_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+const PROVIDER_DELIVERY_ID_SECRET_PREFIX = /^(?:api|bearer|pk|sk|token)[-_]/i;
 
 export function classifyEmailDispatchError(
   error: unknown,
@@ -577,7 +579,8 @@ function normalizeProviderDeliveryId(value: unknown): string | null {
   if (
     !trimmed ||
     trimmed.length > PROVIDER_DELIVERY_ID_MAX_CHARS ||
-    /[\u0000-\u001f\u007f]/.test(trimmed)
+    !PROVIDER_DELIVERY_ID_PATTERN.test(trimmed) ||
+    PROVIDER_DELIVERY_ID_SECRET_PREFIX.test(trimmed)
   ) {
     return null;
   }

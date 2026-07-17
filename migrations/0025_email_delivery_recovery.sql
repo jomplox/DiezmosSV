@@ -20,8 +20,35 @@ CREATE UNIQUE INDEX idx_email_deliveries_resend_request_id
 CREATE INDEX idx_email_deliveries_latest_receipt
   ON email_deliveries(document_id, email_type, attempt_no DESC, created_at DESC, id DESC);
 
--- A current or ambiguous claimed receipt is a hard document/type fence. Legacy
--- rows have no claim_token and remain readable without making this upgrade fail.
+-- Pre-0025 could contain more than one claimed failure for the same receipt
+-- identity because only the idempotency key was unique. Keep the newest claim as
+-- the conservative unresolved fence and preserve every older evidence row without
+-- claim ownership so the partial unique index can be created on populated D1 data.
+UPDATE email_deliveries
+   SET claim_token = NULL
+ WHERE id IN (
+   SELECT id
+     FROM (
+       SELECT id,
+              ROW_NUMBER() OVER (
+                PARTITION BY document_id, email_type
+                ORDER BY COALESCE(
+                           provider_dispatch_started_at,
+                           claim_attempted_at,
+                           created_at
+                         ) DESC,
+                         created_at DESC,
+                         id DESC
+              ) AS unresolved_rank
+         FROM email_deliveries
+        WHERE claim_token IS NOT NULL
+          AND email_type IN ('dteReceipt', 'dteReceiptTransitorio')
+          AND status IN ('PENDING', 'FAILED')
+     )
+    WHERE unresolved_rank > 1
+ );
+
+-- A current or ambiguous claimed receipt is a hard document/type fence.
 CREATE UNIQUE INDEX idx_email_deliveries_unresolved_receipt_claim
   ON email_deliveries(document_id, email_type)
   WHERE claim_token IS NOT NULL

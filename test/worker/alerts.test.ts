@@ -338,6 +338,36 @@ describe("operational alert dispatch", () => {
     expect(auditChannels(db, "ALERT_SENT:DTE_FAILED")).toEqual(["email", "webhook"]);
   });
 
+  it("treats a rotated webhook URL as a new target for the same incident", async () => {
+    const db = new InMemoryAlertD1();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts/first",
+      ALERT_WEBHOOK_KIND: "slack"
+    } as Env;
+    const repo = new Repository(env.DB);
+    const alert = {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_rotated_webhook",
+      incidentId: "issuance_attempt_rotated_webhook"
+    };
+
+    await sendOperationalAlert(env, repo, alert);
+    env.ALERT_WEBHOOK_URL = "https://hooks.example.test/alerts/second";
+    await sendOperationalAlert(env, repo, alert);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(db.alertDeliveries).toHaveLength(2);
+  });
+
   it("atomically suppresses concurrent dispatches for the same incident and recipient", async () => {
     const db = new InMemoryAlertD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
@@ -490,6 +520,53 @@ describe("operational alert dispatch", () => {
 
     expect(attempts.filter((recipient) => recipient === "owner@example.org")).toHaveLength(1);
     expect(attempts.filter((recipient) => recipient === "admin@example.org")).toHaveLength(2);
+  });
+
+  it("does not audit a channel as sent while another recipient remains ambiguous", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org, admin@example.org" });
+    const attempts: string[] = [];
+    let ownerAttempt = 0;
+    let adminAttempt = 0;
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: {
+        send: async (message: unknown) => {
+          const recipient = String((message as { to?: unknown }).to);
+          attempts.push(recipient);
+          if (recipient === "owner@example.org" && ++ownerAttempt === 1) {
+            throw new Error("ambiguous response channel closure");
+          }
+          if (recipient === "admin@example.org" && ++adminAttempt === 1) {
+            throw Object.assign(new Error("recipient rejected before acceptance"), {
+              code: "E_RECIPIENT_NOT_ALLOWED"
+            });
+          }
+          return { messageId: `alert-${attempts.length}` };
+        }
+      } as SendEmail
+    } as Env;
+    const repo = new Repository(env.DB);
+    const alert = {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_partial_ambiguous",
+      incidentId: "attempt_partial_ambiguous"
+    };
+
+    await sendOperationalAlert(env, repo, alert);
+    await sendOperationalAlert(env, repo, alert);
+
+    expect(attempts.filter((recipient) => recipient === "owner@example.org")).toHaveLength(1);
+    expect(attempts.filter((recipient) => recipient === "admin@example.org")).toHaveLength(2);
+    expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:DTE_FAILED")).toHaveLength(0);
+    expect(db.audits.filter((audit) => audit.action === "ALERT_FAILED:DTE_FAILED")).toHaveLength(2);
   });
 
   it("redacts addresses, URLs, and bearer tokens from alert channels and audits", async () => {

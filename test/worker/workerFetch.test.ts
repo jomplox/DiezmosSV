@@ -9879,12 +9879,20 @@ describe("deferred transmission when MH is unavailable", () => {
       },
       {
         ...testDocument(),
-        id: "doc_deferred_attention",
+        id: "doc_receipt_pending_attention",
         codigo_generacion: "EEEEEEE5-EEEE-4EEE-8EEE-EEEEEEEEEEE5",
         numero_control: "DTE-15-M001P004-000000000000815",
-        status: "SIGNED",
-        transmission_deferred_at: "2026-07-17T11:05:00.000Z",
+        status: "ACCEPTED",
         created_at: "2026-07-17T11:05:00.000Z"
+      },
+      {
+        ...testDocument(),
+        id: "doc_deferred_attention",
+        codigo_generacion: "FFFFFFF6-FFFF-4FFF-8FFF-FFFFFFFFFFF6",
+        numero_control: "DTE-15-M001P004-000000000000816",
+        status: "SIGNED",
+        transmission_deferred_at: "2026-07-17T11:06:00.000Z",
+        created_at: "2026-07-17T11:06:00.000Z"
       }
     );
     db.emailDeliveries.push(
@@ -9914,6 +9922,15 @@ describe("deferred transmission when MH is unavailable", () => {
         status: "SENT",
         provider_response_json: JSON.stringify({ provider: "cloudflare-email" }),
         created_at: "2026-07-17T11:07:00.000Z"
+      },
+      {
+        id: "delivery_pending_post_dispatch",
+        document_id: "doc_receipt_pending_attention",
+        email_type: "dteReceipt",
+        status: "PENDING",
+        provider_dispatch_started_at: "2026-07-17T11:08:00.000Z",
+        provider_response_json: "{}",
+        created_at: "2026-07-17T11:08:00.000Z"
       }
     );
 
@@ -9932,9 +9949,11 @@ describe("deferred transmission when MH is unavailable", () => {
         receipt_email_status?: string | null;
         receipt_email_outcome_class?: string | null;
         receipt_email_failure_code?: string | null;
+        receipt_email_requires_review?: number | null;
       }>;
     };
     expect(body.documents.map((document) => document.id)).toEqual([
+      "doc_receipt_pending_attention",
       "doc_receipt_failed_attention",
       "doc_fiscal_rejected_attention",
       "doc_fiscal_failed_attention"
@@ -9944,6 +9963,11 @@ describe("deferred transmission when MH is unavailable", () => {
       receipt_email_status: "FAILED",
       receipt_email_outcome_class: "UNKNOWN",
       receipt_email_failure_code: "E_INTERNAL_SERVER_ERROR"
+    });
+    expect(body.documents.find((document) => document.id === "doc_receipt_pending_attention")).toMatchObject({
+      status: "ACCEPTED",
+      receipt_email_status: "PENDING",
+      receipt_email_requires_review: 1
     });
   });
 
@@ -14743,6 +14767,7 @@ class Statement {
         outcome_class: latest.outcome_class ?? null,
         failure_code: latest.failure_code ?? null,
         retry_safe: Number(latest.retry_safe ?? 0),
+        provider_dispatch_started_at: latest.provider_dispatch_started_at ?? null,
         attempt_no: Number(latest.attempt_no ?? 1),
         occurred_at:
           latest.finalized_at ??
@@ -15853,18 +15878,34 @@ class Statement {
                 (delivery.email_type === "dteReceipt" || delivery.email_type === "dteReceiptTransitorio")
             )
             .sort((left, right) => {
-              const leftAttemptedAt = String(left.claim_attempted_at ?? left.created_at ?? "");
-              const rightAttemptedAt = String(right.claim_attempted_at ?? right.created_at ?? "");
+              const attemptOrder = Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1);
+              if (attemptOrder !== 0) return attemptOrder;
+              const leftAttemptedAt = String(
+                left.finalized_at ?? left.claim_attempted_at ?? left.created_at ?? ""
+              );
+              const rightAttemptedAt = String(
+                right.finalized_at ?? right.claim_attempted_at ?? right.created_at ?? ""
+              );
               return (
                 rightAttemptedAt.localeCompare(leftAttemptedAt) ||
                 String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")) ||
                 String(right.id ?? "").localeCompare(String(left.id ?? ""))
               );
             })[0];
-        if (this.sql.includes("latest_receipt.status = 'FAILED'")) {
+        if (
+          this.sql.includes("dte_documents.status IN ('FAILED', 'REJECTED')") &&
+          this.sql.includes("latest_receipt.status = 'FAILED'")
+        ) {
           documents = documents.filter((document) => {
             if (document.status === "FAILED" || document.status === "REJECTED") return true;
-            return document.status === "ACCEPTED" && latestReceipt(document.id)?.status === "FAILED";
+            const receipt = latestReceipt(document.id);
+            return document.status === "ACCEPTED" && (
+              receipt?.status === "FAILED" ||
+              (
+                receipt?.status === "PENDING" &&
+                receipt.provider_dispatch_started_at != null
+              )
+            );
           });
         } else if (this.sql.includes("dte_documents.status = 'SIGNED' AND dte_documents.transmission_deferred_at IS NOT NULL")) {
           // Virtual "TRANSMISSION_PENDING" filter: deferred docs only, not plain SIGNED.
@@ -15898,7 +15939,20 @@ class Statement {
             receipt_email_status: latestReceipt(document.id)?.status ?? null,
             receipt_email_outcome_class: latestReceipt(document.id)?.outcome_class ?? null,
             receipt_email_failure_code: latestReceipt(document.id)?.failure_code ?? null,
-            receipt_email_retry_safe: latestReceipt(document.id)?.retry_safe ?? null
+            receipt_email_retry_safe: latestReceipt(document.id)?.retry_safe ?? null,
+            receipt_email_requires_review: (() => {
+              const receipt = latestReceipt(document.id);
+              return (
+                (
+                  receipt?.status === "PENDING" &&
+                  receipt.provider_dispatch_started_at != null
+                ) ||
+                (
+                  receipt?.status === "FAILED" &&
+                  ((receipt.outcome_class ?? null) === null || receipt.outcome_class === "UNKNOWN")
+                )
+              ) ? 1 : 0;
+            })()
           })) as T[]
         };
       }

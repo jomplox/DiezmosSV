@@ -18,6 +18,7 @@ export interface ReceiptEmailDeliveryState {
   outcomeClass: EmailDeliveryOutcomeClass | null;
   failureCode: string | null;
   retrySafe: boolean;
+  requiresReview: boolean;
   attemptNo: number;
   occurredAt: string;
 }
@@ -1151,6 +1152,7 @@ export class Repository {
     const row = await this.db
       .prepare(
         `SELECT status, outcome_class, failure_code, retry_safe, attempt_no,
+                provider_dispatch_started_at,
                 COALESCE(
                   finalized_at,
                   sent_at,
@@ -1170,6 +1172,7 @@ export class Repository {
         outcome_class: EmailDeliveryOutcomeClass | null;
         failure_code: string | null;
         retry_safe: number;
+        provider_dispatch_started_at: string | null;
         attempt_no: number;
         occurred_at: string;
       }>();
@@ -1179,6 +1182,12 @@ export class Repository {
           outcomeClass: row.outcome_class,
           failureCode: row.failure_code,
           retrySafe: Number(row.retry_safe) === 1,
+          requiresReview:
+            (row.status === "PENDING" && row.provider_dispatch_started_at !== null) ||
+            (
+              row.status === "FAILED" &&
+              (row.outcome_class === null || row.outcome_class === "UNKNOWN")
+            ),
           attemptNo: Number(row.attempt_no),
           occurredAt: row.occurred_at
         }
@@ -1200,7 +1209,13 @@ export class Repository {
         dte_documents.status IN ('FAILED', 'REJECTED')
         OR (
           dte_documents.status = 'ACCEPTED'
-          AND latest_receipt.status = 'FAILED'
+          AND (
+            latest_receipt.status = 'FAILED'
+            OR (
+              latest_receipt.status = 'PENDING'
+              AND latest_receipt.provider_dispatch_started_at IS NOT NULL
+            )
+          )
         )
       )`);
     } else if (params.status === "TRANSMISSION_PENDING") {
@@ -1243,6 +1258,7 @@ export class Repository {
                outcome_class,
                failure_code,
                retry_safe,
+               provider_dispatch_started_at,
                ROW_NUMBER() OVER (
                  PARTITION BY document_id
                  ORDER BY attempt_no DESC,
@@ -1257,7 +1273,19 @@ export class Repository {
              latest_receipt.status AS receipt_email_status,
              latest_receipt.outcome_class AS receipt_email_outcome_class,
              latest_receipt.failure_code AS receipt_email_failure_code,
-             latest_receipt.retry_safe AS receipt_email_retry_safe
+             latest_receipt.retry_safe AS receipt_email_retry_safe,
+             CASE
+               WHEN latest_receipt.status = 'PENDING'
+                AND latest_receipt.provider_dispatch_started_at IS NOT NULL
+               THEN 1
+               WHEN latest_receipt.status = 'FAILED'
+                AND (
+                  latest_receipt.outcome_class IS NULL
+                  OR latest_receipt.outcome_class = 'UNKNOWN'
+                )
+               THEN 1
+               ELSE 0
+             END AS receipt_email_requires_review
         ${from}
         ${where}
        ORDER BY dte_documents.created_at DESC, dte_documents.id DESC

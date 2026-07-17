@@ -173,8 +173,10 @@ La sección **Fallos** reúne dos situaciones distintas:
   **Rechazado** también existe y Hacienda respondió que no lo aceptaba. Para estos casos,
   seleccione el documento en la lista y use el panel de detalle a la derecha.
 - Un CDE **Aceptado** también aparece aquí cuando el comprobante fiscal quedó correcto
-  pero su correo no llegó. La fila muestra **Correo fallido** y el detalle explica si el
-  envío se puede intentar otra vez con seguridad o necesita revisión.
+  pero su correo falló o quedó con resultado incierto. La fila muestra **Correo fallido**
+  cuando el proveedor confirmó un fallo y **Correo por revisar** cuando el sistema no
+  puede confirmar si el proveedor lo aceptó. El detalle explica si el envío se puede
+  intentar otra vez con seguridad o necesita revisión.
 
 En una tarjeta **CDE NO CREADO**, **Número reservado** significa que el sistema apartó ese
 número para crear el mismo comprobante al reintentar; no significa que el CDE ya fue
@@ -190,6 +192,7 @@ Para un CDE **Fallido** o **Rechazado**:
   lápiz junto a **Correo de envío** si hace falta y pulse **Reenviar ahora** dentro del
   aviso rojo. Púlselo una sola vez; si el sistema no puede confirmar el resultado
   anterior, el botón queda bloqueado para evitar dos correos y pide revisión manual.
+  No intente sortear un aviso **Correo por revisar** con otro navegador o usuario.
 
 **Cuándo escalar a soporte técnico:** si un mismo CDE sigue en **Fallido** o **Rechazado**
 después de dos o tres reintentos, o si el mensaje de error menciona credenciales, firma o

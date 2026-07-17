@@ -433,13 +433,18 @@ send is recognized only for HTTP `200` or `202` with
 rejection is retry-safe only for an HTTP `4xx` JSON response shaped as
 `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}`. Empty, malformed, oversized,
 non-JSON, generic `4xx`, unrecognized `2xx`, timeout, network, and `5xx` responses are outcome-unknown
-and require manual review; the Worker does not auto-retry them.
+and require manual review; the Worker does not auto-retry them. An accepted provider ID must be an
+opaque 1–128 character identifier made only of ASCII letters, numbers, `_`, and `-`; URLs, email
+addresses, bearer/API/token-shaped values, and other unsafe identifiers are rejected as unknown
+instead of being persisted.
 
 Operational alert email and webhook delivery are independent. A failure in one channel does not
 prevent the other from running. Each recipient/channel uses a durable dispatch claim keyed to the
-incident, and post-dispatch uncertainty is never reclaimed automatically. Audit rows are secondary
-operator history rather than the duplicate-send fence. The same incident is therefore suppressed
-after a confirmed send while a later incident for the same CDE can alert again. The webhook payload
+incident and normalized target, so rotating a webhook URL creates a new target without exposing the
+URL in D1. Post-dispatch uncertainty is never reclaimed automatically, and an alert channel is only
+complete when every configured target is confirmed sent. Audit rows are secondary operator history
+rather than the duplicate-send fence. The same incident is therefore suppressed after a confirmed
+send while a later incident for the same CDE can alert again. The webhook payload
 contains only redacted alert text, redacted internal entity display, and the admin origin; it never
 contains the webhook URL, raw provider errors, donor addresses, or provider credentials.
 
@@ -677,7 +682,7 @@ until a deployment operator reconciles the true MH outcome per
 ## 🗄️ Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0024)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0025)</strong></summary>
 
 <br/>
 
@@ -691,7 +696,8 @@ until a deployment operator reconciles the true MH outcome per
 | `audit_logs` | Immutable action log: actor, action, entity, metadata. |
 | `mh_tokens` | Cached MH auth tokens, per environment. |
 | `document_sequences` | Control-number counters per environment/prefix. |
-| `email_deliveries` | Email send records, provider responses, and PDF/JSON evidence hashes. |
+| `email_deliveries` | Claimed email attempts, dispatch/outcome evidence, provider IDs, and PDF/JSON evidence hashes. |
+| `operational_alert_deliveries` | Incident- and target-scoped claims for independent alert email/webhook delivery. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |
