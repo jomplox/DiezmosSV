@@ -15,6 +15,7 @@ import { classifyEmailDispatchError, EmailService, type EmailDeliveryResult } fr
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
+import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
 
@@ -172,6 +173,7 @@ export class IssuancePipeline {
     const existing = await this.repo.getDteDocumentByWompiEvent(wompiEventId);
     if (existing) {
       await this.repo.markWompiDocumentCreated(wompiEventId, existing.id);
+      await this.recordStagingSmokeRun(existing.id, event.transaction_id);
       return this.processDteDocument(existing.id);
     }
     if (event.processed_at) {
@@ -290,11 +292,29 @@ export class IssuancePipeline {
         return (await this.repo.getDteDocumentByWompiEvent(wompiEventId)) ?? null;
       }
       record = created;
+      await this.recordStagingSmokeRun(record.id, event.transaction_id);
     } catch (error) {
       await this.repo.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
       throw error;
     }
     return this.processDteDocument(record.id);
+  }
+
+  private async recordStagingSmokeRun(
+    documentId: string,
+    transactionId: string
+  ): Promise<void> {
+    const runId = stagingSmokeRunIdFromTransaction(this.env, transactionId);
+    if (!runId) {
+      return;
+    }
+    await this.repo.createAuditIfAbsent({
+      action: "STAGING_SMOKE_RUN",
+      entityType: "dte_document",
+      entityId: documentId,
+      summary: "CDE creado por la prueba integral de staging",
+      metadata: { runId, path: "webhook", source: "staging-smoke" }
+    });
   }
 
   // A REJECTED verdict is MH's judgment on the document CONTENT: retransmitting
