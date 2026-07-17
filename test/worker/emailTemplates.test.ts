@@ -438,7 +438,7 @@ describe("email dispatch outcome classification", () => {
         html: "<p>Body</p>"
       })).resolves.toEqual({
         provider: "http-email",
-        messageId: "email_http_contract_1"
+        messageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
       });
     } finally {
       vi.unstubAllGlobals();
@@ -450,7 +450,7 @@ describe("email dispatch outcome classification", () => {
     "https://user:secret@mail.example/private",
     "Bearer secret-token",
     "sk_private_provider_token"
-  ])("rejects non-opaque HTTP provider identities without persisting %s", async (providerId) => {
+  ])("hashes an accepted HTTP provider identity without returning the raw value %s", async (providerId) => {
     vi.stubGlobal("fetch", vi.fn(async () =>
       new Response(JSON.stringify({
         status: "accepted",
@@ -468,46 +468,43 @@ describe("email dispatch outcome classification", () => {
     } as unknown as Env);
 
     try {
-      const error = await service.sendOperationalAlert({
+      const result = await service.sendOperationalAlert({
         to: "ops@example.org",
         subject: "Alert",
         text: "Body",
         html: "<p>Body</p>"
-      }).catch((caught: unknown) => caught);
-      expect(error).toMatchObject({
-        code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED",
-        outcomeClass: "UNKNOWN",
-        retrySafe: false,
-        providerResponse: { code: "HTTP_PROVIDER_RESPONSE_UNRECOGNIZED" }
       });
-      expect(JSON.stringify(error)).not.toContain(providerId);
+      expect(result).toMatchObject({
+        provider: "http-email",
+        messageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+      });
+      expect(JSON.stringify(result)).not.toContain(providerId);
     } finally {
       vi.unstubAllGlobals();
     }
   });
 
-  it("rejects a Cloudflare response whose message ID is not an opaque identifier", async () => {
-    const send = vi.fn(async () => ({ messageId: "Bearer private-provider-token" }));
+  it("hashes an RFC-style Cloudflare message ID after acceptance without returning the raw value", async () => {
+    const providerId = "<accepted.message.123@mail.cloudflare.example>";
+    const send = vi.fn(async () => ({ messageId: providerId }));
     const service = new EmailService({
       MOCK_EXTERNAL_SERVICES: "false",
       EMAIL_FROM: "receipts@example.org",
       EMAIL: { send }
     } as unknown as Env);
 
-    const error = await service.sendOperationalAlert({
+    const result = await service.sendOperationalAlert({
       to: "ops@example.org",
       subject: "Alert",
       text: "Body",
       html: "<p>Body</p>"
-    }).catch((caught: unknown) => caught);
-
-    expect(error).toMatchObject({
-      code: "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED",
-      outcomeClass: "UNKNOWN",
-      retrySafe: false,
-      providerResponse: { code: "CLOUDFLARE_ACCEPTANCE_UNCONFIRMED" }
     });
-    expect(JSON.stringify(error)).not.toContain("private-provider-token");
+
+    expect(result).toMatchObject({
+      provider: "cloudflare-email",
+      messageId: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+    });
+    expect(JSON.stringify(result)).not.toContain(providerId);
   });
 
   it("classifies HTTP server errors as unknown and never retry-safe", async () => {

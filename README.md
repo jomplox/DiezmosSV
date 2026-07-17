@@ -433,10 +433,10 @@ send is recognized only for HTTP `200` or `202` with
 rejection is retry-safe only for an HTTP `4xx` JSON response shaped as
 `{"status":"rejected","accepted":false,"code":"<STABLE_CODE>"}`. Empty, malformed, oversized,
 non-JSON, generic `4xx`, unrecognized `2xx`, timeout, network, and `5xx` responses are outcome-unknown
-and require manual review; the Worker does not auto-retry them. An accepted provider ID must be an
-opaque 1–128 character identifier made only of ASCII letters, numbers, `_`, and `-`; URLs, email
-addresses, bearer/API/token-shaped values, and other unsafe identifiers are rejected as unknown
-instead of being persisted.
+and require manual review; the Worker does not auto-retry them. A successful provider response must
+include a non-empty delivery ID, but the Worker never persists that raw value. It immediately stores
+only a fixed-length `sha256:` digest, so future provider ID formats cannot be rejected after an
+accepted send and a provider-returned URL, address, or credential cannot enter durable evidence.
 
 Operational alert email and webhook delivery are independent. A failure in one channel does not
 prevent the other from running. Each recipient/channel uses a durable dispatch claim keyed to the

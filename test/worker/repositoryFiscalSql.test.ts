@@ -565,6 +565,43 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("blocks a fresh resend when the latest legacy receipt failure is ambiguous without a claim token", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(database, "doc_legacy_ambiguous", "2026-06-01T12:00:02.000Z", "donor@example.org");
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, claim_token,
+         outcome_class, retry_safe, attempt_no, created_at
+       ) VALUES (?, ?, ?, 'FAILED', '{}', 'dteReceipt', 'ACCEPTED',
+                 NULL, NULL, 0, 1, ?)`
+    ).run(
+      "email_legacy_ambiguous",
+      "doc_legacy_ambiguous",
+      "donor@example.org",
+      "2026-06-01T12:00:03.000Z"
+    );
+    const repository = new Repository(d1.database);
+
+    await expect(repository.claimManualEmailDelivery({
+      documentId: "doc_legacy_ambiguous",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "88888888-8888-4888-8888-888888888888"
+    })).resolves.toMatchObject({
+      kind: "manual_review",
+      id: "email_legacy_ambiguous",
+      attemptNo: 1,
+      outcomeClass: null
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM email_deliveries WHERE document_id = ?"
+    ).get("doc_legacy_ambiguous")).toEqual({ count: 1 });
+    database.close();
+  });
+
   it("orders the latest receipt outcome by document attempt number before tied timestamps", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);

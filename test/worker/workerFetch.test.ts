@@ -4632,6 +4632,39 @@ describe("document email resend", () => {
     expect(persisted).not.toContain("https://private.example/token/abc");
   });
 
+  it("blocks a fresh resend ID when the latest legacy receipt failure is ambiguous", async () => {
+    const db = emailResendDb();
+    db.emailDeliveries.push({
+      id: "email_legacy_ambiguous",
+      document_id: "doc_1",
+      to_email: "legacy-contact-2@example.com",
+      status: "FAILED",
+      provider_response_json: "{}",
+      email_type: "dteReceipt",
+      document_status_at_send: "ACCEPTED",
+      claim_token: null,
+      outcome_class: null,
+      retry_safe: 0,
+      attempt_no: 1,
+      created_at: "2026-07-17T16:59:00.000Z"
+    });
+    const send = vi.fn(async () => ({ messageId: "must-not-send" }));
+    const response = await resendDocument(env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    }));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "resend_requires_review",
+      outcomeClass: null,
+      attemptNo: 1
+    });
+    expect(send).not.toHaveBeenCalled();
+    expect(db.emailDeliveries).toHaveLength(1);
+  });
+
   it("sends receipts through the Cloudflare Email Service binding", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
@@ -4693,6 +4726,7 @@ describe("document email resend", () => {
     expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
       receptor: { correo: "legacy-contact-2@example.com" }
     });
+    const providerDeliveryId = `sha256:${await sha256Hex(utf8Bytes("cf-email-1"))}`;
     expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
@@ -4703,8 +4737,8 @@ describe("document email resend", () => {
       pdf_renderer_version: "cde-pdf:v3",
       pdf_sha256: pdfSha256,
       dte_json_sha256: await sha256Hex(dteJsonBytes),
-      provider_delivery_id: "cf-email-1",
-      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-1" })
+      provider_delivery_id: providerDeliveryId,
+      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: providerDeliveryId })
     }));
   });
 
@@ -4876,12 +4910,13 @@ describe("document email resend", () => {
     expect(response.status).toBe(200);
     expect(cloudflareSend).not.toHaveBeenCalled();
     expect(providerFetch).toHaveBeenCalledTimes(1);
+    const providerDeliveryId = `sha256:${await sha256Hex(utf8Bytes("email_http_selected"))}`;
     expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
       document_id: "doc_1",
       status: "SENT",
       provider_response_json: JSON.stringify({
         provider: "http-email",
-        messageId: "email_http_selected"
+        messageId: providerDeliveryId
       })
     }));
   });
@@ -5973,6 +6008,7 @@ describe("document invalidation", () => {
     expect(JSON.parse(new TextDecoder().decode(sentMessage.attachments[1].content as Uint8Array))).toMatchObject({
       receptor: { correo: "legacy-contact-2@example.com" }
     });
+    const providerDeliveryId = `sha256:${await sha256Hex(utf8Bytes("cf-email-invalidated"))}`;
     expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
       document_id: "doc_1",
       to_email: "legacy-contact-2@example.com",
@@ -5983,8 +6019,8 @@ describe("document invalidation", () => {
       pdf_renderer_version: "cde-pdf:v3",
       pdf_sha256: invalidationPdfSha256,
       dte_json_sha256: await sha256Hex(invalidationJsonBytes),
-      provider_delivery_id: "cf-email-invalidated",
-      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: "cf-email-invalidated" })
+      provider_delivery_id: providerDeliveryId,
+      provider_response_json: JSON.stringify({ provider: "cloudflare-email", messageId: providerDeliveryId })
     }));
     expect(db.audits).toContainEqual(expect.objectContaining({ action: "EMAIL_INVALIDATION_SENT", entity_id: "doc_1" }));
     const invalidation = JSON.parse(String(db.dteEvents[0].plain_json)) as {
@@ -8254,12 +8290,13 @@ describe("donation intent correlation", () => {
     expect(intentCompletedAtSend).toEqual([true]);
     expect(sent).toHaveLength(1);
     expect(db.emailDeliveries).toHaveLength(1);
+    const providerDeliveryId = `sha256:${await sha256Hex(utf8Bytes("concurrent-receipt-1"))}`;
     expect(db.emailDeliveries[0]).toMatchObject({
       document_id: "dte_concurrent_finalization",
       status: "SENT",
       email_type: "dteReceipt",
       document_status_at_send: "ACCEPTED",
-      provider_delivery_id: "concurrent-receipt-1"
+      provider_delivery_id: providerDeliveryId
     });
     expect(
       db.preparedSql.some((sql) =>
@@ -14658,20 +14695,35 @@ class Statement {
       const duplicateRequest = this.db.emailDeliveries.some(
         (delivery) => delivery.resend_request_id === resendRequestId
       );
-      const blocker = this.db.emailDeliveries.find(
-        (delivery) =>
-          delivery.document_id === documentId &&
-          delivery.email_type === emailType &&
-          delivery.claim_token != null &&
-          delivery.resend_request_id !== resendRequestId &&
-          (
-            delivery.status === "PENDING" ||
-            (
-              delivery.status === "FAILED" &&
-              ((delivery.outcome_class ?? null) === null || delivery.outcome_class === "UNKNOWN")
-            )
-          )
-      );
+      const latest = this.db.emailDeliveries
+        .filter(
+          (delivery) =>
+            delivery.document_id === documentId &&
+            delivery.email_type === emailType
+        )
+        .sort((left, right) => {
+          const attemptOrder = Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1);
+          if (attemptOrder !== 0) return attemptOrder;
+          const leftOccurredAt = String(
+            left.finalized_at ?? left.claim_attempted_at ?? left.created_at ?? ""
+          );
+          const rightOccurredAt = String(
+            right.finalized_at ?? right.claim_attempted_at ?? right.created_at ?? ""
+          );
+          return (
+            rightOccurredAt.localeCompare(leftOccurredAt) ||
+            String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")) ||
+            String(right.id ?? "").localeCompare(String(left.id ?? ""))
+          );
+        })[0];
+      const blocker =
+        latest?.status === "PENDING" ||
+        (
+          latest?.status === "FAILED" &&
+          ((latest.outcome_class ?? null) === null || latest.outcome_class === "UNKNOWN")
+        )
+          ? latest
+          : undefined;
       if (duplicateRequest || blocker) return null;
       const attemptNo = Math.max(
         ...this.db.emailDeliveries
@@ -14726,21 +14778,35 @@ class Statement {
       this.sql.includes("FROM email_deliveries")
     ) {
       const [documentId, emailType] = this.args;
-      const blocker = this.db.emailDeliveries
+      const latest = this.db.emailDeliveries
         .filter(
           (delivery) =>
             delivery.document_id === documentId &&
-            delivery.email_type === emailType &&
-            delivery.claim_token != null &&
-            (
-              delivery.status === "PENDING" ||
-              (
-                delivery.status === "FAILED" &&
-                ((delivery.outcome_class ?? null) === null || delivery.outcome_class === "UNKNOWN")
-              )
-            )
+            delivery.email_type === emailType
         )
-        .sort((left, right) => Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1))[0];
+        .sort((left, right) => {
+          const attemptOrder = Number(right.attempt_no ?? 1) - Number(left.attempt_no ?? 1);
+          if (attemptOrder !== 0) return attemptOrder;
+          const leftOccurredAt = String(
+            left.finalized_at ?? left.claim_attempted_at ?? left.created_at ?? ""
+          );
+          const rightOccurredAt = String(
+            right.finalized_at ?? right.claim_attempted_at ?? right.created_at ?? ""
+          );
+          return (
+            rightOccurredAt.localeCompare(leftOccurredAt) ||
+            String(right.created_at ?? "").localeCompare(String(left.created_at ?? "")) ||
+            String(right.id ?? "").localeCompare(String(left.id ?? ""))
+          );
+        })[0];
+      const blocker =
+        latest?.status === "PENDING" ||
+        (
+          latest?.status === "FAILED" &&
+          ((latest.outcome_class ?? null) === null || latest.outcome_class === "UNKNOWN")
+        )
+          ? latest
+          : undefined;
       return (blocker ?? null) as T | null;
     }
     if (
