@@ -55,8 +55,10 @@ export function isPreCdeRetryInFlight(
 
 export function preCdeActionLabel(
   item: Pick<WompiIssuanceFailureItem, "issuance_status" | "processed_at">,
-  correctable: boolean
+  correctable: boolean,
+  reviewRequired = false
 ): string {
+  if (reviewRequired) return "Revisión necesaria";
   const retryInFlight = isPreCdeRetryInFlight(item);
   if (correctable) {
     if (!retryInFlight) return "Corregir y reintentar";

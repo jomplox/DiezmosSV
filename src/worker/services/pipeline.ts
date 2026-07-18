@@ -518,6 +518,13 @@ export class IssuancePipeline {
       );
     }
     const binding = await resolveDonationIntentBinding(this.repo, payload);
+    if (binding.kind === "unbound") {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "WOMPI_INTENT_QUARANTINED",
+        WOMPI_INTENT_QUARANTINED_MESSAGE
+      );
+    }
     const intent = binding.kind === "bound" ? binding.intent : null;
     const config = getEmisorConfig(this.env);
     const correctionConfig = event.control_prefix

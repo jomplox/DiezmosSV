@@ -1,4 +1,4 @@
-import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, FiscalCorrectionRecord, FiscalCorrectionStatus, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiPaymentLink, WompiWebhook } from "../types";
+import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, FiscalCorrectionRecord, FiscalCorrectionStatus, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiIssuanceRetrySnapshot, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { generationCode, newId, normalizeControlPrefix, numeroControl } from "../utils/ids";
 import { amountCents, donorName } from "../domain/wompi";
@@ -1712,6 +1712,19 @@ export class Repository {
       .first<WompiIssuanceFailureItem>();
   }
 
+  async getWompiIssuanceRetrySnapshotById(
+    wompiEventId: string
+  ): Promise<WompiIssuanceRetrySnapshot | null> {
+    return this.db
+      .prepare(
+        `SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}, issuance_attempt_id, issuance_claim_id
+           FROM wompi_events
+          WHERE id = ?`
+      )
+      .bind(wompiEventId)
+      .first<WompiIssuanceRetrySnapshot>();
+  }
+
   async claimInitialWompiIssuanceAttempt(wompiEventId: string): Promise<string | null> {
     const attemptId = newId("issuance_attempt");
     const queuedAt = nowIso();
@@ -1731,7 +1744,11 @@ export class Repository {
     return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
   }
 
-  async claimWompiIssuanceRetry(wompiEventId: string, actorId: string): Promise<string | null> {
+  async claimWompiIssuanceRetry(
+    wompiEventId: string,
+    actorId: string,
+    observed: WompiIssuanceRetrySnapshot
+  ): Promise<string | null> {
     const attemptId = newId("issuance_attempt");
     const retryQueuedAt = nowIso();
     const actorIp = normalizeAuditIp(this.auditContext?.ip ?? null);
@@ -1747,6 +1764,12 @@ export class Repository {
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_claim_id IS NULL
+             AND issuance_status IS ?
+             AND processed_at IS ?
+             AND issuance_attempt_id IS ?
+             AND issuance_claim_id IS ?
+             AND issuance_error_code IS ?
+             AND issuance_error_message IS ?
              AND (
                issuance_status IN ('FAILED', 'DEAD_LETTERED')
                OR (
@@ -1763,7 +1786,17 @@ export class Repository {
                   )
              )`
         )
-        .bind(attemptId, retryQueuedAt, wompiEventId),
+        .bind(
+          attemptId,
+          retryQueuedAt,
+          wompiEventId,
+          observed.issuance_status,
+          observed.processed_at,
+          observed.issuance_attempt_id,
+          observed.issuance_claim_id,
+          observed.issuance_error_code,
+          observed.issuance_error_message
+        ),
       this.db
         .prepare(
           `INSERT INTO audit_logs (

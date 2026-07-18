@@ -105,6 +105,7 @@ export interface WompiIssuanceFailureItem {
   issuance_failed_at: string | null;
   issuance_dead_lettered_at: string | null;
   reserved_numero_control: string | null;
+  correction_available: boolean | null;
 }
 
 export interface FiscalCorrectionData {

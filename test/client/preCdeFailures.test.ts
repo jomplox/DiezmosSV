@@ -23,7 +23,8 @@ const items: WompiIssuanceFailureItem[] = [
     issuance_last_attempt_at: "2026-07-13T20:02:00.000Z",
     issuance_failed_at: "2026-07-13T20:02:00.000Z",
     issuance_dead_lettered_at: null,
-    reserved_numero_control: "DTE-15-M001P004-000000000000031"
+    reserved_numero_control: "DTE-15-M001P004-000000000000031",
+    correction_available: null
   },
   {
     id: "wompi-event-2",
@@ -40,7 +41,8 @@ const items: WompiIssuanceFailureItem[] = [
     issuance_last_attempt_at: "2026-07-13T21:05:00.000Z",
     issuance_failed_at: "2026-07-13T21:05:00.000Z",
     issuance_dead_lettered_at: "2026-07-13T21:05:00.000Z",
-    reserved_numero_control: null
+    reserved_numero_control: null,
+    correction_available: null
   }
 ];
 
@@ -116,6 +118,13 @@ describe("isPreCdeRetryInFlight", () => {
       issuance_status: "PROCESSING",
       processed_at: null
     }, false)).toBe("Reintento en cola");
+  });
+
+  it("shows a stable blocked label for an unresolved correction binding", () => {
+    expect(preCdeActionLabel({
+      issuance_status: "FAILED",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    }, false, true)).toBe("Revisión necesaria");
   });
 });
 

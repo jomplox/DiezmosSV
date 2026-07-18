@@ -62,7 +62,8 @@ import {
   FiscalCorrectionDialog,
   fiscalCorrectionRequestIdForTarget,
   fiscalCorrectionStatusLabel,
-  isCorrectablePreCdeFailure
+  isCorrectablePreCdeFailure,
+  isReviewRequiredPreCdeFailure
 } from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
@@ -4524,10 +4525,13 @@ function PreCdeFailuresPanel({
           {items.map((item) => {
             const retryQueued = isPreCdeRetryInFlight(item);
             const correctable = isCorrectablePreCdeFailure(item);
-            const actionLabel = preCdeActionLabel(item, correctable);
-            const actionBusy = correctable
-              ? busy === `fiscal-correction-load:WOMPI_EVENT:${item.id}`
-              : busy === `pre-cde-retry:${item.id}`;
+            const reviewRequired = isReviewRequiredPreCdeFailure(item);
+            const actionLabel = preCdeActionLabel(item, correctable, reviewRequired);
+            const actionBusy = reviewRequired
+              ? false
+              : correctable
+                ? busy === `fiscal-correction-load:WOMPI_EVENT:${item.id}`
+                : busy === `pre-cde-retry:${item.id}`;
             return (
               <article className="pre-cde-failure-card" key={item.id}>
                 <span className="status pre-cde">CDE NO CREADO</span>
@@ -4547,8 +4551,9 @@ function PreCdeFailuresPanel({
                 {canRetry && (
                   <button
                     type="button"
-                    disabled={retryQueued || actionBusy}
+                    disabled={reviewRequired || retryQueued || actionBusy}
                     onClick={() => {
+                      if (reviewRequired) return;
                       if (correctable) void onCorrect(item);
                       else void onRetry(item.id);
                     }}

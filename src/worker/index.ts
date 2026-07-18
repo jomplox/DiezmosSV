@@ -78,7 +78,8 @@ import {
   buildCorrectedDirectCandidate,
   buildCorrectedWompiCandidate,
   effectiveDocumentCorrectionData,
-  effectiveWompiCorrectionData
+  effectiveWompiCorrectionData,
+  requiresFiscalReceptorCorrection
 } from "./services/fiscalCorrection";
 import {
   legacyIssuanceAttemptId,
@@ -1027,7 +1028,21 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   if (url.pathname === "/api/wompi-events/issuance-failures" && request.method === "GET") {
     requireRole(user, "VIEWER");
     try {
-      return jsonResponse({ failures: await repo.listWompiIssuanceFailures(100) });
+      const failures = await repo.listWompiIssuanceFailures(100);
+      const projected = await Promise.all(failures.map(async (failure) => {
+        if (!requiresFiscalReceptorCorrection(
+          failure.issuance_error_code,
+          failure.issuance_error_message ?? ""
+        )) {
+          return { ...failure, correction_available: null };
+        }
+        const correctionData = await effectiveWompiCorrectionData(repo, failure.id);
+        return {
+          ...failure,
+          correction_available: correctionData?.correctable === true
+        };
+      }));
+      return jsonResponse({ failures: projected });
     } catch (error) {
       logWorkerError(env, "wompi_issuance_failure_list_failed", error);
       return wompiIssuanceOperationFailedResponse();
@@ -1039,20 +1054,41 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     const actor = requireRole(user, "OPERATOR");
     const wompiEventId = wompiIssuanceRetryMatch[1];
     try {
-      const attemptId = await repo.claimWompiIssuanceRetry(wompiEventId, actor.id);
+      const current = await repo.getWompiIssuanceRetrySnapshotById(wompiEventId);
+      if (!current) {
+        return notFound();
+      }
+      if (requiresFiscalReceptorCorrection(
+        current.issuance_error_code,
+        current.issuance_error_message ?? ""
+      )) {
+        return wompiCorrectionRequiredResponse();
+      }
+      const attemptId = await repo.claimWompiIssuanceRetry(
+        wompiEventId,
+        actor.id,
+        current
+      );
       if (!attemptId) {
-        const current = await repo.getWompiIssuanceFailureById(wompiEventId);
-        if (!current) {
+        const latest = await repo.getWompiIssuanceFailureById(wompiEventId);
+        if (!latest) {
           return notFound();
         }
-        if (current.issuance_status === "RETRY_QUEUED" || current.issuance_status === "PROCESSING") {
-          return jsonResponse({ queued: false, failure: current });
+        if (requiresFiscalReceptorCorrection(
+          latest.issuance_error_code,
+          latest.issuance_error_message ?? ""
+        )) {
+          return wompiCorrectionRequiredResponse();
+        }
+        const failure = { ...latest, correction_available: null };
+        if (latest.issuance_status === "RETRY_QUEUED" || latest.issuance_status === "PROCESSING") {
+          return jsonResponse({ queued: false, failure });
         }
         return jsonResponse(
           {
             error: "wompi_issuance_retry_not_available",
             message: "El evento Wompi ya no está disponible para reintento.",
-            failure: current
+            failure
           },
           { status: 409 }
         );
@@ -2264,6 +2300,13 @@ async function handleWompiFiscalCorrection(
   }
   assertDeploymentAllowsAmbiente(env, event.environment);
 
+  const binding = await resolveDonationIntentBinding(repo, payload);
+  if (binding.kind === "unbound") {
+    return fiscalCorrectionConflict(
+      "wompi_intent_binding_unresolved",
+      "La intención de donación no coincide con este evento Wompi."
+    );
+  }
   const beforeData = await effectiveWompiCorrectionData(repo, wompiEventId);
   if (!beforeData) return notFound();
   if (!beforeData.correctable) {
@@ -2275,7 +2318,6 @@ async function handleWompiFiscalCorrection(
   );
   if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
 
-  const binding = await resolveDonationIntentBinding(repo, payload);
   const config = getEmisorConfig(env);
   buildCorrectedWompiCandidate({
     payload,
@@ -2545,6 +2587,13 @@ function unchangedFiscalCorrectionResponse(): Response {
 
 function fiscalCorrectionConflict(error: string, message: string): Response {
   return jsonResponse({ error, message }, { status: 409 });
+}
+
+function wompiCorrectionRequiredResponse(): Response {
+  return fiscalCorrectionConflict(
+    "correction_required",
+    "Corrija los datos del donante antes de reintentar la creación del CDE."
+  );
 }
 
 function fiscalCorrectionNotAllowedResponse(guidance: string | null): Response {
