@@ -1,0 +1,562 @@
+import { AlertTriangle, X } from "lucide-react";
+import {
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState
+} from "react";
+import {
+  CAT012_DEPARTMENTS,
+  CAT019_ACTIVITIES,
+  CAT020_COUNTRIES,
+  CAT022_DOCUMENT_TYPES,
+  CAT032_DOMICILE,
+  findCatalogOption,
+  getCat008Districts,
+  getCat013Municipalities,
+  type CatalogOption
+} from "../shared/catalogs";
+import {
+  FiscalCorrectionValidationError,
+  fiscalCorrectionChangedFields,
+  validateFiscalReceptorCorrection,
+  type FiscalCorrectionStatus,
+  type FiscalReceptorCorrection
+} from "../shared/fiscalCorrection";
+import { catalogOptionLabel } from "./displayText";
+import type {
+  FiscalCorrectionData,
+  FiscalCorrectionProtectedContext,
+  WompiIssuanceFailureItem
+} from "./types";
+
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
+const CORRECTABLE_LOCAL_CODE = /(?:^|_)(?:DONOR|RECEPTOR)(?:_|$)/;
+const CORRECTABLE_RECEPTOR_PATH = /(?:#\/receptor(?:\/|$)|\breceptor\.[A-Za-z])/i;
+
+export interface FiscalCorrectionFormState {
+  normalized: FiscalReceptorCorrection | null;
+  changed: boolean;
+  canSubmit: boolean;
+  validationError: string;
+}
+
+export function fiscalCorrectionFormState(
+  before: FiscalReceptorCorrection,
+  draft: FiscalReceptorCorrection,
+  activeStatus: FiscalCorrectionStatus | null
+): FiscalCorrectionFormState {
+  try {
+    const normalized = validateFiscalReceptorCorrection(
+      draft as unknown as Record<string, unknown>
+    );
+    const changed = fiscalCorrectionChangedFields(before, normalized).length > 0;
+    return {
+      normalized,
+      changed,
+      canSubmit: changed && activeStatus === null,
+      validationError: ""
+    };
+  } catch (error) {
+    return {
+      normalized: null,
+      changed: false,
+      canSubmit: false,
+      validationError:
+        error instanceof FiscalCorrectionValidationError
+          ? error.message
+          : "Revise los datos del receptor."
+    };
+  }
+}
+
+export function fiscalCorrectionStatusLabel(status: FiscalCorrectionStatus): string {
+  const labels: Record<FiscalCorrectionStatus, string> = {
+    QUEUED: "Corrección en cola",
+    PROCESSING: "Procesando corrección",
+    ACCEPTED: "Corrección aceptada",
+    REJECTED: "Corrección rechazada",
+    FAILED: "Falló la corrección",
+    REVIEW_REQUIRED: "Revisión necesaria"
+  };
+  return labels[status];
+}
+
+export function isCorrectablePreCdeFailure(
+  item: Pick<WompiIssuanceFailureItem, "issuance_error_code" | "issuance_error_message">
+): boolean {
+  return CORRECTABLE_LOCAL_CODE.test(item.issuance_error_code ?? "")
+    || CORRECTABLE_RECEPTOR_PATH.test(item.issuance_error_message ?? "");
+}
+
+export function fiscalCorrectionRequestIdForTarget(
+  requestIds: Map<string, string>,
+  targetKey: string,
+  create: () => string = () => crypto.randomUUID()
+): string {
+  const existing = requestIds.get(targetKey);
+  if (existing) return existing;
+  const requestId = create();
+  requestIds.set(targetKey, requestId);
+  return requestId;
+}
+
+export function FiscalCorrectionDialog({
+  open,
+  data,
+  protectedContext,
+  busy,
+  error,
+  onCancel,
+  onSubmit
+}: {
+  open: boolean;
+  data: FiscalCorrectionData | null;
+  protectedContext: FiscalCorrectionProtectedContext;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onSubmit: (value: FiscalReceptorCorrection) => Promise<void>;
+}) {
+  const [form, setForm] = useState<FiscalReceptorCorrection>(
+    () => data?.receptor ?? emptyCorrection()
+  );
+  const dialogRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (open && data) {
+      setForm(data.receptor);
+    }
+  }, [open, data]);
+
+  useEffect(() => {
+    if (!open) return;
+    dialogRef.current?.focus();
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        if (!busy) onCancel();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const dialog = dialogRef.current;
+      if (!dialog) return;
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+      ).filter(
+        (element) =>
+          element.offsetParent !== null || element === document.activeElement
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [open, busy, onCancel]);
+
+  const formState = useMemo(
+    () =>
+      data
+        ? fiscalCorrectionFormState(
+            data.receptor,
+            form,
+            data.activeCorrection?.status ?? null
+          )
+        : null,
+    [data, form]
+  );
+
+  if (!open || !data || !formState) return null;
+
+  const businessFields =
+    form.tipoDocumento === "36"
+    || Boolean(form.nrc || form.codActividad || form.descActividad);
+  const domestic = form.codDomiciliado === 1;
+  const municipalityOptions = domestic
+    ? getCat013Municipalities(form.departamento)
+    : [];
+  const districtOptions = domestic
+    ? getCat008Districts(form.departamento)
+    : [];
+  const activeStatus = data.activeCorrection?.status ?? null;
+  const validationMessage = formState.validationError || error;
+  const canSubmit =
+    data.correctable && formState.canSubmit && !busy && activeStatus === null;
+  const normalized = formState.normalized;
+
+  function update(patch: Partial<FiscalReceptorCorrection>) {
+    setForm((current) => ({ ...current, ...patch }));
+  }
+
+  function updateDocumentType(tipoDocumento: string) {
+    update({
+      tipoDocumento,
+      ...(tipoDocumento === "36"
+        ? {}
+        : { nrc: null, codActividad: null, descActividad: null })
+    });
+  }
+
+  function updateDomicile(value: string) {
+    const codDomiciliado = value === "2" ? 2 : 1;
+    if (codDomiciliado === 2) {
+      update({
+        codDomiciliado,
+        codPais: form.codPais === "SV" ? "" : form.codPais,
+        departamento: "00",
+        municipio: "00",
+        distrito: "00"
+      });
+      return;
+    }
+    update({
+      codDomiciliado,
+      codPais: "SV",
+      departamento: form.departamento === "00" ? "" : form.departamento,
+      municipio: form.municipio === "00" ? "" : form.municipio,
+      distrito: form.distrito === "00" ? "" : form.distrito
+    });
+  }
+
+  function handleSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (canSubmit && normalized) {
+      void onSubmit(normalized);
+    }
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.currentTarget === event.target && !busy) onCancel();
+      }}
+    >
+      <section
+        ref={dialogRef}
+        tabIndex={-1}
+        className="fiscal-correction-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="fiscal-correction-title"
+        aria-describedby="fiscal-correction-reason"
+      >
+        <header>
+          <div>
+            <h2 id="fiscal-correction-title">Corregir datos fiscales</h2>
+            <p>Revise únicamente los datos del receptor que causaron el rechazo.</p>
+          </div>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={onCancel}
+            disabled={busy}
+            aria-label="Cerrar corrección fiscal"
+            title="Cerrar"
+          >
+            <X size={17} />
+          </button>
+        </header>
+
+        <div
+          id="fiscal-correction-reason"
+          className="fiscal-correction-reason"
+          role="alert"
+        >
+          <AlertTriangle size={18} />
+          <div>
+            <strong>Motivo del fallo</strong>
+            <span>{data.failureReason}</span>
+          </div>
+        </div>
+
+        {activeStatus && (
+          <p className="fiscal-correction-active" role="status">
+            {fiscalCorrectionStatusLabel(activeStatus)}
+          </p>
+        )}
+        {!data.correctable && (
+          <p className="fiscal-correction-guidance" role="alert">
+            {data.guidance ?? "Este caso requiere revisión técnica."}
+          </p>
+        )}
+
+        <div className="fiscal-correction-protected">
+          <strong>Datos protegidos</strong>
+          <p>
+            El monto, el emisor, el ambiente y los identificadores fiscales no
+            se modificarán.
+          </p>
+          <dl>
+            <div><dt>Monto</dt><dd>{protectedContext.amountLabel}</dd></div>
+            <div><dt>Ambiente</dt><dd>{protectedContext.environmentLabel}</dd></div>
+            <div><dt>Emisor</dt><dd>{protectedContext.issuerLabel}</dd></div>
+          </dl>
+        </div>
+
+        <form onSubmit={handleSubmit}>
+          <div className="fiscal-correction-grid">
+            <CorrectionField label="Tipo de documento">
+              <CorrectionSelect
+                name="tipoDocumento"
+                value={form.tipoDocumento}
+                options={CAT022_DOCUMENT_TYPES}
+                onChange={updateDocumentType}
+              />
+            </CorrectionField>
+            <CorrectionField label="Número de documento">
+              <input
+                name="numDocumento"
+                value={form.numDocumento}
+                onChange={(event) => update({ numDocumento: event.target.value })}
+                autoComplete="off"
+              />
+            </CorrectionField>
+            <CorrectionField label="Nombre o razón social" span>
+              <input
+                name="nombre"
+                value={form.nombre}
+                onChange={(event) => update({ nombre: event.target.value })}
+                autoComplete="name"
+              />
+            </CorrectionField>
+
+            {businessFields && (
+              <>
+                <CorrectionField label="NRC">
+                  <input
+                    name="nrc"
+                    value={form.nrc ?? ""}
+                    onChange={(event) => update({ nrc: event.target.value || null })}
+                    inputMode="numeric"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Actividad económica">
+                  <CorrectionSelect
+                    name="codActividad"
+                    value={form.codActividad ?? ""}
+                    options={CAT019_ACTIVITIES}
+                    onChange={(codActividad) =>
+                      update({
+                        codActividad: codActividad || null,
+                        descActividad:
+                          findCatalogOption(CAT019_ACTIVITIES, codActividad)?.label
+                          ?? null
+                      })
+                    }
+                    placeholder="Seleccione"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Descripción de actividad" span>
+                  <input
+                    name="descActividad"
+                    value={form.descActividad ?? ""}
+                    onChange={(event) =>
+                      update({ descActividad: event.target.value || null })
+                    }
+                  />
+                </CorrectionField>
+              </>
+            )}
+
+            <CorrectionField label="Correo">
+              <input
+                name="correo"
+                type="email"
+                value={form.correo ?? ""}
+                onChange={(event) => update({ correo: event.target.value || null })}
+                autoComplete="email"
+              />
+            </CorrectionField>
+            <CorrectionField label="Teléfono">
+              <input
+                name="telefono"
+                value={form.telefono ?? ""}
+                onChange={(event) =>
+                  update({ telefono: event.target.value || null })
+                }
+                inputMode="tel"
+                autoComplete="tel"
+              />
+            </CorrectionField>
+            <CorrectionField label="Domicilio fiscal">
+              <CorrectionSelect
+                name="codDomiciliado"
+                value={String(form.codDomiciliado)}
+                options={CAT032_DOMICILE}
+                onChange={updateDomicile}
+              />
+            </CorrectionField>
+
+            {domestic ? (
+              <>
+                <CorrectionField label="País">
+                  <span className="fiscal-correction-readonly">El Salvador</span>
+                </CorrectionField>
+                <CorrectionField label="Departamento">
+                  <CorrectionSelect
+                    name="departamento"
+                    value={form.departamento}
+                    options={CAT012_DEPARTMENTS.filter((option) => option.code !== "00")}
+                    onChange={(departamento) =>
+                      update({ departamento, municipio: "", distrito: "" })
+                    }
+                    placeholder="Seleccione"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Municipio">
+                  <CorrectionSelect
+                    name="municipio"
+                    value={form.municipio}
+                    options={municipalityOptions}
+                    onChange={(municipio) => update({ municipio })}
+                    placeholder="Seleccione"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Distrito">
+                  <CorrectionSelect
+                    name="distrito"
+                    value={form.distrito}
+                    options={districtOptions}
+                    onChange={(distrito) => update({ distrito })}
+                    placeholder="Seleccione"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Dirección completa" span>
+                  <textarea
+                    name="complemento"
+                    value={form.complemento}
+                    onChange={(event) => update({ complemento: event.target.value })}
+                    rows={3}
+                    autoComplete="street-address"
+                  />
+                </CorrectionField>
+              </>
+            ) : (
+              <>
+                <CorrectionField label="País" span>
+                  <CorrectionSelect
+                    name="codPais"
+                    value={form.codPais}
+                    options={CAT020_COUNTRIES.filter((option) => option.code !== "SV")}
+                    onChange={(codPais) => update({ codPais })}
+                    placeholder="Seleccione"
+                  />
+                </CorrectionField>
+                <CorrectionField label="Dirección en el extranjero" span>
+                  <textarea
+                    name="complemento"
+                    value={form.complemento}
+                    onChange={(event) => update({ complemento: event.target.value })}
+                    rows={3}
+                    autoComplete="street-address"
+                  />
+                </CorrectionField>
+              </>
+            )}
+          </div>
+
+          {validationMessage && (
+            <p className="error fiscal-correction-error" role="alert">
+              {validationMessage}
+            </p>
+          )}
+          {!validationMessage && !formState.changed && (
+            <p className="fiscal-correction-hint">
+              Cambie al menos un dato para continuar.
+            </p>
+          )}
+
+          <footer>
+            <button type="button" onClick={onCancel} disabled={busy}>
+              Cancelar
+            </button>
+            <button type="submit" className="primary" disabled={!canSubmit}>
+              Guardar y reintentar
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function CorrectionField({
+  label,
+  span,
+  children
+}: {
+  label: string;
+  span?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className={span ? "span-2" : ""}>
+      <span>{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function CorrectionSelect({
+  name,
+  value,
+  options,
+  onChange,
+  placeholder
+}: {
+  name: string;
+  value: string;
+  options: readonly CatalogOption[];
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  return (
+    <select
+      name={name}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+    >
+      {(placeholder || !value) && (
+        <option value="">{placeholder ?? "Seleccione"}</option>
+      )}
+      {options.map((option) => (
+        <option key={`${option.code}-${option.label}`} value={option.code}>
+          {option.code} - {catalogOptionLabel(option.label)}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+function emptyCorrection(): FiscalReceptorCorrection {
+  return {
+    tipoDocumento: "13",
+    numDocumento: "",
+    nrc: null,
+    nombre: "",
+    codActividad: null,
+    descActividad: null,
+    correo: null,
+    telefono: null,
+    codDomiciliado: 1,
+    codPais: "SV",
+    departamento: "",
+    municipio: "",
+    distrito: "",
+    complemento: ""
+  };
+}

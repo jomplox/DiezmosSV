@@ -35,7 +35,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
@@ -53,7 +53,14 @@ import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, donationIntentStatusLabel, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { rejectionDetailForDocument } from "./rejectionDetail";
+import {
+  FiscalCorrectionDialog,
+  fiscalCorrectionRequestIdForTarget,
+  fiscalCorrectionStatusLabel,
+  isCorrectablePreCdeFailure
+} from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
+import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
 import {
   CAT012_DEPARTMENTS,
   CAT014_UNITS,
@@ -88,6 +95,9 @@ import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalW
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
 type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
+type FiscalCorrectionTarget =
+  | { kind: "WOMPI_EVENT"; id: string }
+  | { kind: "DTE_DOCUMENT"; id: string };
 
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
@@ -238,6 +248,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
   const resendRequestIds = useRef(new Map<string, string>());
+  const fiscalCorrectionRequestIds = useRef(new Map<string, string>());
   // Functions from an older React render retain this version. The centralized request
   // wrapper rejects them before they can issue another request or write account data.
   const renderAccountStateVersion = accountStateGuardRef.current.capture();
@@ -305,6 +316,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [selectedDocumentAudit, setSelectedDocumentAudit] = useState<AuditRow[]>([]);
   const [selectedReceiptEmailDelivery, setSelectedReceiptEmailDelivery] = useState<ReceiptEmailDeliveryState | null>(null);
   const [selectedDocumentDetailVersion, setSelectedDocumentDetailVersion] = useState(0);
+  const [selectedFiscalCorrectionData, setSelectedFiscalCorrectionData] = useState<FiscalCorrectionData | null>(null);
+  const [fiscalCorrectionTarget, setFiscalCorrectionTarget] = useState<FiscalCorrectionTarget | null>(null);
+  const [fiscalCorrectionData, setFiscalCorrectionData] = useState<FiscalCorrectionData | null>(null);
+  const [fiscalCorrectionProtectedContext, setFiscalCorrectionProtectedContext] =
+    useState<FiscalCorrectionProtectedContext>(emptyFiscalCorrectionProtectedContext);
+  const [fiscalCorrectionError, setFiscalCorrectionError] = useState("");
   const [testInput, setTestInput] = useState<TestDteInput>(emptyTestDteInput);
   const [newUser, setNewUser] = useState<CreateUserInput>({
     name: "",
@@ -478,6 +495,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setDonorVerifiedDocId(null);
       setSelectedDocumentAudit([]);
       setSelectedReceiptEmailDelivery(null);
+      setSelectedFiscalCorrectionData(null);
       return;
     }
     setDonorVerifiedDocId(null);
@@ -507,6 +525,56 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       cancelled = true;
     };
   }, [token, selected?.id, selectedDocumentDetailVersion]);
+
+  useEffect(() => {
+    const documentId = selected?.id;
+    const shouldLoad =
+      Boolean(token && documentId && can(user, "OPERATOR"))
+      && (
+        selected?.status === "REJECTED"
+        || Boolean(selected?.fiscal_operation_claim_id)
+      );
+    if (!shouldLoad || !documentId) {
+      setSelectedFiscalCorrectionData(null);
+      return;
+    }
+    setSelectedFiscalCorrectionData(null);
+    let cancelled = false;
+    void (async () => {
+      const documentData = await accountApi<FiscalCorrectionData>(
+        `/api/documents/${documentId}/correction-data`
+      );
+      if (
+        documentData.activeCorrection
+        || !selected?.wompi_event_id
+      ) {
+        if (!cancelled) setSelectedFiscalCorrectionData(documentData);
+        return;
+      }
+      const wompiData = await accountApi<FiscalCorrectionData>(
+        `/api/wompi-events/${selected.wompi_event_id}/correction-data`
+      );
+      if (!cancelled) {
+        setSelectedFiscalCorrectionData(
+          wompiData.activeCorrection ? wompiData : documentData
+        );
+      }
+    })()
+      .catch(() => {
+        if (!cancelled) setSelectedFiscalCorrectionData(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    token,
+    user?.role,
+    selected?.id,
+    selected?.status,
+    selected?.wompi_event_id,
+    selected?.fiscal_operation_claim_id,
+    selectedDocumentDetailVersion
+  ]);
 
   useEffect(() => {
     if (token) {
@@ -694,6 +762,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setBackupVerifyByMonth({});
     setDonorVerifiedDocId(null);
     setSelectedDocumentAudit([]);
+    setSelectedReceiptEmailDelivery(null);
+    setSelectedFiscalCorrectionData(null);
+    setFiscalCorrectionTarget(null);
+    setFiscalCorrectionData(null);
+    setFiscalCorrectionProtectedContext(emptyFiscalCorrectionProtectedContext());
+    setFiscalCorrectionError("");
+    fiscalCorrectionRequestIds.current.clear();
     setTestInput(emptyTestDteInput());
     setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
     setSelectedUserId(null);
@@ -767,6 +842,98 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast("Reintento de creación en cola");
       await refresh();
     });
+  }
+
+  async function openFiscalCorrection(
+    target: FiscalCorrectionTarget,
+    protectedContext: FiscalCorrectionProtectedContext
+  ) {
+    if (busy) return;
+    const targetKey = fiscalCorrectionTargetKey(target);
+    setFiscalCorrectionTarget(target);
+    setFiscalCorrectionData(null);
+    setFiscalCorrectionProtectedContext(protectedContext);
+    setFiscalCorrectionError("");
+    setBusy(`fiscal-correction-load:${targetKey}`);
+    try {
+      const path = target.kind === "WOMPI_EVENT"
+        ? `/api/wompi-events/${target.id}/correction-data`
+        : `/api/documents/${target.id}/correction-data`;
+      const data = await accountApi<FiscalCorrectionData>(path);
+      setFiscalCorrectionData(data);
+    } catch (error) {
+      setFiscalCorrectionTarget(null);
+      setFiscalCorrectionData(null);
+      setFiscalCorrectionProtectedContext(emptyFiscalCorrectionProtectedContext());
+      handleApiFailure(error);
+    } finally {
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) {
+        setBusy("");
+      }
+    }
+  }
+
+  function closeFiscalCorrection() {
+    if (fiscalCorrectionTarget) {
+      fiscalCorrectionRequestIds.current.delete(
+        fiscalCorrectionTargetKey(fiscalCorrectionTarget)
+      );
+    }
+    setFiscalCorrectionTarget(null);
+    setFiscalCorrectionData(null);
+    setFiscalCorrectionProtectedContext(emptyFiscalCorrectionProtectedContext());
+    setFiscalCorrectionError("");
+  }
+
+  async function submitFiscalCorrection(receptor: FiscalReceptorCorrection) {
+    const target = fiscalCorrectionTarget;
+    if (!target || !fiscalCorrectionData || busy) return;
+    const targetKey = fiscalCorrectionTargetKey(target);
+    const correctionRequestId = fiscalCorrectionRequestIdForTarget(
+      fiscalCorrectionRequestIds.current,
+      targetKey
+    );
+    const path = target.kind === "WOMPI_EVENT"
+      ? `/api/wompi-events/${target.id}/correct-and-retry`
+      : `/api/documents/${target.id}/correct-and-retry`;
+    setFiscalCorrectionError("");
+    setBusy("fiscal-correction-submit");
+    let accepted = false;
+    try {
+      await accountApi(path, {
+        method: "POST",
+        body: { correctionRequestId, receptor }
+      });
+      fiscalCorrectionRequestIds.current.delete(targetKey);
+      accepted = true;
+    } catch (error) {
+      if (isApiError(error)) {
+        fiscalCorrectionRequestIds.current.delete(targetKey);
+        if (error.details.error === "fiscal_correction_queue_failed") {
+          accepted = true;
+        } else {
+          setFiscalCorrectionError(error.message);
+          if (error.status === 401) handleApiFailure(error);
+        }
+      } else if (!(error instanceof StaleAccountStateError)) {
+        setFiscalCorrectionError(
+          "No se pudo confirmar la respuesta. Revise su conexión y vuelva a intentarlo; se conservará la misma solicitud."
+        );
+      }
+    } finally {
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) {
+        setBusy("");
+      }
+    }
+    if (!accepted) return;
+    closeFiscalCorrection();
+    setToast("Corrección en cola");
+    try {
+      await refresh();
+      setSelectedDocumentDetailVersion((current) => current + 1);
+    } catch (error) {
+      handleApiFailure(error);
+    }
   }
 
   async function createTestDte() {
@@ -1405,6 +1572,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                   busy={busy}
                   canRetry={can(user, "OPERATOR")}
                   onRetry={retryPreCdeFailure}
+                  onCorrect={(item) => openFiscalCorrection(
+                    { kind: "WOMPI_EVENT", id: item.id },
+                    {
+                      amountLabel: `$${(item.amount_cents / 100).toFixed(2)}`,
+                      environmentLabel: environmentLabel(item.environment),
+                      issuerLabel: branding.displayName
+                    }
+                  )}
                 />
               )}
               <Stats documents={documents} onlyFailed={view === "failures"} preCdeFailureCount={visiblePreCdeFailures.length} />
@@ -1425,10 +1600,20 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 selected={selected}
                 audit={selectedDocumentAudit}
                 receiptEmailDelivery={selectedReceiptEmailDelivery}
+                fiscalCorrectionData={selectedFiscalCorrectionData}
                 donorDataVerified={selected?.id === donorVerifiedDocId}
                 busy={busy}
                 now={now}
                 onAction={documentAction}
+                canCorrect={can(user, "OPERATOR")}
+                onCorrect={(target) => {
+                  if (!selected) return;
+                  void openFiscalCorrection(target, {
+                    amountLabel: `$${(selected.amount_cents / 100).toFixed(2)}`,
+                    environmentLabel: environmentLabel(selected.environment),
+                    issuerLabel: branding.displayName
+                  });
+                }}
                 onInvalidateRequest={(id) => {
                   setInvalidationForm(defaultInvalidationForm());
                   setPendingInvalidationId(id);
@@ -1677,6 +1862,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
       )}
+      <FiscalCorrectionDialog
+        open={Boolean(fiscalCorrectionTarget && fiscalCorrectionData)}
+        data={fiscalCorrectionData}
+        protectedContext={fiscalCorrectionProtectedContext}
+        busy={busy === "fiscal-correction-submit"}
+        error={fiscalCorrectionError}
+        onCancel={closeFiscalCorrection}
+        onSubmit={submitFiscalCorrection}
+      />
       <div className="toast-region" role="status" aria-live="polite">
         {toast && (
           <button className="toast" onClick={() => setToast("")}>
@@ -4302,7 +4496,8 @@ function PreCdeFailuresPanel({
   loading,
   busy,
   canRetry,
-  onRetry
+  onRetry,
+  onCorrect
 }: {
   items: WompiIssuanceFailureItem[];
   error: string;
@@ -4310,6 +4505,7 @@ function PreCdeFailuresPanel({
   busy: string;
   canRetry: boolean;
   onRetry: (id: string) => Promise<void>;
+  onCorrect: (item: WompiIssuanceFailureItem) => Promise<void>;
 }) {
   if (items.length === 0 && !error && !loading) {
     return null;
@@ -4327,6 +4523,19 @@ function PreCdeFailuresPanel({
         <div className="pre-cde-failure-grid">
           {items.map((item) => {
             const retryQueued = item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING";
+            const correctable = isCorrectablePreCdeFailure(item);
+            const actionLabel = correctable
+              ? item.issuance_status === "RETRY_QUEUED"
+                ? "Corrección en cola"
+                : item.issuance_status === "PROCESSING"
+                  ? "Procesando corrección"
+                  : "Corregir y reintentar"
+              : retryQueued
+                ? "Reintento en cola"
+                : "Reintentar creación";
+            const actionBusy = correctable
+              ? busy === `fiscal-correction-load:WOMPI_EVENT:${item.id}`
+              : busy === `pre-cde-retry:${item.id}`;
             return (
               <article className="pre-cde-failure-card" key={item.id}>
                 <span className="status pre-cde">CDE NO CREADO</span>
@@ -4346,10 +4555,13 @@ function PreCdeFailuresPanel({
                 {canRetry && (
                   <button
                     type="button"
-                    disabled={retryQueued || busy === `pre-cde-retry:${item.id}`}
-                    onClick={() => void onRetry(item.id)}
+                    disabled={retryQueued || actionBusy}
+                    onClick={() => {
+                      if (correctable) void onCorrect(item);
+                      else void onRetry(item.id);
+                    }}
                   >
-                    {retryQueued ? "Reintento en cola" : "Reintentar creación"}
+                    {actionLabel}
                   </button>
                 )}
               </article>
@@ -4492,10 +4704,13 @@ function DetailPanel({
   selected,
   audit,
   receiptEmailDelivery,
+  fiscalCorrectionData,
   donorDataVerified,
   busy,
   now,
   onAction,
+  canCorrect,
+  onCorrect,
   onInvalidateRequest,
   onDownload,
   emailEditingId,
@@ -4508,10 +4723,13 @@ function DetailPanel({
   selected?: DteDocument;
   audit: AuditRow[];
   receiptEmailDelivery?: ReceiptEmailDeliveryState | null;
+  fiscalCorrectionData?: FiscalCorrectionData | null;
   donorDataVerified?: boolean;
   busy: string;
   now: Date;
   onAction: (action: "resend" | "retry" | "invalidate") => void;
+  canCorrect: boolean;
+  onCorrect: (target: FiscalCorrectionTarget) => void;
   onInvalidateRequest: (id: string) => void;
   onDownload: (format: "pdf" | "json") => void;
   emailEditingId: string | null;
@@ -4533,6 +4751,8 @@ function DetailPanel({
     : null;
   const emailEditing = emailEditingId === selected.id;
   const fiscalOutcomePending = Boolean(selected.fiscal_operation_claim_id);
+  const activeCorrectionStatus =
+    fiscalCorrectionData?.activeCorrection?.status ?? null;
   const postAcceptFinalizationPending = selected.status === "ACCEPTED" && !selected.post_accept_finalized_at;
   const canRetry = isRetryableDocument(selected);
   const LegalIcon = invalidationWindow.tone === "expired" || invalidationWindow.tone === "warning" ? AlertTriangle : CheckCircle2;
@@ -4560,6 +4780,22 @@ function DetailPanel({
             {selected.fiscal_operation_claimed_at && (
               <small>Operación iniciada: {formatElSalvadorDateTime(selected.fiscal_operation_claimed_at)} hora El Salvador</small>
             )}
+          </div>
+        </div>
+      )}
+      {activeCorrectionStatus && (
+        <div
+          className={`legal-box ${activeCorrectionStatus === "REVIEW_REQUIRED" ? "expired" : "warning"}`}
+          role="status"
+        >
+          <AlertTriangle size={17} />
+          <div>
+            <strong>{fiscalCorrectionStatusLabel(activeCorrectionStatus)}</strong>
+            <span>
+              {activeCorrectionStatus === "REVIEW_REQUIRED"
+                ? "No se enviará otra corrección hasta conciliar el resultado con Hacienda."
+                : "La corrección protegida ya está en curso."}
+            </span>
           </div>
         </div>
       )}
@@ -4656,7 +4892,33 @@ function DetailPanel({
         {!emailAttention && (
           <button disabled={fiscalOutcomePending || postAcceptFinalizationPending || busy === "resend"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : "Reenviar el comprobante al correo del donante"} onClick={() => onAction("resend")}><Mail size={16} />Reenviar correo</button>
         )}
-        <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar DTE</button>
+        {selected.status === "REJECTED" ? (
+          <button
+            disabled={
+              !canCorrect
+              || Boolean(activeCorrectionStatus)
+              || fiscalOutcomePending
+              || busy === `fiscal-correction-load:DTE_DOCUMENT:${selected.id}`
+            }
+            title={
+              activeCorrectionStatus
+                ? fiscalCorrectionStatusLabel(activeCorrectionStatus)
+                : fiscalOutcomePending
+                  ? "Corrección fiscal en curso"
+                  : "Corregir los datos del receptor y crear un nuevo intento fiscal"
+            }
+            onClick={() => onCorrect({ kind: "DTE_DOCUMENT", id: selected.id })}
+          >
+            <Pencil size={16} />
+            {activeCorrectionStatus
+              ? fiscalCorrectionStatusLabel(activeCorrectionStatus)
+              : fiscalOutcomePending
+                ? "Corrección en cola"
+                : "Corregir y reintentar"}
+          </button>
+        ) : (
+          <button disabled={!canRetry || busy === "retry"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : canRetry ? "Reintentar procesamiento" : "Disponible solo para DTE con fallos o contingencia"} onClick={() => onAction("retry")}><RotateCcw size={16} />Reintentar DTE</button>
+        )}
         <button className="danger" disabled={fiscalOutcomePending || postAcceptFinalizationPending || !invalidationWindow.canInvalidate || busy === "invalidate"} title={fiscalOutcomePending ? "Requiere conciliación fiscal" : postAcceptFinalizationPending ? "Finalización local en curso" : undefined} onClick={() => onInvalidateRequest(selected.id)}><AlertTriangle size={16} />Invalidar</button>
         <button disabled={busy === "download-pdf"} onClick={() => onDownload("pdf")}><Download size={16} />PDF</button>
         <button disabled={busy === "download-json"} onClick={() => onDownload("json")}><Download size={16} />JSON</button>
@@ -5115,7 +5377,19 @@ function isRetryableDocument(document: Pick<DteDocument, "status" | "transmissio
   if (document.status === "SIGNED" && document.transmission_deferred_at) {
     return false;
   }
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
+  return ["SIGNED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
+}
+
+function fiscalCorrectionTargetKey(target: FiscalCorrectionTarget): string {
+  return `${target.kind}:${target.id}`;
+}
+
+function emptyFiscalCorrectionProtectedContext(): FiscalCorrectionProtectedContext {
+  return {
+    amountLabel: "—",
+    environmentLabel: "—",
+    issuerLabel: "—"
+  };
 }
 
 function isValidEmail(value: string): boolean {

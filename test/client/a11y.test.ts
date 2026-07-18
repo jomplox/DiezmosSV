@@ -18,6 +18,19 @@ describe("keyboard accessibility contract", () => {
     expect(occurrences.length).toBeGreaterThanOrEqual(5);
   });
 
+  it("gives the fiscal correction dialog modal semantics and keyboard dismissal", () => {
+    const fiscalCorrectionSource = readFileSync(
+      resolve(import.meta.dirname, "../../src/client/fiscalCorrectionDialog.tsx"),
+      "utf8"
+    );
+
+    expect(fiscalCorrectionSource).toContain('role="dialog"');
+    expect(fiscalCorrectionSource).toContain('aria-modal="true"');
+    expect(fiscalCorrectionSource).toContain('aria-labelledby="fiscal-correction-title"');
+    expect(fiscalCorrectionSource).toContain('event.key === "Escape"');
+    expect(fiscalCorrectionSource).toContain('event.key !== "Tab"');
+  });
+
   it("labels the quick-DTE Monto input for screen readers", () => {
     expect(appSource).toContain('aria-label="Monto"');
   });

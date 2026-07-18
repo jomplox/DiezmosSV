@@ -662,6 +662,187 @@ select,
   box-shadow: 0 18px 54px rgba(0, 0, 0, 0.18);
 }
 
+.fiscal-correction-dialog {
+  width: min(820px, 100%);
+  max-height: min(900px, calc(100vh - 44px));
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow: auto;
+  padding: 18px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--card-radius);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.18);
+}
+
+.fiscal-correction-dialog header,
+.fiscal-correction-dialog footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fiscal-correction-dialog header p,
+.fiscal-correction-protected p {
+  margin-top: 4px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.fiscal-correction-dialog h2 {
+  margin-bottom: 4px;
+}
+
+.fiscal-correction-dialog form {
+  display: grid;
+  gap: 12px;
+}
+
+.fiscal-correction-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.fiscal-correction-grid label {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.fiscal-correction-grid label > span:first-child {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.fiscal-correction-grid input,
+.fiscal-correction-grid select,
+.fiscal-correction-grid textarea {
+  width: 100%;
+  color: var(--ink);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+.fiscal-correction-grid input,
+.fiscal-correction-grid select {
+  min-height: 40px;
+  padding: 0 12px;
+}
+
+.fiscal-correction-grid textarea {
+  min-height: 88px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.fiscal-correction-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.fiscal-correction-protected {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.fiscal-correction-protected dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.fiscal-correction-protected dl > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.fiscal-correction-protected dt {
+  color: var(--ink-secondary);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.fiscal-correction-protected dd {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+  font-weight: 650;
+}
+
+.fiscal-correction-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 12px;
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  border-radius: 10px;
+  background: var(--danger-tint);
+}
+
+.fiscal-correction-reason div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.fiscal-correction-reason span {
+  overflow-wrap: anywhere;
+  color: var(--ink-secondary);
+  font-size: 13px;
+}
+
+.fiscal-correction-active,
+.fiscal-correction-guidance {
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-weight: 650;
+}
+
+.fiscal-correction-active {
+  color: var(--warn);
+  border: 1px solid var(--warn-border);
+  background: var(--warn-tint);
+}
+
+.fiscal-correction-guidance {
+  color: var(--danger);
+  border: 1px solid var(--danger-border);
+  background: var(--danger-tint);
+}
+
+.fiscal-correction-readonly {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  padding: 0 11px;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.fiscal-correction-error,
+.fiscal-correction-hint {
+  margin: 0;
+  font-size: 13px;
+}
+
+.fiscal-correction-hint {
+  color: var(--ink-secondary);
+}
+
 .advanced-dte-modal header,
 .advanced-dte-modal footer,
 .confirm-modal header,
@@ -4278,6 +4459,35 @@ pre {
 input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
   outline: 2px solid var(--accent, #0f766e);
   outline-offset: 2px;
+}
+
+@media (max-width: 720px) {
+  .fiscal-correction-dialog {
+    max-height: calc(100vh - 20px);
+  }
+
+  .fiscal-correction-dialog header,
+  .fiscal-correction-dialog footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .fiscal-correction-dialog header .icon-button {
+    align-self: flex-end;
+  }
+
+  .fiscal-correction-grid,
+  .fiscal-correction-protected dl {
+    grid-template-columns: 1fr;
+  }
+
+  .fiscal-correction-grid .span-2 {
+    grid-column: auto;
+  }
+
+  .fiscal-correction-dialog footer button {
+    width: 100%;
+  }
 }
 
 /* ===== Analítica (carril Wompi) ===== */

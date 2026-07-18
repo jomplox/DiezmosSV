@@ -1,3 +1,8 @@
+import type {
+  FiscalCorrectionStatus,
+  FiscalReceptorCorrection
+} from "../shared/fiscalCorrection";
+
 export interface DteDocument {
   id: string;
   wompi_event_id: string | null;
@@ -99,6 +104,24 @@ export interface WompiIssuanceFailureItem {
   issuance_failed_at: string | null;
   issuance_dead_lettered_at: string | null;
   reserved_numero_control: string | null;
+}
+
+export interface FiscalCorrectionData {
+  receptor: FiscalReceptorCorrection;
+  targetStatus: string;
+  failureReason: string;
+  correctable: boolean;
+  guidance: string | null;
+  activeCorrection: {
+    id: string;
+    status: FiscalCorrectionStatus;
+  } | null;
+}
+
+export interface FiscalCorrectionProtectedContext {
+  amountLabel: string;
+  environmentLabel: string;
+  issuerLabel: string;
 }
 
 export interface User {

@@ -32,7 +32,11 @@ describe("document email failure notice", () => {
     expect(appSource).toContain("receiptEmailFailureGuidance(emailAttention.outcomeClass)");
     expect(appSource).toContain("Reenviar ahora");
     expect(appSource).toContain("{!emailAttention && (");
+    expect(appSource).toContain('selected.status === "REJECTED"');
+    expect(appSource).toContain("Corregir y reintentar");
     expect(appSource).toContain("Reintentar DTE");
+    expect(appSource).toContain('["SIGNED", "FAILED", "CONTINGENCY_PENDING"]');
+    expect(appSource).not.toContain('["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"]');
     expect(appSource).not.toContain("latestReceiptEmailFailure(audit)");
   });
 
