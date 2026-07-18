@@ -3317,6 +3317,199 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("limits ordinary receipt lookup to the materialized document page while preserving latest metadata", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    seedAcceptedDocument(
+      database,
+      "doc_ordinary_page_newest",
+      "2026-07-18T12:00:00.000Z",
+      "newest@example.org",
+      "5"
+    );
+    seedAcceptedDocument(
+      database,
+      "doc_ordinary_page_lookahead",
+      "2026-07-18T11:00:00.000Z",
+      "lookahead@example.org",
+      "6"
+    );
+    seedAcceptedDocument(
+      database,
+      "doc_ordinary_off_page",
+      "2026-07-18T10:00:00.000Z",
+      "off-page@example.org",
+      "7"
+    );
+    database.prepare(
+      "UPDATE dte_documents SET created_at = ?, updated_at = ? WHERE id = ?"
+    ).run(
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      "doc_ordinary_page_newest"
+    );
+    database.prepare(
+      "UPDATE dte_documents SET created_at = ?, updated_at = ? WHERE id = ?"
+    ).run(
+      "2026-07-18T11:00:00.000Z",
+      "2026-07-18T11:00:00.000Z",
+      "doc_ordinary_page_lookahead"
+    );
+    database.prepare(
+      "UPDATE dte_documents SET created_at = ?, updated_at = ? WHERE id = ?"
+    ).run(
+      "2026-07-18T10:00:00.000Z",
+      "2026-07-18T10:00:00.000Z",
+      "doc_ordinary_off_page"
+    );
+    const insertDelivery = database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, outcome_class, failure_code,
+         retry_safe, attempt_no, created_at
+       ) VALUES (?, ?, ?, ?, '{}', 'dteReceipt', 'ACCEPTED', ?, ?, ?, ?, ?)`
+    );
+    insertDelivery.run(
+      "delivery_ordinary_old",
+      "doc_ordinary_page_newest",
+      "newest@example.org",
+      "FAILED",
+      "NOT_SENT",
+      "E_HEADER_NOT_ALLOWED",
+      1,
+      1,
+      "2026-07-18T12:01:00.000Z"
+    );
+    insertDelivery.run(
+      "delivery_ordinary_latest",
+      "doc_ordinary_page_newest",
+      "newest@example.org",
+      "FAILED",
+      "UNKNOWN",
+      "E_INTERNAL_SERVER_ERROR",
+      0,
+      2,
+      "2026-07-18T12:02:00.000Z"
+    );
+    insertDelivery.run(
+      "delivery_ordinary_off_page",
+      "doc_ordinary_off_page",
+      "off-page@example.org",
+      "SENT",
+      null,
+      null,
+      0,
+      1,
+      "2026-07-18T10:01:00.000Z"
+    );
+    const repository = new Repository(d1.database);
+
+    await expect(repository.listDteDocuments({ limit: 1 })).resolves.toMatchObject({
+      documents: [
+        expect.objectContaining({
+          id: "doc_ordinary_page_newest",
+          receipt_email_status: "FAILED",
+          receipt_email_outcome_class: "UNKNOWN",
+          receipt_email_failure_code: "E_INTERNAL_SERVER_ERROR",
+          receipt_email_retry_safe: 0,
+          receipt_email_requires_review: 1
+        })
+      ],
+      hasMore: true
+    });
+
+    const listStatement = d1.statements.find((statement) =>
+      statement.sql.includes("AS receipt_email_status")
+    );
+    expect(listStatement?.sql).toContain("page_documents AS MATERIALIZED");
+    if (!listStatement) throw new Error("document list statement was not captured");
+    const queryPlan = database
+      .prepare(`EXPLAIN QUERY PLAN ${listStatement.sql}`)
+      .all(...listStatement.args) as Array<{ detail: string }>;
+    expect(queryPlan.map((step) => step.detail)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /SEARCH receipt_candidate USING INDEX idx_email_deliveries_latest_receipt \(document_id=\? AND email_type=\?\)/
+        )
+      ])
+    );
+    expect(queryPlan.some((step) => /SCAN receipt_candidate/.test(step.detail))).toBe(false);
+    database.close();
+  });
+
+  it("keeps status, FTS search, and cursor bindings correct on ordinary materialized pages", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const rows = [
+      ["doc_search_4", "2026-07-18T14:00:00.000Z", "Search Smoke Four", "4"],
+      ["doc_search_3", "2026-07-18T13:00:00.000Z", "Search Smoke Three", "3"],
+      ["doc_search_2", "2026-07-18T12:00:00.000Z", "Search Smoke Two", "2"],
+      ["doc_search_1", "2026-07-18T11:00:00.000Z", "Search Smoke One", "1"]
+    ] as const;
+    for (const [id, createdAt, donorName, suffix] of rows) {
+      seedAcceptedDocument(database, id, createdAt, `${id}@example.org`, suffix);
+      database.prepare(
+        `UPDATE dte_documents
+            SET donor_name = ?, created_at = ?, updated_at = ?
+          WHERE id = ?`
+      ).run(donorName, createdAt, createdAt, id);
+      indexDocumentForSearch(database, id);
+    }
+    seedRejectedDocument(database, "doc_search_rejected");
+    database.prepare(
+      `UPDATE dte_documents
+          SET donor_name = 'Search Smoke Rejected',
+              created_at = '2026-07-18T15:00:00.000Z',
+              updated_at = '2026-07-18T15:00:00.000Z'
+        WHERE id = 'doc_search_rejected'`
+    ).run();
+    indexDocumentForSearch(database, "doc_search_rejected");
+    const repository = new Repository(d1.database);
+
+    const firstPage = await repository.listDteDocuments({
+      status: "ACCEPTED",
+      q: "Search Smoke",
+      limit: 2
+    });
+    expect(firstPage.documents.map((document) => document.id)).toEqual([
+      "doc_search_4",
+      "doc_search_3"
+    ]);
+    expect(firstPage).toMatchObject({ hasMore: true, limit: 2 });
+    expect(firstPage.nextCursor).toEqual(expect.any(String));
+
+    const secondPage = await repository.listDteDocuments({
+      status: "ACCEPTED",
+      q: "Search Smoke",
+      limit: 2,
+      cursor: firstPage.nextCursor
+    });
+    expect(secondPage.documents.map((document) => document.id)).toEqual([
+      "doc_search_2",
+      "doc_search_1"
+    ]);
+    expect(secondPage).toMatchObject({
+      hasMore: false,
+      nextCursor: null,
+      limit: 2
+    });
+
+    const listStatements = d1.statements.filter((statement) =>
+      statement.sql.includes("AS receipt_email_status")
+    );
+    expect(listStatements).toHaveLength(2);
+    expect(listStatements[0].args).toEqual(["ACCEPTED", "search* AND smoke*", 3]);
+    expect(listStatements[1].args).toEqual([
+      "ACCEPTED",
+      "search* AND smoke*",
+      "2026-07-18T13:00:00.000Z",
+      "2026-07-18T13:00:00.000Z",
+      "doc_search_3",
+      3
+    ]);
+    database.close();
+  });
+
   it("orders the latest receipt outcome by document attempt number before tied timestamps", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);
@@ -3831,8 +4024,14 @@ describe("fiscal repository SQL on SQLite", () => {
 class SqliteD1 {
   constructor(private readonly sqlite: DatabaseSync) {}
 
+  readonly statements: SqliteStatement[] = [];
+
   readonly database = {
-    prepare: (sql: string) => new SqliteStatement(this.sqlite, sql),
+    prepare: (sql: string) => {
+      const statement = new SqliteStatement(this.sqlite, sql);
+      this.statements.push(statement);
+      return statement;
+    },
     batch: async (statements: SqliteStatement[]) => {
       this.sqlite.exec("BEGIN IMMEDIATE");
       try {
@@ -3848,10 +4047,10 @@ class SqliteD1 {
 }
 
 class SqliteStatement {
-  private args: SQLInputValue[] = [];
+  args: SQLInputValue[] = [];
   private readonly statement: StatementSync;
 
-  constructor(database: DatabaseSync, sql: string) {
+  constructor(database: DatabaseSync, readonly sql: string) {
     this.statement = database.prepare(sql);
   }
 
@@ -3960,6 +4159,32 @@ function seedRejectedDocument(database: DatabaseSync, id: string): void {
     `control_${id}`,
     '{"identificacion":{"tipoDte":"15"}}'
   );
+}
+
+function indexDocumentForSearch(database: DatabaseSync, documentId: string): void {
+  database.prepare(
+    `INSERT INTO dte_document_search (
+       document_id,
+       codigo_generacion,
+       codigo_generacion_compact,
+       numero_control,
+       numero_control_compact,
+       numero_control_serial,
+       donor_email,
+       donor_name
+     )
+     SELECT
+       id,
+       codigo_generacion,
+       lower(replace(codigo_generacion, '-', '')),
+       numero_control,
+       lower(replace(numero_control, '-', '')),
+       COALESCE(NULLIF(ltrim(substr(numero_control, -15), '0'), ''), substr(numero_control, -15)),
+       donor_email,
+       donor_name
+       FROM dte_documents
+      WHERE id = ?`
+  ).run(documentId);
 }
 
 async function reserveDocumentCorrectionIdentifiers(

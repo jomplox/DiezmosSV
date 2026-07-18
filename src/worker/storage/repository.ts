@@ -2781,31 +2781,10 @@ export class Repository {
       bindings.push(cursor.createdAt, cursor.createdAt, cursor.id);
     }
     const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
-    const from = `FROM dte_documents
-      LEFT JOIN latest_receipt
-        ON latest_receipt.document_id = dte_documents.id
-       AND latest_receipt.row_num = 1
-      ${ftsQuery ? "JOIN dte_document_search ON dte_document_search.document_id = dte_documents.id" : ""}`;
-    const rows = await this.db
-      .prepare(`WITH latest_receipt AS (
-        SELECT document_id,
-               status,
-               outcome_class,
-               failure_code,
-               retry_safe,
-               provider_dispatch_started_at,
-               ROW_NUMBER() OVER (
-                 PARTITION BY document_id
-                 ORDER BY attempt_no DESC,
-                          COALESCE(finalized_at, claim_attempted_at, created_at) DESC,
-                          created_at DESC,
-                          id DESC
-               ) AS row_num
-          FROM email_deliveries
-         WHERE email_type IN ('dteReceipt', 'dteReceiptTransitorio')
-      )
-      SELECT dte_documents.*,
-             latest_receipt.status AS receipt_email_status,
+    const searchJoin = ftsQuery
+      ? "JOIN dte_document_search ON dte_document_search.document_id = dte_documents.id"
+      : "";
+    const receiptProjection = `latest_receipt.status AS receipt_email_status,
              latest_receipt.outcome_class AS receipt_email_outcome_class,
              latest_receipt.failure_code AS receipt_email_failure_code,
              latest_receipt.retry_safe AS receipt_email_retry_safe,
@@ -2820,11 +2799,65 @@ export class Repository {
                 )
                THEN 1
                ELSE 0
-             END AS receipt_email_requires_review
-        ${from}
-        ${where}
-       ORDER BY dte_documents.created_at DESC, dte_documents.id DESC
-       LIMIT ?`)
+             END AS receipt_email_requires_review`;
+    const sql = params.attention === "failures"
+      ? `WITH latest_receipt AS (
+          SELECT document_id,
+                 status,
+                 outcome_class,
+                 failure_code,
+                 retry_safe,
+                 provider_dispatch_started_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY document_id
+                   ORDER BY attempt_no DESC,
+                            COALESCE(finalized_at, claim_attempted_at, created_at) DESC,
+                            created_at DESC,
+                            id DESC
+                 ) AS row_num
+            FROM email_deliveries
+           WHERE email_type IN ('dteReceipt', 'dteReceiptTransitorio')
+        )
+        SELECT dte_documents.*,
+               ${receiptProjection}
+          FROM dte_documents
+          LEFT JOIN latest_receipt
+            ON latest_receipt.document_id = dte_documents.id
+           AND latest_receipt.row_num = 1
+          ${searchJoin}
+          ${where}
+         ORDER BY dte_documents.created_at DESC, dte_documents.id DESC
+         LIMIT ?`
+      : `WITH page_documents AS MATERIALIZED (
+          SELECT dte_documents.*
+            FROM dte_documents
+            ${searchJoin}
+            ${where}
+           ORDER BY dte_documents.created_at DESC, dte_documents.id DESC
+           LIMIT ?
+        )
+        SELECT page_documents.*,
+               ${receiptProjection}
+          FROM page_documents
+          LEFT JOIN email_deliveries AS latest_receipt
+            ON latest_receipt.id = (
+              SELECT receipt_candidate.id
+                FROM email_deliveries AS receipt_candidate
+               WHERE receipt_candidate.document_id = page_documents.id
+                 AND receipt_candidate.email_type IN ('dteReceipt', 'dteReceiptTransitorio')
+               ORDER BY receipt_candidate.attempt_no DESC,
+                        COALESCE(
+                          receipt_candidate.finalized_at,
+                          receipt_candidate.claim_attempted_at,
+                          receipt_candidate.created_at
+                        ) DESC,
+                        receipt_candidate.created_at DESC,
+                        receipt_candidate.id DESC
+               LIMIT 1
+            )
+         ORDER BY page_documents.created_at DESC, page_documents.id DESC`;
+    const rows = await this.db
+      .prepare(sql)
       .bind(...bindings, limit + 1)
       .all<DteDocumentRecord>()
       .then((result) => result.results ?? []);
