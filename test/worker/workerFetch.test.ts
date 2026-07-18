@@ -879,6 +879,124 @@ describe("guarded fiscal correction API", () => {
       });
   }
 
+  function stubDocumentCorrectionLifecycle(
+    correction: FiscalCorrectionRecord,
+    db: InMemoryD1
+  ): void {
+    const ownedDocument = () => db.documents.find(
+      (document) => document.id === correction.document_id
+    );
+    vi.spyOn(Repository.prototype, "getFiscalCorrection").mockImplementation(async (id) =>
+      id === correction.id ? correction : null
+    );
+    vi.spyOn(Repository.prototype, "claimFiscalCorrectionProcessing")
+      .mockImplementation(async (input) => {
+        const document = ownedDocument();
+        if (["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)) {
+          return "terminal";
+        }
+        if (
+          input.id !== correction.id
+          || input.processingClaimId !== correction.processing_claim_id
+          || input.issuanceAttemptId !== undefined
+          || input.fiscalClaimId !== correction.fiscal_claim_id
+          || correction.status !== "QUEUED"
+          || !document
+          || document.status !== "REJECTED"
+          || document.fiscal_operation_claim_id !== correction.fiscal_claim_id
+        ) {
+          return "busy";
+        }
+        correction.status = "PROCESSING";
+        correction.processing_started_at = new Date().toISOString();
+        return "claimed";
+      });
+    vi.spyOn(Repository.prototype, "prepareClaimedFiscalCorrectionDocument")
+      .mockImplementation(async (input) => {
+        const document = ownedDocument();
+        if (
+          input.correctionId !== correction.id
+          || input.documentId !== correction.document_id
+          || input.claimId !== correction.fiscal_claim_id
+          || correction.status !== "PROCESSING"
+          || !document
+          || document.status !== "REJECTED"
+          || document.fiscal_operation_claim_id !== correction.fiscal_claim_id
+        ) {
+          return false;
+        }
+        document.codigo_generacion = input.codigoGeneracion;
+        document.numero_control = input.numeroControl;
+        document.plain_json = JSON.stringify(input.plainJson);
+        document.signed_jws = input.signedJws;
+        document.donor_name = input.donorName;
+        document.donor_email = input.donorEmail;
+        document.status = "SIGNED";
+        document.sello_recibido = null;
+        document.mh_estado = null;
+        document.mh_observaciones_json = "[]";
+        document.accepted_at = null;
+        document.transmission_deferred_at = null;
+        document.post_accept_finalized_at = null;
+        document.updated_at = new Date().toISOString();
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "markFiscalCorrectionMhDispatchStarted")
+      .mockImplementation(async (id, processingClaimId) => {
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+          || correction.mh_dispatch_started_at !== null
+        ) {
+          return false;
+        }
+        correction.mh_dispatch_started_at = new Date().toISOString();
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "clearFiscalCorrectionMhDispatchStarted")
+      .mockImplementation(async (id, processingClaimId) => {
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+          || correction.mh_dispatch_started_at === null
+        ) {
+          return false;
+        }
+        correction.mh_dispatch_started_at = null;
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "finalizeFiscalCorrection")
+      .mockImplementation(async (id, processingClaimId, outcome) => {
+        const dispatchStateMatches = outcome.status === "FAILED"
+          ? correction.mh_dispatch_started_at === null
+          : correction.mh_dispatch_started_at !== null;
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+          || !dispatchStateMatches
+        ) {
+          return false;
+        }
+        correction.status = outcome.status;
+        correction.failure_code = outcome.failureCode ?? null;
+        correction.failure_message = outcome.failureMessage ?? null;
+        correction.completed_at = new Date().toISOString();
+        if (outcome.status !== "REVIEW_REQUIRED") {
+          const document = ownedDocument();
+          if (document?.fiscal_operation_claim_id === correction.fiscal_claim_id) {
+            document.fiscal_operation_claim_id = null;
+            document.fiscal_operation_claimed_at = null;
+            document.fiscal_operation_kind = null;
+            document.fiscal_operation_event_id = null;
+          }
+        }
+        return true;
+      });
+  }
+
   async function consumeCorrectionMessage(
     runtime: Env,
     body: IssuanceMessage,
@@ -1927,25 +2045,48 @@ describe("guarded fiscal correction API", () => {
     expect(db.documents[0].fiscal_operation_claim_id).toBe("foreign-safe-predispatch-claim");
   });
 
-  it("retries a token-owned document correction with a bounded Task 5 error", async () => {
+  it("rebuilds a claimed direct rejected document from its immutable snapshot", async () => {
     const db = correctionDb();
+    db.nextSequence = 91;
+    const source = rejectedCorrectionDocument({
+      id: "doc_rejected_direct_correction",
+      fiscal_operation_claim_id: "fiscal_claim_direct_correction",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
     const correction = correctionRecord({
-      id: "fiscal_correction_document_task_5",
+      id: "fiscal_correction_direct_document",
       target_kind: "DTE_DOCUMENT",
       wompi_event_id: null,
-      document_id: "doc_rejected_task_5",
+      document_id: source.id,
       issuance_attempt_id: null,
-      fiscal_claim_id: "fiscal_claim_task_5",
-      processing_claim_id: "correction_processing_task_5"
+      fiscal_claim_id: "fiscal_claim_direct_correction",
+      processing_claim_id: "correction_processing_direct_correction",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({
+        nombre: "Receptor Directo Corregido",
+        correo: null
+      })),
+      source_document_snapshot_json: JSON.stringify(source)
     });
-    vi.spyOn(Repository.prototype, "getFiscalCorrection").mockResolvedValue(correction);
-    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    db.documents.push(source);
+    stubDocumentCorrectionLifecycle(correction, db);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-DIRECT-CORRECTION",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
     const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const original = JSON.parse(source.plain_json) as Record<string, any>;
+    const originalIdentifiers = {
+      codigoGeneracion: source.codigo_generacion,
+      numeroControl: source.numero_control
+    };
+    const sequenceBefore = db.nextSequence;
 
-    await expect(new IssuancePipeline(runtime).processFiscalCorrection(correction.id, {
-      processingClaimId: correction.processing_claim_id,
-      fiscalClaimId: correction.fiscal_claim_id!
-    })).rejects.toThrow("La corrección de documentos rechazados aún no está habilitada.");
     const disposition = await consumeCorrectionMessage(runtime, {
       advancedDocumentId: correction.document_id!,
       fiscalCorrectionId: correction.id,
@@ -1953,10 +2094,296 @@ describe("guarded fiscal correction API", () => {
       fiscalClaimId: correction.fiscal_claim_id!
     });
 
-    expect(disposition.ack).not.toHaveBeenCalled();
-    expect(disposition.retry).toHaveBeenCalledTimes(1);
-    expect(correction.status).toBe("QUEUED");
-    expect(db.documents).toHaveLength(0);
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction.status).toBe("ACCEPTED");
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
+    expect(db.documents).toHaveLength(1);
+    const updated = db.documents[0];
+    const corrected = JSON.parse(updated.plain_json) as Record<string, any>;
+    expect(updated.id).toBe(source.id);
+    expect(updated.wompi_event_id).toBeNull();
+    expect(updated.codigo_generacion).not.toBe(originalIdentifiers.codigoGeneracion);
+    expect(updated.numero_control).not.toBe(originalIdentifiers.numeroControl);
+    expect(corrected.receptor.nombre).toBe("Receptor Directo Corregido");
+    expect(corrected.emisor).toEqual(original.emisor);
+    expect(corrected.cuerpoDocumento).toEqual(original.cuerpoDocumento);
+    expect(corrected.resumen).toEqual(original.resumen);
+    expect(corrected.otrosDocumentos).toEqual(original.otrosDocumentos);
+    expect(JSON.parse(correction.source_document_snapshot_json!)).toMatchObject({
+      codigo_generacion: originalIdentifiers.codigoGeneracion,
+      numero_control: originalIdentifiers.numeroControl,
+      signed_jws: "original.signed.jws"
+    });
+    expect(transmit).toHaveBeenCalledWith(expect.objectContaining({
+      signedJws: expect.not.stringMatching(/^original\.signed\.jws$/)
+    }));
+  });
+
+  it("preserves Wompi evidence and runs normal accepted finalization on the same row", async () => {
+    const db = correctionDb();
+    db.nextSequence = 101;
+    const payload = correctionWebhook({
+      IdTransaccion: "wompi_rejected_correction_tx",
+      Monto: "25.00",
+      CodigoAutorizacion: "authorization_original",
+      IdExterno: "di_document_correction",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_document_correction",
+        NombreProducto: "Ofrenda"
+      },
+      Cliente: {
+        ...(correctionWebhook().Cliente ?? {}),
+        DocumentoIdentidad: "10000002-7",
+        EMail: "original@example.org"
+      }
+    });
+    const sourcePlain = buildCdeDocument(payload, emisorConfig(), {
+      sequence: 23,
+      environment: "00",
+      issuedAt: new Date(payload.FechaTransaccion),
+      donorOverride: {
+        tipoDocumento: "13",
+        numDocumento: "10000002-7",
+        nombre: "Receptor Wompi Original",
+        correo: "original@example.org",
+        telefono: "70001111",
+        direccion: {
+          departamento: "06",
+          municipio: "22",
+          distrito: "01",
+          complemento: "Dirección original"
+        },
+        codPais: "SV",
+        codDomiciliado: 1,
+        giftType: "OFRENDA"
+      }
+    }) as Record<string, any>;
+    const sourceIds = sourcePlain.identificacion as Record<string, string>;
+    const source = testDocument({
+      id: "doc_rejected_wompi_correction",
+      wompi_event_id: "wompi_rejected_correction",
+      status: "REJECTED",
+      codigo_generacion: sourceIds.codigoGeneracion,
+      numero_control: sourceIds.numeroControl,
+      plain_json: JSON.stringify(sourcePlain),
+      signed_jws: "original-wompi.signed.jws",
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: JSON.stringify(["#/receptor/nombre rechazado"]),
+      donor_name: "Receptor Wompi Original",
+      donor_email: "original@example.org",
+      amount_cents: 2500,
+      accepted_at: null,
+      fiscal_operation_claim_id: "fiscal_claim_wompi_document",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_wompi_document_processing",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: source.id,
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_wompi_document",
+      processing_claim_id: "correction_processing_wompi_document",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({
+        nombre: "Receptor Wompi Corregido",
+        correo: "corrected@example.org"
+      })),
+      changed_fields_json: JSON.stringify(["nombre", "correo"]),
+      source_document_snapshot_json: JSON.stringify(source)
+    });
+    db.documents.push(source);
+    db.wompiEvents.push(correctionEvent({
+      id: source.wompi_event_id,
+      transaction_id: payload.IdTransaccion,
+      raw_body: JSON.stringify(payload),
+      created_document_id: source.id,
+      processed_at: "2026-07-18T12:00:00.000Z",
+      issuance_status: "DOCUMENT_CREATED"
+    }));
+    db.donationIntents.push({
+      id: "di_document_correction",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_name: null,
+      donor_document_type: "13",
+      donor_document: "10000002-7",
+      donor_email: null,
+      donor_phone: "70001111",
+      direccion_departamento: "06",
+      direccion_municipio: "22",
+      direccion_distrito: "01",
+      direccion_complemento: "Dirección original",
+      donor_pais: null,
+      gift_type: "OFRENDA",
+      wompi_id_enlace: 987654,
+      wompi_url_enlace: "https://s.wompi.sv/987654",
+      wompi_url_enlace_largo: "https://pagos.wompi.sv/x",
+      document_id: null,
+      client_ip: "203.0.113.9",
+      datos_token_hash: null,
+      paid_at: null,
+      created_at: "2026-07-18T11:00:00.000Z",
+      updated_at: "2026-07-18T11:00:00.000Z",
+      expires_at: "2099-07-18T12:00:00.000Z"
+    });
+    stubDocumentCorrectionLifecycle(correction, db);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-WOMPI-DOCUMENT-CORRECTION",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const sequenceBefore = db.nextSequence;
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction.status).toBe("ACCEPTED");
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
+    expect(db.documents).toHaveLength(1);
+    const updated = db.documents[0];
+    const corrected = JSON.parse(updated.plain_json) as Record<string, any>;
+    const snapshot = JSON.parse(correction.source_document_snapshot_json!) as DteDocumentRecord;
+    const original = JSON.parse(snapshot.plain_json) as Record<string, any>;
+    expect(updated.id).toBe(source.id);
+    expect(updated.wompi_event_id).toBe(source.wompi_event_id);
+    expect(updated.codigo_generacion).not.toBe(snapshot.codigo_generacion);
+    expect(updated.numero_control).not.toBe(snapshot.numero_control);
+    expect(snapshot.signed_jws).toBe("original-wompi.signed.jws");
+    expect(corrected.receptor).toMatchObject({
+      nombre: "Receptor Wompi Corregido",
+      correo: "corrected@example.org"
+    });
+    expect(corrected.resumen).toEqual(original.resumen);
+    expect(corrected.cuerpoDocumento).toEqual(original.cuerpoDocumento);
+    expect(corrected.otrosDocumentos).toEqual(original.otrosDocumentos);
+    expect(corrected.apendice).toEqual(original.apendice);
+    expect(transmit).toHaveBeenCalledWith(expect.objectContaining({
+      signedJws: expect.not.stringMatching(/^original-wompi\.signed\.jws$/)
+    }));
+    expect(db.donationIntents[0]).toMatchObject({
+      status: "COMPLETED",
+      document_id: source.id
+    });
+    expect(db.emailDeliveries).toContainEqual(expect.objectContaining({
+      document_id: source.id,
+      email_type: "dteReceipt",
+      status: "SENT"
+    }));
+    expectCorrectionAudits(db, correction, "ACCEPTED", ["nombre", "correo"]);
+  });
+
+  it("leaves a durable corrected SIGNED row on the safe retry path after proven pre-dispatch failure", async () => {
+    const db = correctionDb();
+    const source = rejectedCorrectionDocument({
+      id: "doc_rejected_predispatch_correction",
+      fiscal_operation_claim_id: "fiscal_claim_predispatch_correction",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_document_predispatch",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: source.id,
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_predispatch_correction",
+      processing_claim_id: "correction_processing_predispatch_correction",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({ correo: null })),
+      source_document_snapshot_json: JSON.stringify(source)
+    });
+    db.documents.push(source);
+    stubDocumentCorrectionLifecycle(correction, db);
+    vi.spyOn(MhClient.prototype, "transmitDte").mockRejectedValue(
+      new MhPreDispatchError("MH auth unavailable", new Error("auth unavailable"))
+    );
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "FAILED",
+      mh_dispatch_started_at: null,
+      failure_code: "MH_PRE_DISPATCH_ERROR"
+    });
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: null,
+      fiscal_operation_kind: null
+    });
+  });
+
+  it("keeps an ambiguous corrected document dispatch claimed and REVIEW_REQUIRED", async () => {
+    const db = correctionDb();
+    const source = rejectedCorrectionDocument({
+      id: "doc_rejected_ambiguous_correction",
+      fiscal_operation_claim_id: "fiscal_claim_ambiguous_correction",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_document_ambiguous",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: source.id,
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_ambiguous_correction",
+      processing_claim_id: "correction_processing_ambiguous_correction",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({ correo: null })),
+      source_document_snapshot_json: JSON.stringify(source)
+    });
+    db.documents.push(source);
+    stubDocumentCorrectionLifecycle(correction, db);
+    vi.spyOn(MhClient.prototype, "transmitDte").mockRejectedValue(
+      new Error("connection reset after request write")
+    );
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "REVIEW_REQUIRED",
+      mh_dispatch_started_at: expect.any(String),
+      failure_code: "MH_DISPATCH_UNCERTAIN"
+    });
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: correction.fiscal_claim_id,
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    expectCorrectionAudits(db, correction, "REVIEW_REQUIRED");
   });
 
   it("preflights a Wompi-backed rejected document from its durable source", async () => {
@@ -6984,8 +7411,7 @@ describe("document retry", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("rebuilds a rejected Wompi CDE from the original webhook before retransmitting", async () => {
-    const certPassword = "correct horse battery staple";
+  it("requires an explicit receptor correction for a rejected Wompi CDE", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
     // Real payment-link payload shape: no DocumentoIdentidad, no Direccion.
@@ -7018,30 +7444,24 @@ describe("document retry", () => {
       accepted_at: null,
       mh_estado: "HTTP_400"
     });
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const before = structuredClone(db.documents[0]);
 
     const response = await worker.fetch(
       new Request("https://example.org/api/documents/doc_1/retry", {
         method: "POST",
         headers: { Authorization: "Bearer test-token" }
       }),
-      env(db, {
-        EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
-        MH_CERT_XML: await generatedCertificateXml(certPassword),
-        MH_CERT_PASSWORD: certPassword
-      })
+      env(db)
     );
 
-    expect(response.status).toBe(200);
-    const document = db.documents[0];
-    // A rejection is MH's verdict on the CONTENT: the retry must rebuild the
-    // document from the webhook (new codigoGeneracion, re-signed), never
-    // retransmit the same signed JWS.
-    expect(document.signed_jws).not.toBe("stale-signed-jws");
-    expect(document.codigo_generacion).not.toBe("6CAE5F7E-A590-4573-8EF2-FE48B14796C4");
-    expect(document.status).toBe("ACCEPTED");
-    const receptor = (JSON.parse(String(document.plain_json)) as { receptor: Record<string, unknown> }).receptor;
-    expect(receptor.tipoDocumento).toBe("37");
-    expect(receptor.direccion).toMatchObject({ complemento: "No proporcionada por el donante" });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "document_correction_required",
+      message: "Corrija los datos rechazados antes de crear un nuevo intento fiscal."
+    });
+    expect(db.documents[0]).toEqual(before);
+    expect(transmit).not.toHaveBeenCalled();
   });
 });
 
@@ -10339,7 +10759,7 @@ describe("donation intent correlation", () => {
     );
     expect(response.status).toBe(409);
     await expect(response.json()).resolves.toMatchObject({
-      error: "wompi_intent_quarantined"
+      error: "document_correction_required"
     });
     expect(outbound).not.toHaveBeenCalled();
   });

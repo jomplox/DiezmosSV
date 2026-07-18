@@ -631,6 +631,72 @@ export class Repository {
     return Boolean(row);
   }
 
+  async prepareClaimedFiscalCorrectionDocument(input: {
+    correctionId: string;
+    documentId: string;
+    claimId: string;
+    codigoGeneracion: string;
+    numeroControl: string;
+    plainJson: Record<string, unknown>;
+    signedJws: string;
+    donorName: string | null;
+    donorEmail: string | null;
+  }): Promise<boolean> {
+    const updatedAt = nowIso();
+    const row = await this.db.prepare(
+      `UPDATE dte_documents
+          SET codigo_generacion = ?,
+              numero_control = ?,
+              plain_json = ?,
+              signed_jws = ?,
+              donor_name = ?,
+              donor_email = ?,
+              status = 'SIGNED',
+              sello_recibido = NULL,
+              mh_estado = NULL,
+              mh_observaciones_json = '[]',
+              accepted_at = NULL,
+              contingency_period_id = NULL,
+              transmission_deferred_at = NULL,
+              post_accept_finalized_at = NULL,
+              post_accept_finalization_claim_id = NULL,
+              post_accept_finalization_claimed_at = NULL,
+              post_accept_email_dispatch_started_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND status = 'REJECTED'
+          AND fiscal_operation_claim_id = ?
+          AND fiscal_operation_kind = 'TRANSMISSION'
+          AND fiscal_operation_event_id IS NULL
+          AND EXISTS (
+            SELECT 1 FROM fiscal_corrections
+             WHERE id = ?
+               AND target_kind = 'DTE_DOCUMENT'
+               AND document_id = dte_documents.id
+               AND environment = dte_documents.environment
+               AND status = 'PROCESSING'
+               AND fiscal_claim_id = ?
+               AND source_document_snapshot_json IS NOT NULL
+          )
+        RETURNING id`
+    ).bind(
+      input.codigoGeneracion,
+      input.numeroControl,
+      JSON.stringify(input.plainJson),
+      input.signedJws,
+      input.donorName,
+      input.donorEmail,
+      updatedAt,
+      input.documentId,
+      input.claimId,
+      input.correctionId,
+      input.claimId
+    ).first<{ id: string }>();
+    if (!row) return false;
+    await this.indexDteDocumentById(input.documentId);
+    return true;
+  }
+
   async finalizeFiscalCorrection(
     id: string,
     claimId: string,

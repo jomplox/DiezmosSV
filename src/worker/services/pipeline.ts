@@ -1,14 +1,14 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
 import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
-import { DocumentSchemaValidationError } from "../domain/schema";
+import { DocumentSchemaValidationError, validateCde } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { legacyIssuanceAttemptId, Repository } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { newId } from "../utils/ids";
+import { newId, numeroControl as buildNumeroControl } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
 import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./email";
@@ -19,7 +19,7 @@ import { logWorkerError } from "./observability";
 import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
-import { buildCorrectedWompiCandidate } from "./fiscalCorrection";
+import { buildCorrectedDirectCandidate, buildCorrectedWompiCandidate } from "./fiscalCorrection";
 import type { FiscalReceptorCorrection } from "../../shared/fiscalCorrection";
 
 // Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
@@ -114,19 +114,13 @@ interface FiscalCorrectionContext {
   correctionId: string;
   processingClaimId: string;
   claimId: string;
+  preserveSignedOnPreDispatchFailure?: boolean;
 }
 
 export class FiscalCorrectionOwnershipError extends Error {
   constructor() {
     super("La corrección fiscal perdió su propiedad de procesamiento.");
     this.name = "FiscalCorrectionOwnershipError";
-  }
-}
-
-export class UnsupportedFiscalCorrectionTargetError extends Error {
-  constructor() {
-    super("La corrección de documentos rechazados aún no está habilitada.");
-    this.name = "UnsupportedFiscalCorrectionTargetError";
   }
 }
 
@@ -379,10 +373,11 @@ export class IssuancePipeline {
       await this.recordFiscalCorrectionAudit(correction, correction.status);
       return correction;
     }
-    if (correction.target_kind !== "WOMPI_EVENT") {
-      throw new UnsupportedFiscalCorrectionTargetError();
-    }
-    if (!correction.wompi_event_id || !ownership.issuanceAttemptId) {
+    if (
+      correction.target_kind === "WOMPI_EVENT"
+        ? (!correction.wompi_event_id || !ownership.issuanceAttemptId)
+        : (!correction.document_id || !ownership.fiscalClaimId)
+    ) {
       throw new FiscalCorrectionOwnershipError();
     }
 
@@ -409,6 +404,19 @@ export class IssuancePipeline {
     await this.recordFiscalCorrectionAudit(correction, "STARTED");
     if (correction.mh_dispatch_started_at) {
       return this.finalizeFiscalCorrectionReview(correction, ownership);
+    }
+    if (correction.target_kind === "DTE_DOCUMENT") {
+      try {
+        return await this.processRejectedDocumentFiscalCorrection(correction, ownership);
+      } catch (error) {
+        if (
+          error instanceof FiscalCorrectionBusyError
+          || error instanceof FiscalCorrectionDispatchInFlightError
+        ) {
+          throw error;
+        }
+        return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+      }
     }
     if (!correction.wompi_event_id || !ownership.issuanceAttemptId) {
       throw new FiscalCorrectionOwnershipError();
@@ -557,6 +565,134 @@ export class IssuancePipeline {
     }
   }
 
+  private async processRejectedDocumentFiscalCorrection(
+    correction: FiscalCorrectionRecord,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    if (
+      !correction.document_id
+      || !correction.fiscal_claim_id
+      || ownership.fiscalClaimId !== correction.fiscal_claim_id
+    ) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    const current = await this.repo.getDteDocument(correction.document_id);
+    if (
+      !current
+      || current.status !== "REJECTED"
+      || current.fiscal_operation_claim_id !== correction.fiscal_claim_id
+      || current.fiscal_operation_kind !== "TRANSMISSION"
+    ) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    assertDeploymentAllowsAmbiente(this.env, current.environment);
+    const config = getEmisorConfig(this.env);
+    let source: DteDocumentRecord;
+    let correctedReceptor: FiscalReceptorCorrection;
+    let candidate: Record<string, unknown>;
+    try {
+      source = parseFiscalCorrectionSourceDocument(correction);
+      if (
+        source.id !== current.id
+        || source.environment !== current.environment
+        || source.status !== "REJECTED"
+        || source.wompi_event_id !== current.wompi_event_id
+      ) {
+        throw new Error("La evidencia archivada no coincide con el documento reclamado.");
+      }
+    } catch (error) {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "FISCAL_CORRECTION_INVALID_SOURCE",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    try {
+      correctedReceptor = JSON.parse(
+        correction.corrected_receptor_json
+      ) as FiscalReceptorCorrection;
+      // Build and validate once before the durable sequence mutation. This creates
+      // the one fresh generation code that will be persisted; only the placeholder
+      // control number is replaced after the owned sequence allocation below.
+      candidate = buildCorrectedDirectCandidate({
+        sourceDocument: source,
+        correction: correctedReceptor,
+        config,
+        sequence: 1
+      });
+    } catch (error) {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "FISCAL_CORRECTION_INVALID_CANDIDATE",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    const sequence = await this.repo.nextControlSequence(
+      current.environment,
+      config.controlPrefix
+    );
+    const identification = candidate.identificacion as Record<string, unknown>;
+    identification.numeroControl = buildNumeroControl(config.controlPrefix, sequence);
+    validateCde(candidate);
+    const identifiers = extractCdeIdentifiers(candidate);
+    const summary = cdeDocumentSummary(candidate);
+    const signedJws = await signMhDocument(
+      candidate,
+      getMhCertificateXml(this.env),
+      requireSecret(this.env, "MH_CERT_PASSWORD")
+    );
+    const prepared = await this.repo.prepareClaimedFiscalCorrectionDocument({
+      correctionId: correction.id,
+      documentId: current.id,
+      claimId: correction.fiscal_claim_id,
+      codigoGeneracion: identifiers.codigoGeneracion,
+      numeroControl: identifiers.numeroControl,
+      plainJson: candidate,
+      signedJws,
+      donorName: summary.donorName,
+      donorEmail: summary.donorEmail
+    });
+    if (!prepared) {
+      throw new FiscalCorrectionBusyError(
+        "El documento rechazado cambió antes de persistir la corrección."
+      );
+    }
+    return this.finishDocumentFiscalCorrection(correction, current.id, ownership);
+  }
+
+  private async finishDocumentFiscalCorrection(
+    correction: FiscalCorrectionRecord,
+    documentId: string,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    if (!ownership.fiscalClaimId) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    const processed = await this.processDteDocument(documentId, undefined, {
+      correctionId: correction.id,
+      processingClaimId: ownership.processingClaimId,
+      claimId: ownership.fiscalClaimId,
+      preserveSignedOnPreDispatchFailure: true
+    });
+    if (processed.status !== "ACCEPTED" && processed.status !== "REJECTED") {
+      throw new FiscalCorrectionBusyError(
+        "El CDE corregido sigue ocupado antes de un resultado fiscal."
+      );
+    }
+    const finalized = await this.repo.finalizeFiscalCorrection(
+      correction.id,
+      ownership.processingClaimId,
+      { status: processed.status }
+    );
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      await this.recordFiscalCorrectionAudit(latest, latest.status);
+      return latest;
+    }
+    throw new Error("No se pudo finalizar el resultado de la corrección fiscal.");
+  }
+
   private async finishWompiFiscalCorrection(
     correction: FiscalCorrectionRecord,
     document: DteDocumentRecord,
@@ -644,9 +780,11 @@ export class IssuancePipeline {
     error: unknown
   ): Promise<FiscalCorrectionRecord> {
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
-    const document = latest.wompi_event_id
-      ? await this.repo.getDteDocumentByWompiEvent(latest.wompi_event_id)
-      : null;
+    const document = latest.document_id
+      ? await this.repo.getDteDocument(latest.document_id)
+      : latest.wompi_event_id
+        ? await this.repo.getDteDocumentByWompiEvent(latest.wompi_event_id)
+        : null;
     if (document?.status === "ACCEPTED") {
       const finalized = await this.repo.finalizeFiscalCorrection(
         latest.id,
@@ -969,6 +1107,9 @@ export class IssuancePipeline {
       }
       if (error instanceof MhPreDispatchError && claimId) {
         if (correctionContext) {
+          if (correctionContext.preserveSignedOnPreDispatchFailure) {
+            throw error;
+          }
           const failed = await this.repo.markDocumentFailed(record.id, claimId, {
             mhEstado: "MH_PRE_DISPATCH_ERROR",
             observaciones: [String(error.message)]
@@ -1605,6 +1746,27 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
     codigoGeneracion: identificacion.codigoGeneracion,
     numeroControl: identificacion.numeroControl
   };
+}
+
+function parseFiscalCorrectionSourceDocument(
+  correction: FiscalCorrectionRecord
+): DteDocumentRecord {
+  if (!correction.source_document_snapshot_json) {
+    throw new Error("La corrección no contiene la evidencia archivada del rechazo.");
+  }
+  const parsed = JSON.parse(correction.source_document_snapshot_json);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("La evidencia archivada del rechazo no es un documento válido.");
+  }
+  const source = parsed as Partial<DteDocumentRecord>;
+  if (
+    typeof source.id !== "string"
+    || typeof source.plain_json !== "string"
+    || (source.environment !== "00" && source.environment !== "01")
+  ) {
+    throw new Error("La evidencia archivada del rechazo está incompleta.");
+  }
+  return source as DteDocumentRecord;
 }
 
 function assertFiscalCorrectionOwnership(
