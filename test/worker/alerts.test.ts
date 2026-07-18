@@ -164,7 +164,7 @@ describe("operational alert dispatch", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("emits a privacy-safe native event without an alert-email recipient", async () => {
+  it("emits a privacy-safe advanced CDE failure event without incident content", async () => {
     const db = new InMemoryAlertD1();
     const env = {
       DB: db as unknown as D1Database,
@@ -176,7 +176,7 @@ describe("operational alert dispatch", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     await sendOperationalAlert(env, new Repository(env.DB), {
-      kind: "DTE_FAILED",
+      kind: "ADVANCED_CDE_FAILED",
       title: "Fallo para ana@example.org",
       detail: "https://private.example/dte_123 incident attempt_1",
       entityType: "dte_document",
@@ -187,7 +187,7 @@ describe("operational alert dispatch", () => {
     expect(spy).toHaveBeenCalledWith({
       event: "operational_alert",
       app_env: "staging",
-      alert_kind: "dte_failed",
+      alert_kind: "advanced_cde_failed",
       entity_type: "dte_document"
     });
     expect(spy.mock.calls[0][0]).not.toHaveProperty("title");
