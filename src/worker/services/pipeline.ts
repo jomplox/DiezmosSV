@@ -5,7 +5,11 @@ import { DocumentSchemaValidationError, validateCde } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
-import { legacyIssuanceAttemptId, Repository } from "../storage/repository";
+import {
+  legacyIssuanceAttemptId,
+  Repository,
+  type FiscalCorrectionDocumentEvidence
+} from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId, numeroControl as buildNumeroControl } from "../utils/ids";
@@ -683,7 +687,10 @@ export class IssuancePipeline {
     const finalized = await this.repo.finalizeFiscalCorrection(
       correction.id,
       ownership.processingClaimId,
-      { status: processed.status }
+      {
+        status: processed.status,
+        document: this.fiscalCorrectionDocumentEvidence(correction, processed)
+      }
     );
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
     if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
@@ -713,9 +720,14 @@ export class IssuancePipeline {
         "El CDE corregido sigue ocupado antes de un resultado fiscal."
       );
     }
-    const finalized = await this.repo.finalizeFiscalCorrection(correction.id, ownership.processingClaimId, {
-      status: processed.status
-    });
+    const finalized = await this.repo.finalizeFiscalCorrection(
+      correction.id,
+      ownership.processingClaimId,
+      {
+        status: processed.status,
+        document: this.fiscalCorrectionDocumentEvidence(correction, processed)
+      }
+    );
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
     if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
       await this.recordFiscalCorrectionAudit(latest, latest.status);
@@ -757,13 +769,22 @@ export class IssuancePipeline {
     correction: FiscalCorrectionRecord,
     ownership: FiscalCorrectionQueueOwnership
   ): Promise<FiscalCorrectionRecord> {
+    const document = correction.document_id
+      ? await this.repo.getDteDocument(correction.document_id)
+      : correction.wompi_event_id
+        ? await this.repo.getDteDocumentByWompiEvent(correction.wompi_event_id)
+        : null;
+    if (!document) {
+      throw new FiscalCorrectionOwnershipError();
+    }
     const finalized = await this.repo.finalizeFiscalCorrection(
       correction.id,
       ownership.processingClaimId,
       {
         status: "REVIEW_REQUIRED",
         failureCode: "MH_DISPATCH_UNCERTAIN",
-        failureMessage: "La respuesta de Hacienda no pudo determinarse con certeza."
+        failureMessage: "La respuesta de Hacienda no pudo determinarse con certeza.",
+        document: this.fiscalCorrectionDocumentEvidence(correction, document)
       }
     );
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
@@ -789,7 +810,10 @@ export class IssuancePipeline {
       const finalized = await this.repo.finalizeFiscalCorrection(
         latest.id,
         ownership.processingClaimId,
-        { status: "ACCEPTED" }
+        {
+          status: "ACCEPTED",
+          document: this.fiscalCorrectionDocumentEvidence(latest, document)
+        }
       );
       const acceptedCorrection = (await this.repo.getFiscalCorrection(latest.id)) ?? latest;
       if (
@@ -825,6 +849,23 @@ export class IssuancePipeline {
       "FISCAL_CORRECTION_FAILED",
       error instanceof Error ? error.message : String(error)
     );
+  }
+
+  private fiscalCorrectionDocumentEvidence(
+    correction: FiscalCorrectionRecord,
+    document: DteDocumentRecord
+  ): FiscalCorrectionDocumentEvidence {
+    const documentClaimId = correction.target_kind === "DTE_DOCUMENT"
+      ? correction.fiscal_claim_id
+      : `fiscal_correction_${correction.id}`;
+    if (!documentClaimId || !document.signed_jws) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    return {
+      documentId: document.id,
+      documentClaimId,
+      signedJws: document.signed_jws
+    };
   }
 
   private async recordFiscalCorrectionAudit(
@@ -1059,10 +1100,13 @@ export class IssuancePipeline {
         return (await this.repo.getDteDocument(record.id)) ?? record;
       }
       if (correctionContext) {
-        const marked = await this.repo.markFiscalCorrectionMhDispatchStarted(
-          correctionContext.correctionId,
-          correctionContext.processingClaimId
-        );
+        const marked = await this.repo.markFiscalCorrectionMhDispatchStarted({
+          correctionId: correctionContext.correctionId,
+          processingClaimId: correctionContext.processingClaimId,
+          documentId: record.id,
+          documentClaimId: claimId,
+          signedJws
+        });
         if (!marked) {
           throw new FiscalCorrectionDispatchInFlightError();
         }
