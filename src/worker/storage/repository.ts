@@ -434,7 +434,13 @@ export class Repository {
             WHERE id = ?
               AND environment = ?
               AND status = 'REJECTED'
-              AND fiscal_operation_claim_id IS NULL`
+              AND fiscal_operation_claim_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM fiscal_corrections AS accepted_correction
+                 WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
+                   AND accepted_correction.document_id = dte_documents.id
+                   AND accepted_correction.status = 'ACCEPTED'
+              )`
         ).bind(
           correctionId,
           input.requestId,
@@ -460,6 +466,12 @@ export class Repository {
               AND environment = ?
               AND status = 'REJECTED'
               AND fiscal_operation_claim_id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM fiscal_corrections AS accepted_correction
+                 WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
+                   AND accepted_correction.document_id = dte_documents.id
+                   AND accepted_correction.status = 'ACCEPTED'
+              )
               AND EXISTS (
                 SELECT 1 FROM fiscal_corrections
                  WHERE id = ?
@@ -489,7 +501,13 @@ export class Repository {
           WHERE id = ?
             AND environment = ?
             AND status = 'REJECTED'
-            AND fiscal_operation_claim_id IS NULL`
+            AND fiscal_operation_claim_id IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM fiscal_corrections AS accepted_correction
+               WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
+                 AND accepted_correction.document_id = dte_documents.id
+                 AND accepted_correction.status = 'ACCEPTED'
+            )`
       ).bind(input.documentId, input.environment).first<{ id: string }>();
       if (!eligible) return { kind: "ineligible" };
     }
@@ -596,7 +614,13 @@ export class Repository {
           WHERE id = ?
             AND status = 'PROCESSING'
             AND processing_claim_id = ?
-            AND (? <> 'FAILED' OR mh_dispatch_started_at IS NULL)`
+            AND (
+              (? = 'FAILED' AND mh_dispatch_started_at IS NULL)
+              OR (
+                ? IN ('ACCEPTED', 'REJECTED', 'REVIEW_REQUIRED')
+                AND mh_dispatch_started_at IS NOT NULL
+              )
+            )`
       ).bind(
         outcome.status,
         outcome.failureCode ?? null,
@@ -605,6 +629,7 @@ export class Repository {
         completedAt,
         id,
         claimId,
+        outcome.status,
         outcome.status
       ),
       this.db.prepare(

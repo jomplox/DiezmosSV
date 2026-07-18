@@ -93,6 +93,88 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("allows exactly one different request to claim a rejected document", async () => {
+    const database = migratedDatabase();
+    seedRejectedDocument(database, "doc_competing_requests");
+    const repository = new Repository(new SqliteD1(database).database);
+
+    const [first, second] = await Promise.all([
+      repository.claimDocumentFiscalCorrection(documentCorrectionClaimInput({
+        documentId: "doc_competing_requests",
+        requestId: "10101010-1010-4010-8010-101010101010"
+      })),
+      repository.claimDocumentFiscalCorrection(documentCorrectionClaimInput({
+        documentId: "doc_competing_requests",
+        requestId: "20202020-2020-4020-8020-202020202020"
+      }))
+    ]);
+
+    expect([first.kind, second.kind].sort()).toEqual(["claimed", "ineligible"]);
+    const corrections = database.prepare(
+      `SELECT attempt_number, fiscal_claim_id
+         FROM fiscal_corrections WHERE document_id = ?`
+    ).all("doc_competing_requests") as Array<{
+      attempt_number: number;
+      fiscal_claim_id: string;
+    }>;
+    expect(corrections).toEqual([{
+      attempt_number: 1,
+      fiscal_claim_id: expect.any(String)
+    }]);
+    expect(database.prepare(
+      `SELECT fiscal_operation_claim_id, fiscal_operation_kind
+         FROM dte_documents WHERE id = ?`
+    ).get("doc_competing_requests")).toEqual({
+      fiscal_operation_claim_id: corrections[0].fiscal_claim_id,
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    database.close();
+  });
+
+  it("never reclaims a rejected document after an accepted correction", async () => {
+    const database = migratedDatabase();
+    seedRejectedDocument(database, "doc_accepted_history");
+    const repository = new Repository(new SqliteD1(database).database);
+    const first = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId: "doc_accepted_history",
+        requestId: "30303030-3030-4030-8030-303030303030"
+      })
+    );
+    if (first.kind !== "claimed") throw new Error("expected accepted-history claim");
+    await repository.claimFiscalCorrectionProcessing({
+      id: first.correction.id,
+      processingClaimId: first.correction.processing_claim_id,
+      fiscalClaimId: first.correction.fiscal_claim_id ?? undefined
+    });
+    await repository.markFiscalCorrectionMhDispatchStarted(
+      first.correction.id,
+      first.correction.processing_claim_id
+    );
+    await expect(repository.finalizeFiscalCorrection(
+      first.correction.id,
+      first.correction.processing_claim_id,
+      { status: "ACCEPTED" }
+    )).resolves.toBe(true);
+
+    expect(database.prepare(
+      "SELECT status FROM dte_documents WHERE id = ?"
+    ).get("doc_accepted_history")).toEqual({ status: "REJECTED" });
+    await expect(repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId: "doc_accepted_history",
+        requestId: "40404040-4040-4040-8040-404040404040"
+      })
+    )).resolves.toEqual({ kind: "ineligible" });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE document_id = ?"
+    ).get("doc_accepted_history")).toEqual({ count: 1 });
+    expect(database.prepare(
+      "SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?"
+    ).get("doc_accepted_history")).toEqual({ fiscal_operation_claim_id: null });
+    database.close();
+  });
+
   it("requires both correction and target ownership before processing", async () => {
     const database = migratedDatabase();
     seedFailedWompiEvent(database, "wompi_processing_fence");
@@ -187,6 +269,62 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: correction.processing_claim_id,
       fiscalClaimId: correction.fiscal_claim_id ?? undefined
     })).resolves.toBe("terminal");
+    database.close();
+  });
+
+  it("requires MH dispatch evidence for known and uncertain MH outcomes", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    const outcomes = [
+      { status: "ACCEPTED" as const },
+      { status: "REJECTED" as const, failureCode: "MH_REJECTED" },
+      { status: "REVIEW_REQUIRED" as const, failureCode: "MH_OUTCOME_UNKNOWN" }
+    ];
+
+    for (const [index, outcome] of outcomes.entries()) {
+      const documentId = `doc_dispatch_required_${index}`;
+      seedRejectedDocument(database, documentId);
+      const claimed = await repository.claimDocumentFiscalCorrection(
+        documentCorrectionClaimInput({
+          documentId,
+          requestId: `50505050-5050-4050-8050-50505050505${index}`
+        })
+      );
+      if (claimed.kind !== "claimed") throw new Error("expected dispatch-required claim");
+      const correction = claimed.correction;
+      await repository.claimFiscalCorrectionProcessing({
+        id: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        fiscalClaimId: correction.fiscal_claim_id ?? undefined
+      });
+
+      await expect(repository.finalizeFiscalCorrection(
+        correction.id,
+        correction.processing_claim_id,
+        outcome
+      )).resolves.toBe(false);
+      expect(database.prepare(
+        "SELECT status, mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
+      ).get(correction.id)).toEqual({
+        status: "PROCESSING",
+        mh_dispatch_started_at: null
+      });
+      expect(database.prepare(
+        "SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?"
+      ).get(documentId)).toEqual({
+        fiscal_operation_claim_id: correction.fiscal_claim_id
+      });
+
+      await repository.markFiscalCorrectionMhDispatchStarted(
+        correction.id,
+        correction.processing_claim_id
+      );
+      await expect(repository.finalizeFiscalCorrection(
+        correction.id,
+        correction.processing_claim_id,
+        outcome
+      )).resolves.toBe(true);
+    }
     database.close();
   });
 
