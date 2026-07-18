@@ -1346,7 +1346,7 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
-  it("lists only stale queued and safe pre-dispatch processing corrections", async () => {
+  it("rotates only stale queued and safe pre-dispatch processing correction ownership", async () => {
     const database = migratedDatabase();
     const repository = new Repository(new SqliteD1(database).database);
     for (const id of ["wompi_stale_queued", "wompi_safe_processing", "wompi_ambiguous_processing"]) {
@@ -1362,7 +1362,10 @@ describe("fiscal repository SQL on SQLite", () => {
       claims.push(result.correction);
     }
     database.prepare(
-      "UPDATE fiscal_corrections SET created_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+      `UPDATE fiscal_corrections
+          SET created_at = '2000-01-01T00:00:00.000Z',
+              updated_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
     ).run(claims[0].id);
     for (const correction of claims.slice(1)) {
       await repository.claimFiscalCorrectionProcessing({
@@ -1384,6 +1387,109 @@ describe("fiscal repository SQL on SQLite", () => {
       claims[0].id,
       claims[1].id
     ].sort());
+    const recoveredQueued = await repository.recoverFiscalCorrectionProcessingClaim({
+      id: claims[0].id,
+      currentProcessingClaimId: claims[0].processing_claim_id,
+      nextProcessingClaimId: "correction_processing_recovered_queued",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    });
+    const recoveredProcessing = await repository.recoverFiscalCorrectionProcessingClaim({
+      id: claims[1].id,
+      currentProcessingClaimId: claims[1].processing_claim_id,
+      nextProcessingClaimId: "correction_processing_recovered_processing",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    });
+    expect(recoveredQueued).toMatchObject({
+      id: claims[0].id,
+      status: "PROCESSING",
+      processing_claim_id: "correction_processing_recovered_queued",
+      issuance_attempt_id: claims[0].issuance_attempt_id
+    });
+    expect(recoveredProcessing).toMatchObject({
+      id: claims[1].id,
+      status: "PROCESSING",
+      processing_claim_id: "correction_processing_recovered_processing",
+      issuance_attempt_id: claims[1].issuance_attempt_id
+    });
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: claims[2].id,
+      currentProcessingClaimId: claims[2].processing_claim_id,
+      nextProcessingClaimId: "must_not_recover_ambiguous",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    })).resolves.toBeNull();
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: claims[0].id,
+      currentProcessingClaimId: claims[0].processing_claim_id,
+      nextProcessingClaimId: "must_not_recover_stale_owner",
+      staleBefore: "2030-01-01T00:00:00.000Z"
+    })).resolves.toBeNull();
+    database.close();
+  });
+
+  it("recovers a stale signed document correction only with its matching fiscal claim", async () => {
+    const database = migratedDatabase();
+    const documentId = "doc_recover_signed_correction";
+    seedRejectedDocument(database, documentId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId,
+        requestId: "56565656-5656-4656-8656-565656565656"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected signed recovery claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id ?? undefined
+    });
+    await repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: correction.id,
+      documentId,
+      claimId: correction.fiscal_claim_id!,
+      codigoGeneracion: "56565656-5656-4656-8656-565656565656",
+      numeroControl: "DTE-15-M001P004-000000000000156",
+      plainJson: {
+        identificacion: {
+          tipoDte: "15",
+          codigoGeneracion: "56565656-5656-4656-8656-565656565656",
+          numeroControl: "DTE-15-M001P004-000000000000156"
+        }
+      },
+      signedJws: "signed-recoverable-correction",
+      donorName: "Donante corregida",
+      donorEmail: "corregida@example.org"
+    });
+    database.prepare(
+      "UPDATE fiscal_corrections SET processing_started_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+    ).run(correction.id);
+
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "correction_processing_recovered_signed",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    })).resolves.toMatchObject({
+      id: correction.id,
+      status: "PROCESSING",
+      processing_claim_id: "correction_processing_recovered_signed",
+      fiscal_claim_id: correction.fiscal_claim_id
+    });
+    expect(database.prepare(
+      `SELECT status, signed_jws, fiscal_operation_claim_id
+         FROM dte_documents WHERE id = ?`
+    ).get(documentId)).toEqual({
+      status: "SIGNED",
+      signed_jws: "signed-recoverable-correction",
+      fiscal_operation_claim_id: correction.fiscal_claim_id
+    });
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "must_not_recover_old_signed_owner",
+      staleBefore: "2030-01-01T00:00:00.000Z"
+    })).resolves.toBeNull();
     database.close();
   });
 

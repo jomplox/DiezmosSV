@@ -1122,7 +1122,8 @@ describe("guarded fiscal correction API", () => {
     db: InMemoryD1,
     correction: FiscalCorrectionRecord,
     terminalStatus: "ACCEPTED" | "REJECTED" | "FAILED" | "REVIEW_REQUIRED",
-    changedFields = ["numDocumento"]
+    changedFields = ["numDocumento"],
+    includeQueued = false
   ): void {
     const audits = db.audits.filter(
       (audit) =>
@@ -1130,16 +1131,195 @@ describe("guarded fiscal correction API", () => {
         && audit.entity_id === correction.id
     );
     expect(audits.map((audit) => audit.action)).toEqual([
+      ...(includeQueued ? ["FISCAL_CORRECTION_QUEUED"] : []),
       "FISCAL_CORRECTION_STARTED",
       `FISCAL_CORRECTION_${terminalStatus}`
     ]);
     for (const audit of audits) {
+      const action = String(audit.action).replace("FISCAL_CORRECTION_", "");
       expect(JSON.parse(String(audit.metadata_json))).toEqual({
         correctionId: correction.id,
-        changedFields
+        target: {
+          kind: correction.target_kind,
+          id: correction.target_kind === "WOMPI_EVENT"
+            ? correction.wompi_event_id
+            : correction.document_id
+        },
+        requestIdHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+        attemptNumber: correction.attempt_number,
+        changedFields,
+        outcomeCode: action === "STARTED"
+          ? "PROCESSING"
+          : action === terminalStatus && correction.failure_code
+            ? correction.failure_code
+            : action
       });
+      const metadataText = String(audit.metadata_json);
+      expect(metadataText).not.toContain("corrected_receptor_json");
+      expect(metadataText).not.toContain("before_receptor_json");
+      expect(metadataText).not.toContain("10000002-7");
+      expect(metadataText).not.toContain("12345678-9");
+      expect(metadataText).not.toContain("Ana Donante");
+      expect(metadataText).not.toContain(correction.request_id);
     }
   }
+
+  it("requeues only stale queued and proven pre-dispatch fiscal corrections with fresh ownership", async () => {
+    const staleQueued = correctionRecord({
+      id: "fiscal_correction_stale_queued",
+      status: "QUEUED",
+      processing_claim_id: "processing_stale_queued",
+      issuance_attempt_id: "issuance_stale_queued"
+    });
+    const safeProcessing = correctionRecord({
+      id: "fiscal_correction_safe_processing",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: "doc_safe_processing",
+      status: "PROCESSING",
+      processing_claim_id: "processing_safe_old",
+      processing_started_at: "2000-01-01T00:00:00.000Z",
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_safe_processing"
+    });
+    const dispatched = correctionRecord({
+      id: "fiscal_correction_dispatched",
+      status: "PROCESSING",
+      processing_started_at: "2000-01-01T00:00:00.000Z",
+      mh_dispatch_started_at: "2000-01-01T00:01:00.000Z"
+    });
+    const review = correctionRecord({
+      id: "fiscal_correction_review",
+      status: "REVIEW_REQUIRED"
+    });
+    const accepted = correctionRecord({
+      id: "fiscal_correction_accepted",
+      status: "ACCEPTED"
+    });
+    const rejected = correctionRecord({
+      id: "fiscal_correction_rejected",
+      status: "REJECTED"
+    });
+    const candidates = [
+      staleQueued,
+      safeProcessing,
+      dispatched,
+      review,
+      accepted,
+      rejected
+    ];
+    vi.spyOn(Repository.prototype, "listRecoverableFiscalCorrections")
+      .mockResolvedValue(candidates);
+    const recovered = vi.spyOn(
+      Repository.prototype,
+      "recoverFiscalCorrectionProcessingClaim"
+    ).mockImplementation(async (input) => {
+      const candidate = candidates.find((row) =>
+        row.id === input.id
+        && row.processing_claim_id === input.currentProcessingClaimId
+      );
+      if (!candidate) return null;
+      candidate.status = "PROCESSING";
+      candidate.processing_claim_id = input.nextProcessingClaimId;
+      candidate.processing_started_at = new Date().toISOString();
+      return candidate;
+    });
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(correctionDb(), {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+
+    await new IssuancePipeline(runtime).recoverStalledFiscalCorrections();
+
+    expect(recovered).toHaveBeenCalledTimes(2);
+    expect(recovered.mock.calls.map(([input]) => input.id)).toEqual([
+      staleQueued.id,
+      safeProcessing.id
+    ]);
+    expect(queued).toEqual([
+      {
+        wompiEventId: staleQueued.wompi_event_id,
+        issuanceAttemptId: staleQueued.issuance_attempt_id,
+        fiscalCorrectionId: staleQueued.id,
+        fiscalCorrectionProcessingClaimId: expect.any(String)
+      },
+      {
+        advancedDocumentId: safeProcessing.document_id,
+        fiscalClaimId: safeProcessing.fiscal_claim_id,
+        fiscalCorrectionId: safeProcessing.id,
+        fiscalCorrectionProcessingClaimId: expect.any(String)
+      }
+    ]);
+    expect(queued[0].fiscalCorrectionProcessingClaimId).not.toBe(
+      "processing_stale_queued"
+    );
+    expect(queued[1].fiscalCorrectionProcessingClaimId).not.toBe(
+      "processing_safe_old"
+    );
+    expect(transmit).not.toHaveBeenCalled();
+  });
+
+  it("resumes a recovered signed document without rebuilding or allocating again", async () => {
+    const db = correctionDb();
+    const fiscalClaimId = "fiscal_claim_recovered_signed";
+    const rejectedSnapshot = rejectedCorrectionDocument({
+      id: "doc_recovered_signed",
+      fiscal_operation_claim_id: fiscalClaimId,
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const signedDocument = {
+      ...rejectedSnapshot,
+      status: "SIGNED",
+      signed_jws: "recovered-corrected-signed-jws",
+      mh_estado: null,
+      mh_observaciones_json: "[]"
+    } as DteDocumentRecord;
+    const correction = correctionRecord({
+      id: "fiscal_correction_recovered_signed",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: signedDocument.id,
+      status: "PROCESSING",
+      issuance_attempt_id: null,
+      fiscal_claim_id: fiscalClaimId,
+      processing_claim_id: "correction_processing_recovered_signed",
+      processing_started_at: new Date().toISOString(),
+      source_document_snapshot_json: JSON.stringify(rejectedSnapshot)
+    });
+    db.documents.push(signedDocument);
+    stubDocumentCorrectionLifecycle(correction, db);
+    const sequenceBefore = db.nextSequence;
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-RECOVERED-SIGNED",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+
+    const disposition = await consumeCorrectionMessage(
+      correctionRuntime(db),
+      {
+        advancedDocumentId: signedDocument.id,
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        fiscalClaimId
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(correction.status).toBe("ACCEPTED");
+    expect(db.documents[0]).toMatchObject({
+      status: "ACCEPTED",
+      signed_jws: "recovered-corrected-signed-jws",
+      sello_recibido: "SELLO-RECOVERED-SIGNED"
+    });
+  });
 
   it("requires OPERATOR before reading either correction target", async () => {
     const unauthenticated = correctionDb(null);
@@ -1507,7 +1687,7 @@ describe("guarded fiscal correction API", () => {
     expect(db.nextSequence).toBe(sequenceBefore);
     expect(event.raw_body).toBe(rawBodyBefore);
     expect(JSON.stringify(db.donationIntents)).toBe(intentsBefore);
-    expectCorrectionAudits(db, correction, "ACCEPTED");
+    expectCorrectionAudits(db, correction, "ACCEPTED", ["numDocumento"], true);
   });
 
   it("validates before allocating one reservation for a corrected event without identifiers", async () => {

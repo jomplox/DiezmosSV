@@ -141,6 +141,31 @@ export interface FiscalCorrectionMhDispatchInput extends FiscalCorrectionDocumen
   processingClaimId: string;
 }
 
+export type FiscalCorrectionAuditTransition =
+  | "QUEUED"
+  | "STARTED"
+  | "ACCEPTED"
+  | "REJECTED"
+  | "FAILED"
+  | "REVIEW_REQUIRED";
+
+const FISCAL_CORRECTION_AUDIT_FIELDS = new Set([
+  "tipoDocumento",
+  "numDocumento",
+  "nrc",
+  "nombre",
+  "codActividad",
+  "descActividad",
+  "correo",
+  "telefono",
+  "codDomiciliado",
+  "codPais",
+  "departamento",
+  "municipio",
+  "distrito",
+  "complemento"
+]);
+
 async function emailDeliveryIdempotencyKey(
   documentId: string,
   emailType: string,
@@ -178,7 +203,7 @@ const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_nam
   issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
   issuance_dead_lettered_at, reserved_numero_control`;
 
-export const RETENTION_WINDOWED_TABLES = ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "audit_logs"] as const;
+export const RETENTION_WINDOWED_TABLES = ["dte_documents", "fiscal_corrections", "donation_intents", "dte_events", "email_deliveries", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
 export const RETENTION_SNAPSHOT_TABLES = ["wompi_events", "contingency_periods", "contingency_batches", "contingency_batch_lines"] as const;
@@ -569,6 +594,62 @@ export class Repository {
     return this.db.prepare(
       "SELECT * FROM fiscal_corrections WHERE request_id = ?"
     ).bind(requestId).first<FiscalCorrectionRecord>();
+  }
+
+  async createFiscalCorrectionAudit(
+    correction: FiscalCorrectionRecord,
+    transition: FiscalCorrectionAuditTransition,
+    actor?: { type: "SYSTEM" | "USER"; id?: string | null }
+  ): Promise<boolean> {
+    let parsedFields: unknown;
+    try {
+      parsedFields = JSON.parse(correction.changed_fields_json);
+    } catch {
+      parsedFields = [];
+    }
+    const changedFields = Array.isArray(parsedFields)
+      ? parsedFields.reduce<string[]>((safeFields, value) => {
+          if (
+            typeof value === "string"
+            && FISCAL_CORRECTION_AUDIT_FIELDS.has(value)
+            && !safeFields.includes(value)
+          ) {
+            safeFields.push(value);
+          }
+          return safeFields;
+        }, [])
+      : [];
+    const targetId = correction.target_kind === "WOMPI_EVENT"
+      ? correction.wompi_event_id
+      : correction.document_id;
+    const requestIdHash = await sha256Hex(utf8Bytes(correction.request_id));
+    const outcomeCode = transition === "STARTED"
+      ? "PROCESSING"
+      : correction.failure_code ?? transition;
+    const summaries: Record<FiscalCorrectionAuditTransition, string> = {
+      QUEUED: "Corrección fiscal en cola",
+      STARTED: "Procesamiento de corrección fiscal iniciado",
+      ACCEPTED: "Corrección fiscal aceptada",
+      REJECTED: "Corrección fiscal rechazada",
+      FAILED: "Corrección fiscal fallida",
+      REVIEW_REQUIRED: "Corrección fiscal requiere revisión"
+    };
+    return this.createAuditIfAbsent({
+      actorType: actor?.type,
+      actorId: actor?.id,
+      action: `FISCAL_CORRECTION_${transition}`,
+      entityType: "fiscal_correction",
+      entityId: correction.id,
+      summary: summaries[transition],
+      metadata: {
+        correctionId: correction.id,
+        target: { kind: correction.target_kind, id: targetId },
+        requestIdHash,
+        attemptNumber: correction.attempt_number,
+        changedFields,
+        outcomeCode
+      }
+    });
   }
 
   async getActiveFiscalCorrectionForTarget(
@@ -1024,16 +1105,77 @@ export class Repository {
       `SELECT * FROM fiscal_corrections
         WHERE (
           status = 'QUEUED'
-          AND created_at < ?
+          AND updated_at < ?
         ) OR (
           status = 'PROCESSING'
           AND processing_started_at < ?
           AND mh_dispatch_started_at IS NULL
         )
-        ORDER BY COALESCE(processing_started_at, created_at), id
+        ORDER BY COALESCE(processing_started_at, updated_at), id
         LIMIT ?`
     ).bind(staleBefore, staleBefore, safeLimit).all<FiscalCorrectionRecord>();
     return rows.results ?? [];
+  }
+
+  async recoverFiscalCorrectionProcessingClaim(input: {
+    id: string;
+    currentProcessingClaimId: string;
+    nextProcessingClaimId: string;
+    staleBefore: string;
+  }): Promise<FiscalCorrectionRecord | null> {
+    const recoveredAt = nowIso();
+    return this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET status = 'PROCESSING',
+              processing_claim_id = ?,
+              processing_started_at = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND processing_claim_id = ?
+          AND mh_dispatch_started_at IS NULL
+          AND (
+            (status = 'QUEUED' AND updated_at < ?)
+            OR
+            (status = 'PROCESSING' AND processing_started_at < ?)
+          )
+          AND (
+            (
+              target_kind = 'WOMPI_EVENT'
+              AND issuance_attempt_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM wompi_events
+                 WHERE id = fiscal_corrections.wompi_event_id
+                   AND issuance_attempt_id = fiscal_corrections.issuance_attempt_id
+                   AND issuance_status IN (
+                     'RETRY_QUEUED', 'PROCESSING', 'DOCUMENT_CREATED'
+                   )
+              )
+            )
+            OR
+            (
+              target_kind = 'DTE_DOCUMENT'
+              AND fiscal_claim_id IS NOT NULL
+              AND EXISTS (
+                SELECT 1
+                  FROM dte_documents
+                 WHERE id = fiscal_corrections.document_id
+                   AND status IN ('REJECTED', 'SIGNED')
+                   AND fiscal_operation_claim_id = fiscal_corrections.fiscal_claim_id
+                   AND fiscal_operation_kind = 'TRANSMISSION'
+              )
+            )
+          )
+        RETURNING *`
+    ).bind(
+      input.nextProcessingClaimId,
+      recoveredAt,
+      recoveredAt,
+      input.id,
+      input.currentProcessingClaimId,
+      input.staleBefore,
+      input.staleBefore
+    ).first<FiscalCorrectionRecord>();
   }
 
   private resolveFiscalCorrectionClaim(

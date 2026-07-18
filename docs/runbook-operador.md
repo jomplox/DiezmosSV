@@ -167,11 +167,14 @@ La sección **Fallos** reúne dos situaciones distintas:
 
 - Una tarjeta **CDE NO CREADO** significa que el pago de Wompi sí llegó, pero el error
   ocurrió antes de crear el CDE. No es un CDE **Fallido** ni **Rechazado**: todavía no
-  existe un comprobante que Hacienda pueda aceptar o rechazar. Lea el error exacto que
-  muestra la tarjeta y pulse **Reintentar creación**.
+  existe un comprobante que Hacienda pueda aceptar o rechazar. Si el error corresponde
+  a datos del donante, pulse **Corregir y reintentar**; el sistema conserva el pago y
+  cualquier número que ya hubiera reservado.
 - Un CDE **Fallido** ya existe, pero tuvo un error durante el proceso. Un CDE
   **Rechazado** también existe y Hacienda respondió que no lo aceptaba. Para estos casos,
-  seleccione el documento en la lista y use el panel de detalle a la derecha.
+  seleccione el documento en la lista y use el panel de detalle a la derecha. Cuando el
+  rechazo corresponde a datos del receptor, **Corregir y reintentar** preserva el CDE
+  rechazado como evidencia y crea un nuevo intento fiscal con identificadores nuevos.
 - Un CDE **Aceptado** también aparece aquí cuando el comprobante fiscal quedó correcto
   pero su correo falló o quedó con resultado incierto. La fila muestra **Correo fallido**
   cuando el proveedor confirmó un fallo y **Correo por revisar** cuando el sistema no
@@ -183,11 +186,38 @@ número para crear el mismo comprobante al reintentar; no significa que el CDE y
 emitido ni aceptado. **Número aún no asignado** significa que el error ocurrió antes de
 reservarlo. No emita otro CDE para sustituir esa tarjeta.
 
-Para un CDE **Fallido** o **Rechazado**:
+### Corregir datos fiscales y reintentar
 
-- Pulse **Reintentar DTE** para volver a procesar el CDE. Es lo primero que debe intentar: la
-  mayoría de fallos son temporales (Hacienda ocupada, corte de red) y se resuelven al
-  reintentar.
+El formulario **Corregir y reintentar** permite cambiar únicamente estos datos del
+receptor: tipo y número de documento, NRC, nombre o razón social, actividad económica y
+su descripción, correo, teléfono, domicilio fiscal, país, departamento, municipio,
+distrito y dirección completa.
+
+No permite cambiar el monto, el tipo de donación, los datos del pago Wompi, el emisor, el
+ambiente, las fechas, el número de control, el código de generación, el sello, la forma de
+pago ni la referencia del pago. Si el rechazo menciona uno de esos datos protegidos, vaya
+a **Configuración** o contacte a soporte técnico.
+
+Revise los campos, haga al menos un cambio válido y pulse una sola vez **Guardar y
+reintentar**. El sistema guarda la corrección primero y luego la coloca en cola. Cerrar la
+ventana o perder la conexión después de pulsar no autoriza a crear otro intento: vuelva a
+cargar **Fallos** para ver **Corrección en cola** o **Procesando corrección**.
+
+Si aparece **Revisión necesaria**, Hacienda pudo haber recibido el intento, pero el
+sistema no pudo confirmar su respuesta. **No vuelva a pulsar Guardar y reintentar, no use
+Reintentar DTE y no cree otro CDE.** Anote el código de generación y escale a soporte
+técnico para conciliación fiscal.
+
+Después de instalar esta función, los fallos y rechazos que ya existían antes del
+despliegue no se corrigen ni se reintentan automáticamente. Cada registro anterior debe
+revisarse manualmente en **Fallos**; use la corrección guardada solo cuando el mensaje
+identifique un dato editable del receptor.
+
+Para un CDE **Fallido**, **Rechazado** o con fallo de correo:
+
+- Pulse **Reintentar DTE** únicamente para un fallo local o temporal que la pantalla
+  identifique como reintentable. Un CDE **Rechazado** por datos del receptor debe usar
+  **Corregir y reintentar**; no retransmita el mismo contenido rechazado.
 - Si el correo al donante falló pero el CDE está **Aceptado**, corrija el correo con el
   lápiz junto a **Correo de envío** si hace falta y pulse **Reenviar ahora** dentro del
   aviso rojo. Púlselo una sola vez; si el sistema no puede confirmar el resultado
@@ -195,10 +225,10 @@ Para un CDE **Fallido** o **Rechazado**:
   No intente sortear un aviso **Correo por revisar** con otro navegador o usuario.
 
 **Cuándo escalar a soporte técnico:** si un mismo CDE sigue en **Fallido** o **Rechazado**
-después de dos o tres reintentos, o si el mensaje de error menciona credenciales, firma o
+después de un reintento seguro, o si el mensaje de error menciona credenciales, firma o
 certificado, no siga reintentando: contacte a soporte técnico (ver pie de página) e
 indíquele el **Código de generación** del documento. Para un **CDE NO CREADO**, si el
-mismo error de validación se repite después de **Reintentar creación**, no siga pulsando
+mismo error de validación se repite después de **Guardar y reintentar**, no siga pulsando
 el botón: contacte a soporte y comparta el error exacto de la tarjeta y el **Número
 reservado**, si aparece.
 

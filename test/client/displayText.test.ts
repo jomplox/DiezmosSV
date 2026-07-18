@@ -69,6 +69,14 @@ describe("client display text", () => {
     expect(auditActionLabel("WOMPI_EVENT_STALLED")).toBe("Evento Wompi sin procesar — revisar");
     expect(auditActionLabel("WOMPI_ISSUANCE_FAILED")).toBe("CDE no creado");
     expect(auditActionLabel("WOMPI_ISSUANCE_RETRY_QUEUED")).toBe("Reintento de creación en cola");
+    expect(auditActionLabel("FISCAL_CORRECTION_QUEUED")).toBe("Corrección fiscal en cola");
+    expect(auditActionLabel("FISCAL_CORRECTION_STARTED")).toBe("Corrección fiscal iniciada");
+    expect(auditActionLabel("FISCAL_CORRECTION_ACCEPTED")).toBe("Corrección fiscal aceptada");
+    expect(auditActionLabel("FISCAL_CORRECTION_REJECTED")).toBe("Corrección fiscal rechazada");
+    expect(auditActionLabel("FISCAL_CORRECTION_FAILED")).toBe("Corrección fiscal fallida");
+    expect(auditActionLabel("FISCAL_CORRECTION_REVIEW_REQUIRED")).toBe(
+      "Corrección fiscal requiere revisión"
+    );
     expect(auditActionLabel("ALERT_EMAIL_UPDATED")).toBe("Correo de alertas actualizado");
     expect(auditActionLabel("DTE_TRANSMISSION_DEFERRED")).toBe("Transmisión diferida");
     expect(auditActionLabel("ALERT_SENT:MH_UNAVAILABLE")).toBe("Alerta enviada: Hacienda no disponible");
