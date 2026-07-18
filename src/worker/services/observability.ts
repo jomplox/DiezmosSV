@@ -48,6 +48,7 @@ const ERROR_EVENTS = new Set([
   "wompi_link_deactivation_failed"
 ]);
 const ALERT_KINDS = new Set([
+  "advanced_cde_failed",
   "cert_expiring",
   "dte_failed",
   "email_failed",
