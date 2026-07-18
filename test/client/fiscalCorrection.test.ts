@@ -8,10 +8,12 @@ import {
   fiscalCorrectionFormState,
   fiscalCorrectionRequestIdForTarget,
   fiscalCorrectionStatusLabel,
-  isCorrectablePreCdeFailure,
+  isCorrectablePreCdeFailure
+} from "../../src/client/fiscalCorrectionDialog";
+import {
   restoreFiscalCorrectionDialogFocus,
   trapFiscalCorrectionDialogFocus
-} from "../../src/client/fiscalCorrectionDialog";
+} from "../../src/client/fiscalCorrectionFocus";
 import type {
   FiscalCorrectionData,
   WompiIssuanceFailureItem
