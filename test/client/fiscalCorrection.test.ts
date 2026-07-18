@@ -8,7 +8,9 @@ import {
   fiscalCorrectionFormState,
   fiscalCorrectionRequestIdForTarget,
   fiscalCorrectionStatusLabel,
-  isCorrectablePreCdeFailure
+  isCorrectablePreCdeFailure,
+  restoreFiscalCorrectionDialogFocus,
+  trapFiscalCorrectionDialogFocus
 } from "../../src/client/fiscalCorrectionDialog";
 import type {
   FiscalCorrectionData,
@@ -247,25 +249,54 @@ describe("Fallos fiscal correction wiring", () => {
     expect(appSource).not.toContain("body: { correctionRequestId, receptor, event");
   });
 
-  it("keeps one request UUID through unknown network failures and clears it after a response", () => {
+  it("reuses the exact request UUID after an unknown failure, close, and reopen", () => {
     const ids = new Map<string, string>();
     const create = vi.fn()
       .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
-      .mockReturnValueOnce("70000003-2222-4222-8222-700000032222");
+      .mockReturnValueOnce("70000003-2222-4222-8222-700000032222")
+      .mockReturnValueOnce("33333333-3333-4333-8333-333333333333");
 
+    const firstAttempt = fiscalCorrectionRequestIdForTarget(
+      ids,
+      "DTE_DOCUMENT:dte-1",
+      create
+    );
+    expect(firstAttempt).toBe("11111111-1111-4111-8111-111111111111");
+
+    // An unknown POST result and a user close are both non-definitive. Reopening
+    // the same target must therefore retain the first action's request fence.
     expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
-      .toBe("11111111-1111-4111-8111-111111111111");
-    expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
-      .toBe("11111111-1111-4111-8111-111111111111");
+      .toBe(firstAttempt);
     expect(create).toHaveBeenCalledTimes(1);
-    ids.delete("DTE_DOCUMENT:dte-1");
-    expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
+
+    // A different target owns a different fence.
+    expect(fiscalCorrectionRequestIdForTarget(ids, "WOMPI_EVENT:event-2", create))
       .toBe("70000003-2222-4222-8222-700000032222");
+
+    // Account/logout reset is allowed to clear every retained action.
+    ids.clear();
+    expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
+      .toBe("33333333-3333-4333-8333-333333333333");
 
     expect(appSource).toContain("const fiscalCorrectionRequestIds = useRef(new Map<string, string>())");
     expect(appSource).toContain("fiscalCorrectionRequestIdForTarget(");
     expect(appSource).toContain("if (isApiError(error))");
     expect(appSource).toContain("fiscalCorrectionRequestIds.current.delete(targetKey)");
+    const closeBlock =
+      appSource.match(/function closeFiscalCorrection\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
+    expect(closeBlock).not.toContain("fiscalCorrectionRequestIds.current.delete");
+    expect(dialogSource).toContain(
+      "if (event.currentTarget === event.target && !busy) onCancel();"
+    );
+    expect(dialogSource).toContain(
+      "if (!busyRef.current) onCancelRef.current();"
+    );
+    expect(dialogSource).toContain(
+      '<button type="button" onClick={onCancel} disabled={busy}>'
+    );
+    const unknownFailureBlock =
+      appSource.match(/else if \(!\(error instanceof StaleAccountStateError\)\) \{[\s\S]*?\n      \}/)?.[0] ?? "";
+    expect(unknownFailureBlock).not.toContain("fiscalCorrectionRequestIds.current.delete");
   });
 
   it("clears correction state on account reset without disrupting an open dialog during detail refresh", () => {
@@ -292,5 +323,77 @@ describe("Fallos fiscal correction wiring", () => {
     );
     expect(selectedCorrectionEffect).toContain("documentData.activeCorrection");
     expect(selectedCorrectionEffect).toContain("!selected?.wompi_event_id");
+  });
+});
+
+describe("fiscal correction focus ownership", () => {
+  function focusTarget(
+    ownerDocument: { activeElement: unknown },
+    connected = true
+  ): HTMLElement {
+    const target = {
+      hidden: false,
+      isConnected: connected,
+      getAttribute: () => null,
+      focus: vi.fn(() => {
+        ownerDocument.activeElement = target;
+      })
+    };
+    return target as unknown as HTMLElement;
+  }
+
+  it("wraps initial Shift+Tab and Tab without allowing focus outside", () => {
+    const ownerDocument: { activeElement: unknown } = { activeElement: null };
+    const first = focusTarget(ownerDocument);
+    const last = focusTarget(ownerDocument);
+    const outside = focusTarget(ownerDocument);
+    const dialog = {
+      ownerDocument,
+      querySelectorAll: () => [first, last],
+      contains: (element: unknown) => element === first || element === last,
+      focus: vi.fn()
+    } as unknown as HTMLElement;
+
+    ownerDocument.activeElement = dialog;
+    const initialShiftTab = {
+      key: "Tab",
+      shiftKey: true,
+      preventDefault: vi.fn()
+    } as unknown as KeyboardEvent;
+    trapFiscalCorrectionDialogFocus(dialog, initialShiftTab);
+    expect(initialShiftTab.preventDefault).toHaveBeenCalledOnce();
+    expect(last.focus).toHaveBeenCalledOnce();
+
+    ownerDocument.activeElement = outside;
+    const escapedTab = {
+      key: "Tab",
+      shiftKey: false,
+      preventDefault: vi.fn()
+    } as unknown as KeyboardEvent;
+    trapFiscalCorrectionDialogFocus(dialog, escapedTab);
+    expect(escapedTab.preventDefault).toHaveBeenCalledOnce();
+    expect(first.focus).toHaveBeenCalledOnce();
+
+    ownerDocument.activeElement = last;
+    const finalTab = {
+      key: "Tab",
+      shiftKey: false,
+      preventDefault: vi.fn()
+    } as unknown as KeyboardEvent;
+    trapFiscalCorrectionDialogFocus(dialog, finalTab);
+    expect(finalTab.preventDefault).toHaveBeenCalledOnce();
+    expect(first.focus).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores the connected opener and ignores a detached one", () => {
+    const ownerDocument: { activeElement: unknown } = { activeElement: null };
+    const connected = focusTarget(ownerDocument);
+    const detached = focusTarget(ownerDocument, false);
+
+    restoreFiscalCorrectionDialogFocus(connected);
+    restoreFiscalCorrectionDialogFocus(detached);
+
+    expect(connected.focus).toHaveBeenCalledOnce();
+    expect(detached.focus).not.toHaveBeenCalled();
   });
 });
