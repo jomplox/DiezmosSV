@@ -119,7 +119,7 @@ Set `STAGING_BOOTSTRAP`, `SMOKE_CREATE_USER`, `SMOKE_INVALIDATE`, or
 
 By default, the script verifies the deployed admin shell, `/api/health`, login, signed Wompi webhook
 ingress, Queue-driven CDE issuance to MH `ambiente=00`, admin-generated TEST DTE issuance, PDF/JSON
-downloads, email resend, contingency sweep, and audit-log visibility. It fails on email resend unless
+downloads, email resend, and audit-log visibility. It fails on email resend unless
 `SMOKE_ALLOW_EMAIL_FAILURE=1` is set.
 
 1. Open the Worker URL and confirm the admin UI loads from ASSETS.
@@ -139,7 +139,7 @@ downloads, email resend, contingency sweep, and audit-log visibility. It fails o
    - Invalidation/anulacion on an accepted TEST DTE inside the legal window.
 6. Open the audit tab and verify entries exist for login, test generation, issuance, resend, retry,
    invalidation, and user creation where applicable.
-7. Run a contingency sweep from the UI and verify the button returns visibly instead of hanging.
+7. Open **Contingencia** and verify the historical read-only view loads without open or sweep controls.
 8. Open **Credenciales** as an OWNER and verify that:
    - The staging Worker name and app environment are visible.
    - Only the MH TEST lane is available; signer, issuer, Wompi, and email statuses show configured or pending.
