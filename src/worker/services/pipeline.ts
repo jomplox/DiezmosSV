@@ -23,7 +23,11 @@ import { logWorkerError } from "./observability";
 import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
-import { buildCorrectedDirectCandidate, buildCorrectedWompiCandidate } from "./fiscalCorrection";
+import {
+  assertDirectCorrectionSourceTrusted,
+  buildCorrectedDirectCandidate,
+  buildCorrectedWompiCandidate
+} from "./fiscalCorrection";
 import type { FiscalReceptorCorrection } from "../../shared/fiscalCorrection";
 
 // Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
@@ -666,6 +670,11 @@ export class IssuancePipeline {
       ) {
         throw new Error("La evidencia archivada no coincide con el documento reclamado.");
       }
+      await assertDirectCorrectionSourceTrusted({
+        sourceDocument: source,
+        config,
+        certificateXml: () => getMhCertificateXml(this.env)
+      });
     } catch (error) {
       return this.finalizeFiscalCorrectionFailure(
         correction,

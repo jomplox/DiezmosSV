@@ -75,6 +75,7 @@ import {
   type FiscalReceptorCorrection
 } from "../shared/fiscalCorrection";
 import {
+  assertDirectCorrectionSourceTrusted,
   buildCorrectedDirectCandidate,
   buildCorrectedWompiCandidate,
   effectiveDocumentCorrectionData,
@@ -2264,6 +2265,7 @@ async function handleWompiFiscalCorrection(
 ): Promise<Response> {
   const parsed = await readFiscalCorrectionRequest(request);
   if (parsed instanceof Response) return parsed;
+  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(parsed.receptor);
 
   const event = await repo.getWompiEventById(wompiEventId);
   if (!event) return notFound();
@@ -2290,7 +2292,7 @@ async function handleWompiFiscalCorrection(
       parsed.requestId,
       "WOMPI_EVENT",
       wompiEventId,
-      parsed.receptor
+      requestPayloadSha256
     );
     if (existing) return existing;
     return fiscalCorrectionConflict(
@@ -2332,7 +2334,7 @@ async function handleWompiFiscalCorrection(
   const claim = await repo.claimWompiFiscalCorrection({
     wompiEventId,
     requestId: parsed.requestId,
-    requestPayloadSha256: await fiscalCorrectionRequestDigest(parsed.receptor),
+    requestPayloadSha256,
     environment: event.environment,
     beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
     correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
@@ -2373,32 +2375,25 @@ async function handleDocumentFiscalCorrection(
 ): Promise<Response> {
   const parsed = await readFiscalCorrectionRequest(request);
   if (parsed instanceof Response) return parsed;
+  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(parsed.receptor);
 
   const document = await repo.getDteDocument(documentId);
   if (!document) return notFound();
+  const existing = await existingFiscalCorrectionResponse(
+    repo,
+    parsed.requestId,
+    "DTE_DOCUMENT",
+    documentId,
+    requestPayloadSha256
+  );
+  if (existing) return existing;
   if (document.fiscal_operation_claim_id) {
-    const existing = await existingFiscalCorrectionResponse(
-      repo,
-      parsed.requestId,
-      "DTE_DOCUMENT",
-      documentId,
-      parsed.receptor
-    );
-    if (existing) return existing;
     return fiscalCorrectionConflict(
       "fiscal_outcome_pending_reconciliation",
       "El resultado fiscal está pendiente de conciliación."
     );
   }
   if (document.status !== "REJECTED") {
-    const existing = await existingFiscalCorrectionResponse(
-      repo,
-      parsed.requestId,
-      "DTE_DOCUMENT",
-      documentId,
-      parsed.receptor
-    );
-    if (existing) return existing;
     return fiscalCorrectionConflict(
       "document_correction_not_available",
       "Solo un CDE rechazado explícitamente puede corregirse."
@@ -2417,6 +2412,17 @@ async function handleDocumentFiscalCorrection(
   if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
 
   const config = getEmisorConfig(env);
+  try {
+    await assertDirectCorrectionSourceTrusted({
+      sourceDocument: document,
+      config,
+      certificateXml: () => getMhCertificateXml(env)
+    });
+  } catch {
+    return fiscalCorrectionNotAllowedResponse(
+      "El emisor del CDE original no pudo verificarse."
+    );
+  }
   buildCorrectedDirectCandidate({
     sourceDocument: document,
     correction: parsed.receptor,
@@ -2427,7 +2433,7 @@ async function handleDocumentFiscalCorrection(
   const claim = await repo.claimDocumentFiscalCorrection({
     documentId,
     requestId: parsed.requestId,
-    requestPayloadSha256: await fiscalCorrectionRequestDigest(parsed.receptor),
+    requestPayloadSha256,
     environment: document.environment,
     beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
     correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
@@ -2558,7 +2564,7 @@ async function existingFiscalCorrectionResponse(
   requestId: string,
   targetKind: "WOMPI_EVENT" | "DTE_DOCUMENT",
   targetId: string,
-  correction: FiscalReceptorCorrection
+  requestPayloadSha256: string
 ): Promise<Response | null> {
   const existing = await repo.getFiscalCorrectionByRequestId(requestId);
   if (!existing) return null;
@@ -2568,7 +2574,7 @@ async function existingFiscalCorrectionResponse(
   if (
     existing.target_kind !== targetKind
     || existingTargetId !== targetId
-    || existing.corrected_receptor_json !== fiscalCorrectionPayload(correction)
+    || existing.request_payload_sha256 !== requestPayloadSha256
   ) {
     return fiscalCorrectionRequestConflictResponse();
   }

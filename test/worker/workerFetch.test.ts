@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
+import { fiscalCorrectionPayload } from "../../src/shared/fiscalCorrection";
 import { buildCdeDocument, buildDirectCdeDocument } from "../../src/worker/domain/dteBuilder";
+import { signMhDocument } from "../../src/worker/domain/signer";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import {
@@ -3111,6 +3113,70 @@ describe("guarded fiscal correction API", () => {
     }));
   });
 
+  it("rejects a queue-time signed/archive mismatch before reserving identifiers", async () => {
+    const db = correctionDb();
+    db.nextSequence = 96;
+    const password = "cert-password";
+    const certXml = await generatedCertificateXml(password);
+    const source = rejectedCorrectionDocument({
+      id: "doc_rejected_tampered_snapshot",
+      fiscal_operation_claim_id: "fiscal_claim_tampered_snapshot",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const signedPayload = JSON.parse(source.plain_json) as Record<string, any>;
+    signedPayload.emisor = {
+      ...signedPayload.emisor,
+      nombre: "EMISOR HISTORICO FIRMADO"
+    };
+    source.signed_jws = await signMhDocument(signedPayload, certXml, password);
+    source.plain_json = JSON.stringify({
+      ...signedPayload,
+      emisor: {
+        ...signedPayload.emisor,
+        nombre: "EMISOR ARCHIVADO ALTERADO"
+      }
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_tampered_snapshot",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: source.id,
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_tampered_snapshot",
+      processing_claim_id: "correction_processing_tampered_snapshot",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({
+        nombre: "Receptor corregido"
+      })),
+      source_document_snapshot_json: JSON.stringify(source)
+    });
+    db.documents.push(source);
+    stubDocumentCorrectionLifecycle(correction, db);
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = certXml;
+    runtime.MH_CERT_PASSWORD = password;
+    const sequenceBefore = db.nextSequence;
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "FAILED",
+      failure_code: "FISCAL_CORRECTION_INVALID_SOURCE"
+    });
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(sign).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+  });
+
   it("preserves Wompi evidence and runs normal accepted finalization on the same row", async () => {
     const db = correctionDb();
     db.nextSequence = 101;
@@ -3421,6 +3487,234 @@ describe("guarded fiscal correction API", () => {
     }]);
   });
 
+  it("accepts a signed historical issuer during direct correction preflight", async () => {
+    const db = correctionDb();
+    const password = "cert-password";
+    const certXml = await generatedCertificateXml(password);
+    const document = rejectedCorrectionDocument();
+    const historical = JSON.parse(document.plain_json) as Record<string, any>;
+    historical.emisor = {
+      ...historical.emisor,
+      nombre: "EMISOR HISTORICO VERIFICADO"
+    };
+    document.plain_json = JSON.stringify(historical);
+    document.signed_jws = await signMhDocument(historical, certXml, password);
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord({
+        id: "fiscal_correction_historical_issuer",
+        target_kind: "DTE_DOCUMENT",
+        wompi_event_id: null,
+        document_id: document.id,
+        issuance_attempt_id: null,
+        fiscal_claim_id: "fiscal_claim_historical_issuer"
+      })
+    });
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    runtime.MH_CERT_XML = certXml;
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "66666666-6666-4666-8666-666666666666",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect(response.status).toBe(202);
+    expect(queued).toHaveLength(1);
+  });
+
+  it("accepts a signed historical issuer when archived JSON only reorders object keys", async () => {
+    const db = correctionDb();
+    const password = "cert-password";
+    const certXml = await generatedCertificateXml(password);
+    const document = rejectedCorrectionDocument();
+    const historical = JSON.parse(document.plain_json) as Record<string, any>;
+    historical.emisor = {
+      ...historical.emisor,
+      nombre: "EMISOR HISTORICO VERIFICADO"
+    };
+    document.signed_jws = await signMhDocument(historical, certXml, password);
+    document.plain_json = JSON.stringify(
+      Object.fromEntries(Object.entries(historical).reverse())
+    );
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord({
+        id: "fiscal_correction_historical_reordered",
+        target_kind: "DTE_DOCUMENT",
+        wompi_event_id: null,
+        document_id: document.id,
+        issuance_attempt_id: null,
+        fiscal_claim_id: "fiscal_claim_historical_reordered"
+      })
+    });
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    runtime.MH_CERT_XML = certXml;
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "69696969-6969-4969-8969-696969696969",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect(response.status).toBe(202);
+    expect(queued).toHaveLength(1);
+  });
+
+  it("rejects a signed historical issuer when the certificate belongs to another NIT", async () => {
+    const db = correctionDb();
+    const password = "cert-password";
+    const certXml = await generatedCertificateXml(password, "99999999999999");
+    const document = rejectedCorrectionDocument();
+    const historical = JSON.parse(document.plain_json) as Record<string, any>;
+    historical.emisor = {
+      ...historical.emisor,
+      nombre: "EMISOR HISTORICO NO VINCULADO"
+    };
+    document.plain_json = JSON.stringify(historical);
+    document.signed_jws = await signMhDocument(historical, certXml, password);
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    const claim = vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection")
+      .mockResolvedValue({
+        kind: "claimed",
+        correction: correctionRecord({
+          id: "fiscal_correction_mismatched_certificate_nit",
+          target_kind: "DTE_DOCUMENT",
+          wompi_event_id: null,
+          document_id: document.id,
+          issuance_attempt_id: null,
+          fiscal_claim_id: "fiscal_claim_mismatched_certificate_nit"
+        })
+      });
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = certXml;
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "70707070-7070-4070-8070-707070707071",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "fiscal_correction_not_allowed",
+      message: "El emisor del CDE original no pudo verificarse."
+    });
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("rejects a historical issuer when signed payload and archived JSON differ", async () => {
+    const db = correctionDb();
+    const password = "cert-password";
+    const certXml = await generatedCertificateXml(password);
+    const document = rejectedCorrectionDocument();
+    const signedPayload = JSON.parse(document.plain_json) as Record<string, any>;
+    signedPayload.emisor = {
+      ...signedPayload.emisor,
+      nombre: "EMISOR HISTORICO VERIFICADO"
+    };
+    document.signed_jws = await signMhDocument(signedPayload, certXml, password);
+    document.plain_json = JSON.stringify({
+      ...signedPayload,
+      resumen: {
+        ...signedPayload.resumen,
+        totalPagar: 999
+      }
+    });
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    const claim = vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection");
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    runtime.MH_CERT_XML = certXml;
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "67676767-6767-4767-8767-676767676767",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect(response.status).toBe(409);
+    expect(claim).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("accepts an unsigned direct source when its issuer matches current config", async () => {
+    const db = correctionDb();
+    const document = rejectedCorrectionDocument({ signed_jws: null });
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord({
+        id: "fiscal_correction_unsigned_current_issuer",
+        target_kind: "DTE_DOCUMENT",
+        wompi_event_id: null,
+        document_id: document.id,
+        issuance_attempt_id: null,
+        fiscal_claim_id: "fiscal_claim_unsigned_current_issuer"
+      })
+    });
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "68686868-6868-4868-8868-686868686868",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>));
+
+    expect(response.status).toBe(202);
+    expect(queued).toHaveLength(1);
+  });
+
+  it("rejects an unsigned direct source whose issuer is not current", async () => {
+    const db = correctionDb();
+    const document = rejectedCorrectionDocument({ signed_jws: null });
+    const foreign = JSON.parse(document.plain_json) as Record<string, any>;
+    foreign.emisor = {
+      ...foreign.emisor,
+      nombre: "EMISOR NO CONFIABLE"
+    };
+    document.plain_json = JSON.stringify(foreign);
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    const claim = vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection");
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "69696969-6969-4969-8969-696969696969",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>));
+
+    expect(response.status).toBe(409);
+    expect(claim).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(0);
+  });
+
   it("refuses non-receptor corrections before durable claim or queue send", async () => {
     const db = correctionDb();
     const event = correctionEvent({
@@ -3495,6 +3789,9 @@ describe("guarded fiscal correction API", () => {
     );
     vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
     const existing = correctionRecord({
+      request_payload_sha256: await sha256Hex(utf8Bytes(fiscalCorrectionPayload(
+        correctionReceptor({ nombre: "Nombre corregido" }) as any
+      ))),
       corrected_receptor_json: JSON.stringify(
         correctionReceptor({ nombre: "Nombre corregido" })
       )
@@ -3533,6 +3830,86 @@ describe("guarded fiscal correction API", () => {
     });
     expect(conflict.status).toBe(409);
     expect(queued).toHaveLength(0);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("replays a terminal direct correction before eligibility or unchanged checks", async () => {
+    const db = correctionDb();
+    const receptor = correctionReceptor({
+      nombre: "Donante Original",
+      correo: "original@example.org",
+      complemento: "Dirección original"
+    });
+    const document = rejectedCorrectionDocument();
+    const existing = correctionRecord({
+      request_id: "70707070-7070-4070-8070-707070707070",
+      request_payload_sha256: await sha256Hex(
+        utf8Bytes(fiscalCorrectionPayload(receptor as any))
+      ),
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: document.id,
+      status: "REJECTED",
+      corrected_receptor_json: fiscalCorrectionPayload(receptor as any),
+      completed_at: "2026-07-18T13:00:00.000Z"
+    });
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "getFiscalCorrectionByRequestId")
+      .mockResolvedValue(existing);
+    const claim = vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection");
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: existing.request_id,
+        receptor
+      }
+    ), correctionRuntime(db));
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({
+      ok: true,
+      queued: false,
+      duplicate: true,
+      correctionId: existing.id,
+      status: "REJECTED"
+    });
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("keeps a same-id direct replay with a different payload in conflict", async () => {
+    const db = correctionDb();
+    const original = correctionReceptor({ nombre: "Nombre original" });
+    const document = rejectedCorrectionDocument();
+    const existing = correctionRecord({
+      request_id: "71717171-7171-4171-8171-717171717171",
+      request_payload_sha256: await sha256Hex(
+        utf8Bytes(fiscalCorrectionPayload(original as any))
+      ),
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: document.id,
+      status: "REJECTED",
+      corrected_receptor_json: fiscalCorrectionPayload(original as any),
+      completed_at: "2026-07-18T13:00:00.000Z"
+    });
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "getFiscalCorrectionByRequestId")
+      .mockResolvedValue(existing);
+    const claim = vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection");
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: existing.request_id,
+        receptor: correctionReceptor({ nombre: "Nombre diferente" })
+      }
+    ), correctionRuntime(db));
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "correction_request_conflict"
+    });
     expect(claim).not.toHaveBeenCalled();
   });
 
@@ -21035,7 +21412,10 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
 }
 
-async function generatedCertificateXml(password: string): Promise<string> {
+async function generatedCertificateXml(
+  password: string,
+  nit = "10000003520015"
+): Promise<string> {
   const pair = (await crypto.subtle.generateKey(
     {
       name: "RSASSA-PKCS1-v1_5",
@@ -21049,7 +21429,7 @@ async function generatedCertificateXml(password: string): Promise<string> {
   const pkcs8 = new Uint8Array((await crypto.subtle.exportKey("pkcs8", pair.privateKey)) as ArrayBuffer);
   const spki = new Uint8Array((await crypto.subtle.exportKey("spki", pair.publicKey)) as ArrayBuffer);
   const passwordHash = hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-512", utf8Bytes(password))));
-  return `<CertificadoMH><nit>12345678901234</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
+  return `<CertificadoMH><nit>${nit}</nit><publicKey><encodied>${bytesToBase64(spki)}</encodied></publicKey><privateKey><encodied>${bytesToBase64(pkcs8)}</encodied><clave>${passwordHash}</clave></privateKey><activo>true</activo></CertificadoMH>`;
 }
 
 function emisorConfig() {

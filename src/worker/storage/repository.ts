@@ -457,7 +457,8 @@ export class Repository {
           changedFields,
           outcomeCode: "QUEUED",
           actorType: "USER",
-          actorId: input.createdBy
+          actorId: input.createdBy,
+          includeRequestContext: true
         })
       ]);
 
@@ -636,7 +637,8 @@ export class Repository {
           changedFields,
           outcomeCode: "QUEUED",
           actorType: "USER",
-          actorId: input.createdBy
+          actorId: input.createdBy,
+          includeRequestContext: true
         })
       ]);
 
@@ -701,9 +703,17 @@ export class Repository {
     outcomeCode: string;
     actorType?: "SYSTEM" | "USER";
     actorId?: string | null;
+    includeRequestContext?: boolean;
+    auditRecovered?: boolean;
   }): D1PreparedStatement {
     const actorType = input.actorType
       ?? (input.transition === "QUEUED" ? "USER" : "SYSTEM");
+    const actorIp = input.transition === "QUEUED" && input.includeRequestContext
+      ? normalizeAuditIp(this.auditContext?.ip ?? null)
+      : null;
+    const actorContext = input.transition === "QUEUED" && input.includeRequestContext
+      ? serializeAuditContext(this.auditContext?.context)
+      : null;
     const statePredicate = input.transition === "QUEUED"
       ? "1 = 1"
       : input.transition === "STARTED"
@@ -716,21 +726,27 @@ export class Repository {
        )
        SELECT ?, ?, CASE WHEN ? = 'USER' THEN COALESCE(?, created_by) ELSE NULL END,
               ?, 'fiscal_correction', id, ?,
-              json_object(
-                'correctionId', id,
-                'target', json_object(
-                  'kind', target_kind,
-                  'id', CASE
-                    WHEN target_kind = 'WOMPI_EVENT' THEN wompi_event_id
-                    ELSE document_id
-                  END
+              json_patch(
+                json_object(
+                  'correctionId', id,
+                  'target', json_object(
+                    'kind', target_kind,
+                    'id', CASE
+                      WHEN target_kind = 'WOMPI_EVENT' THEN wompi_event_id
+                      ELSE document_id
+                    END
+                  ),
+                  'requestIdHash', ?,
+                  'attemptNumber', attempt_number,
+                  'changedFields', json(?),
+                  'outcomeCode', ?
                 ),
-                'requestIdHash', ?,
-                'attemptNumber', attempt_number,
-                'changedFields', json(?),
-                'outcomeCode', ?
+                CASE WHEN ? = 1
+                  THEN json_object('auditRecovered', json('true'))
+                  ELSE json_object()
+                END
               ),
-              NULL, NULL
+              ?, ?
          FROM fiscal_corrections
         WHERE id = ?
           AND ${statePredicate}
@@ -746,6 +762,9 @@ export class Repository {
       input.requestIdHash,
       JSON.stringify(input.changedFields),
       input.outcomeCode,
+      input.auditRecovered ? 1 : 0,
+      actorIp,
+      actorContext,
       input.correctionId
     ];
     if (
@@ -776,7 +795,8 @@ export class Repository {
         changedFields,
         outcomeCode,
         actorType: transition === "QUEUED" ? "USER" : "SYSTEM",
-        actorId: transition === "QUEUED" ? correction.created_by : null
+        actorId: transition === "QUEUED" ? correction.created_by : null,
+        auditRecovered: true
       })
     );
   }
@@ -912,7 +932,8 @@ export class Repository {
         changedFields,
         outcomeCode: "QUEUED",
         actorType: "USER",
-        actorId: correctionBeforeClaim.created_by
+        actorId: correctionBeforeClaim.created_by,
+        auditRecovered: true
       }),
       this.fiscalCorrectionAuditInsertStatement({
         correctionId: input.id,
