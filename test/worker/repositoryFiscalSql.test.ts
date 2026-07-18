@@ -224,7 +224,7 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
-  it("archives each explicit MH rejection and permits the next guarded attempt with fresh identifiers", async () => {
+  it("blocks a second correction in the MH rejection finalization gap", async () => {
     const database = migratedDatabase();
     seedRejectedDocument(database, "doc_rejected_twice");
     const repository = new Repository(new SqliteD1(database).database);
@@ -269,7 +269,28 @@ describe("fiscal repository SQL on SQLite", () => {
         acceptedAt: null
       }
     );
-    await repository.finalizeFiscalCorrection(
+    expect(database.prepare(
+      `SELECT status, fiscal_operation_claim_id
+         FROM dte_documents WHERE id = ?`
+    ).get("doc_rejected_twice")).toEqual({
+      status: "REJECTED",
+      fiscal_operation_claim_id: null
+    });
+    await expect(repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId: "doc_rejected_twice",
+        requestId: "60606060-6060-4060-8060-606060606060",
+        requestPayloadSha256: "gap-race-payload"
+      })
+    )).resolves.toEqual({ kind: "ineligible" });
+    expect(database.prepare(
+      "SELECT status FROM fiscal_corrections WHERE id = ?"
+    ).get(first.correction.id)).toEqual({ status: "PROCESSING" });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE document_id = ?"
+    ).get("doc_rejected_twice")).toEqual({ count: 1 });
+
+    await expect(repository.finalizeFiscalCorrection(
       first.correction.id,
       first.correction.processing_claim_id,
       {
@@ -280,7 +301,10 @@ describe("fiscal repository SQL on SQLite", () => {
           signedJws: "first-corrected-jws"
         }
       }
-    );
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      "SELECT status FROM fiscal_corrections WHERE id = ?"
+    ).get(first.correction.id)).toEqual({ status: "REJECTED" });
 
     const second = await repository.claimDocumentFiscalCorrection(
       documentCorrectionClaimInput({

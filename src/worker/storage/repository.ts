@@ -448,10 +448,11 @@ export class Repository {
               AND status = 'REJECTED'
               AND fiscal_operation_claim_id IS NULL
               AND NOT EXISTS (
-                SELECT 1 FROM fiscal_corrections AS accepted_correction
-                 WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
-                   AND accepted_correction.document_id = dte_documents.id
-                   AND accepted_correction.status = 'ACCEPTED'
+                SELECT 1 FROM fiscal_corrections AS blocking_correction
+                 WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
+                   AND blocking_correction.document_id = dte_documents.id
+                   AND blocking_correction.status
+                       IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
               )`
         ).bind(
           correctionId,
@@ -479,10 +480,12 @@ export class Repository {
               AND status = 'REJECTED'
               AND fiscal_operation_claim_id IS NULL
               AND NOT EXISTS (
-                SELECT 1 FROM fiscal_corrections AS accepted_correction
-                 WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
-                   AND accepted_correction.document_id = dte_documents.id
-                   AND accepted_correction.status = 'ACCEPTED'
+                SELECT 1 FROM fiscal_corrections AS blocking_correction
+                 WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
+                   AND blocking_correction.document_id = dte_documents.id
+                   AND blocking_correction.id <> ?
+                   AND blocking_correction.status
+                       IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
               )
               AND EXISTS (
                 SELECT 1 FROM fiscal_corrections
@@ -495,6 +498,7 @@ export class Repository {
           claimedAt,
           input.documentId,
           input.environment,
+          correctionId,
           correctionId,
           fiscalClaimId
         )
@@ -515,10 +519,11 @@ export class Repository {
             AND status = 'REJECTED'
             AND fiscal_operation_claim_id IS NULL
             AND NOT EXISTS (
-              SELECT 1 FROM fiscal_corrections AS accepted_correction
-               WHERE accepted_correction.target_kind = 'DTE_DOCUMENT'
-                 AND accepted_correction.document_id = dte_documents.id
-                 AND accepted_correction.status = 'ACCEPTED'
+              SELECT 1 FROM fiscal_corrections AS blocking_correction
+               WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
+                 AND blocking_correction.document_id = dte_documents.id
+                 AND blocking_correction.status
+                     IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
             )`
       ).bind(input.documentId, input.environment).first<{ id: string }>();
       if (!eligible) return { kind: "ineligible" };
