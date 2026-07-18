@@ -116,6 +116,93 @@ describe("Worker fetch error handling", () => {
   });
 });
 
+describe("Worker non-fetch handler error containment", () => {
+  it("contains a DLQ failure and retries every unresolved message", async () => {
+    const sensitiveMessage = "DLQ failed for ana@example.org at https://private.example/dte_123";
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    const batch = {
+      queue: "diezmossv-staging-issuance-example-dlq",
+      messages: [{
+        id: "msg_private",
+        timestamp: new Date(),
+        body: { advancedDocumentId: "dte_123" },
+        attempts: 1,
+        ack,
+        retry
+      }],
+      ackAll: vi.fn(),
+      retryAll
+    } as unknown as MessageBatch<IssuanceMessage>;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      worker.queue(batch, {
+        DB: {
+          prepare() {
+            throw new Error(sensitiveMessage);
+          }
+        } as unknown as D1Database,
+        APP_ENV: "staging"
+      } as Env)
+    ).resolves.toBeUndefined();
+
+    expect(ack).not.toHaveBeenCalled();
+    expect(retry).not.toHaveBeenCalled();
+    expect(retryAll).toHaveBeenCalledTimes(1);
+    expect(errorSpy).toHaveBeenCalledWith({
+      event: "queue_handler_failed",
+      app_env: "staging",
+      error_name: "error",
+      error_code: "unknown"
+    });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(sensitiveMessage);
+  });
+
+  it("contains a scheduled prerequisite failure and aborts later sweeps", async () => {
+    const sensitiveMessage = "D1 credential sk_live_private for owner@example.org";
+    const preparedSql: string[] = [];
+    const retryDeferred = vi.spyOn(
+      IssuancePipeline.prototype,
+      "retryDeferredTransmissions"
+    );
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        {
+          DB: {
+            prepare(sql: string) {
+              preparedSql.push(sql);
+              return {
+                bind() {
+                  return this;
+                },
+                async run() {
+                  throw new Error(sensitiveMessage);
+                }
+              };
+            }
+          } as unknown as D1Database,
+          APP_ENV: "production"
+        } as Env
+      )
+    ).resolves.toBeUndefined();
+
+    expect(preparedSql).toEqual(["DELETE FROM login_rate_limits WHERE expires_at <= ?"]);
+    expect(retryDeferred).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith({
+      event: "scheduled_handler_failed",
+      app_env: "production",
+      error_name: "error",
+      error_code: "unknown"
+    });
+    expect(JSON.stringify(errorSpy.mock.calls)).not.toContain(sensitiveMessage);
+  });
+});
+
 describe("static document security policy", () => {
   it("adds anti-framing and no-referrer headers without changing the asset response", async () => {
     const db = new InMemoryD1();

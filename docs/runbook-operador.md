@@ -283,6 +283,18 @@ el evento `operational_alert` y recibe la notificación mediante una política d
 Notifications**. Esa ruta es independiente del correo de la aplicación; si necesita atención
 operativa, contacte a soporte para que revise ambas señales.
 
+Configuración técnica durable para **staging**:
+
+1. Guarde una consulta con los filtros `$metadata.service = "diezmossv-staging-resource-example"` y
+   `event = "operational_alert"`.
+2. Configure la alerta para disparar cuando el conteo sea mayor que cero y volver a
+   **NORMAL** cuando la ventana quede vacía.
+3. Enlace la política de Notifications `workers_observability_alert` al correo operativo para
+   los estados **FIRING**, **FAILED** y **NORMAL**.
+4. Use la prueba sintética de la política para comprobar únicamente el enrutamiento del correo.
+   Esa prueba no demuestra que Workers Logs haya ingerido el evento ni que la alerta real haya
+   entrado en **FIRING**; confirme ambos estados por separado en Observability.
+
 ---
 
 ## 10. Exportar el F960

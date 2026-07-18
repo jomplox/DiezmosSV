@@ -8,6 +8,12 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 enabled = true
 head_sampling_rate = 1
 
+[observability.logs]
+invocation_logs = false
+
+[observability.traces]
+enabled = false
+
 [[send_email]]
 name = "EMAIL"
 allowed_sender_addresses = ["legacy-contact-4@example.com"]
@@ -61,6 +67,12 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 [env.staging.observability]
 enabled = true
 head_sampling_rate = 1
+
+[env.staging.observability.logs]
+invocation_logs = false
+
+[env.staging.observability.traces]
+enabled = false
 
 [[env.staging.send_email]]
 name = "EMAIL"
@@ -117,6 +129,12 @@ assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling =
 [env.production.observability]
 enabled = true
 head_sampling_rate = 1
+
+[env.production.observability.logs]
+invocation_logs = false
+
+[env.production.observability.traces]
+enabled = false
 
 [[env.production.send_email]]
 name = "EMAIL"
