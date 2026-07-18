@@ -842,6 +842,103 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("blocks a DTE correction in the Wompi rejection finalization gap", async () => {
+    const database = migratedDatabase();
+    const eventId = "wompi_cross_target_gap";
+    const documentId = "doc_wompi_cross_target_gap";
+    const signedJws = "wompi-cross-target-jws";
+    seedFailedWompiEvent(database, eventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: eventId,
+        requestId: "81818181-8181-4181-8181-818181818181"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected Wompi correction claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    });
+    const documentClaimId = `fiscal_correction_${correction.id}`;
+    database.prepare(
+      `INSERT INTO dte_documents (
+         id, wompi_event_id, environment, codigo_generacion, numero_control,
+         status, plain_json, signed_jws, amount_cents, issued_at, created_at,
+         updated_at, fiscal_operation_claim_id, fiscal_operation_claimed_at,
+         fiscal_operation_kind
+       ) VALUES (?, ?, '00', ?, ?, 'SIGNED', '{}', ?, 2500, ?, ?, ?, ?, ?,
+                 'TRANSMISSION')`
+    ).run(
+      documentId,
+      eventId,
+      "82828282-8282-4282-8282-828282828282",
+      "DTE-15-M001P004-000000000000161",
+      signedJws,
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      documentClaimId,
+      "2026-07-18T12:00:00.000Z"
+    );
+    database.prepare(
+      "UPDATE wompi_events SET created_document_id = ?, issuance_status = 'DOCUMENT_CREATED' WHERE id = ?"
+    ).run(documentId, eventId);
+    await repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      documentId,
+      documentClaimId,
+      signedJws
+    });
+    await repository.completeDocumentTransmission(documentId, documentClaimId, {
+      status: "REJECTED",
+      sello: null,
+      mhEstado: "RECHAZADO",
+      observaciones: ["#/receptor/nombre rechazado"],
+      acceptedAt: null
+    });
+
+    await expect(repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId,
+        requestId: "83838383-8383-4383-8383-838383838383",
+        requestPayloadSha256: "cross-target-gap-payload"
+      })
+    )).resolves.toEqual({ kind: "ineligible" });
+    expect(database.prepare(
+      "SELECT status FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({ status: "PROCESSING" });
+
+    await expect(repository.finalizeFiscalCorrection(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        status: "REJECTED",
+        document: { documentId, documentClaimId, signedJws }
+      }
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      "SELECT status FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({ status: "REJECTED" });
+    await expect(repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId,
+        requestId: "84848484-8484-4484-8484-848484848484",
+        requestPayloadSha256: "cross-target-after-terminal-payload"
+      })
+    )).resolves.toMatchObject({
+      kind: "claimed",
+      correction: {
+        target_kind: "DTE_DOCUMENT",
+        attempt_number: 1
+      }
+    });
+    database.close();
+  });
+
   it("atomically retires an uncorrectable pre-CDE event without losing its evidence", async () => {
     const database = migratedDatabase();
     const eventId = "wompi_uncorrectable_candidate";
