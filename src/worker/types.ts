@@ -1,3 +1,10 @@
+import type {
+  FiscalCorrectionStatus,
+  FiscalReceptorCorrection
+} from "../shared/fiscalCorrection";
+
+export type { FiscalCorrectionStatus } from "../shared/fiscalCorrection";
+
 export type Ambiente = "00" | "01";
 
 // Wrangler owns configured binding/runtime types. Environment-dependent bindings
@@ -31,6 +38,45 @@ export interface IssuanceMessage {
   wompiEventId?: string;
   issuanceAttemptId?: string;
   advancedDocumentId?: string;
+  fiscalCorrectionId?: string;
+  fiscalCorrectionProcessingClaimId?: string;
+  fiscalClaimId?: string;
+}
+
+export interface FiscalCorrectionRecord {
+  id: string;
+  request_id: string;
+  request_payload_sha256: string;
+  attempt_number: number;
+  target_kind: "WOMPI_EVENT" | "DTE_DOCUMENT";
+  wompi_event_id: string | null;
+  document_id: string | null;
+  environment: Ambiente;
+  status: FiscalCorrectionStatus;
+  before_receptor_json: string;
+  corrected_receptor_json: string;
+  changed_fields_json: string;
+  source_document_snapshot_json: string | null;
+  issuance_attempt_id: string | null;
+  fiscal_claim_id: string | null;
+  processing_claim_id: string;
+  mh_dispatch_started_at: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  created_by: string;
+  created_at: string;
+  processing_started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+export interface FiscalCorrectionData {
+  receptor: FiscalReceptorCorrection;
+  targetStatus: string;
+  failureReason: string;
+  correctable: boolean;
+  guidance: string | null;
+  activeCorrection: Pick<FiscalCorrectionRecord, "id" | "status"> | null;
 }
 
 export interface WompiWebhook {

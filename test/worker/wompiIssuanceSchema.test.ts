@@ -51,6 +51,81 @@ describe("Wompi issuance reservation migration", () => {
     expect(columns.map((column) => column.name)).toContain("issuance_attempt_id");
   });
 
+  it("persists constrained fiscal correction history and per-target attempts", () => {
+    const columns = database
+      .prepare("PRAGMA table_info(fiscal_corrections)")
+      .all() as Array<{ name: string }>;
+    const indexes = database
+      .prepare("PRAGMA index_list(fiscal_corrections)")
+      .all() as Array<{ name: string; unique: number }>;
+
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "request_id",
+      "attempt_number",
+      "processing_claim_id",
+      "processing_started_at",
+      "mh_dispatch_started_at",
+      "source_document_snapshot_json"
+    ]));
+    expect(indexes).toContainEqual(expect.objectContaining({
+      name: "uq_fiscal_corrections_wompi_attempt",
+      unique: 1
+    }));
+    expect(indexes).toContainEqual(expect.objectContaining({
+      name: "uq_fiscal_corrections_document_attempt",
+      unique: 1
+    }));
+
+    insertRawFiscalCorrection(database, {
+      id: "correction_one",
+      requestId: "request_one",
+      attemptNumber: 1,
+      wompiEventId: "wompi_a"
+    });
+    expect(() => insertRawFiscalCorrection(database, {
+      id: "correction_duplicate_request",
+      requestId: "request_one",
+      attemptNumber: 2,
+      wompiEventId: "wompi_a"
+    })).toThrow(/UNIQUE constraint failed: fiscal_corrections\.request_id/);
+    expect(() => insertRawFiscalCorrection(database, {
+      id: "correction_duplicate_attempt",
+      requestId: "request_two",
+      attemptNumber: 1,
+      wompiEventId: "wompi_a"
+    })).toThrow(/UNIQUE constraint failed: fiscal_corrections\.wompi_event_id, fiscal_corrections\.attempt_number/);
+  });
+
+  it("rejects invalid correction JSON and target/snapshot combinations", () => {
+    expect(() => insertRawFiscalCorrection(database, {
+      id: "correction_invalid_json",
+      requestId: "request_invalid_json",
+      attemptNumber: 1,
+      wompiEventId: "wompi_a",
+      correctedReceptorJson: "not-json"
+    })).toThrow(/CHECK constraint failed/);
+    expect(() => database.prepare(
+      `INSERT INTO fiscal_corrections (
+         id, request_id, request_payload_sha256, attempt_number, target_kind,
+         document_id, environment, status, before_receptor_json,
+         corrected_receptor_json, changed_fields_json,
+         source_document_snapshot_json, processing_claim_id, created_by
+       ) VALUES ('correction_missing_snapshot', 'request_missing_snapshot', 'sha',
+         1, 'DTE_DOCUMENT', 'missing-document', '00', 'QUEUED', '{}', '{}',
+         '[]', NULL, 'processing', 'user_operator')`
+    ).run()).toThrow(/CHECK constraint failed/);
+    expect(() => database.prepare(
+      `INSERT INTO fiscal_corrections (
+         id, request_id, request_payload_sha256, attempt_number, target_kind,
+         wompi_event_id, document_id, environment, status, before_receptor_json,
+         corrected_receptor_json, changed_fields_json,
+         source_document_snapshot_json, processing_claim_id, created_by
+       ) VALUES ('correction_two_targets', 'request_two_targets', 'sha', 1,
+         'WOMPI_EVENT', 'wompi_b', 'document_too', '00', 'QUEUED', '{}', '{}',
+         '[]', NULL, 'processing', 'user_operator')`
+    ).run()).toThrow(/CHECK constraint failed/);
+  });
+
   it("persists claimant fencing tokens for DTE transmission and receipt delivery", () => {
     const documentColumns = database
       .prepare("PRAGMA table_info(dte_documents)")
@@ -582,6 +657,32 @@ function sequenceRows(database: DatabaseSync): Array<{
       control_prefix: string;
       next_value: number;
     }>;
+}
+
+function insertRawFiscalCorrection(
+  database: DatabaseSync,
+  input: {
+    id: string;
+    requestId: string;
+    attemptNumber: number;
+    wompiEventId: string;
+    correctedReceptorJson?: string;
+  }
+): void {
+  database.prepare(
+    `INSERT INTO fiscal_corrections (
+       id, request_id, request_payload_sha256, attempt_number, target_kind,
+       wompi_event_id, environment, status, before_receptor_json,
+       corrected_receptor_json, changed_fields_json, processing_claim_id, created_by
+     ) VALUES (?, ?, 'sha', ?, 'WOMPI_EVENT', ?, '00', 'QUEUED', '{}', ?, '[]',
+       'processing', 'user_operator')`
+  ).run(
+    input.id,
+    input.requestId,
+    input.attemptNumber,
+    input.wompiEventId,
+    input.correctedReceptorJson ?? "{}"
+  );
 }
 
 function sqliteD1(database: DatabaseSync): D1Database {
