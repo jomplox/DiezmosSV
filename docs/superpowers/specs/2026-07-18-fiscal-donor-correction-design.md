@@ -134,10 +134,16 @@ Add a `fiscal_corrections` table with:
 - `source_document_snapshot_json`: nullable immutable snapshot of the rejected
   document's identifiers, `plain_json`, `signed_jws`, MH state, observations, and
   timestamps;
+- `request_payload_sha256`: stable digest used to reject reuse of one request ID with
+  different corrected data;
+- `attempt_number`: immutable per-target sequence used for operator history;
 - `issuance_attempt_id`: pre-CDE queue ownership token when applicable;
 - `fiscal_claim_id`: rejected-document fiscal ownership token when applicable;
+- `processing_claim_id`: rotating ownership token for one correction queue delivery;
+- `processing_started_at` and `mh_dispatch_started_at`, kept separate so recovery can
+  distinguish safe pre-dispatch work from an uncertain external outcome;
 - bounded operator-safe failure code and message;
-- `created_by`, `created_at`, `started_at`, `completed_at`, and `updated_at`.
+- `created_by`, `created_at`, `completed_at`, and `updated_at`.
 
 Constraints require the target columns appropriate to `target_kind`. `request_id` is
 unique. A request ID reused for a different target or corrected payload is a conflict;
@@ -234,9 +240,10 @@ rejected version in `fiscal_corrections`.
 Both mutation APIs return `202` after durable storage and queue submission. The UI
 refreshes the target status rather than holding an MH request open.
 
-The queue message carries the correction ID and the appropriate issuance or fiscal
-claim token. Processing compares all ownership tokens before building, signing, or
-transmitting.
+The queue message carries the correction ID, its rotating processing token, and the
+appropriate issuance or fiscal claim token. Processing compares all ownership tokens
+before building, signing, or transmitting. Safe stale-work recovery rotates the
+processing token before requeueing, which fences out an older delivery.
 
 - A failure proven to occur before MH dispatch releases the operational claim and marks
   the correction `FAILED`, allowing an explicit new guarded attempt.
