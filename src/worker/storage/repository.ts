@@ -528,6 +528,24 @@ export class Repository {
     ).bind(requestId).first<FiscalCorrectionRecord>();
   }
 
+  async getActiveFiscalCorrectionForTarget(
+    targetKind: FiscalCorrectionRecord["target_kind"],
+    targetId: string
+  ): Promise<Pick<FiscalCorrectionRecord, "id" | "status"> | null> {
+    const targetColumn = targetKind === "WOMPI_EVENT"
+      ? "wompi_event_id"
+      : "document_id";
+    return this.db.prepare(
+      `SELECT id, status
+         FROM fiscal_corrections
+        WHERE target_kind = ?
+          AND ${targetColumn} = ?
+          AND status IN ('QUEUED', 'PROCESSING')
+        ORDER BY attempt_number DESC
+        LIMIT 1`
+    ).bind(targetKind, targetId).first<Pick<FiscalCorrectionRecord, "id" | "status">>();
+  }
+
   async claimFiscalCorrectionProcessing(input: {
     id: string;
     processingClaimId: string;

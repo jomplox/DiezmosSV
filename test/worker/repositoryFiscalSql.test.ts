@@ -61,6 +61,47 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("returns only the latest nonterminal correction for one target", async () => {
+    const database = migratedDatabase();
+    seedFailedWompiEvent(database, "wompi_active_correction");
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: "wompi_active_correction",
+        requestId: "23232323-2323-4323-8323-232323232323"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected active correction claim");
+
+    await expect(repository.getActiveFiscalCorrectionForTarget(
+      "WOMPI_EVENT",
+      "wompi_active_correction"
+    )).resolves.toEqual({
+      id: claimed.correction.id,
+      status: "QUEUED"
+    });
+    await expect(repository.getActiveFiscalCorrectionForTarget(
+      "DTE_DOCUMENT",
+      "wompi_active_correction"
+    )).resolves.toBeNull();
+
+    await repository.claimFiscalCorrectionProcessing({
+      id: claimed.correction.id,
+      processingClaimId: claimed.correction.processing_claim_id,
+      issuanceAttemptId: claimed.correction.issuance_attempt_id ?? undefined
+    });
+    await repository.finalizeFiscalCorrection(
+      claimed.correction.id,
+      claimed.correction.processing_claim_id,
+      { status: "FAILED", failureCode: "PRE_DISPATCH", failureMessage: "No enviado" }
+    );
+    await expect(repository.getActiveFiscalCorrectionForTarget(
+      "WOMPI_EVENT",
+      "wompi_active_correction"
+    )).resolves.toBeNull();
+    database.close();
+  });
+
   it("snapshots a rejected document before claiming it", async () => {
     const database = migratedDatabase();
     seedRejectedDocument(database, "doc_rejected");
