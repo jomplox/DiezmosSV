@@ -393,6 +393,8 @@ export class Repository {
     return { kind: "ineligible" };
   }
 
+  // dte_documents.wompi_event_id is a unique foreign key when present, so matching
+  // it to a WOMPI_EVENT correction identifies the exact durable event/document pair.
   async claimDocumentFiscalCorrection(
     input: DocumentFiscalCorrectionClaimInput
   ): Promise<FiscalCorrectionClaimResult> {
@@ -449,10 +451,18 @@ export class Repository {
               AND fiscal_operation_claim_id IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM fiscal_corrections AS blocking_correction
-                 WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
-                   AND blocking_correction.document_id = dte_documents.id
-                   AND blocking_correction.status
+                 WHERE blocking_correction.status
                        IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
+                   AND (
+                     (
+                       blocking_correction.target_kind = 'DTE_DOCUMENT'
+                       AND blocking_correction.document_id = dte_documents.id
+                     )
+                     OR (
+                       blocking_correction.target_kind = 'WOMPI_EVENT'
+                       AND blocking_correction.wompi_event_id = dte_documents.wompi_event_id
+                     )
+                   )
               )`
         ).bind(
           correctionId,
@@ -481,11 +491,19 @@ export class Repository {
               AND fiscal_operation_claim_id IS NULL
               AND NOT EXISTS (
                 SELECT 1 FROM fiscal_corrections AS blocking_correction
-                 WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
-                   AND blocking_correction.document_id = dte_documents.id
-                   AND blocking_correction.id <> ?
+                 WHERE blocking_correction.id <> ?
                    AND blocking_correction.status
                        IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
+                   AND (
+                     (
+                       blocking_correction.target_kind = 'DTE_DOCUMENT'
+                       AND blocking_correction.document_id = dte_documents.id
+                     )
+                     OR (
+                       blocking_correction.target_kind = 'WOMPI_EVENT'
+                       AND blocking_correction.wompi_event_id = dte_documents.wompi_event_id
+                     )
+                   )
               )
               AND EXISTS (
                 SELECT 1 FROM fiscal_corrections
@@ -520,10 +538,18 @@ export class Repository {
             AND fiscal_operation_claim_id IS NULL
             AND NOT EXISTS (
               SELECT 1 FROM fiscal_corrections AS blocking_correction
-               WHERE blocking_correction.target_kind = 'DTE_DOCUMENT'
-                 AND blocking_correction.document_id = dte_documents.id
-                 AND blocking_correction.status
+               WHERE blocking_correction.status
                      IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
+                 AND (
+                   (
+                     blocking_correction.target_kind = 'DTE_DOCUMENT'
+                     AND blocking_correction.document_id = dte_documents.id
+                   )
+                   OR (
+                     blocking_correction.target_kind = 'WOMPI_EVENT'
+                     AND blocking_correction.wompi_event_id = dte_documents.wompi_event_id
+                   )
+                 )
             )`
       ).bind(input.documentId, input.environment).first<{ id: string }>();
       if (!eligible) return { kind: "ineligible" };
