@@ -53,6 +53,17 @@ export async function verifyMhJws(jws: string, certXml: string): Promise<boolean
   );
 }
 
+export function decodeMhJwsPayload(jws: string): unknown {
+  const parts = jws.split(".");
+  if (parts.length !== 3 || !parts[1]) {
+    throw new Error("El JWS del Ministerio de Hacienda no contiene una carga válida");
+  }
+  return JSON.parse(
+    new TextDecoder("utf-8", { fatal: true, ignoreBOM: false })
+      .decode(base64UrlToBytes(parts[1]))
+  );
+}
+
 export interface CertificateExpiry {
   expiresAt: string | null;
 }

@@ -345,6 +345,107 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("does not attribute a reconciled queued audit to the duplicate caller", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_duplicate_context";
+    seedFailedWompiEvent(database, wompiEventId);
+    const input = wompiCorrectionClaimInput({
+      wompiEventId,
+      requestId: "31313131-3131-4131-8131-313131313132"
+    });
+    const firstRepository = new Repository(new SqliteD1(database).database);
+    const first = await firstRepository.claimWompiFiscalCorrection(input);
+    if (first.kind !== "claimed") throw new Error("expected audited correction claim");
+    database.prepare(
+      `DELETE FROM audit_logs
+        WHERE action = 'FISCAL_CORRECTION_QUEUED' AND entity_id = ?`
+    ).run(first.correction.id);
+
+    const replayRepository = new Repository(new SqliteD1(database).database, {
+      ip: "198.51.100.77",
+      context: { country: "US", userAgent: "Duplicate replay" }
+    });
+    await expect(replayRepository.claimWompiFiscalCorrection(input)).resolves.toMatchObject({
+      kind: "duplicate",
+      correction: { id: first.correction.id }
+    });
+
+    const recovered = database.prepare(
+      `SELECT actor_ip, actor_context, metadata_json
+         FROM audit_logs
+        WHERE action = 'FISCAL_CORRECTION_QUEUED' AND entity_id = ?`
+    ).get(first.correction.id) as {
+      actor_ip: string | null;
+      actor_context: string | null;
+      metadata_json: string;
+    };
+    expect(recovered.actor_ip).toBeNull();
+    expect(recovered.actor_context).toBeNull();
+    expect(JSON.parse(recovered.metadata_json)).toMatchObject({ auditRecovered: true });
+    database.close();
+  });
+
+  it("preserves request context only on the initial user fiscal-correction audit", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_request_context";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database, {
+      ip: " 203.0.113.42 ",
+      context: {
+        country: " SV ",
+        city: " San Salvador ",
+        asn: 64500,
+        userAgent: " Fiscal Console "
+      }
+    });
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "32323232-3232-4232-8232-323232323233"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected contextual correction claim");
+
+    await expect(repository.claimFiscalCorrectionProcessing({
+      id: claimed.correction.id,
+      processingClaimId: claimed.correction.processing_claim_id,
+      issuanceAttemptId: claimed.correction.issuance_attempt_id ?? undefined
+    })).resolves.toBe("claimed");
+
+    const rows = database.prepare(
+      `SELECT action, actor_type, actor_ip, actor_context
+         FROM audit_logs
+        WHERE entity_type = 'fiscal_correction' AND entity_id = ?
+        ORDER BY CASE action
+          WHEN 'FISCAL_CORRECTION_QUEUED' THEN 1
+          ELSE 2
+        END`
+    ).all(claimed.correction.id) as Array<{
+      action: string;
+      actor_type: string;
+      actor_ip: string | null;
+      actor_context: string | null;
+    }>;
+    expect(rows[0]).toMatchObject({
+      action: "FISCAL_CORRECTION_QUEUED",
+      actor_type: "USER",
+      actor_ip: "203.0.113.42"
+    });
+    expect(JSON.parse(rows[0].actor_context ?? "{}")).toEqual({
+      country: "SV",
+      city: "San Salvador",
+      asn: 64500,
+      userAgent: "Fiscal Console"
+    });
+    expect(rows[1]).toEqual({
+      action: "FISCAL_CORRECTION_STARTED",
+      actor_type: "SYSTEM",
+      actor_ip: null,
+      actor_context: null
+    });
+    database.close();
+  });
+
   it("rolls back a correction claim when its required queued audit cannot persist", async () => {
     const database = migratedDatabase();
     const wompiEventId = "wompi_audit_claim_rollback";
