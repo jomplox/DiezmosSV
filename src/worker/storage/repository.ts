@@ -3361,7 +3361,7 @@ export class Repository {
     entityType: string;
     entityId: string;
     incidentId: string;
-    channel: "email" | "webhook";
+    channel: "email";
     targetKey: string;
   }): Promise<OperationalAlertDeliveryClaim> {
     const id = newId("alert_delivery");

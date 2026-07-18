@@ -275,10 +275,13 @@ recibirá automáticamente avisos cuando algo necesite atención:
 Para configurar o cambiar esa dirección (rol Propietario): vaya a **Configuración → Correo**,
 escriba el correo en **Correo para avisos operativos** y pulse **Guardar correo de alertas**.
 
-Si soporte configuró además un webhook de Slack o Discord, ese aviso se intenta al mismo tiempo que
-el correo. Una falla de correo no bloquea el webhook, ni una falla del webhook bloquea el correo.
 El sistema evita repetir un aviso ya confirmado; si no puede confirmar si el proveedor lo aceptó,
 deja el caso para revisión técnica en vez de enviarlo otra vez automáticamente.
+
+Además del correo, soporte supervisa cada incidente en **Workers Observability** de Cloudflare con
+el evento `operational_alert` y recibe la notificación mediante una política de **Cloudflare
+Notifications**. Esa ruta es independiente del correo de la aplicación; si necesita atención
+operativa, contacte a soporte para que revise ambas señales.
 
 ---
 
