@@ -229,8 +229,7 @@ describe("Fallos fiscal correction wiring", () => {
 
     expect(isCorrectablePreCdeFailure(deterministic)).toBe(true);
     expect(isCorrectablePreCdeFailure(transient)).toBe(false);
-    expect(appSource).toContain('"Corregir y reintentar"');
-    expect(appSource).toContain('"Reintentar creación"');
+    expect(appSource).toContain("preCdeActionLabel(item, correctable)");
     expect(appSource).toContain("isCorrectablePreCdeFailure(item)");
   });
 

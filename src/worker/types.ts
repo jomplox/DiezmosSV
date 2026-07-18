@@ -329,6 +329,7 @@ export interface WompiIssuanceFailureItem {
   donor_name: string | null;
   donor_email: string | null;
   received_at: string;
+  processed_at: string | null;
   issuance_status: WompiIssuanceStatus | null;
   issuance_attempt_count: number;
   issuance_error_code: string | null;

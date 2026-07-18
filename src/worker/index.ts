@@ -2241,7 +2241,13 @@ async function handleWompiFiscalCorrection(
   if (
     event.created_document_id
     || event.issuance_claim_id
-    || !["FAILED", "DEAD_LETTERED"].includes(event.issuance_status ?? "")
+    || (
+      !["FAILED", "DEAD_LETTERED"].includes(event.issuance_status ?? "")
+      && !(
+        event.processed_at !== null
+        && ["RETRY_QUEUED", "PROCESSING"].includes(event.issuance_status ?? "")
+      )
+    )
   ) {
     const existing = await existingFiscalCorrectionResponse(
       repo,
