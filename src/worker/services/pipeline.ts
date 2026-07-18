@@ -707,6 +707,19 @@ export class IssuancePipeline {
     validateCde(candidate);
     const identifiers = extractCdeIdentifiers(candidate);
     const summary = cdeDocumentSummary(candidate);
+    const signingOwned = await this.repo.renewFiscalCorrectionDocumentSigningLease({
+      correctionId: correction.id,
+      documentId: current.id,
+      processingClaimId: ownership.processingClaimId,
+      fiscalClaimId: correction.fiscal_claim_id,
+      codigoGeneracion: identifiers.codigoGeneracion,
+      numeroControl: identifiers.numeroControl
+    });
+    if (!signingOwned) {
+      throw new FiscalCorrectionBusyError(
+        "La propiedad de la corrección cambió antes de firmar el documento."
+      );
+    }
     const signedJws = await signMhDocument(
       candidate,
       getMhCertificateXml(this.env),

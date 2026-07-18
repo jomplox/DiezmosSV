@@ -551,6 +551,32 @@ describe("fiscal repository SQL on SQLite", () => {
       codigoGeneracion: "92929292-9292-4292-8292-929292929292",
       numeroControl: "DTE-15-M001P004-000000000000001"
     });
+    await expect(repository.renewFiscalCorrectionDocumentSigningLease({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: oldProcessingClaimId,
+      fiscalClaimId,
+      codigoGeneracion: reserved!.codigoGeneracion,
+      numeroControl: reserved!.numeroControl
+    })).resolves.toBe(false);
+    database.prepare(
+      `UPDATE fiscal_corrections
+          SET processing_started_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(correction.id);
+    await expect(repository.renewFiscalCorrectionDocumentSigningLease({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: nextProcessingClaimId,
+      fiscalClaimId,
+      codigoGeneracion: reserved!.codigoGeneracion,
+      numeroControl: reserved!.numeroControl
+    })).resolves.toBe(true);
+    expect(database.prepare(
+      "SELECT processing_started_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({
+      processing_started_at: expect.not.stringMatching(/^2000-/)
+    });
     signCount += 1;
     await expect(repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: correction.id,
@@ -565,6 +591,11 @@ describe("fiscal repository SQL on SQLite", () => {
       donorEmail: null
     })).resolves.toBe(true);
 
+    database.prepare(
+      `UPDATE fiscal_corrections
+          SET processing_started_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(correction.id);
     await expect(repository.reserveFiscalCorrectionDocumentIdentifiers({
       correctionId: correction.id,
       documentId,
@@ -574,6 +605,11 @@ describe("fiscal repository SQL on SQLite", () => {
       controlPrefix: "M001P004",
       codigoGeneracion: "93939393-9393-4393-8393-939393939393"
     })).resolves.toEqual(reserved);
+    expect(database.prepare(
+      "SELECT processing_started_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({
+      processing_started_at: expect.not.stringMatching(/^2000-/)
+    });
     expect(signCount).toBe(1);
     expect(database.prepare(
       `SELECT next_value FROM document_sequences
@@ -651,6 +687,101 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: "correction_processing_recovered_wompi",
       issuanceAttemptId: correction.issuance_attempt_id!
     })).resolves.toBe(true);
+    database.close();
+  });
+
+  it("keeps the ordinary stalled-Wompi sweep off an active correction token", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_stalled_correction_fence";
+    const rawBody = JSON.stringify({
+      Cliente: {
+        DocumentoIdentidad: "12345678-9",
+        Nombre: "Donante original inválida"
+      }
+    });
+    seedFailedWompiEvent(database, wompiEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET raw_body = ?,
+              received_at = '2000-01-01T00:00:00.000Z',
+              issuance_last_attempt_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(rawBody, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "95959595-9595-4595-8595-959595959595",
+        correctedReceptorJson: JSON.stringify({
+          numDocumento: "10000002-7",
+          nombre: "Donante corregida"
+        })
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected protected correction");
+    const correction = claimed.correction;
+    const correctionAttemptId = correction.issuance_attempt_id!;
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_last_attempt_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(wompiEventId);
+
+    await expect(repository.listStalledApprovedWompiEvents(
+      "2026-01-01T00:00:00.000Z"
+    )).resolves.toEqual([]);
+    await expect(repository.claimStalledWompiIssuanceAttempt(
+      wompiEventId,
+      correctionAttemptId,
+      "2026-01-01T00:00:00.000Z"
+    )).resolves.toBeNull();
+    expect(database.prepare(
+      `SELECT issuance_status, issuance_attempt_id, raw_body
+         FROM wompi_events WHERE id = ?`
+    ).get(wompiEventId)).toEqual({
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correctionAttemptId,
+      raw_body: rawBody
+    });
+    expect(database.prepare(
+      `SELECT status, processing_claim_id, corrected_receptor_json
+         FROM fiscal_corrections WHERE id = ?`
+    ).get(correction.id)).toEqual({
+      status: "QUEUED",
+      processing_claim_id: correction.processing_claim_id,
+      corrected_receptor_json: JSON.stringify({
+        numDocumento: "10000002-7",
+        nombre: "Donante corregida"
+      })
+    });
+
+    database.prepare(
+      `UPDATE fiscal_corrections
+          SET updated_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(correction.id);
+    const recovered = await repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "correction_processing_stalled_wompi_recovered",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    });
+    expect(recovered).toMatchObject({
+      id: correction.id,
+      status: "PROCESSING",
+      processing_claim_id: "correction_processing_stalled_wompi_recovered",
+      issuance_attempt_id: correctionAttemptId
+    });
+    await expect(repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: `wompi_correction_${correction.id}`,
+      correctionId: correction.id,
+      processingClaimId: "correction_processing_stalled_wompi_recovered",
+      issuanceAttemptId: correctionAttemptId
+    })).resolves.toBe(true);
+    expect(database.prepare(
+      "SELECT raw_body FROM wompi_events WHERE id = ?"
+    ).get(wompiEventId)).toEqual({ raw_body: rawBody });
     database.close();
   });
 
@@ -1030,6 +1161,17 @@ describe("fiscal repository SQL on SQLite", () => {
       donorName: "Donante corregida",
       donorEmail: null
     });
+    const processingBeforeDispatch = database.prepare(
+      `SELECT processing_started_at, mh_dispatch_started_at
+         FROM fiscal_corrections WHERE id = ?`
+    ).get(correction.id) as {
+      processing_started_at: string;
+      mh_dispatch_started_at: string | null;
+    };
+    expect(processingBeforeDispatch).toMatchObject({
+      processing_started_at: expect.any(String),
+      mh_dispatch_started_at: null
+    });
     const dispatchInput = {
       correctionId: correction.id,
       processingClaimId: correction.processing_claim_id,
@@ -1048,7 +1190,7 @@ describe("fiscal repository SQL on SQLite", () => {
       `SELECT processing_started_at, mh_dispatch_started_at
          FROM fiscal_corrections WHERE id = ?`
     ).get(correction.id)).toMatchObject({
-      processing_started_at: processing.processing_started_at,
+      processing_started_at: processingBeforeDispatch.processing_started_at,
       mh_dispatch_started_at: expect.any(String)
     });
     await expect(repository.finalizeFiscalCorrection(
@@ -3047,10 +3189,13 @@ describe("fiscal repository SQL on SQLite", () => {
     const deletePhase = (table: string) =>
       protocol.deletePhases.findIndex((phase) => phase.tables.includes(table));
 
-    expect(protocol.transaction).toEqual({
-      begin: "BEGIN IMMEDIATE",
+    expect(protocol.wranglerFile).toEqual({
       deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
       verify: "PRAGMA foreign_key_check",
+      forbiddenTransactionStatements: ["BEGIN", "COMMIT", "ROLLBACK"]
+    });
+    expect(protocol.localSqliteTransaction).toEqual({
+      begin: "BEGIN IMMEDIATE",
       commit: "COMMIT",
       rollback: "ROLLBACK"
     });
@@ -3115,14 +3260,17 @@ describe("fiscal repository SQL on SQLite", () => {
       }
     };
 
-    database.exec(protocol.transaction.begin);
-    database.exec(protocol.transaction.deferForeignKeys);
+    // better-sqlite3 supplies the transaction that Wrangler supplies remotely;
+    // the simulated restore file begins at deferForeignKeys and contains no
+    // nested BEGIN/COMMIT/ROLLBACK statements.
+    database.exec(protocol.localSqliteTransaction.begin);
+    database.exec(protocol.wranglerFile.deferForeignKeys);
     for (const phase of protocol.restorePhases) {
       for (const table of phase.tables) restoreOperations[table]?.();
     }
-    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
-    database.exec(protocol.transaction.commit);
-    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+    expect(database.prepare(protocol.wranglerFile.verify).all()).toEqual([]);
+    database.exec(protocol.localSqliteTransaction.commit);
+    expect(database.prepare(protocol.wranglerFile.verify).all()).toEqual([]);
 
     const deleteOperations: Record<string, () => void> = {
       fiscal_corrections: () => {
@@ -3141,14 +3289,14 @@ describe("fiscal repository SQL on SQLite", () => {
         database.prepare("DELETE FROM wompi_events WHERE id = 'restore_wompi'").run();
       }
     };
-    database.exec(protocol.transaction.begin);
-    database.exec(protocol.transaction.deferForeignKeys);
+    database.exec(protocol.localSqliteTransaction.begin);
+    database.exec(protocol.wranglerFile.deferForeignKeys);
     for (const phase of protocol.deletePhases) {
       for (const table of phase.tables) deleteOperations[table]?.();
     }
-    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
-    database.exec(protocol.transaction.commit);
-    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+    expect(database.prepare(protocol.wranglerFile.verify).all()).toEqual([]);
+    database.exec(protocol.localSqliteTransaction.commit);
+    expect(database.prepare(protocol.wranglerFile.verify).all()).toEqual([]);
     expect(database.prepare(
       `SELECT
          (SELECT COUNT(*) FROM fiscal_corrections) AS corrections,

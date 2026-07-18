@@ -201,3 +201,85 @@ remove or expose that local credential artifact.
 
 No emails, database rows, Cloudflare resources, deployments, or other external systems
 were mutated during the review remediation.
+
+## Second Important-review remediation
+
+The second review found three narrower ownership and recovery gaps:
+
+1. the ordinary stalled-Wompi sweep could reclaim an event whose issuance token was
+   held by an active fiscal correction;
+2. a direct-DTE worker that paused after identifier reservation could sign after a
+   recovery worker rotated the processing token; and
+3. the documented restore file put explicit transaction statements inside
+   `wrangler d1 execute --file`, even though Wrangler supplies the outer transaction.
+
+### Second-review RED
+
+Focused repository, worker, and retention tests first failed as expected. The
+deterministic queue test paused the old direct-DTE worker after reservation, rotated
+ownership, then proved the old worker still reached the signer. Retention assertions
+proved the Wrangler-specific protocol did not yet exist. After explicitly backdating
+the Wompi event in its fixture, the ordinary stalled sweep also reclaimed the active
+correction token.
+
+No production code changed until all three regressions had failed for the intended
+reason.
+
+### Second-review changes
+
+- The ordinary stalled-Wompi list and claim now both exclude events with an active
+  correction or a correction-held issuance token. Recovery keeps the corrected
+  receptor and original raw Wompi evidence intact.
+- Reserving or reusing direct-DTE identifiers renews the correction lease. A new
+  token-qualified lease check runs immediately before cryptographic signing, and the
+  existing token-qualified prepare update remains the final persistence fence.
+- The deterministic pause/rotate/resume test proves that the old owner invokes
+  neither signer nor prepare, while the recovered owner reuses the same legal number
+  reservation and completes without incrementing the sequence twice.
+- `RETENTION_FOREIGN_KEY_PROTOCOL` now distinguishes a transaction-free
+  `wranglerFile` (`defer_foreign_keys`, ordered phases, `foreign_key_check`) from an
+  explicit `localSqliteTransaction` rehearsal (`BEGIN IMMEDIATE`, `COMMIT`,
+  `ROLLBACK`).
+- The restore runbook now states that `restore.sql` must not contain `BEGIN`,
+  `COMMIT`, or `ROLLBACK`. Local SQLite rollback guidance remains explicit and the
+  migrated real-FK test simulates Wrangler's implicit outer transaction.
+- The previously approved deterministic audit coupling remains unchanged.
+
+### Second-review GREEN
+
+Focused ownership, queue, retention, and schema proof:
+
+```bash
+rtk npx vitest run test/worker/repositoryFiscalSql.test.ts \
+  test/worker/workerFetch.test.ts \
+  test/worker/retention.test.ts \
+  test/worker/wompiIssuanceSchema.test.ts
+```
+
+Result: 4 files passed; 572 tests passed.
+
+Full suite:
+
+```bash
+rtk npm test
+```
+
+Result: 74 files passed; 1,360 tests passed and 1 test skipped. The runner retained
+the existing non-blocking Fontconfig warning.
+
+Static, build, generated-type, and diff checks:
+
+```bash
+rtk npm run typecheck
+rtk npm run build
+rtk npm run types:check
+rtk git diff --check
+```
+
+Result: all passed. The build retained the existing non-blocking bundle-size warning.
+`rtk npm run security:check-private-boundary` remains blocked only by the pre-existing
+ignored file `node_modules/.cache/wrangler/wrangler-account.json`; this task did not
+remove, modify, or expose that local credential artifact.
+
+No emails, database rows, Cloudflare resources, deployments, or other external systems
+were mutated during the second review remediation.

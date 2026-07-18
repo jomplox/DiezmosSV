@@ -113,13 +113,13 @@ table:
 3. Apply via `wrangler d1 execute <database> --env <env> --remote --file
    restore.sql`, batching inserts (D1 has a statement-size limit) rather
    than issuing thousands of individual `wrangler d1 execute` calls.
-4. Run every restore batch in one deferred-foreign-key transaction. There is
-   no valid flat insert order because
+4. Wrangler wraps the file in its own transaction. Do not put `BEGIN`, `COMMIT`, or `ROLLBACK` inside `restore.sql`;
+   nested transaction statements make `wrangler d1 execute --file` fail.
+   There is no valid flat insert order because
    `contingency_periods` ↔ `dte_events` ↔ `dte_documents` is a real reference
-   cycle. Start the generated SQL with:
+   cycle. Start the generated SQL file with:
 
    ```sql
-   BEGIN IMMEDIATE;
    PRAGMA defer_foreign_keys = ON;
    ```
 
@@ -131,26 +131,43 @@ table:
       `contingency_batches`, `donation_intents`;
    4. leaves: `contingency_batch_lines`, `audit_logs`.
 
-   Before committing, run:
+   End the same file with:
 
    ```sql
    PRAGMA foreign_key_check;
    ```
 
-   The command must return no rows. If it reports any row, execute `ROLLBACK`
-   and repair the archive/input mapping; do not disable foreign keys or commit
-   a partial restore. Only an empty check may be followed by `COMMIT`.
+   The command must return no rows. If it reports any row or any statement
+   fails, treat the Wrangler execution as failed and repair the archive/input
+   mapping; do not disable foreign keys or accept a partial restore.
 
-   Cleanup uses the same deferred transaction but reverses dependencies:
+   Cleanup uses a separate Wrangler file with the same first and last pragmas,
+   but reverses dependencies:
    delete leaves and dependents first (including `fiscal_corrections`), then
    delete `dte_events`, `dte_documents`, and `contingency_periods` as the
    deferred cycle, and finally delete `wompi_events` and
-   `document_sequences`. Run `PRAGMA foreign_key_check` before `COMMIT` and
-   `ROLLBACK` on any reported violation.
+   `document_sequences`.
 5. After restoring, spot-check row counts against the manifest's
    `rowCount` for each table, and re-run the read paths (`GET
    /api/documents`, `GET /api/audit`) to confirm the restored data renders
    correctly.
+
+### Local SQLite rehearsal
+
+Wrangler provides the outer transaction remotely. A local `sqlite3` or
+`better-sqlite3` rehearsal does not, so wrap the same ordered file contents
+explicitly:
+
+```sql
+BEGIN IMMEDIATE;
+PRAGMA defer_foreign_keys = ON;
+-- ordered restore or cleanup phases
+PRAGMA foreign_key_check;
+COMMIT;
+```
+
+If the local foreign-key check reports rows, use `ROLLBACK` instead of
+`COMMIT`, repair the input, and repeat the rehearsal.
 
 ### Mutable snapshots and legal counter reconciliation
 

@@ -1278,6 +1278,37 @@ describe("previousElSalvadorMonth (UTC/El Salvador day seam)", () => {
 });
 
 describe("retention restore guidance", () => {
+  it("keeps the Wrangler restore file free of nested transaction statements", () => {
+    const protocol = RETENTION_FOREIGN_KEY_PROTOCOL as unknown as {
+      wranglerFile: {
+        deferForeignKeys: string;
+        verify: string;
+        forbiddenTransactionStatements: readonly string[];
+      };
+      localSqliteTransaction: {
+        begin: string;
+        commit: string;
+        rollback: string;
+      };
+    };
+    expect(protocol.wranglerFile).toEqual({
+      deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
+      verify: "PRAGMA foreign_key_check",
+      forbiddenTransactionStatements: ["BEGIN", "COMMIT", "ROLLBACK"]
+    });
+    const expectedWranglerFile = [
+      protocol.wranglerFile?.deferForeignKeys,
+      "-- ordered restore phases",
+      protocol.wranglerFile?.verify
+    ].join(";\n");
+    expect(expectedWranglerFile).not.toMatch(/\b(?:BEGIN|COMMIT|ROLLBACK)\b/);
+    expect(protocol.localSqliteTransaction).toEqual({
+      begin: "BEGIN IMMEDIATE",
+      commit: "COMMIT",
+      rollback: "ROLLBACK"
+    });
+  });
+
   it("uses the latest mutable snapshots and advances legacy counters without moving backward", () => {
     const guidance = readFileSync(
       resolve(import.meta.dirname, "../../docs/retention-restore.md"),
@@ -1291,6 +1322,10 @@ describe("retention restore guidance", () => {
       "MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)"
     );
     expect(guidance).toContain("Never move an existing counter backward");
+    expect(guidance).toContain(
+      "Do not put `BEGIN`, `COMMIT`, or `ROLLBACK` inside `restore.sql`"
+    );
+    expect(guidance).toContain("Wrangler wraps the file in its own transaction");
     expect(guidance).toContain("BEGIN IMMEDIATE");
     expect(guidance).toContain("PRAGMA defer_foreign_keys = ON");
     expect(guidance).toContain("PRAGMA foreign_key_check");
