@@ -1358,6 +1358,27 @@ describe("guarded fiscal correction API", () => {
     return { ack, retry };
   }
 
+  async function consumeCorrectionDeadLetter(
+    runtime: Env,
+    body: IssuanceMessage,
+    id = crypto.randomUUID()
+  ): Promise<{
+    ack: ReturnType<typeof vi.fn>;
+    retry: ReturnType<typeof vi.fn>;
+    retryAll: ReturnType<typeof vi.fn>;
+  }> {
+    const ack = vi.fn();
+    const retry = vi.fn();
+    const retryAll = vi.fn();
+    await worker.queue({
+      queue: "diezmossv-staging-issuance-example-dlq",
+      messages: [{ id, timestamp: new Date(), body, attempts: 4, ack, retry }],
+      ackAll: vi.fn(),
+      retryAll
+    } as unknown as MessageBatch<IssuanceMessage>, runtime);
+    return { ack, retry, retryAll };
+  }
+
   function rejectedCorrectionDocument(
     overrides: Partial<DteDocumentRecord> = {}
   ): DteDocumentRecord {
@@ -1620,6 +1641,195 @@ describe("guarded fiscal correction API", () => {
       "processing_safe_old"
     );
     expect(transmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps an owned pre-dispatch correction recoverable when its queue message reaches the DLQ", async () => {
+    const db = correctionDb();
+    const event = correctionEvent({
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "issuance_dlq_predispatch",
+      processed_at: null
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_dlq_predispatch",
+      status: "PROCESSING",
+      processing_started_at: "2000-01-01T00:00:00.000Z",
+      processing_claim_id: "processing_dlq_predispatch",
+      issuance_attempt_id: "issuance_dlq_predispatch"
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event, db);
+    const deadLetter = vi.spyOn(
+      Repository.prototype,
+      "markWompiIssuanceDeadLettered"
+    );
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+
+    const disposition = await consumeCorrectionDeadLetter(
+      correctionRuntime(db),
+      {
+        wompiEventId: String(event.id),
+        issuanceAttemptId: correction.issuance_attempt_id!,
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(disposition.retryAll).not.toHaveBeenCalled();
+    expect(correction.status).toBe("PROCESSING");
+    expect(correction.mh_dispatch_started_at).toBeNull();
+    expect(event.issuance_status).toBe("PROCESSING");
+    expect(deadLetter).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.audits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "FISCAL_CORRECTION_STARTED",
+        entity_id: correction.id
+      })
+    ]));
+  });
+
+  it("moves an owned dispatch-started correction from the DLQ to review without retransmitting", async () => {
+    const db = correctionDb();
+    const documentId = "doc_dlq_dispatched";
+    const event = correctionEvent({
+      issuance_status: "DOCUMENT_CREATED",
+      issuance_attempt_id: "issuance_dlq_dispatched",
+      created_document_id: documentId,
+      processed_at: "2000-01-01T00:00:00.000Z"
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_dlq_dispatched",
+      status: "PROCESSING",
+      processing_started_at: "2000-01-01T00:00:00.000Z",
+      processing_claim_id: "processing_dlq_dispatched",
+      issuance_attempt_id: "issuance_dlq_dispatched",
+      mh_dispatch_started_at: "2000-01-01T00:01:00.000Z"
+    });
+    const documentClaimId = `fiscal_correction_${correction.id}`;
+    const document = testDocument({
+      id: documentId,
+      wompi_event_id: String(event.id),
+      status: "SIGNED",
+      signed_jws: "signed-dlq-dispatched",
+      fiscal_operation_claim_id: documentClaimId,
+      fiscal_operation_claimed_at: "2000-01-01T00:00:30.000Z",
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    });
+    db.wompiEvents.push(event);
+    db.documents.push(document);
+    stubQueuedCorrectionLifecycle(correction, event, db);
+    const deadLetter = vi.spyOn(
+      Repository.prototype,
+      "markWompiIssuanceDeadLettered"
+    );
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+
+    const disposition = await consumeCorrectionDeadLetter(
+      correctionRuntime(db),
+      {
+        wompiEventId: String(event.id),
+        issuanceAttemptId: correction.issuance_attempt_id!,
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(disposition.retryAll).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "REVIEW_REQUIRED",
+      failure_code: "MH_DISPATCH_UNCERTAIN"
+    });
+    expect(event.issuance_status).toBe("DOCUMENT_CREATED");
+    expect(deadLetter).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.audits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "FISCAL_CORRECTION_REVIEW_REQUIRED",
+        entity_id: correction.id
+      })
+    ]));
+  });
+
+  it("does not mutate a correction target for a DLQ message with stale ownership", async () => {
+    const db = correctionDb();
+    const event = correctionEvent({
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: "issuance_dlq_stale",
+      processed_at: null
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_dlq_stale",
+      status: "PROCESSING",
+      processing_claim_id: "processing_dlq_current",
+      issuance_attempt_id: "issuance_dlq_stale"
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event, db);
+    const auditReconciliation = vi.mocked(
+      Repository.prototype.reconcileFiscalCorrectionAudits
+    );
+    const deadLetter = vi.spyOn(
+      Repository.prototype,
+      "markWompiIssuanceDeadLettered"
+    );
+
+    const disposition = await consumeCorrectionDeadLetter(
+      correctionRuntime(db),
+      {
+        wompiEventId: String(event.id),
+        issuanceAttemptId: correction.issuance_attempt_id!,
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: "processing_dlq_stale"
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retryAll).not.toHaveBeenCalled();
+    expect(correction.status).toBe("PROCESSING");
+    expect(event.issuance_status).toBe("PROCESSING");
+    expect(auditReconciliation).not.toHaveBeenCalled();
+    expect(deadLetter).not.toHaveBeenCalled();
+  });
+
+  it("reconciles terminal correction audits when an owned duplicate reaches the DLQ", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_dlq_terminal",
+      status: "ACCEPTED",
+      processing_claim_id: "processing_dlq_terminal",
+      completed_at: "2000-01-01T00:02:00.000Z"
+    });
+    vi.spyOn(Repository.prototype, "getFiscalCorrection")
+      .mockResolvedValue(correction);
+    const auditReconciliation = vi.spyOn(
+      Repository.prototype,
+      "reconcileFiscalCorrectionAudits"
+    ).mockResolvedValue();
+    const deadLetter = vi.spyOn(
+      Repository.prototype,
+      "markWompiIssuanceDeadLettered"
+    );
+
+    const disposition = await consumeCorrectionDeadLetter(
+      correctionRuntime(db),
+      {
+        wompiEventId: correction.wompi_event_id!,
+        issuanceAttemptId: correction.issuance_attempt_id!,
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retryAll).not.toHaveBeenCalled();
+    expect(auditReconciliation).toHaveBeenCalledWith(correction);
+    expect(deadLetter).not.toHaveBeenCalled();
   });
 
   it.each(["ACCEPTED", "REJECTED"] as const)(

@@ -528,7 +528,12 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
 
 async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
   const repo = new Repository(env.DB);
+  const pipeline = new IssuancePipeline(env);
   for (const message of batch.messages) {
+    if (message.body.fiscalCorrectionId) {
+      await handleFiscalCorrectionDeadLetterMessage(message, pipeline, repo);
+      continue;
+    }
     const documentId = message.body.advancedDocumentId;
     const wompiEventId = message.body.wompiEventId;
     const entityType = documentId ? "dte_document" : "wompi_event";
@@ -577,6 +582,74 @@ async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: 
     });
     message.ack();
   }
+}
+
+async function handleFiscalCorrectionDeadLetterMessage(
+  message: Message<IssuanceMessage>,
+  pipeline: IssuancePipeline,
+  repo: Repository
+): Promise<void> {
+  const correctionId = message.body.fiscalCorrectionId;
+  const processingClaimId = message.body.fiscalCorrectionProcessingClaimId;
+  const issuanceAttemptId = message.body.issuanceAttemptId;
+  const fiscalClaimId = message.body.fiscalClaimId;
+  if (
+    !correctionId
+    || !processingClaimId
+    || Boolean(issuanceAttemptId) === Boolean(fiscalClaimId)
+  ) {
+    message.ack();
+    return;
+  }
+  const correction = await repo.getFiscalCorrection(correctionId);
+  const ownsCorrection = Boolean(
+    correction
+    && correction.processing_claim_id === processingClaimId
+    && correction.issuance_attempt_id === (issuanceAttemptId ?? null)
+    && correction.fiscal_claim_id === (fiscalClaimId ?? null)
+    && (
+      correction.target_kind === "WOMPI_EVENT"
+        ? (
+            message.body.wompiEventId === correction.wompi_event_id
+            && message.body.advancedDocumentId === undefined
+          )
+        : (
+            message.body.advancedDocumentId === correction.document_id
+            && message.body.wompiEventId === undefined
+          )
+    )
+  );
+  if (!correction || !ownsCorrection) {
+    message.ack();
+    return;
+  }
+  if (["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)) {
+    await repo.reconcileFiscalCorrectionAudits(correction);
+    message.ack();
+    return;
+  }
+  if (
+    correction.status === "PROCESSING"
+    && correction.mh_dispatch_started_at !== null
+  ) {
+    await pipeline.processFiscalCorrection(correction.id, {
+      processingClaimId,
+      ...(issuanceAttemptId ? { issuanceAttemptId } : {}),
+      ...(fiscalClaimId ? { fiscalClaimId } : {})
+    });
+    message.ack();
+    return;
+  }
+  if (
+    correction.mh_dispatch_started_at === null
+    && (correction.status === "QUEUED" || correction.status === "PROCESSING")
+  ) {
+    // Leave proven pre-dispatch work under its current correction ownership.
+    // The scheduled stale-correction sweep can rotate that ownership and requeue
+    // it safely; the ordinary DLQ path must not dead-letter the backing Wompi event.
+    await repo.reconcileFiscalCorrectionAudits(correction);
+  }
+  message.ack();
 }
 
 // Runs on every 15-minute cron tick. certificateExpiry never throws (an
