@@ -603,15 +603,17 @@ export class Repository {
   }
 
   async markFiscalCorrectionMhDispatchStarted(id: string, claimId: string): Promise<boolean> {
+    const dispatchStartedAt = nowIso();
     const row = await this.db.prepare(
       `UPDATE fiscal_corrections
-          SET mh_dispatch_started_at = COALESCE(mh_dispatch_started_at, ?),
+          SET mh_dispatch_started_at = ?,
               updated_at = ?
         WHERE id = ?
           AND status = 'PROCESSING'
           AND processing_claim_id = ?
+          AND mh_dispatch_started_at IS NULL
         RETURNING id`
-    ).bind(nowIso(), nowIso(), id, claimId).first<{ id: string }>();
+    ).bind(dispatchStartedAt, dispatchStartedAt, id, claimId).first<{ id: string }>();
     return Boolean(row);
   }
 
@@ -689,6 +691,96 @@ export class Repository {
       ).bind(completedAt, id, claimId, outcome.status, id, claimId)
     ]);
     return Number(results[0]?.meta?.changes ?? 0) === 1;
+  }
+
+  async finalizeWompiFiscalCorrectionFailure(
+    id: string,
+    claimId: string,
+    outcome: Pick<FiscalCorrectionOutcome, "failureCode" | "failureMessage">
+  ): Promise<boolean> {
+    const completedAt = nowIso();
+    const failureCode = outcome.failureCode ?? "FISCAL_CORRECTION_FAILED";
+    const failureMessage = outcome.failureMessage ?? "La corrección fiscal falló antes de crear el CDE.";
+    const results = await this.db.batch([
+      this.db.prepare(
+        `UPDATE wompi_events
+            SET issuance_status = 'FAILED',
+                issuance_attempt_count = issuance_attempt_count + 1,
+                issuance_error_code = ?,
+                issuance_error_message = ?,
+                issuance_last_attempt_at = ?,
+                issuance_failed_at = ?,
+                processed_at = ?,
+                issuance_attempt_id = NULL,
+                issuance_claim_id = NULL,
+                issuance_claimed_at = NULL
+          WHERE id = (
+            SELECT wompi_event_id
+              FROM fiscal_corrections
+             WHERE id = ?
+               AND target_kind = 'WOMPI_EVENT'
+               AND status = 'PROCESSING'
+               AND processing_claim_id = ?
+               AND mh_dispatch_started_at IS NULL
+          )
+            AND created_document_id IS NULL
+            AND processed_at IS NULL
+            AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+            AND issuance_attempt_id = (
+              SELECT issuance_attempt_id
+                FROM fiscal_corrections
+               WHERE id = ?
+                 AND processing_claim_id = ?
+            )`
+      ).bind(
+        failureCode,
+        failureMessage,
+        completedAt,
+        completedAt,
+        completedAt,
+        id,
+        claimId,
+        id,
+        claimId
+      ),
+      this.db.prepare(
+        `UPDATE fiscal_corrections
+            SET status = 'FAILED',
+                failure_code = ?,
+                failure_message = ?,
+                completed_at = ?,
+                updated_at = ?
+          WHERE id = ?
+            AND target_kind = 'WOMPI_EVENT'
+            AND status = 'PROCESSING'
+            AND processing_claim_id = ?
+            AND mh_dispatch_started_at IS NULL
+            AND EXISTS (
+              SELECT 1
+                FROM wompi_events
+               WHERE id = fiscal_corrections.wompi_event_id
+                 AND created_document_id IS NULL
+                 AND issuance_status = 'FAILED'
+                 AND processed_at = ?
+                 AND issuance_attempt_id IS NULL
+                 AND issuance_claim_id IS NULL
+                 AND issuance_error_code = ?
+            )`
+      ).bind(
+        failureCode,
+        failureMessage,
+        completedAt,
+        completedAt,
+        id,
+        claimId,
+        completedAt,
+        failureCode
+      )
+    ]);
+    return (
+      Number(results[0]?.meta?.changes ?? 0) === 1
+      && Number(results[1]?.meta?.changes ?? 0) === 1
+    );
   }
 
   async listRecoverableFiscalCorrections(

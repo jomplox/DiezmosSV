@@ -338,6 +338,139 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("lets exactly one correction delivery cross the MH dispatch boundary", async () => {
+    const database = migratedDatabase();
+    seedFailedWompiEvent(database, "wompi_dispatch_cas");
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: "wompi_dispatch_cas",
+        requestId: "45454545-4545-4545-8545-454545454545"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected dispatch CAS claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    });
+
+    await expect(repository.markFiscalCorrectionMhDispatchStarted(
+      correction.id,
+      correction.processing_claim_id
+    )).resolves.toBe(true);
+    const firstMarker = database.prepare(
+      "SELECT mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id);
+    await expect(repository.markFiscalCorrectionMhDispatchStarted(
+      correction.id,
+      correction.processing_claim_id
+    )).resolves.toBe(false);
+    expect(database.prepare(
+      "SELECT mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual(firstMarker);
+    database.close();
+  });
+
+  it("atomically retires an uncorrectable pre-CDE event without losing its evidence", async () => {
+    const database = migratedDatabase();
+    const eventId = "wompi_uncorrectable_candidate";
+    const numeroControl = "DTE-15-M001P004-000000000000091";
+    const codigoGeneracion = "91919191-9191-4191-8191-919191919191";
+    seedFailedWompiEvent(database, eventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET control_prefix = 'M001P004',
+              control_sequence = 91,
+              reserved_numero_control = ?,
+              reserved_codigo_generacion = ?
+        WHERE id = ?`
+    ).run(numeroControl, codigoGeneracion, eventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: eventId,
+        requestId: "46464646-4646-4646-8646-464646464646"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected retirement claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    });
+
+    await expect(repository.finalizeWompiFiscalCorrectionFailure(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        failureCode: "FISCAL_CORRECTION_INVALID_CANDIDATE",
+        failureMessage: "El receptor corregido no es válido."
+      }
+    )).resolves.toBe(true);
+
+    expect(database.prepare(
+      `SELECT issuance_status, processed_at, issuance_attempt_id, issuance_claim_id,
+              issuance_claimed_at, issuance_error_code, issuance_error_message,
+              control_prefix, control_sequence, reserved_numero_control,
+              reserved_codigo_generacion
+         FROM wompi_events WHERE id = ?`
+    ).get(eventId)).toEqual({
+      issuance_status: "FAILED",
+      processed_at: expect.any(String),
+      issuance_attempt_id: null,
+      issuance_claim_id: null,
+      issuance_claimed_at: null,
+      issuance_error_code: "FISCAL_CORRECTION_INVALID_CANDIDATE",
+      issuance_error_message: "El receptor corregido no es válido.",
+      control_prefix: "M001P004",
+      control_sequence: 91,
+      reserved_numero_control: numeroControl,
+      reserved_codigo_generacion: codigoGeneracion
+    });
+    expect(database.prepare(
+      `SELECT status, failure_code, corrected_receptor_json, changed_fields_json
+         FROM fiscal_corrections WHERE id = ?`
+    ).get(correction.id)).toEqual({
+      status: "FAILED",
+      failure_code: "FISCAL_CORRECTION_INVALID_CANDIDATE",
+      corrected_receptor_json: JSON.stringify({ nombre: "Donante corregida" }),
+      changed_fields_json: JSON.stringify(["nombre"])
+    });
+    expect(await repository.listStalledApprovedWompiEvents(
+      "2099-01-01T00:00:00.000Z"
+    )).toEqual([]);
+
+    const next = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: eventId,
+        requestId: "47474747-4747-4747-8747-474747474747",
+        requestPayloadSha256: "next-correction-payload"
+      })
+    );
+    expect(next).toMatchObject({
+      kind: "claimed",
+      correction: {
+        issuance_attempt_id: expect.any(String)
+      }
+    });
+    if (next.kind !== "claimed") throw new Error("expected a new explicit correction");
+    expect(next.correction.issuance_attempt_id).not.toBe(correction.issuance_attempt_id);
+    expect(database.prepare(
+      `SELECT control_prefix, control_sequence, reserved_numero_control,
+              reserved_codigo_generacion
+         FROM wompi_events WHERE id = ?`
+    ).get(eventId)).toEqual({
+      control_prefix: "M001P004",
+      control_sequence: 91,
+      reserved_numero_control: numeroControl,
+      reserved_codigo_generacion: codigoGeneracion
+    });
+    database.close();
+  });
+
   it("requires MH dispatch evidence for known and uncertain MH outcomes", async () => {
     const database = migratedDatabase();
     const repository = new Repository(new SqliteD1(database).database);
