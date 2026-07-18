@@ -87,6 +87,22 @@ const TERMINAL_FISCAL_CORRECTION_STATUSES = new Set([
   "FAILED",
   "REVIEW_REQUIRED"
 ]);
+const FISCAL_CORRECTION_AUDIT_FIELDS = new Set([
+  "tipoDocumento",
+  "numDocumento",
+  "nrc",
+  "nombre",
+  "codActividad",
+  "descActividad",
+  "correo",
+  "telefono",
+  "codDomiciliado",
+  "codPais",
+  "departamento",
+  "municipio",
+  "distrito",
+  "complemento"
+]);
 
 export interface FiscalCorrectionQueueOwnership {
   processingClaimId: string;
@@ -118,6 +134,13 @@ class FiscalCorrectionBusyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "FiscalCorrectionBusyError";
+  }
+}
+
+class FiscalCorrectionDispatchInFlightError extends Error {
+  constructor() {
+    super("Otra entrega ya cruzó el límite de despacho fiscal de esta corrección.");
+    this.name = "FiscalCorrectionDispatchInFlightError";
   }
 }
 
@@ -353,6 +376,7 @@ export class IssuancePipeline {
     }
     assertFiscalCorrectionOwnership(correction, ownership);
     if (TERMINAL_FISCAL_CORRECTION_STATUSES.has(correction.status)) {
+      await this.recordFiscalCorrectionAudit(correction, correction.status);
       return correction;
     }
     if (correction.target_kind !== "WOMPI_EVENT") {
@@ -372,6 +396,7 @@ export class IssuancePipeline {
       correction = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
       assertFiscalCorrectionOwnership(correction, ownership);
       if (claim === "terminal" || TERMINAL_FISCAL_CORRECTION_STATUSES.has(correction.status)) {
+        await this.recordFiscalCorrectionAudit(correction, correction.status);
         return correction;
       }
       if (claim !== "claimed" && correction.status !== "PROCESSING") {
@@ -381,6 +406,7 @@ export class IssuancePipeline {
     if (correction.status !== "PROCESSING") {
       throw new FiscalCorrectionOwnershipError();
     }
+    await this.recordFiscalCorrectionAudit(correction, "STARTED");
     if (correction.mh_dispatch_started_at) {
       return this.finalizeFiscalCorrectionReview(correction, ownership);
     }
@@ -402,7 +428,12 @@ export class IssuancePipeline {
       try {
         return await this.finishWompiFiscalCorrection(correction, existing, ownership);
       } catch (error) {
-        if (error instanceof FiscalCorrectionBusyError) throw error;
+        if (
+          error instanceof FiscalCorrectionBusyError
+          || error instanceof FiscalCorrectionDispatchInFlightError
+        ) {
+          throw error;
+        }
         return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
       }
     }
@@ -427,6 +458,9 @@ export class IssuancePipeline {
     const binding = await resolveDonationIntentBinding(this.repo, payload);
     const intent = binding.kind === "bound" ? binding.intent : null;
     const config = getEmisorConfig(this.env);
+    const correctionConfig = event.control_prefix
+      ? { ...config, controlPrefix: event.control_prefix }
+      : config;
     let correctedReceptor: FiscalReceptorCorrection;
 
     try {
@@ -437,7 +471,7 @@ export class IssuancePipeline {
         payload,
         intent,
         correction: correctedReceptor,
-        config,
+        config: correctionConfig,
         environment: event.environment,
         sequence: event.control_sequence ?? 1,
         codigoGeneracion: event.reserved_codigo_generacion ?? undefined
@@ -473,13 +507,13 @@ export class IssuancePipeline {
       const reserved = await this.repo.reserveWompiDocumentIdentifiers(
         event.id,
         event.environment,
-        config.controlPrefix
+        correctionConfig.controlPrefix
       );
       const document = buildCorrectedWompiCandidate({
         payload,
         intent,
         correction: correctedReceptor,
-        config,
+        config: correctionConfig,
         environment: event.environment,
         sequence: reserved.sequence,
         codigoGeneracion: reserved.codigoGeneracion
@@ -513,7 +547,12 @@ export class IssuancePipeline {
       if (eventClaimed) {
         await this.repo.releaseWompiEventIssuance(event.id, issuanceClaimId);
       }
-      if (error instanceof FiscalCorrectionBusyError) throw error;
+      if (
+        error instanceof FiscalCorrectionBusyError
+        || error instanceof FiscalCorrectionDispatchInFlightError
+      ) {
+        throw error;
+      }
       return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
     }
   }
@@ -543,6 +582,7 @@ export class IssuancePipeline {
     });
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
     if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      await this.recordFiscalCorrectionAudit(latest, latest.status);
       return latest;
     }
     throw new Error("No se pudo finalizar el resultado de la corrección fiscal.");
@@ -553,13 +593,25 @@ export class IssuancePipeline {
     failureCode: string,
     failureMessage: string
   ): Promise<FiscalCorrectionRecord> {
-    const finalized = await this.repo.finalizeFiscalCorrection(correction.id, correction.processing_claim_id, {
-      status: "FAILED",
-      failureCode,
-      failureMessage
-    });
+    const retiredWompiEvent = correction.target_kind === "WOMPI_EVENT"
+      ? await this.repo.finalizeWompiFiscalCorrectionFailure(
+          correction.id,
+          correction.processing_claim_id,
+          { failureCode, failureMessage }
+        )
+      : false;
+    const finalized = retiredWompiEvent || await this.repo.finalizeFiscalCorrection(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        status: "FAILED",
+        failureCode,
+        failureMessage
+      }
+    );
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
     if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      await this.recordFiscalCorrectionAudit(latest, latest.status);
       return latest;
     }
     throw new Error("No se pudo finalizar el fallo previo al despacho fiscal.");
@@ -580,6 +632,7 @@ export class IssuancePipeline {
     );
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
     if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      await this.recordFiscalCorrectionAudit(latest, latest.status);
       return latest;
     }
     throw new Error("No se pudo registrar la revisión requerida de la corrección fiscal.");
@@ -591,6 +644,28 @@ export class IssuancePipeline {
     error: unknown
   ): Promise<FiscalCorrectionRecord> {
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    const document = latest.wompi_event_id
+      ? await this.repo.getDteDocumentByWompiEvent(latest.wompi_event_id)
+      : null;
+    if (document?.status === "ACCEPTED") {
+      const finalized = await this.repo.finalizeFiscalCorrection(
+        latest.id,
+        ownership.processingClaimId,
+        { status: "ACCEPTED" }
+      );
+      const acceptedCorrection = (await this.repo.getFiscalCorrection(latest.id)) ?? latest;
+      if (
+        finalized
+        || TERMINAL_FISCAL_CORRECTION_STATUSES.has(acceptedCorrection.status)
+      ) {
+        await this.recordFiscalCorrectionAudit(
+          acceptedCorrection,
+          acceptedCorrection.status
+        );
+        return acceptedCorrection;
+      }
+      throw new Error("No se pudo finalizar la aceptación conocida de la corrección fiscal.");
+    }
     if (error instanceof MhPreDispatchError) {
       if (latest.mh_dispatch_started_at) {
         await this.repo.clearFiscalCorrectionMhDispatchStarted(
@@ -612,6 +687,52 @@ export class IssuancePipeline {
       "FISCAL_CORRECTION_FAILED",
       error instanceof Error ? error.message : String(error)
     );
+  }
+
+  private async recordFiscalCorrectionAudit(
+    correction: FiscalCorrectionRecord,
+    status: string
+  ): Promise<void> {
+    const actionStatus = status === "STARTED"
+      ? status
+      : TERMINAL_FISCAL_CORRECTION_STATUSES.has(status)
+        ? status
+        : null;
+    if (!actionStatus) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(correction.changed_fields_json);
+    } catch {
+      parsed = [];
+    }
+    const changedFields = Array.isArray(parsed)
+      ? parsed.reduce<string[]>((fields, candidate) => {
+          if (
+            typeof candidate === "string"
+            && FISCAL_CORRECTION_AUDIT_FIELDS.has(candidate)
+            && !fields.includes(candidate)
+          ) {
+            fields.push(candidate);
+          }
+          return fields;
+        }, [])
+      : [];
+    try {
+      await this.repo.createAuditIfAbsent({
+        action: `FISCAL_CORRECTION_${actionStatus}`,
+        entityType: "fiscal_correction",
+        entityId: correction.id,
+        summary: actionStatus === "STARTED"
+          ? "Procesamiento de corrección fiscal iniciado"
+          : `Corrección fiscal finalizada con estado ${actionStatus}`,
+        metadata: {
+          correctionId: correction.id,
+          changedFields
+        }
+      });
+    } catch (error) {
+      logWorkerError(this.env, "fiscal_correction_audit_failed", error);
+    }
   }
 
   private async recordStagingSmokeRun(
@@ -805,11 +926,7 @@ export class IssuancePipeline {
           correctionContext.processingClaimId
         );
         if (!marked) {
-          await this.repo.markDocumentFailed(record.id, claimId, {
-            mhEstado: "FISCAL_CORRECTION_OWNERSHIP_LOST",
-            observaciones: ["La corrección perdió propiedad antes del despacho fiscal."]
-          });
-          throw new FiscalCorrectionOwnershipError();
+          throw new FiscalCorrectionDispatchInFlightError();
         }
       }
       const mhResult = await this.mh.transmitDte({
@@ -847,6 +964,9 @@ export class IssuancePipeline {
       }
       return (await this.repo.getDteDocument(record.id)) ?? record;
     } catch (error) {
+      if (error instanceof FiscalCorrectionDispatchInFlightError) {
+        throw error;
+      }
       if (error instanceof MhPreDispatchError && claimId) {
         if (correctionContext) {
           const failed = await this.repo.markDocumentFailed(record.id, claimId, {
