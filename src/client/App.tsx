@@ -60,10 +60,14 @@ import { invalidationWindowInfo } from "./invalidationWindow";
 import { rejectionDetailForDocument } from "./rejectionDetail";
 import {
   FiscalCorrectionDialog,
-  fiscalCorrectionRequestIdForTarget,
+  fiscalCorrectionDraftForTarget,
+  fiscalCorrectionSubmissionForTarget,
+  fiscalCorrectionSubmissionMessage,
   fiscalCorrectionStatusLabel,
   isCorrectablePreCdeFailure,
-  isReviewRequiredPreCdeFailure
+  isReviewRequiredPreCdeFailure,
+  type FiscalCorrectionPendingSubmission,
+  type FiscalCorrectionSubmitResponse
 } from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
@@ -254,7 +258,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
   const resendRequestIds = useRef(new Map<string, string>());
-  const fiscalCorrectionRequestIds = useRef(new Map<string, string>());
+  const fiscalCorrectionSubmissions = useRef(
+    new Map<string, FiscalCorrectionPendingSubmission>()
+  );
   // Functions from an older React render retain this version. The centralized request
   // wrapper rejects them before they can issue another request or write account data.
   const renderAccountStateVersion = accountStateGuardRef.current.capture();
@@ -774,7 +780,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setFiscalCorrectionData(null);
     setFiscalCorrectionProtectedContext(emptyFiscalCorrectionProtectedContext());
     setFiscalCorrectionError("");
-    fiscalCorrectionRequestIds.current.clear();
+    fiscalCorrectionSubmissions.current.clear();
     setTestInput(emptyTestDteInput());
     setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
     setSelectedUserId(null);
@@ -890,9 +896,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     const target = fiscalCorrectionTarget;
     if (!target || !fiscalCorrectionData || busy) return;
     const targetKey = fiscalCorrectionTargetKey(target);
-    const correctionRequestId = fiscalCorrectionRequestIdForTarget(
-      fiscalCorrectionRequestIds.current,
-      targetKey
+    const submission = fiscalCorrectionSubmissionForTarget(
+      fiscalCorrectionSubmissions.current,
+      targetKey,
+      receptor
     );
     const path = target.kind === "WOMPI_EVENT"
       ? `/api/wompi-events/${target.id}/correct-and-retry`
@@ -900,18 +907,25 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setFiscalCorrectionError("");
     setBusy("fiscal-correction-submit");
     let accepted = false;
+    let acceptedMessage = "";
     try {
-      await accountApi(path, {
+      const result = await accountApi<FiscalCorrectionSubmitResponse>(path, {
         method: "POST",
-        body: { correctionRequestId, receptor }
+        body: {
+          correctionRequestId: submission.correctionRequestId,
+          receptor: submission.receptor
+        }
       });
-      fiscalCorrectionRequestIds.current.delete(targetKey);
+      fiscalCorrectionSubmissions.current.delete(targetKey);
       accepted = true;
+      acceptedMessage = fiscalCorrectionSubmissionMessage(result);
     } catch (error) {
       if (isApiError(error)) {
-        fiscalCorrectionRequestIds.current.delete(targetKey);
+        fiscalCorrectionSubmissions.current.delete(targetKey);
         if (error.details.error === "fiscal_correction_queue_failed") {
           accepted = true;
+          acceptedMessage =
+            "La corrección quedó guardada y se reintentará automáticamente.";
         } else {
           setFiscalCorrectionError(error.message);
           if (error.status === 401) handleApiFailure(error);
@@ -928,7 +942,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
     if (!accepted) return;
     closeFiscalCorrection();
-    setToast("Corrección en cola");
+    setToast(acceptedMessage);
     try {
       await refresh();
       setSelectedDocumentDetailVersion((current) => current + 1);
@@ -1863,15 +1877,26 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           onConfirm={() => void documentAction("invalidate", pendingInvalidation)}
         />
       )}
-      <FiscalCorrectionDialog
-        open={Boolean(fiscalCorrectionTarget && fiscalCorrectionData)}
-        data={fiscalCorrectionData}
-        protectedContext={fiscalCorrectionProtectedContext}
-        busy={busy === "fiscal-correction-submit"}
-        error={fiscalCorrectionError}
-        onCancel={closeFiscalCorrection}
-        onSubmit={submitFiscalCorrection}
-      />
+      {fiscalCorrectionTarget && fiscalCorrectionData && (
+        <FiscalCorrectionDialog
+          key={fiscalCorrectionTargetKey(fiscalCorrectionTarget)}
+          open
+          data={fiscalCorrectionData}
+          initialDraft={fiscalCorrectionDraftForTarget(
+            fiscalCorrectionSubmissions.current,
+            fiscalCorrectionTargetKey(fiscalCorrectionTarget),
+            fiscalCorrectionData.receptor
+          )}
+          retryingSubmittedPayload={fiscalCorrectionSubmissions.current.has(
+            fiscalCorrectionTargetKey(fiscalCorrectionTarget)
+          )}
+          protectedContext={fiscalCorrectionProtectedContext}
+          busy={busy === "fiscal-correction-submit"}
+          error={fiscalCorrectionError}
+          onCancel={closeFiscalCorrection}
+          onSubmit={submitFiscalCorrection}
+        />
+      )}
       <div className="toast-region" role="status" aria-live="polite">
         {toast && (
           <button className="toast" onClick={() => setToast("")}>

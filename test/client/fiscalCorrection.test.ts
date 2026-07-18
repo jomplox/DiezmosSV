@@ -6,7 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 import {
   FiscalCorrectionDialog,
   fiscalCorrectionFormState,
-  fiscalCorrectionRequestIdForTarget,
+  fiscalCorrectionDraftForTarget,
+  fiscalCorrectionSubmissionForTarget,
+  fiscalCorrectionSubmissionMessage,
   fiscalCorrectionStatusLabel,
   isCorrectablePreCdeFailure
 } from "../../src/client/fiscalCorrectionDialog";
@@ -64,10 +66,18 @@ function data(
   };
 }
 
-function renderDialog(value: FiscalCorrectionData): string {
+function renderDialog(
+  value: FiscalCorrectionData,
+  options: {
+    initialDraft?: FiscalReceptorCorrection;
+    retryingSubmittedPayload?: boolean;
+  } = {}
+): string {
   return renderToStaticMarkup(createElement(FiscalCorrectionDialog, {
     open: true,
     data: value,
+    initialDraft: options.initialDraft,
+    retryingSubmittedPayload: options.retryingSubmittedPayload ?? false,
     protectedContext: {
       amountLabel: "$42.50",
       environmentLabel: "Pruebas",
@@ -105,6 +115,26 @@ describe("fiscal correction dialog", () => {
     )).toMatchObject({
       changed: true,
       canSubmit: true,
+      validationError: ""
+    });
+  });
+
+  it("does not mark an untouched raw draft dirty because validation normalizes it", () => {
+    const serverReceptor = {
+      ...domesticReceptor,
+      correo: "ANA@EXAMPLE.ORG"
+    };
+
+    expect(
+      fiscalCorrectionFormState(
+        serverReceptor,
+        serverReceptor,
+        null,
+        { initialDraft: serverReceptor }
+      )
+    ).toMatchObject({
+      changed: false,
+      canSubmit: false,
       validationError: ""
     });
   });
@@ -251,50 +281,111 @@ describe("Fallos fiscal correction wiring", () => {
   });
 
   it("loads and submits only the allowlisted receptor to the guarded endpoints", () => {
+    const submitBlock =
+      appSource.match(/async function submitFiscalCorrection[\s\S]*?\n  async function createTestDte/)?.[0] ?? "";
+
     expect(appSource).toContain("/correction-data");
     expect(appSource).toContain("/correct-and-retry");
-    expect(appSource).toContain("body: { correctionRequestId, receptor }");
-    expect(appSource).not.toContain("body: { correctionRequestId, receptor, protectedContext");
-    expect(appSource).not.toContain("body: { correctionRequestId, receptor, document");
-    expect(appSource).not.toContain("body: { correctionRequestId, receptor, event");
+    expect(submitBlock).toContain("correctionRequestId: submission.correctionRequestId");
+    expect(submitBlock).toContain("receptor: submission.receptor");
+    expect(submitBlock).not.toContain("protectedContext:");
+    expect(submitBlock).not.toContain("document: submission");
+    expect(submitBlock).not.toContain("event: submission");
   });
 
   it("reuses the exact request UUID after an unknown failure, close, and reopen", () => {
-    const ids = new Map<string, string>();
+    const submissions = new Map();
     const create = vi.fn()
       .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
       .mockReturnValueOnce("70000003-2222-4222-8222-700000032222")
       .mockReturnValueOnce("33333333-3333-4333-8333-333333333333");
+    const submittedReceptor = {
+      ...domesticReceptor,
+      correo: "corregido@example.org"
+    };
 
-    const firstAttempt = fiscalCorrectionRequestIdForTarget(
-      ids,
+    const firstAttempt = fiscalCorrectionSubmissionForTarget(
+      submissions,
       "DTE_DOCUMENT:dte-1",
+      submittedReceptor,
       create
     );
-    expect(firstAttempt).toBe("11111111-1111-4111-8111-111111111111");
+    expect(firstAttempt).toEqual({
+      correctionRequestId: "11111111-1111-4111-8111-111111111111",
+      receptor: submittedReceptor
+    });
 
     // An unknown POST result and a user close are both non-definitive. Reopening
-    // the same target must therefore retain the first action's request fence.
-    expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
-      .toBe(firstAttempt);
+    // the same target must therefore restore the exact payload and request fence.
+    expect(
+      fiscalCorrectionDraftForTarget(
+        submissions,
+        "DTE_DOCUMENT:dte-1",
+        domesticReceptor
+      )
+    ).toEqual(submittedReceptor);
+    expect(
+      fiscalCorrectionSubmissionForTarget(
+        submissions,
+        "DTE_DOCUMENT:dte-1",
+        submittedReceptor,
+        create
+      )
+    ).toEqual(firstAttempt);
     expect(create).toHaveBeenCalledTimes(1);
+    expect(
+      fiscalCorrectionFormState(
+        domesticReceptor,
+        submittedReceptor,
+        null,
+        {
+          initialDraft: submittedReceptor,
+          retryingSubmittedPayload: true
+        }
+      )
+    ).toMatchObject({
+      changed: false,
+      canSubmit: true,
+      validationError: ""
+    });
 
     // A different target owns a different fence.
-    expect(fiscalCorrectionRequestIdForTarget(ids, "WOMPI_EVENT:event-2", create))
-      .toBe("70000003-2222-4222-8222-700000032222");
+    expect(
+      fiscalCorrectionSubmissionForTarget(
+        submissions,
+        "WOMPI_EVENT:event-2",
+        submittedReceptor,
+        create
+      ).correctionRequestId
+    ).toBe("70000003-2222-4222-8222-700000032222");
 
-    // Account/logout reset is allowed to clear every retained action.
-    ids.clear();
-    expect(fiscalCorrectionRequestIdForTarget(ids, "DTE_DOCUMENT:dte-1", create))
-      .toBe("33333333-3333-4333-8333-333333333333");
+    // A real edit starts a distinct logical action instead of reusing an
+    // ambiguous request with a different payload.
+    const edited = {
+      ...submittedReceptor,
+      telefono: "70002222"
+    };
+    expect(
+      fiscalCorrectionSubmissionForTarget(
+        submissions,
+        "DTE_DOCUMENT:dte-1",
+        edited,
+        create
+      )
+    ).toEqual({
+      correctionRequestId: "33333333-3333-4333-8333-333333333333",
+      receptor: edited
+    });
 
-    expect(appSource).toContain("const fiscalCorrectionRequestIds = useRef(new Map<string, string>())");
-    expect(appSource).toContain("fiscalCorrectionRequestIdForTarget(");
+    expect(appSource).toMatch(
+      /const fiscalCorrectionSubmissions = useRef\(\s*new Map/
+    );
+    expect(appSource).toContain("fiscalCorrectionSubmissionForTarget(");
     expect(appSource).toContain("if (isApiError(error))");
-    expect(appSource).toContain("fiscalCorrectionRequestIds.current.delete(targetKey)");
+    expect(appSource).toContain("fiscalCorrectionSubmissions.current.delete(targetKey)");
     const closeBlock =
       appSource.match(/function closeFiscalCorrection\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
-    expect(closeBlock).not.toContain("fiscalCorrectionRequestIds.current.delete");
+    expect(closeBlock).not.toContain("fiscalCorrectionSubmissions.current.delete");
     expect(dialogSource).toContain(
       "if (event.currentTarget === event.target && !busy) onCancel();"
     );
@@ -306,7 +397,48 @@ describe("Fallos fiscal correction wiring", () => {
     );
     const unknownFailureBlock =
       appSource.match(/else if \(!\(error instanceof StaleAccountStateError\)\) \{[\s\S]*?\n      \}/)?.[0] ?? "";
-    expect(unknownFailureBlock).not.toContain("fiscalCorrectionRequestIds.current.delete");
+    expect(unknownFailureBlock).not.toContain("fiscalCorrectionSubmissions.current.delete");
+  });
+
+  it("remounts the dialog per target so one target never renders another draft", () => {
+    const dialogRender =
+      appSource.match(/\{fiscalCorrectionTarget && fiscalCorrectionData && \([\s\S]*?<FiscalCorrectionDialog[\s\S]*?\/>\s*\)\}/)?.[0] ?? "";
+
+    expect(dialogRender).toContain("key={fiscalCorrectionTargetKey(fiscalCorrectionTarget)}");
+    expect(dialogRender).toContain("initialDraft={fiscalCorrectionDraftForTarget(");
+    expect(dialogSource).not.toMatch(
+      /useEffect\(\(\) => \{\s*if \(open && data\) \{\s*setForm\(data\.receptor\)/
+    );
+
+    const targetBDraft = {
+      ...domesticReceptor,
+      nombre: "Receptor B"
+    };
+    const html = renderDialog(data(targetBDraft), { initialDraft: targetBDraft });
+    expect(html).toContain('value="Receptor B"');
+    expect(html).not.toContain("Receptor A");
+  });
+
+  it("reports terminal duplicate responses truthfully and refreshes their detail", () => {
+    expect(fiscalCorrectionSubmissionMessage({ status: "QUEUED" }))
+      .toBe("Corrección en cola");
+    expect(fiscalCorrectionSubmissionMessage({ status: "PROCESSING" }))
+      .toBe("Corrección en proceso");
+    expect(fiscalCorrectionSubmissionMessage({ status: "ACCEPTED", duplicate: true }))
+      .toBe("La corrección ya fue aceptada por Hacienda.");
+    expect(fiscalCorrectionSubmissionMessage({ status: "REJECTED", duplicate: true }))
+      .toBe("Hacienda rechazó la corrección. Revise el detalle.");
+    expect(fiscalCorrectionSubmissionMessage({ status: "FAILED", duplicate: true }))
+      .toBe("La corrección falló. Revise el detalle.");
+    expect(fiscalCorrectionSubmissionMessage({ status: "REVIEW_REQUIRED", duplicate: true }))
+      .toBe("La corrección requiere revisión antes de continuar.");
+
+    const submitBlock =
+      appSource.match(/async function submitFiscalCorrection[\s\S]*?\n  async function createTestDte/)?.[0] ?? "";
+    expect(submitBlock).toContain("accountApi<FiscalCorrectionSubmitResponse>");
+    expect(submitBlock).toContain("fiscalCorrectionSubmissionMessage(result)");
+    expect(submitBlock).toContain("await refresh()");
+    expect(submitBlock).toContain("setSelectedDocumentDetailVersion((current) => current + 1)");
   });
 
   it("clears correction state on account reset without disrupting an open dialog during detail refresh", () => {
@@ -316,9 +448,9 @@ describe("Fallos fiscal correction wiring", () => {
       appSource.match(/\/\/ The document list does not carry[\s\S]*?\n  \}, \[token, selected\?\.id, selectedDocumentDetailVersion\]\);/)?.[0] ?? "";
 
     expect(resetBlock).toContain("setFiscalCorrectionTarget(null)");
-    expect(resetBlock).toContain("fiscalCorrectionRequestIds.current.clear()");
+    expect(resetBlock).toContain("fiscalCorrectionSubmissions.current.clear()");
     expect(detailEffect).not.toContain("setFiscalCorrectionTarget(null)");
-    expect(detailEffect).not.toContain("fiscalCorrectionRequestIds.current.clear()");
+    expect(detailEffect).not.toContain("fiscalCorrectionSubmissions.current.clear()");
   });
 
   it("finds active correction state for both direct and Wompi-backed documents", () => {
