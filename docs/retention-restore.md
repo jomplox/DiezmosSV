@@ -12,6 +12,7 @@ multi-year retention tax law requires survives independently of D1.
 ```
 retention/<YYYY>/<YYYY-MM>/dte_documents.ndjson
 retention/<YYYY>/<YYYY-MM>/fiscal_corrections.ndjson
+retention/<YYYY>/<YYYY-MM>/fiscal_corrections_latest.ndjson  (full current-state snapshot)
 retention/<YYYY>/<YYYY-MM>/donation_intents.ndjson
 retention/<YYYY>/<YYYY-MM>/dte_events.ndjson
 retention/<YYYY>/<YYYY-MM>/email_deliveries.ndjson
@@ -29,10 +30,14 @@ six windowed tables (`dte_documents`, `fiscal_corrections`,
 `donation_intents`, `dte_events`, `email_deliveries`, `audit_logs`) are
 filtered to rows whose `created_at`
 falls in the given month, evaluated in El Salvador local time (UTC-6, no
-DST). The mutable `wompi_events` lifecycle, the legal number counters in
-`document_sequences`, and the three contingency tables are full snapshots as
-of each run. Reads remain keyset-paged and bounded; “full” does not mean one
-unbounded D1 query.
+DST). The mutable `fiscal_corrections` and `wompi_events` lifecycles, the legal
+number counters in `document_sequences`, and the three contingency tables are
+also written as full snapshots as of each run. The historical
+`fiscal_corrections.ndjson` file remains month-windowed and unchanged;
+`fiscal_corrections_latest.ndjson` is its authoritative current-state overlay.
+Both files contain the same complete correction row shape, while audit history
+remains separate in `audit_logs.ndjson`. Reads remain keyset-paged and bounded;
+“full” does not mean one unbounded D1 query.
 
 The pre-CDE issuance lifecycle stays inside the existing
 `wompi_events.ndjson` row; it does not create a separate export. A Wompi row
@@ -56,6 +61,8 @@ duplicating work. It looks like:
   "generatedAt": "2026-07-01T09:00:03.512Z",
   "tables": {
     "dte_documents": { "rowCount": 412, "sha256": "…64 hex chars…" },
+    "fiscal_corrections": { "rowCount": 3, "sha256": "…" },
+    "fiscal_corrections_latest": { "rowCount": 7, "sha256": "…" },
     "dte_events": { "rowCount": 8, "sha256": "…" },
     "email_deliveries": { "rowCount": 405, "sha256": "…" },
     "wompi_events": { "rowCount": 420, "sha256": "…" },
@@ -127,9 +134,11 @@ table:
 
    1. roots: `wompi_events`, `document_sequences`;
    2. deferred cycle: `contingency_periods`, `dte_documents`, `dte_events`;
-   3. dependents: `fiscal_corrections`, `email_deliveries`,
+   3. dependents: historical `fiscal_corrections`, `email_deliveries`,
       `contingency_batches`, `donation_intents`;
-   4. leaves: `contingency_batch_lines`, `audit_logs`.
+   4. authoritative correction overlay: apply the latest verified
+      `fiscal_corrections_latest.ndjson` snapshot to `fiscal_corrections`;
+   5. leaves: `contingency_batch_lines`, `audit_logs`.
 
    End the same file with:
 
@@ -179,20 +188,88 @@ before the full-snapshot change may contain only the Wompi rows received that
 month; treat them as legacy partial inputs and overlay the newest verified
 full snapshot when one is available.
 
-Restore the latest `document_sequences.ndjson` snapshot after Wompi events and
-DTE documents have been restored, then reconcile each
-`(environment, UPPER(control_prefix))` before allowing any new issuance. For
-each key, the safe next value is exactly:
+Restore the latest `fiscal_corrections_latest.ndjson` snapshot after the
+historical `fiscal_corrections.ndjson` rows and after both possible parent
+tables (`wompi_events` and `dte_documents`). Apply every correction column,
+including `reserved_control_prefix`, `reserved_control_sequence`,
+`reserved_codigo_generacion`, and `reserved_numero_control`, and use an
+idempotent `INSERT ... ON CONFLICT(id) DO UPDATE` upsert keyed by `id`. The
+update list in `RETENTION_FOREIGN_KEY_PROTOCOL.authoritativeOverlays` is the
+source of truth. Applying the same verified snapshot twice must leave one
+identical row. This latest snapshot is authoritative for mutable status,
+dispatch, failure, claim, reservation, and completion fields, so a historical
+`QUEUED` or `PROCESSING` row cannot overwrite a later `ACCEPTED`, `REJECTED`,
+`FAILED`, or `REVIEW_REQUIRED` outcome.
 
-**MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)**
+Migration 0028's `trg_fiscal_correction_reserve_sequence` trigger deliberately
+allocates a new live sequence when an application update changes
+`reserved_control_sequence` from `NULL` to a value. A restore is replaying an
+already allocated reservation, not allocating a new one. If
+`document_sequences.next_value` is already ahead, leaving that trigger enabled
+would abort the authoritative overlay. In the **same atomic restore file**,
+temporarily remove only that known allocation trigger, apply all correction
+upserts, and recreate it immediately afterward:
+
+```sql
+DROP TRIGGER IF EXISTS trg_fiscal_correction_reserve_sequence;
+
+-- INSERT every fiscal_corrections_latest.ndjson row here, including all
+-- migration 0028 reservation columns:
+-- INSERT INTO fiscal_corrections (...) VALUES (...)
+-- ON CONFLICT(id) DO UPDATE SET ...;
+
+CREATE TRIGGER trg_fiscal_correction_reserve_sequence
+AFTER UPDATE OF reserved_control_sequence ON fiscal_corrections
+WHEN (
+  OLD.reserved_control_sequence IS NULL
+  AND NEW.reserved_control_sequence IS NOT NULL
+)
+BEGIN
+  UPDATE document_sequences
+     SET next_value = next_value + 1
+   WHERE environment = NEW.environment
+     AND control_prefix = NEW.reserved_control_prefix
+     AND next_value = NEW.reserved_control_sequence;
+
+  SELECT RAISE(ABORT, 'fiscal correction sequence reservation failed')
+   WHERE changes() <> 1;
+END;
+```
+
+Do not drop `trg_fiscal_correction_reservation_complete`; it must continue to
+reject incomplete four-field reservations. For Wrangler, the drop, upserts,
+trigger recreation, and final `PRAGMA foreign_key_check` belong in one
+`--file` execution, without explicit transaction statements. For a local
+rehearsal they belong inside the existing `BEGIN IMMEDIATE` transaction. An
+upsert or trigger-recreation failure must roll back the whole restore; never
+leave the allocation trigger absent.
+
+Archives created before `fiscal_corrections_latest.ndjson` are valid legacy
+archives. Restore their historical `fiscal_corrections.ndjson` rows as they
+exist and do not invent a later outcome. When any newer verified archive
+contains the authoritative snapshot, overlay that newest snapshot last. The
+snapshot repeats only the already protected correction row in R2; it does not
+copy receptor JSON into audit metadata, and it remains behind the same audited
+admin-only backup download route.
+
+Restore the latest `document_sequences.ndjson` snapshot after Wompi events and
+DTE documents have been restored. After the authoritative fiscal-correction
+overlay, reconcile each `(environment, UPPER(control_prefix))` before allowing
+any new issuance. For each key, the safe next value is exactly:
+
+**MAX(snapshot `next_value`, restored document maximum + 1, restored Wompi reservation maximum + 1, restored fiscal-correction reservation maximum + 1)**
 
 The restored document maximum is the greatest trailing serial from
 `dte_documents.numero_control` for that environment/prefix. The restored
-reservation maximum is the greatest non-null `wompi_events.control_sequence`
-for the same environment/prefix. If one source has no row, omit that term (or
-treat it as `1`). Archives created before `document_sequences.ndjson` existed
-are valid legacy archives: derive the counter from the document and Wompi
-reservation maxima instead of assuming `1`.
+Wompi reservation maximum is the greatest non-null
+`wompi_events.control_sequence` for the same environment/prefix. The restored
+fiscal-correction reservation maximum is the greatest non-null
+`fiscal_corrections.reserved_control_sequence` for the same
+environment/`reserved_control_prefix`. If one source has no row, omit that
+term (or treat it as `1`). Archives created before
+`document_sequences.ndjson` existed are valid legacy archives: derive the
+counter from the document, Wompi, and fiscal-correction reservation maxima
+instead of assuming `1`.
 
 Never move an existing counter backward. When restoring into a database that
 already has a counter, compare its current `next_value` with the formula above
