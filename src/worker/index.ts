@@ -58,11 +58,7 @@ import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shar
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient, MhPreDispatchError } from "./services/mhClient";
-import {
-  IssuancePipeline,
-  RejectedWompiRetryConflictError,
-  WompiIntentQuarantinedError
-} from "./services/pipeline";
+import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
@@ -2078,7 +2074,7 @@ function isRetryableDocument(document: Pick<DteDocumentRecord, "status" | "trans
   if (document.status === "SIGNED" && document.transmission_deferred_at) {
     return false;
   }
-  return ["SIGNED", "REJECTED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
+  return ["SIGNED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
 }
 
 function normalizeEmail(value: unknown): string | null {
@@ -2813,6 +2809,15 @@ async function handleDocumentRoute(
         { status: 409 }
       );
     }
+    if (document.status === "REJECTED") {
+      return jsonResponse(
+        {
+          error: "document_correction_required",
+          message: "Corrija los datos rechazados antes de crear un nuevo intento fiscal."
+        },
+        { status: 409 }
+      );
+    }
     if (!isRetryableDocument(document)) {
       return jsonResponse(
         {
@@ -2823,37 +2828,6 @@ async function handleDocumentRoute(
       );
     }
     assertDeploymentAllowsAmbiente(env, document.environment);
-    if (document.status === "REJECTED" && document.wompi_event_id) {
-      // MH rejected the CONTENT of this CDE: retransmitting the same signed JWS
-      // would be rejected identically, so rebuild it from the original webhook.
-      let result: MhResponse;
-      try {
-        result = await new IssuancePipeline(env).rebuildRejectedWompiDocument(document);
-      } catch (error) {
-        if (error instanceof WompiIntentQuarantinedError) {
-          return jsonResponse(
-            { error: error.code, message: error.message },
-            { status: 409 }
-          );
-        }
-        if (error instanceof RejectedWompiRetryConflictError) {
-          // A concurrent retry already claimed the rebuild: refuse cleanly so we never
-          // transmit a second distinct legal DTE for the same Wompi event.
-          return jsonResponse({ error: "document_retry_in_progress", message: error.message }, { status: 409 });
-        }
-        throw error;
-      }
-      await repo.createAudit({
-        actorType: "USER",
-        actorId: actor.id,
-        action: "DTE_RETRIED",
-        entityType: "dte_document",
-        entityId: document.id,
-        summary: `${result.estado} (reconstruido)`,
-        metadata: result.raw
-      });
-      return jsonResponse({ ok: true, result });
-    }
     if (!document.signed_jws) {
       await env.ISSUANCE_QUEUE.send({ advancedDocumentId: document.id });
       await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "DTE_RETRY_ENQUEUED", entityType: "dte_document", entityId: document.id, summary: "Reintento en cola" });
