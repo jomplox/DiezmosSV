@@ -993,9 +993,10 @@ export class Repository {
                 (
                   SELECT next_value
                     FROM document_sequences
-                   WHERE environment = ? AND control_prefix = ?
+                  WHERE environment = ? AND control_prefix = ?
                 )
               ),
+              processing_started_at = ?,
               updated_at = ?
         WHERE id = ?
           AND target_kind = 'DTE_DOCUMENT'
@@ -1029,6 +1030,7 @@ export class Repository {
       input.environment,
       controlPrefix,
       updatedAt,
+      updatedAt,
       input.correctionId,
       input.documentId,
       input.environment,
@@ -1037,10 +1039,9 @@ export class Repository {
     ).first<WompiDocumentIdentifiers>();
     if (reserved) return reserved;
     return this.db.prepare(
-      `SELECT reserved_control_sequence AS sequence,
-              reserved_codigo_generacion AS codigoGeneracion,
-              reserved_numero_control AS numeroControl
-         FROM fiscal_corrections
+      `UPDATE fiscal_corrections
+          SET processing_started_at = ?,
+              updated_at = ?
         WHERE id = ?
           AND target_kind = 'DTE_DOCUMENT'
           AND document_id = ?
@@ -1061,8 +1062,13 @@ export class Repository {
                AND fiscal_operation_claim_id = fiscal_corrections.fiscal_claim_id
                AND fiscal_operation_kind = 'TRANSMISSION'
                AND fiscal_operation_event_id IS NULL
-          )`
+          )
+        RETURNING reserved_control_sequence AS sequence,
+                  reserved_codigo_generacion AS codigoGeneracion,
+                  reserved_numero_control AS numeroControl`
     ).bind(
+      updatedAt,
+      updatedAt,
       input.correctionId,
       input.documentId,
       input.environment,
@@ -1070,6 +1076,51 @@ export class Repository {
       input.fiscalClaimId,
       controlPrefix
     ).first<WompiDocumentIdentifiers>();
+  }
+
+  async renewFiscalCorrectionDocumentSigningLease(input: {
+    correctionId: string;
+    documentId: string;
+    processingClaimId: string;
+    fiscalClaimId: string;
+    codigoGeneracion: string;
+    numeroControl: string;
+  }): Promise<boolean> {
+    const renewedAt = nowIso();
+    const row = await this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET processing_started_at = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND target_kind = 'DTE_DOCUMENT'
+          AND document_id = ?
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND fiscal_claim_id = ?
+          AND reserved_codigo_generacion = ?
+          AND reserved_numero_control = ?
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE id = fiscal_corrections.document_id
+               AND environment = fiscal_corrections.environment
+               AND status = 'REJECTED'
+               AND fiscal_operation_claim_id = fiscal_corrections.fiscal_claim_id
+               AND fiscal_operation_kind = 'TRANSMISSION'
+               AND fiscal_operation_event_id IS NULL
+          )
+        RETURNING id`
+    ).bind(
+      renewedAt,
+      renewedAt,
+      input.correctionId,
+      input.documentId,
+      input.processingClaimId,
+      input.fiscalClaimId,
+      input.codigoGeneracion,
+      input.numeroControl
+    ).first<{ id: string }>();
+    return Boolean(row);
   }
 
   async prepareClaimedFiscalCorrectionDocument(input: {
@@ -1711,7 +1762,20 @@ export class Repository {
              AND created_document_id IS NULL
              AND issuance_attempt_id = ?
              AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
-             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM fiscal_corrections
+                WHERE target_kind = 'WOMPI_EVENT'
+                  AND wompi_event_id = wompi_events.id
+                  AND (
+                    status IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
+                    OR (
+                      issuance_attempt_id IS NOT NULL
+                      AND issuance_attempt_id = wompi_events.issuance_attempt_id
+                    )
+                  )
+             )`
         ).bind(attemptId, queuedAt, wompiEventId, currentAttemptId, staleBefore)
       : this.db.prepare(
           `UPDATE wompi_events
@@ -1723,7 +1787,16 @@ export class Repository {
              AND issuance_attempt_id IS NULL
              AND processed_at IS NULL
              AND issuance_status IS NULL
-             AND COALESCE(issuance_last_attempt_at, received_at) < ?`
+             AND COALESCE(issuance_last_attempt_at, received_at) < ?
+             AND NOT EXISTS (
+               SELECT 1
+                 FROM fiscal_corrections
+                WHERE target_kind = 'WOMPI_EVENT'
+                  AND wompi_event_id = wompi_events.id
+                  AND status IN (
+                    'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
+                  )
+             )`
         ).bind(attemptId, queuedAt, wompiEventId, staleBefore);
     const result = await statement.run();
     return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
@@ -4643,6 +4716,19 @@ export class Repository {
         `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at FROM wompi_events
          WHERE created_document_id IS NULL
            AND result = 'ExitosaAprobada'
+           AND NOT EXISTS (
+             SELECT 1
+               FROM fiscal_corrections
+              WHERE target_kind = 'WOMPI_EVENT'
+                AND wompi_event_id = wompi_events.id
+                AND (
+                  status IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
+                  OR (
+                    issuance_attempt_id IS NOT NULL
+                    AND issuance_attempt_id = wompi_events.issuance_attempt_id
+                  )
+                )
+           )
            AND (
              (
                processed_at IS NULL

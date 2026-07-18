@@ -974,6 +974,7 @@ describe("guarded fiscal correction API", () => {
           && correction.reserved_codigo_generacion
           && correction.reserved_numero_control
         ) {
+          correction.processing_started_at = new Date().toISOString();
           return {
             sequence: correction.reserved_control_sequence,
             codigoGeneracion: correction.reserved_codigo_generacion,
@@ -986,11 +987,32 @@ describe("guarded fiscal correction API", () => {
         correction.reserved_codigo_generacion = input.codigoGeneracion;
         correction.reserved_numero_control =
           `DTE-15-${input.controlPrefix}-${String(sequence).padStart(15, "0")}`;
+        correction.processing_started_at = new Date().toISOString();
         return {
           sequence,
           codigoGeneracion: correction.reserved_codigo_generacion,
           numeroControl: correction.reserved_numero_control
         };
+      });
+    vi.spyOn(Repository.prototype, "renewFiscalCorrectionDocumentSigningLease")
+      .mockImplementation(async (input) => {
+        const document = ownedDocument();
+        if (
+          input.correctionId !== correction.id
+          || input.documentId !== correction.document_id
+          || input.processingClaimId !== correction.processing_claim_id
+          || input.fiscalClaimId !== correction.fiscal_claim_id
+          || input.codigoGeneracion !== correction.reserved_codigo_generacion
+          || input.numeroControl !== correction.reserved_numero_control
+          || correction.status !== "PROCESSING"
+          || !document
+          || document.status !== "REJECTED"
+          || document.fiscal_operation_claim_id !== correction.fiscal_claim_id
+        ) {
+          return false;
+        }
+        correction.processing_started_at = new Date().toISOString();
+        return true;
       });
     vi.spyOn(Repository.prototype, "prepareClaimedFiscalCorrectionDocument")
       .mockImplementation(async (input) => {
@@ -2452,6 +2474,123 @@ describe("guarded fiscal correction API", () => {
       mh_dispatch_started_at: null
     });
     expect(db.documents[0].fiscal_operation_claim_id).toBe("foreign-safe-predispatch-claim");
+  });
+
+  it("fences a reserved direct correction before signing after recovery rotates ownership", async () => {
+    const db = correctionDb();
+    db.nextSequence = 89;
+    const source = rejectedCorrectionDocument({
+      id: "doc_correction_signing_fence",
+      fiscal_operation_claim_id: "fiscal_claim_signing_fence",
+      fiscal_operation_claimed_at: "2026-07-18T12:00:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_signing_fence",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: source.id,
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_signing_fence",
+      processing_claim_id: "correction_processing_signing_old",
+      source_document_snapshot_json: JSON.stringify(source)
+    });
+    db.documents.push(source);
+    stubDocumentCorrectionLifecycle(correction, db);
+
+    const reserve = vi.mocked(
+      Repository.prototype.reserveFiscalCorrectionDocumentIdentifiers
+    );
+    const reserveImplementation = reserve.getMockImplementation();
+    if (!reserveImplementation) throw new Error("expected reservation fixture");
+    let reservationCall = 0;
+    let releaseOldReservation!: () => void;
+    let markOldReserved!: () => void;
+    const oldReserved = new Promise<void>((resolve) => {
+      markOldReserved = resolve;
+    });
+    const reservationGate = new Promise<void>((resolve) => {
+      releaseOldReservation = resolve;
+    });
+    reserve.mockImplementation(async (input) => {
+      const result = await reserveImplementation(input);
+      reservationCall += 1;
+      if (reservationCall === 1) {
+        markOldReserved();
+        await reservationGate;
+      }
+      return result;
+    });
+    vi.spyOn(Repository.prototype, "recoverFiscalCorrectionProcessingClaim")
+      .mockImplementation(async (input) => {
+        if (
+          input.id !== correction.id
+          || input.currentProcessingClaimId !== correction.processing_claim_id
+        ) {
+          return null;
+        }
+        correction.processing_claim_id = input.nextProcessingClaimId;
+        correction.processing_started_at = new Date().toISOString();
+        return correction;
+      });
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    const prepare = vi.mocked(
+      Repository.prototype.prepareClaimedFiscalCorrectionDocument
+    );
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-SIGNING-FENCE",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+    const oldMessage = consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: "correction_processing_signing_old",
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+    await oldReserved;
+
+    const recovered = await new Repository(runtime.DB)
+      .recoverFiscalCorrectionProcessingClaim({
+        id: correction.id,
+        currentProcessingClaimId: "correction_processing_signing_old",
+        nextProcessingClaimId: "correction_processing_signing_new",
+        staleBefore: "2030-01-01T00:00:00.000Z"
+      });
+    expect(recovered).toMatchObject({
+      processing_claim_id: "correction_processing_signing_new",
+      reserved_control_sequence: 89,
+      reserved_numero_control: "DTE-15-M001P004-000000000000089"
+    });
+    releaseOldReservation();
+    const oldDisposition = await oldMessage;
+
+    expect(oldDisposition.ack).toHaveBeenCalledTimes(1);
+    expect(oldDisposition.retry).not.toHaveBeenCalled();
+    expect(sign).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+    expect(db.nextSequence).toBe(90);
+    expect(source.status).toBe("REJECTED");
+
+    const newDisposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: source.id,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: "correction_processing_signing_new",
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+    expect(newDisposition.ack).toHaveBeenCalledTimes(1);
+    expect(newDisposition.retry).not.toHaveBeenCalled();
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(db.nextSequence).toBe(90);
+    expect(correction.status).toBe("ACCEPTED");
   });
 
   it("does not dispatch when a corrected document loses its exact claim before the marker", async () => {

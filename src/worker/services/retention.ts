@@ -39,24 +39,31 @@ interface RetentionForeignKeyPhase {
   tables: readonly string[];
 }
 
-// Disaster-recovery tooling must run these phases in one deferred-foreign-key
-// transaction. contingency_periods, dte_events, and dte_documents form a real
-// cycle, so no flat table order can satisfy every immediate foreign key.
+// Wrangler wraps each D1 --file execution in a transaction, so the file itself
+// must not contain transaction statements. Local SQLite rehearsals still need
+// an explicit outer transaction. contingency_periods, dte_events, and
+// dte_documents form a real cycle, so both paths defer and verify foreign keys.
 export const RETENTION_FOREIGN_KEY_PROTOCOL: {
-  transaction: {
-    begin: string;
+  wranglerFile: {
     deferForeignKeys: string;
     verify: string;
+    forbiddenTransactionStatements: readonly string[];
+  };
+  localSqliteTransaction: {
+    begin: string;
     commit: string;
     rollback: string;
   };
   restorePhases: readonly RetentionForeignKeyPhase[];
   deletePhases: readonly RetentionForeignKeyPhase[];
 } = {
-  transaction: {
-    begin: "BEGIN IMMEDIATE",
+  wranglerFile: {
     deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
     verify: "PRAGMA foreign_key_check",
+    forbiddenTransactionStatements: ["BEGIN", "COMMIT", "ROLLBACK"]
+  },
+  localSqliteTransaction: {
+    begin: "BEGIN IMMEDIATE",
     commit: "COMMIT",
     rollback: "ROLLBACK"
   },
