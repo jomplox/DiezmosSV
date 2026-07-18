@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { buildCdeDocument } from "../../src/worker/domain/dteBuilder";
+import { buildCdeDocument, buildDirectCdeDocument } from "../../src/worker/domain/dteBuilder";
 import worker from "../../src/worker/index";
 import { AuthService, hashPassword } from "../../src/worker/services/auth";
 import {
@@ -19,7 +19,7 @@ import { MhClient } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
-import type { DteDocumentRecord, Env, IssuanceMessage, WompiWebhook } from "../../src/worker/types";
+import type { DteDocumentRecord, Env, FiscalCorrectionRecord, IssuanceMessage, WompiWebhook } from "../../src/worker/types";
 
 const nativeCrypto = crypto;
 
@@ -661,6 +661,457 @@ describe("Wompi issuance failure recovery API", () => {
       error_name: "error",
       error_code: "unknown"
     });
+  });
+});
+
+describe("guarded fiscal correction API", () => {
+  const authorization = { Authorization: "Bearer test-token" };
+
+  function correctionDb(role: string | null = "OPERATOR"): InMemoryD1 {
+    const db = new InMemoryD1();
+    db.sessionUser = role
+      ? {
+          id: `user_${role.toLowerCase()}`,
+          email: `${role.toLowerCase()}@example.org`,
+          name: role,
+          role
+        }
+      : null;
+    return db;
+  }
+
+  function correctionWebhook(overrides: Record<string, unknown> = {}): WompiWebhook {
+    return {
+      ...(wompiSample as WompiWebhook),
+      Cliente: {
+        ...(wompiSample.Cliente as WompiWebhook["Cliente"]),
+        DocumentoIdentidad: "12345678-9",
+        CodigoPais: "SV"
+      },
+      ...overrides
+    };
+  }
+
+  function correctionEvent(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    const payload = correctionWebhook();
+    return wompiEventForReservation({
+      id: "wompi_bad_dui",
+      transaction_id: payload.IdTransaccion,
+      environment: "00",
+      result: payload.ResultadoTransaccion,
+      amount_cents: 1000,
+      raw_body: JSON.stringify(payload),
+      processed_at: "2026-07-17T17:00:00.000Z",
+      created_document_id: null,
+      issuance_claim_id: null,
+      issuance_status: "FAILED",
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: "El DUI del receptor es inválido.",
+      ...overrides
+    });
+  }
+
+  function correctionReceptor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      tipoDocumento: "13",
+      numDocumento: "10000002-7",
+      nrc: null,
+      nombre: "Ana Donante",
+      codActividad: null,
+      descActividad: null,
+      correo: "ana@example.org",
+      telefono: "70001111",
+      codDomiciliado: 1,
+      codPais: "SV",
+      departamento: "06",
+      municipio: "22",
+      distrito: "01",
+      complemento: "Colonia Centro",
+      ...overrides
+    };
+  }
+
+  function correctionRequest(
+    path: string,
+    body: Record<string, unknown>,
+    method = "POST"
+  ): Request {
+    return new Request(`https://example.org${path}`, {
+      method,
+      headers: {
+        ...authorization,
+        "Content-Type": "application/json"
+      },
+      ...(method === "GET" ? {} : { body: JSON.stringify(body) })
+    });
+  }
+
+  function correctionRecord(
+    overrides: Partial<FiscalCorrectionRecord> = {}
+  ): FiscalCorrectionRecord {
+    return {
+      id: "fiscal_correction_1",
+      request_id: "11111111-1111-4111-8111-111111111111",
+      request_payload_sha256: "payload-sha",
+      attempt_number: 1,
+      target_kind: "WOMPI_EVENT",
+      wompi_event_id: "wompi_bad_dui",
+      document_id: null,
+      environment: "00",
+      status: "QUEUED",
+      before_receptor_json: JSON.stringify(correctionReceptor({ numDocumento: "12345678-9" })),
+      corrected_receptor_json: JSON.stringify(correctionReceptor()),
+      changed_fields_json: JSON.stringify(["numDocumento"]),
+      source_document_snapshot_json: null,
+      issuance_attempt_id: "issuance_attempt_1",
+      fiscal_claim_id: null,
+      processing_claim_id: "correction_processing_1",
+      mh_dispatch_started_at: null,
+      failure_code: null,
+      failure_message: null,
+      created_by: "user_operator",
+      created_at: "2026-07-18T12:00:00.000Z",
+      processing_started_at: null,
+      completed_at: null,
+      updated_at: "2026-07-18T12:00:00.000Z",
+      ...overrides
+    };
+  }
+
+  function rejectedCorrectionDocument(
+    overrides: Partial<DteDocumentRecord> = {}
+  ): DteDocumentRecord {
+    const plain = buildDirectCdeDocument({
+      amount: "10.00",
+      donorName: "Donante Original",
+      donorEmail: "original@example.org",
+      donorDocumentType: "13",
+      donorDocument: "10000002-7",
+      donorPhone: "70001111",
+      donorAddress: "Dirección original"
+    }, emisorConfig(), {
+      sequence: 7,
+      environment: "00",
+      issuedAt: new Date("2026-07-17T10:30:00-06:00")
+    }) as Record<string, any>;
+    return testDocument({
+      id: "doc_rejected_correction",
+      wompi_event_id: null,
+      status: "REJECTED",
+      plain_json: JSON.stringify(plain),
+      signed_jws: "original.signed.jws",
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: JSON.stringify(["El DUI del receptor es inválido"]),
+      accepted_at: null,
+      fiscal_operation_claim_id: null,
+      ...overrides
+    });
+  }
+
+  function correctionRuntime(
+    db: InMemoryD1,
+    queue?: Queue<IssuanceMessage>
+  ): Env {
+    return env(db, {
+      EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+      ...(queue ? { ISSUANCE_QUEUE: queue } : {})
+    });
+  }
+
+  it("requires OPERATOR before reading either correction target", async () => {
+    const unauthenticated = correctionDb(null);
+    const viewer = correctionDb("VIEWER");
+    const eventLookup = vi.spyOn(Repository.prototype, "getWompiEventById");
+    const documentLookup = vi.spyOn(Repository.prototype, "getDteDocument");
+
+    const responses = await Promise.all([
+      worker.fetch(new Request("https://example.org/api/wompi-events/wompi_bad_dui/correction-data"), correctionRuntime(unauthenticated)),
+      worker.fetch(correctionRequest("/api/documents/doc_rejected_correction/correct-and-retry", {
+        correctionRequestId: crypto.randomUUID(),
+        receptor: correctionReceptor()
+      }), correctionRuntime(viewer))
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([401, 403]);
+    expect(eventLookup).not.toHaveBeenCalled();
+    expect(documentLookup).not.toHaveBeenCalled();
+  });
+
+  it("returns only editable correction data and active status to an OPERATOR", async () => {
+    const db = correctionDb();
+    const event = correctionEvent();
+    const document = rejectedCorrectionDocument();
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(event as any);
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "getActiveFiscalCorrectionForTarget")
+      .mockResolvedValue({ id: "fiscal_correction_active", status: "PROCESSING" });
+
+    const wompi = await worker.fetch(
+      correctionRequest("/api/wompi-events/wompi_bad_dui/correction-data", {}, "GET"),
+      correctionRuntime(db)
+    );
+    const direct = await worker.fetch(
+      correctionRequest("/api/documents/doc_rejected_correction/correction-data", {}, "GET"),
+      correctionRuntime(db)
+    );
+
+    expect(wompi.status).toBe(200);
+    expect(direct.status).toBe(200);
+    const wompiText = await wompi.text();
+    expect(JSON.parse(wompiText)).toMatchObject({
+      receptor: expect.objectContaining({
+        tipoDocumento: "13",
+        numDocumento: "12345678-9"
+      }),
+      targetStatus: "FAILED",
+      correctable: true,
+      activeCorrection: { id: "fiscal_correction_active", status: "PROCESSING" }
+    });
+    expect(Object.keys(JSON.parse(wompiText))).toEqual([
+      "receptor", "targetStatus", "failureReason", "correctable", "guidance", "activeCorrection"
+    ]);
+    for (const responseText of [wompiText, await direct.text()]) {
+      for (const forbidden of [
+        "raw_body", "signed_jws", "amount_cents", "emisor",
+        "codigo_generacion", "numero_control", "sello_recibido"
+      ]) {
+        expect(responseText).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it("returns 404 for missing targets and 409 for ineligible fiscal states", async () => {
+    const db = correctionDb();
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    const getEvent = vi.spyOn(Repository.prototype, "getWompiEventById");
+    const getDocument = vi.spyOn(Repository.prototype, "getDteDocument");
+
+    getEvent.mockResolvedValueOnce(null).mockResolvedValueOnce(
+      correctionEvent({
+        result: "Denegada",
+        raw_body: JSON.stringify(correctionWebhook({ ResultadoTransaccion: "Denegada" }))
+      }) as any
+    );
+    getDocument
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(rejectedCorrectionDocument({ status: "ACCEPTED" }))
+      .mockResolvedValueOnce(rejectedCorrectionDocument({ status: "INVALIDATED" }))
+      .mockResolvedValueOnce(rejectedCorrectionDocument({ fiscal_operation_claim_id: "pending-claim" }));
+
+    const requestBody = {
+      correctionRequestId: crypto.randomUUID(),
+      receptor: correctionReceptor({ nombre: "Nombre cambiado" })
+    };
+    const responses = [];
+    responses.push(await worker.fetch(correctionRequest("/api/wompi-events/missing/correction-data", {}, "GET"), correctionRuntime(db)));
+    responses.push(await worker.fetch(correctionRequest("/api/documents/missing/correction-data", {}, "GET"), correctionRuntime(db)));
+    responses.push(await worker.fetch(correctionRequest("/api/wompi-events/wompi_bad_dui/correct-and-retry", requestBody), correctionRuntime(db)));
+    for (let index = 0; index < 3; index += 1) {
+      responses.push(await worker.fetch(correctionRequest("/api/documents/doc_rejected_correction/correct-and-retry", {
+        ...requestBody,
+        correctionRequestId: crypto.randomUUID()
+      }), correctionRuntime(db)));
+    }
+
+    expect(responses.map((response) => response.status)).toEqual([404, 404, 409, 409, 409, 409]);
+  });
+
+  it("rejects protected keys and unchanged corrections before claiming", async () => {
+    const db = correctionDb();
+    const payload = correctionWebhook({
+      Cliente: {
+        ...(correctionWebhook().Cliente ?? {}),
+        DocumentoIdentidad: "10000002-7",
+        Nombre: "Ana",
+        Apellidos: "Donante",
+        EMail: "ana@example.org",
+        Celular: "70001111",
+        CodigoPais: "GT",
+        Direccion: "Direccion demo"
+      }
+    });
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(
+      correctionEvent({ raw_body: JSON.stringify(payload) }) as any
+    );
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    const claim = vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection");
+
+    const topLevelProtected = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: crypto.randomUUID(),
+        receptor: correctionReceptor(),
+        amount_cents: 1
+      }
+    ), correctionRuntime(db));
+    const receptorProtected = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: crypto.randomUUID(),
+        receptor: { ...correctionReceptor(), emisor: { nombre: "Ataque" } }
+      }
+    ), correctionRuntime(db));
+    const unchanged = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: crypto.randomUUID(),
+        receptor: correctionReceptor({
+          codDomiciliado: 2,
+          codPais: "GT",
+          departamento: "00",
+          municipio: "00",
+          distrito: "00",
+          complemento: "Direccion demo"
+        })
+      }
+    ), correctionRuntime(db));
+
+    expect([topLevelProtected.status, receptorProtected.status, unchanged.status]).toEqual([400, 400, 400]);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("queues claimed Wompi and document corrections with every ownership token", async () => {
+    const db = correctionDb();
+    const event = correctionEvent();
+    const document = rejectedCorrectionDocument();
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(event as any);
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord()
+    });
+    vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord({
+        id: "fiscal_correction_document",
+        target_kind: "DTE_DOCUMENT",
+        wompi_event_id: null,
+        document_id: document.id,
+        issuance_attempt_id: null,
+        fiscal_claim_id: "fiscal_claim_document"
+      })
+    });
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+
+    const wompi = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: "11111111-1111-4111-8111-111111111111",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+    const direct = await worker.fetch(correctionRequest(
+      "/api/documents/doc_rejected_correction/correct-and-retry",
+      {
+        correctionRequestId: "70000003-2222-4222-8222-700000032222",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect([wompi.status, direct.status]).toEqual([202, 202]);
+    await expect(wompi.json()).resolves.toEqual({
+      ok: true,
+      queued: true,
+      correctionId: "fiscal_correction_1",
+      status: "QUEUED"
+    });
+    expect(queued).toEqual([
+      {
+        wompiEventId: "wompi_bad_dui",
+        fiscalCorrectionId: "fiscal_correction_1",
+        fiscalCorrectionProcessingClaimId: "correction_processing_1",
+        issuanceAttemptId: "issuance_attempt_1"
+      },
+      {
+        advancedDocumentId: "doc_rejected_correction",
+        fiscalCorrectionId: "fiscal_correction_document",
+        fiscalCorrectionProcessingClaimId: "correction_processing_1",
+        fiscalClaimId: "fiscal_claim_document"
+      }
+    ]);
+  });
+
+  it("suppresses duplicate queue sends and rejects a conflicting request id", async () => {
+    const db = correctionDb();
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(
+      correctionEvent({ issuance_status: "RETRY_QUEUED" }) as any
+    );
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    const existing = correctionRecord({
+      corrected_receptor_json: JSON.stringify(
+        correctionReceptor({ nombre: "Nombre corregido" })
+      )
+    });
+    vi.spyOn(Repository.prototype, "getFiscalCorrectionByRequestId")
+      .mockResolvedValue(existing);
+    const claim = vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection");
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    const body = {
+      correctionRequestId: "11111111-1111-4111-8111-111111111111",
+      receptor: correctionReceptor({ nombre: "Nombre corregido" })
+    };
+
+    const duplicate = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      body
+    ), runtime);
+    const conflict = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        ...body,
+        receptor: correctionReceptor({ nombre: "Otro nombre" })
+      }
+    ), runtime);
+
+    expect(duplicate.status).toBe(200);
+    await expect(duplicate.json()).resolves.toEqual({
+      ok: true,
+      queued: false,
+      duplicate: true,
+      correctionId: "fiscal_correction_1",
+      status: "QUEUED"
+    });
+    expect(conflict.status).toBe(409);
+    expect(queued).toHaveLength(0);
+    expect(claim).not.toHaveBeenCalled();
+  });
+
+  it("keeps a durable QUEUED correction when queue submission fails", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord();
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(correctionEvent() as any);
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction
+    });
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: correction.request_id,
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), correctionRuntime(db, {
+      send: async () => { throw new Error("private queue failure"); }
+    } as unknown as Queue<IssuanceMessage>));
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: "fiscal_correction_queue_failed",
+      message: "La corrección quedó guardada y será reintentada automáticamente."
+    });
+    expect(correction.status).toBe("QUEUED");
   });
 });
 

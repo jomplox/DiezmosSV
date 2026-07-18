@@ -72,6 +72,19 @@ import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRe
 import { WompiApiService } from "./services/wompiApi";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import {
+  FiscalCorrectionValidationError,
+  fiscalCorrectionChangedFields,
+  fiscalCorrectionPayload,
+  validateFiscalReceptorCorrection,
+  type FiscalReceptorCorrection
+} from "../shared/fiscalCorrection";
+import {
+  buildCorrectedDirectCandidate,
+  buildCorrectedWompiCandidate,
+  effectiveDocumentCorrectionData,
+  effectiveWompiCorrectionData
+} from "./services/fiscalCorrection";
+import {
   legacyIssuanceAttemptId,
   OwnerTargetProtectedError,
   Repository,
@@ -115,6 +128,7 @@ const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
 const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
+const FISCAL_CORRECTION_REQUEST_KEYS = new Set(["correctionRequestId", "receptor"]);
 
 type BrandingLogoSlot = {
   settingKey: string;
@@ -1276,6 +1290,59 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     return jsonResponse(result);
   }
 
+  const wompiCorrectionDataMatch =
+    url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/correction-data$/);
+  if (wompiCorrectionDataMatch && request.method === "GET") {
+    requireRole(user, "OPERATOR");
+    const data = await effectiveWompiCorrectionData(repo, wompiCorrectionDataMatch[1]);
+    if (!data) return notFound();
+    data.activeCorrection = await repo.getActiveFiscalCorrectionForTarget(
+      "WOMPI_EVENT",
+      wompiCorrectionDataMatch[1]
+    );
+    return jsonResponse(data);
+  }
+
+  const wompiCorrectRetryMatch =
+    url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/correct-and-retry$/);
+  if (wompiCorrectRetryMatch && request.method === "POST") {
+    const actor = requireRole(user, "OPERATOR");
+    return handleWompiFiscalCorrection(
+      request,
+      env,
+      repo,
+      actor,
+      wompiCorrectRetryMatch[1]
+    );
+  }
+
+  const documentCorrectionDataMatch =
+    url.pathname.match(/^\/api\/documents\/([^/]+)\/correction-data$/);
+  if (documentCorrectionDataMatch && request.method === "GET") {
+    requireRole(user, "OPERATOR");
+    const document = await repo.getDteDocument(documentCorrectionDataMatch[1]);
+    if (!document) return notFound();
+    const data = effectiveDocumentCorrectionData(document);
+    data.activeCorrection = await repo.getActiveFiscalCorrectionForTarget(
+      "DTE_DOCUMENT",
+      document.id
+    );
+    return jsonResponse(data);
+  }
+
+  const documentCorrectRetryMatch =
+    url.pathname.match(/^\/api\/documents\/([^/]+)\/correct-and-retry$/);
+  if (documentCorrectRetryMatch && request.method === "POST") {
+    const actor = requireRole(user, "OPERATOR");
+    return handleDocumentFiscalCorrection(
+      request,
+      env,
+      repo,
+      actor,
+      documentCorrectRetryMatch[1]
+    );
+  }
+
   const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);
   if (documentMatch) {
     return handleDocumentRoute(request, env, repo, user, documentMatch[1], documentMatch[2]);
@@ -2084,6 +2151,352 @@ async function handleCredentialWriterTokenRoute(request: Request, env: Env, repo
     }
     return jsonResponse({ error: "cloudflare_token_rejected", message: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
+}
+
+async function handleWompiFiscalCorrection(
+  request: Request,
+  env: Env,
+  repo: Repository,
+  actor: AuthUser,
+  wompiEventId: string
+): Promise<Response> {
+  const parsed = await readFiscalCorrectionRequest(request);
+  if (parsed instanceof Response) return parsed;
+
+  const event = await repo.getWompiEventById(wompiEventId);
+  if (!event) return notFound();
+  const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
+  if (!isApprovedDonation(payload)) {
+    return fiscalCorrectionConflict(
+      "payment_not_approved",
+      "Solo un pago aprobado puede corregirse y reintentarse."
+    );
+  }
+  if (
+    event.created_document_id
+    || event.issuance_claim_id
+    || !["FAILED", "DEAD_LETTERED"].includes(event.issuance_status ?? "")
+  ) {
+    const existing = await existingFiscalCorrectionResponse(
+      repo,
+      parsed.requestId,
+      "WOMPI_EVENT",
+      wompiEventId,
+      parsed.receptor
+    );
+    if (existing) return existing;
+    return fiscalCorrectionConflict(
+      "wompi_correction_not_available",
+      "El evento Wompi ya no está disponible para una corrección."
+    );
+  }
+  assertDeploymentAllowsAmbiente(env, event.environment);
+
+  const beforeData = await effectiveWompiCorrectionData(repo, wompiEventId);
+  if (!beforeData) return notFound();
+  const changedFields = fiscalCorrectionChangedFields(
+    beforeData.receptor,
+    parsed.receptor
+  );
+  if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
+
+  const binding = await resolveDonationIntentBinding(repo, payload);
+  const config = getEmisorConfig(env);
+  buildCorrectedWompiCandidate({
+    payload,
+    intent: binding.kind === "bound" ? binding.intent : null,
+    correction: parsed.receptor,
+    config,
+    environment: event.environment,
+    sequence: event.control_sequence ?? 1,
+    codigoGeneracion: event.reserved_codigo_generacion ?? undefined
+  });
+
+  const claim = await repo.claimWompiFiscalCorrection({
+    wompiEventId,
+    requestId: parsed.requestId,
+    requestPayloadSha256: await fiscalCorrectionRequestDigest(parsed.receptor),
+    environment: event.environment,
+    beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
+    correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
+    changedFieldsJson: JSON.stringify(changedFields),
+    createdBy: actor.id
+  });
+  if (claim.kind === "conflict") return fiscalCorrectionRequestConflictResponse();
+  if (claim.kind === "ineligible") {
+    return fiscalCorrectionConflict(
+      "wompi_correction_not_available",
+      "El evento Wompi cambió mientras se procesaba la corrección."
+    );
+  }
+  if (claim.kind === "duplicate") return duplicateFiscalCorrectionResponse(claim.correction);
+  if (!claim.correction.issuance_attempt_id) {
+    throw new Error("La corrección Wompi reclamada no tiene intento de emisión.");
+  }
+  try {
+    await env.ISSUANCE_QUEUE.send({
+      wompiEventId,
+      fiscalCorrectionId: claim.correction.id,
+      fiscalCorrectionProcessingClaimId: claim.correction.processing_claim_id,
+      issuanceAttemptId: claim.correction.issuance_attempt_id
+    });
+  } catch (error) {
+    logWorkerError(env, "fiscal_correction_queue_failed", error);
+    return fiscalCorrectionQueueFailedResponse();
+  }
+  return queuedFiscalCorrectionResponse(claim.correction.id);
+}
+
+async function handleDocumentFiscalCorrection(
+  request: Request,
+  env: Env,
+  repo: Repository,
+  actor: AuthUser,
+  documentId: string
+): Promise<Response> {
+  const parsed = await readFiscalCorrectionRequest(request);
+  if (parsed instanceof Response) return parsed;
+
+  const document = await repo.getDteDocument(documentId);
+  if (!document) return notFound();
+  if (document.fiscal_operation_claim_id) {
+    const existing = await existingFiscalCorrectionResponse(
+      repo,
+      parsed.requestId,
+      "DTE_DOCUMENT",
+      documentId,
+      parsed.receptor
+    );
+    if (existing) return existing;
+    return fiscalCorrectionConflict(
+      "fiscal_outcome_pending_reconciliation",
+      "El resultado fiscal está pendiente de conciliación."
+    );
+  }
+  if (document.status !== "REJECTED") {
+    const existing = await existingFiscalCorrectionResponse(
+      repo,
+      parsed.requestId,
+      "DTE_DOCUMENT",
+      documentId,
+      parsed.receptor
+    );
+    if (existing) return existing;
+    return fiscalCorrectionConflict(
+      "document_correction_not_available",
+      "Solo un CDE rechazado explícitamente puede corregirse."
+    );
+  }
+  assertDeploymentAllowsAmbiente(env, document.environment);
+
+  const beforeData = effectiveDocumentCorrectionData(document);
+  const changedFields = fiscalCorrectionChangedFields(
+    beforeData.receptor,
+    parsed.receptor
+  );
+  if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
+
+  const config = getEmisorConfig(env);
+  if (document.wompi_event_id) {
+    const event = await repo.getWompiEventById(document.wompi_event_id);
+    if (!event) {
+      return fiscalCorrectionConflict(
+        "source_payment_not_found",
+        "No se encontró el pago original de este CDE."
+      );
+    }
+    const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
+    const binding = await resolveDonationIntentBinding(repo, payload);
+    buildCorrectedWompiCandidate({
+      payload,
+      intent: binding.kind === "bound" ? binding.intent : null,
+      correction: parsed.receptor,
+      config,
+      environment: document.environment,
+      sequence: 1
+    });
+  } else {
+    buildCorrectedDirectCandidate({
+      sourceDocument: document,
+      correction: parsed.receptor,
+      config,
+      sequence: 1
+    });
+  }
+
+  const claim = await repo.claimDocumentFiscalCorrection({
+    documentId,
+    requestId: parsed.requestId,
+    requestPayloadSha256: await fiscalCorrectionRequestDigest(parsed.receptor),
+    environment: document.environment,
+    beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
+    correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
+    changedFieldsJson: JSON.stringify(changedFields),
+    createdBy: actor.id
+  });
+  if (claim.kind === "conflict") return fiscalCorrectionRequestConflictResponse();
+  if (claim.kind === "ineligible") {
+    return fiscalCorrectionConflict(
+      "document_correction_not_available",
+      "El CDE cambió mientras se procesaba la corrección."
+    );
+  }
+  if (claim.kind === "duplicate") return duplicateFiscalCorrectionResponse(claim.correction);
+  if (!claim.correction.fiscal_claim_id) {
+    throw new Error("La corrección de CDE reclamada no tiene propiedad fiscal.");
+  }
+  try {
+    await env.ISSUANCE_QUEUE.send({
+      advancedDocumentId: documentId,
+      fiscalCorrectionId: claim.correction.id,
+      fiscalCorrectionProcessingClaimId: claim.correction.processing_claim_id,
+      fiscalClaimId: claim.correction.fiscal_claim_id
+    });
+  } catch (error) {
+    logWorkerError(env, "fiscal_correction_queue_failed", error);
+    return fiscalCorrectionQueueFailedResponse();
+  }
+  return queuedFiscalCorrectionResponse(claim.correction.id);
+}
+
+async function readFiscalCorrectionRequest(
+  request: Request
+): Promise<{
+  requestId: string;
+  receptor: FiscalReceptorCorrection;
+} | Response> {
+  const body = await readJsonObject(request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  });
+  if (Object.keys(body).some((key) => !FISCAL_CORRECTION_REQUEST_KEYS.has(key))) {
+    return jsonResponse(
+      {
+        error: "protected_field",
+        message: "La solicitud contiene campos fiscales protegidos."
+      },
+      { status: 400 }
+    );
+  }
+  const requestId = normalizeCorrectionRequestId(body.correctionRequestId);
+  if (!requestId) {
+    return jsonResponse(
+      {
+        error: "invalid_correction_request_id",
+        message: "La corrección requiere un UUID único."
+      },
+      { status: 400 }
+    );
+  }
+  if (!isRecord(body.receptor)) {
+    return jsonResponse(
+      {
+        error: "invalid_correction",
+        message: "receptor debe ser un objeto."
+      },
+      { status: 400 }
+    );
+  }
+  try {
+    return {
+      requestId,
+      receptor: validateFiscalReceptorCorrection(body.receptor)
+    };
+  } catch (error) {
+    if (error instanceof FiscalCorrectionValidationError) {
+      return jsonResponse(
+        { error: error.code, message: error.message },
+        { status: 400 }
+      );
+    }
+    throw error;
+  }
+}
+
+function normalizeCorrectionRequestId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const requestId = value.trim().toLowerCase();
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
+    ? requestId
+    : null;
+}
+
+async function fiscalCorrectionRequestDigest(
+  correction: FiscalReceptorCorrection
+): Promise<string> {
+  return sha256Hex(utf8Bytes(fiscalCorrectionPayload(correction)));
+}
+
+function queuedFiscalCorrectionResponse(correctionId: string): Response {
+  return jsonResponse(
+    { ok: true, queued: true, correctionId, status: "QUEUED" },
+    { status: 202 }
+  );
+}
+
+function duplicateFiscalCorrectionResponse(
+  correction: { id: string; status: string }
+): Response {
+  return jsonResponse({
+    ok: true,
+    queued: false,
+    duplicate: true,
+    correctionId: correction.id,
+    status: correction.status
+  });
+}
+
+function fiscalCorrectionRequestConflictResponse(): Response {
+  return fiscalCorrectionConflict(
+    "correction_request_conflict",
+    "Este identificador de corrección ya pertenece a otra solicitud."
+  );
+}
+
+async function existingFiscalCorrectionResponse(
+  repo: Repository,
+  requestId: string,
+  targetKind: "WOMPI_EVENT" | "DTE_DOCUMENT",
+  targetId: string,
+  correction: FiscalReceptorCorrection
+): Promise<Response | null> {
+  const existing = await repo.getFiscalCorrectionByRequestId(requestId);
+  if (!existing) return null;
+  const existingTargetId = existing.target_kind === "WOMPI_EVENT"
+    ? existing.wompi_event_id
+    : existing.document_id;
+  if (
+    existing.target_kind !== targetKind
+    || existingTargetId !== targetId
+    || existing.corrected_receptor_json !== fiscalCorrectionPayload(correction)
+  ) {
+    return fiscalCorrectionRequestConflictResponse();
+  }
+  return duplicateFiscalCorrectionResponse(existing);
+}
+
+function unchangedFiscalCorrectionResponse(): Response {
+  return jsonResponse(
+    {
+      error: "unchanged_correction",
+      message: "La corrección no cambia ningún campo del receptor."
+    },
+    { status: 400 }
+  );
+}
+
+function fiscalCorrectionConflict(error: string, message: string): Response {
+  return jsonResponse({ error, message }, { status: 409 });
+}
+
+function fiscalCorrectionQueueFailedResponse(): Response {
+  return jsonResponse(
+    {
+      error: "fiscal_correction_queue_failed",
+      message: "La corrección quedó guardada y será reintentada automáticamente."
+    },
+    { status: 500 }
+  );
 }
 
 async function handleDocumentRoute(
