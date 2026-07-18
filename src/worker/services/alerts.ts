@@ -2,12 +2,11 @@ import type { Env } from "../types";
 import type { Repository } from "../storage/repository";
 import { brandingOrigin, loadEmailBranding } from "./branding";
 import { operationalAlertHtml } from "./emailHtml";
-import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
+import { classifyEmailDispatchError, EmailService } from "./email";
 import { logOperationalAlert } from "./observability";
 
 export const ALERT_EMAIL_SETTING_KEY = "alert_email";
 const ALERT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ALERT_WEBHOOK_TIMEOUT_MS = 10_000;
 
 export interface OperationalAlert {
   kind: string;
@@ -18,7 +17,7 @@ export interface OperationalAlert {
   incidentId: string;
 }
 
-type AlertChannel = "email" | "webhook";
+type AlertChannel = "email";
 type AlertTargetResult = {
   channel: AlertChannel;
   executed: boolean;
@@ -82,34 +81,17 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
     }
   }
 
-  if (env.ALERT_WEBHOOK_URL?.trim()) {
-    targets.push(dispatchTarget(
-      repo,
-      safeAlert,
-      incidentId,
-      "webhook",
-      `webhook:${env.ALERT_WEBHOOK_KIND ?? "unconfigured"}:${normalizedWebhookTarget(env.ALERT_WEBHOOK_URL)}`,
-      async (beforeProviderDispatch) => {
-        await sendAlertWebhook(env, displayAlert, beforeProviderDispatch);
-      }
-    ));
-  }
-
   const settled = await Promise.allSettled(targets);
   const results = settled.map<AlertTargetResult>((result) =>
     result.status === "fulfilled"
       ? result.value
       : { channel: "email", executed: false, status: "FAILED" }
   );
-  for (const channel of ["email", "webhook"] as const) {
-    const channelResults = results.filter((result) => result.channel === channel);
-    if (!channelResults.some((result) => result.executed)) {
-      continue;
-    }
-    const status = channelResults.every((result) => result.status === "SENT")
+  if (results.some((result) => result.executed)) {
+    const status = results.every((result) => result.status === "SENT")
       ? "SENT"
       : "FAILED";
-    await recordChannelResult(repo, safeAlert, incidentId, channel, status);
+    await recordChannelResult(repo, safeAlert, incidentId, "email", status);
   }
 }
 
@@ -158,20 +140,7 @@ async function dispatchTarget(
     });
     return { channel, executed: true, status: "SENT" };
   } catch (error) {
-    const failure =
-      channel === "email" || error instanceof EmailDispatchError
-        ? classifyEmailDispatchError(error, providerDispatchStarted)
-        : providerDispatchStarted
-          ? {
-              outcomeClass: "UNKNOWN" as const,
-              code: "ALERT_DISPATCH_UNKNOWN",
-              retrySafe: false
-            }
-          : {
-              outcomeClass: "NOT_SENT" as const,
-              code: "ALERT_PRE_DISPATCH_FAILED",
-              retrySafe: true
-            };
+    const failure = classifyEmailDispatchError(error, providerDispatchStarted);
     try {
       await repo.finalizeOperationalAlertDelivery(claim.id, claim.claimToken, {
         status: "FAILED",
@@ -207,64 +176,6 @@ async function recordChannelResult(
   } catch {
     // Alerting must never break the operation that triggered it. If D1 is also
     // unavailable there is nowhere durable to record this secondary failure.
-  }
-}
-
-async function sendAlertWebhook(
-  env: Env,
-  alert: OperationalAlert,
-  beforeProviderDispatch: () => Promise<void>
-): Promise<void> {
-  let url: URL;
-  try {
-    url = new URL(env.ALERT_WEBHOOK_URL ?? "");
-  } catch {
-    throw new Error("ALERT_WEBHOOK_URL no es una URL válida");
-  }
-  if (url.protocol !== "https:" || url.username || url.password) {
-    throw new Error("ALERT_WEBHOOK_URL debe ser una URL HTTPS sin credenciales");
-  }
-  const message = [
-    alert.title,
-    alert.detail,
-    `Tipo de alerta: ${alert.kind}`,
-    `Entidad: ${alert.entityType}`,
-    `ID: ${alert.entityId}`,
-    `Panel: ${originUrl(env)}`
-  ].join("\n\n");
-  const body =
-    env.ALERT_WEBHOOK_KIND === "slack"
-      ? { text: message }
-      : env.ALERT_WEBHOOK_KIND === "discord"
-        ? { content: message }
-        : null;
-  if (!body) {
-    throw new Error("ALERT_WEBHOOK_KIND debe ser slack o discord");
-  }
-  let response: Response;
-  try {
-    await beforeProviderDispatch();
-    response = await fetch(url.toString(), {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      redirect: "error",
-      signal: AbortSignal.timeout(ALERT_WEBHOOK_TIMEOUT_MS)
-    });
-  } catch {
-    throw new Error("No se pudo entregar el webhook de alertas");
-  }
-  if (!response.ok) {
-    throw new Error(`El webhook de alertas respondió HTTP ${response.status}`);
-  }
-}
-
-function normalizedWebhookTarget(value: string | undefined): string {
-  const raw = value?.trim() ?? "";
-  try {
-    return new URL(raw).toString();
-  } catch {
-    return raw;
   }
 }
 

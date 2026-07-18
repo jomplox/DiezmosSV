@@ -138,6 +138,31 @@ describe("operational alert dispatch", () => {
     expect(db.audits).toHaveLength(0);
   });
 
+  it("does not use retired app-managed alert transport configuration", async () => {
+    const db = new InMemoryAlertD1();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      MOCK_EXTERNAL_SERVICES: "false",
+      ["ALERT_" + "WEBHOOK_URL"]: "https://hooks.example.test/alerts",
+      ["ALERT_" + "WEBHOOK_KIND"]: "slack"
+    } as unknown as Env & Record<`ALERT_${"WEBHOOK_URL" | "WEBHOOK_KIND"}`, string>;
+
+    await sendOperationalAlert(env, new Repository(env.DB), {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_retired_transport",
+      incidentId: "attempt_retired_transport"
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("emits a privacy-safe native event without an alert-email recipient", async () => {
     const db = new InMemoryAlertD1();
     const env = {
@@ -228,182 +253,6 @@ describe("operational alert dispatch", () => {
     expect(db.audits.filter((audit) => audit.action === "ALERT_SENT:DTE_FAILED")).toHaveLength(2);
   });
 
-  it("sends the independent Slack webhook even when the alert email fails", async () => {
-    const db = new InMemoryAlertD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      APP_ORIGIN: "https://admin.example.test",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "slack",
-      EMAIL: { send: async () => { throw new Error("email provider unavailable"); } } as SendEmail
-    } as Env;
-    const repo = new Repository(env.DB);
-
-    await sendOperationalAlert(env, repo, {
-      kind: "EMAIL_FAILED",
-      title: "Fallo al enviar comprobante",
-      detail: "detalle seguro",
-      entityType: "dte_document",
-      entityId: "dte_webhook",
-      incidentId: "delivery_claim_1"
-    });
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(await webhookBody(fetchMock)).toEqual({
-      text: [
-        "Fallo al enviar comprobante",
-        "detalle seguro",
-        "Tipo de alerta: EMAIL_FAILED",
-        "Entidad: dte_document",
-        "ID: dte_webhook",
-        "Panel: https://admin.example.test/"
-      ].join("\n\n")
-    });
-    expect(auditChannels(db, "ALERT_FAILED:EMAIL_FAILED")).toEqual(["email"]);
-    expect(auditChannels(db, "ALERT_SENT:EMAIL_FAILED")).toEqual(["webhook"]);
-  });
-
-  it("sends the alert email even when the independent webhook fails", async () => {
-    const db = new InMemoryAlertD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    const sent: unknown[] = [];
-    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 503 })));
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      APP_ORIGIN: "https://admin.example.test",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "discord",
-      EMAIL: { send: async (message: unknown) => { sent.push(message); return { messageId: "email-ok" }; } } as SendEmail
-    } as Env;
-    const repo = new Repository(env.DB);
-
-    await sendOperationalAlert(env, repo, {
-      kind: "EMAIL_FAILED",
-      title: "Fallo al enviar comprobante",
-      detail: "detalle seguro",
-      entityType: "dte_document",
-      entityId: "dte_email",
-      incidentId: "delivery_claim_2"
-    });
-
-    expect(sent).toHaveLength(1);
-    expect(auditChannels(db, "ALERT_SENT:EMAIL_FAILED")).toEqual(["email"]);
-    expect(auditChannels(db, "ALERT_FAILED:EMAIL_FAILED")).toEqual(["webhook"]);
-  });
-
-  it("sends a Discord webhook when no alert email recipient is configured", async () => {
-    const db = new InMemoryAlertD1();
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      APP_ORIGIN: "https://admin.example.test",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "discord"
-    } as Env;
-    const repo = new Repository(env.DB);
-
-    await sendOperationalAlert(env, repo, {
-      kind: "MH_UNAVAILABLE",
-      title: "Ministerio de Hacienda no disponible",
-      detail: "Hay comprobantes pendientes.",
-      entityType: "dte_document",
-      entityId: "dte_oldest",
-      incidentId: "deferred_2026-07-17"
-    });
-
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(await webhookBody(fetchMock)).toEqual({
-      content: [
-        "Ministerio de Hacienda no disponible",
-        "Hay comprobantes pendientes.",
-        "Tipo de alerta: MH_UNAVAILABLE",
-        "Entidad: dte_document",
-        "ID: dte_oldest",
-        "Panel: https://admin.example.test/"
-      ].join("\n\n")
-    });
-    expect(auditChannels(db, "ALERT_SENT:MH_UNAVAILABLE")).toEqual(["webhook"]);
-  });
-
-  it("deduplicates each alert channel by incident", async () => {
-    const db = new InMemoryAlertD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    const sent: unknown[] = [];
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "slack",
-      EMAIL: { send: async (message: unknown) => { sent.push(message); return { messageId: "ok" }; } } as SendEmail
-    } as Env;
-    const repo = new Repository(env.DB);
-    const alert = {
-      kind: "DTE_FAILED",
-      title: "Fallo al emitir DTE",
-      detail: "detalle",
-      entityType: "dte_document",
-      entityId: "dte_channels",
-      incidentId: "issuance_attempt_channels"
-    };
-
-    await sendOperationalAlert(env, repo, alert);
-    await sendOperationalAlert(env, repo, alert);
-
-    expect(sent).toHaveLength(1);
-    expect(fetchMock).toHaveBeenCalledOnce();
-    expect(auditChannels(db, "ALERT_SENT:DTE_FAILED")).toEqual(["email", "webhook"]);
-  });
-
-  it("treats a rotated webhook URL as a new target for the same incident", async () => {
-    const db = new InMemoryAlertD1();
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts/first",
-      ALERT_WEBHOOK_KIND: "slack"
-    } as Env;
-    const repo = new Repository(env.DB);
-    const alert = {
-      kind: "DTE_FAILED",
-      title: "Fallo al emitir DTE",
-      detail: "detalle",
-      entityType: "dte_document",
-      entityId: "dte_rotated_webhook",
-      incidentId: "issuance_attempt_rotated_webhook"
-    };
-
-    await sendOperationalAlert(env, repo, alert);
-    env.ALERT_WEBHOOK_URL = "https://hooks.example.test/alerts/second";
-    await sendOperationalAlert(env, repo, alert);
-
-    expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(db.alertDeliveries).toHaveLength(2);
-  });
-
   it("atomically suppresses concurrent dispatches for the same incident and recipient", async () => {
     const db = new InMemoryAlertD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
@@ -443,48 +292,6 @@ describe("operational alert dispatch", () => {
 
     expect(callsBeforeRelease).toBe(1);
     expect(send).toHaveBeenCalledTimes(1);
-  });
-
-  it("starts the webhook while the independent email channel is still stalled", async () => {
-    const db = new InMemoryAlertD1();
-    db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    let releaseEmail!: () => void;
-    const emailGate = new Promise<void>((resolve) => {
-      releaseEmail = resolve;
-    });
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      EMAIL_FROM: "alerts@example.org",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "slack",
-      EMAIL: {
-        send: async () => {
-          await emailGate;
-          return { messageId: "slow-email" };
-        }
-      } as SendEmail
-    } as Env;
-    const repo = new Repository(env.DB);
-
-    const pending = sendOperationalAlert(env, repo, {
-      kind: "EMAIL_FAILED",
-      title: "Fallo al enviar comprobante",
-      detail: "detalle",
-      entityType: "dte_document",
-      entityId: "dte_parallel_channels",
-      incidentId: "attempt_parallel_channels"
-    });
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    const webhookCallsWhileEmailStalled = fetchMock.mock.calls.length;
-    releaseEmail();
-    await pending;
-
-    expect(webhookCallsWhileEmailStalled).toBe(1);
   });
 
   it("does not resend after a successful provider call whose audit write fails", async () => {
@@ -609,16 +416,12 @@ describe("operational alert dispatch", () => {
     const db = new InMemoryAlertD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     const emails: unknown[] = [];
-    const fetchMock = vi.fn(async () => new Response(null, { status: 204 }));
-    vi.stubGlobal("fetch", fetchMock);
     const env = {
       DB: db as unknown as D1Database,
       ISSUANCE_QUEUE: {} as Queue,
       ASSETS: {} as Fetcher,
       MOCK_EXTERNAL_SERVICES: "false",
       EMAIL_FROM: "alerts@example.org",
-      ALERT_WEBHOOK_URL: "https://hooks.example.test/alerts",
-      ALERT_WEBHOOK_KIND: "discord",
       EMAIL: {
         send: async (message: unknown) => {
           emails.push(message);
@@ -639,43 +442,10 @@ describe("operational alert dispatch", () => {
       incidentId: "attempt_redaction"
     });
 
-    const durable = JSON.stringify({ emails, webhook: await webhookBody(fetchMock), audits: db.audits });
+    const durable = JSON.stringify({ emails, audits: db.audits });
     expect(durable).not.toContain("ana@example.org");
     expect(durable).not.toContain("https://private.example/token/abc");
     expect(durable).not.toContain("secret-token");
-  });
-
-  it.each([
-    ["non-HTTPS", "http://hooks.example.test/alerts", "slack"],
-    ["credential-bearing", "https://user:secret@hooks.example.test/alerts", "discord"],
-    ["malformed URL", "not-a-webhook-url", "slack"],
-    ["unsupported kind", "https://hooks.example.test/alerts", "teams"]
-  ])("records %s webhook configuration as a channel failure", async (_label, webhookUrl, webhookKind) => {
-    const db = new InMemoryAlertD1();
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const env = {
-      DB: db as unknown as D1Database,
-      ISSUANCE_QUEUE: {} as Queue,
-      ASSETS: {} as Fetcher,
-      MOCK_EXTERNAL_SERVICES: "false",
-      ALERT_WEBHOOK_URL: webhookUrl,
-      ALERT_WEBHOOK_KIND: webhookKind
-    } as unknown as Env;
-    const repo = new Repository(env.DB);
-
-    await sendOperationalAlert(env, repo, {
-      kind: "DTE_FAILED",
-      title: "Fallo al emitir DTE",
-      detail: "detalle",
-      entityType: "dte_document",
-      entityId: "dte_bad_webhook",
-      incidentId: `incident_${_label}`
-    });
-
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(auditChannels(db, "ALERT_FAILED:DTE_FAILED")).toEqual(["webhook"]);
-    expect(String(db.audits[0]?.summary)).not.toContain(webhookUrl);
   });
 
   it("records ALERT_FAILED and does not throw when the email provider fails", async () => {
@@ -751,18 +521,6 @@ describe("operational alert dispatch", () => {
     ).resolves.toBeUndefined();
   });
 });
-
-async function webhookBody(fetchMock: ReturnType<typeof vi.fn>): Promise<unknown> {
-  const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined;
-  return JSON.parse(String(init?.body ?? ""));
-}
-
-function auditChannels(db: InMemoryAlertD1, action: string): string[] {
-  return db.audits
-    .filter((audit) => audit.action === action)
-    .map((audit) => JSON.parse(String(audit.metadata_json ?? "{}")).channel)
-    .sort();
-}
 
 class InMemoryAlertD1 {
   readonly settings: Array<Record<string, unknown>> = [];
