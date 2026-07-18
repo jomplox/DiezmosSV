@@ -113,16 +113,40 @@ table:
 3. Apply via `wrangler d1 execute <database> --env <env> --remote --file
    restore.sql`, batching inserts (D1 has a statement-size limit) rather
    than issuing thousands of individual `wrangler d1 execute` calls.
-4. Foreign keys matter for ordering: restore `wompi_events` and
-   `dte_documents` before `fiscal_corrections`; the correction rows reference
-   one of those two parents and contain the immutable before/after receptor
-   evidence. Restore `dte_documents` and
-   `contingency_periods` before `dte_events`, `contingency_batches`, and
-   `contingency_batch_lines` (which reference them), and restore
-   `wompi_events` before `dte_documents` (which references it).
-   If a cleanup or rollback must delete these records, use the reverse
-   dependency order: delete `fiscal_corrections` before its referenced
-   `dte_documents` or `wompi_events` rows.
+4. Run every restore batch in one deferred-foreign-key transaction. There is
+   no valid flat insert order because
+   `contingency_periods` ↔ `dte_events` ↔ `dte_documents` is a real reference
+   cycle. Start the generated SQL with:
+
+   ```sql
+   BEGIN IMMEDIATE;
+   PRAGMA defer_foreign_keys = ON;
+   ```
+
+   Insert in these phases:
+
+   1. roots: `wompi_events`, `document_sequences`;
+   2. deferred cycle: `contingency_periods`, `dte_documents`, `dte_events`;
+   3. dependents: `fiscal_corrections`, `email_deliveries`,
+      `contingency_batches`, `donation_intents`;
+   4. leaves: `contingency_batch_lines`, `audit_logs`.
+
+   Before committing, run:
+
+   ```sql
+   PRAGMA foreign_key_check;
+   ```
+
+   The command must return no rows. If it reports any row, execute `ROLLBACK`
+   and repair the archive/input mapping; do not disable foreign keys or commit
+   a partial restore. Only an empty check may be followed by `COMMIT`.
+
+   Cleanup uses the same deferred transaction but reverses dependencies:
+   delete leaves and dependents first (including `fiscal_corrections`), then
+   delete `dte_events`, `dte_documents`, and `contingency_periods` as the
+   deferred cycle, and finally delete `wompi_events` and
+   `document_sequences`. Run `PRAGMA foreign_key_check` before `COMMIT` and
+   `ROLLBACK` on any reported violation.
 5. After restoring, spot-check row counts against the manifest's
    `rowCount` for each table, and re-run the read paths (`GET
    /api/documents`, `GET /api/audit`) to confirm the restored data renders

@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { RETENTION_FOREIGN_KEY_PROTOCOL } from "../../src/worker/services/retention";
 import { Repository } from "../../src/worker/storage/repository";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
@@ -58,6 +59,232 @@ describe("fiscal repository SQL on SQLite", () => {
       ...input,
       wompiEventId: "another-target"
     })).resolves.toMatchObject({ kind: "conflict" });
+    database.close();
+  });
+
+  it("couples the queued audit to the claim and reconciles it on duplicate requests", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_duplicate";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const input = wompiCorrectionClaimInput({
+      wompiEventId,
+      requestId: "31313131-3131-4131-8131-313131313131"
+    });
+    const first = await repository.claimWompiFiscalCorrection(input);
+    if (first.kind !== "claimed") throw new Error("expected audited correction claim");
+    expect(database.prepare(
+      `SELECT action, entity_id FROM audit_logs
+        WHERE entity_type = 'fiscal_correction'`
+    ).all()).toEqual([{
+      action: "FISCAL_CORRECTION_QUEUED",
+      entity_id: first.correction.id
+    }]);
+
+    database.prepare(
+      `DELETE FROM audit_logs
+        WHERE action = 'FISCAL_CORRECTION_QUEUED' AND entity_id = ?`
+    ).run(first.correction.id);
+    await expect(repository.claimWompiFiscalCorrection(input)).resolves.toMatchObject({
+      kind: "duplicate",
+      correction: { id: first.correction.id }
+    });
+    expect(database.prepare(
+      `SELECT action FROM audit_logs
+        WHERE entity_type = 'fiscal_correction' AND entity_id = ?`
+    ).all(first.correction.id)).toEqual([{
+      action: "FISCAL_CORRECTION_QUEUED"
+    }]);
+    database.close();
+  });
+
+  it("rolls back a correction claim when its required queued audit cannot persist", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_claim_rollback";
+    seedFailedWompiEvent(database, wompiEventId);
+    database.exec(`
+      CREATE TRIGGER block_fiscal_queued_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'FISCAL_CORRECTION_QUEUED'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked queued audit');
+      END;
+    `);
+    const repository = new Repository(new SqliteD1(database).database);
+
+    await expect(repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "32323232-3232-4232-8232-323232323232"
+      })
+    )).rejects.toThrow("blocked queued audit");
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections"
+    ).get()).toEqual({ count: 0 });
+    expect(database.prepare(
+      `SELECT issuance_status, issuance_attempt_id
+         FROM wompi_events WHERE id = ?`
+    ).get(wompiEventId)).toEqual({
+      issuance_status: "FAILED",
+      issuance_attempt_id: "previous-attempt"
+    });
+    database.close();
+  });
+
+  it("rolls back started and failed transitions when their required audits fail", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_transition_rollback";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "33333333-3333-4333-8333-333333333333"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected transition audit claim");
+    const correction = claimed.correction;
+    database.exec(`
+      CREATE TRIGGER block_fiscal_started_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'FISCAL_CORRECTION_STARTED'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked started audit');
+      END;
+    `);
+
+    await expect(repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).rejects.toThrow("blocked started audit");
+    expect(database.prepare(
+      "SELECT status, processing_started_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({
+      status: "QUEUED",
+      processing_started_at: null
+    });
+    database.exec("DROP TRIGGER block_fiscal_started_audit");
+    await expect(repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).resolves.toBe("claimed");
+
+    database.exec(`
+      CREATE TRIGGER block_fiscal_failed_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'FISCAL_CORRECTION_FAILED'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked failed audit');
+      END;
+    `);
+    await expect(repository.finalizeWompiFiscalCorrectionFailure(
+      correction.id,
+      correction.processing_claim_id,
+      { failureCode: "PRE_DISPATCH", failureMessage: "No enviado" }
+    )).rejects.toThrow("blocked failed audit");
+    expect(database.prepare(
+      "SELECT status, completed_at FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({
+      status: "PROCESSING",
+      completed_at: null
+    });
+    expect(database.prepare(
+      "SELECT issuance_status FROM wompi_events WHERE id = ?"
+    ).get(wompiEventId)).toEqual({ issuance_status: "RETRY_QUEUED" });
+
+    database.exec("DROP TRIGGER block_fiscal_failed_audit");
+    await expect(repository.finalizeWompiFiscalCorrectionFailure(
+      correction.id,
+      correction.processing_claim_id,
+      { failureCode: "PRE_DISPATCH", failureMessage: "No enviado" }
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      `SELECT action FROM audit_logs
+        WHERE entity_type = 'fiscal_correction' AND entity_id = ?
+        ORDER BY CASE action
+          WHEN 'FISCAL_CORRECTION_QUEUED' THEN 1
+          WHEN 'FISCAL_CORRECTION_STARTED' THEN 2
+          ELSE 3
+        END`
+    ).all(correction.id)).toEqual([
+      { action: "FISCAL_CORRECTION_QUEUED" },
+      { action: "FISCAL_CORRECTION_STARTED" },
+      { action: "FISCAL_CORRECTION_FAILED" }
+    ]);
+    database.close();
+  });
+
+  it("rolls back recovery token rotation until missing queued and started audits persist", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_audit_recovery";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "34343434-3434-4434-8434-343434343434"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected recovery audit claim");
+    const correction = claimed.correction;
+    database.prepare(
+      `UPDATE fiscal_corrections
+          SET created_at = '2000-01-01T00:00:00.000Z',
+              updated_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(correction.id);
+    database.prepare(
+      "DELETE FROM audit_logs WHERE entity_type = 'fiscal_correction' AND entity_id = ?"
+    ).run(correction.id);
+    database.exec(`
+      CREATE TRIGGER block_recovery_started_audit
+      BEFORE INSERT ON audit_logs
+      WHEN NEW.action = 'FISCAL_CORRECTION_STARTED'
+      BEGIN
+        SELECT RAISE(ABORT, 'blocked recovery audit');
+      END;
+    `);
+
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "correction_processing_blocked_recovery",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    })).rejects.toThrow("blocked recovery audit");
+    expect(database.prepare(
+      "SELECT status, processing_claim_id FROM fiscal_corrections WHERE id = ?"
+    ).get(correction.id)).toEqual({
+      status: "QUEUED",
+      processing_claim_id: correction.processing_claim_id
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE entity_type = 'fiscal_correction'"
+    ).get()).toEqual({ count: 0 });
+
+    database.exec("DROP TRIGGER block_recovery_started_audit");
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "correction_processing_recovered_audit",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    })).resolves.toMatchObject({
+      status: "PROCESSING",
+      processing_claim_id: "correction_processing_recovered_audit"
+    });
+    expect(database.prepare(
+      `SELECT action FROM audit_logs
+        WHERE entity_type = 'fiscal_correction' AND entity_id = ?
+        ORDER BY CASE action
+          WHEN 'FISCAL_CORRECTION_QUEUED' THEN 1
+          WHEN 'FISCAL_CORRECTION_STARTED' THEN 2
+          ELSE 3
+        END`
+    ).all(correction.id)).toEqual([
+      { action: "FISCAL_CORRECTION_QUEUED" },
+      { action: "FISCAL_CORRECTION_STARTED" }
+    ]);
     database.close();
   });
 
@@ -173,9 +400,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: correction.processing_claim_id,
       fiscalClaimId: correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      correction,
+      "doc_prepare_correction",
+      "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+      "DTE-15-M001P004-000000000000101"
+    );
     const input = {
       correctionId: correction.id,
       documentId: "doc_prepare_correction",
+      processingClaimId: correction.processing_claim_id,
       claimId: correction.fiscal_claim_id!,
       codigoGeneracion: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
       numeroControl: "DTE-15-M001P004-000000000000101",
@@ -224,6 +460,200 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("fences a recovered DTE worker before identifier allocation and reuses one reservation", async () => {
+    const database = migratedDatabase();
+    const documentId = "doc_recovery_fence";
+    seedRejectedDocument(database, documentId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId,
+        requestId: "91919191-9191-4191-8191-919191919191"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected fenced correction claim");
+    const correction = claimed.correction;
+    const oldProcessingClaimId = correction.processing_claim_id;
+    const fiscalClaimId = correction.fiscal_claim_id!;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: oldProcessingClaimId,
+      fiscalClaimId
+    });
+    database.prepare(
+      "UPDATE fiscal_corrections SET processing_started_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+    ).run(correction.id);
+
+    let releaseOld!: () => void;
+    let markOldPaused!: () => void;
+    const oldPaused = new Promise<void>((resolve) => {
+      markOldPaused = resolve;
+    });
+    const oldGate = new Promise<void>((resolve) => {
+      releaseOld = resolve;
+    });
+    let signCount = 0;
+    const oldWorker = (async () => {
+      markOldPaused();
+      await oldGate;
+      const identifiers = await repository.reserveFiscalCorrectionDocumentIdentifiers({
+        correctionId: correction.id,
+        documentId,
+        processingClaimId: oldProcessingClaimId,
+        fiscalClaimId,
+        environment: "00",
+        controlPrefix: "M001P004",
+        codigoGeneracion: "91919191-9191-4191-8191-919191919191"
+      });
+      if (!identifiers) return false;
+      signCount += 1;
+      return repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: correction.id,
+        documentId,
+        processingClaimId: oldProcessingClaimId,
+        claimId: fiscalClaimId,
+        codigoGeneracion: identifiers.codigoGeneracion,
+        numeroControl: identifiers.numeroControl,
+        plainJson: { identificacion: identifiers },
+        signedJws: "stale-owner-signed-jws",
+        donorName: "Dueño anterior",
+        donorEmail: null
+      });
+    })();
+    await oldPaused;
+
+    const nextProcessingClaimId = "correction_processing_recovered_fence";
+    const recovered = await repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: oldProcessingClaimId,
+      nextProcessingClaimId,
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    });
+    expect(recovered).toMatchObject({
+      id: correction.id,
+      processing_claim_id: nextProcessingClaimId
+    });
+    releaseOld();
+    await expect(oldWorker).resolves.toBe(false);
+    expect(signCount).toBe(0);
+
+    const reserved = await repository.reserveFiscalCorrectionDocumentIdentifiers({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: nextProcessingClaimId,
+      fiscalClaimId,
+      environment: "00",
+      controlPrefix: "M001P004",
+      codigoGeneracion: "92929292-9292-4292-8292-929292929292"
+    });
+    expect(reserved).toEqual({
+      sequence: 1,
+      codigoGeneracion: "92929292-9292-4292-8292-929292929292",
+      numeroControl: "DTE-15-M001P004-000000000000001"
+    });
+    signCount += 1;
+    await expect(repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: nextProcessingClaimId,
+      claimId: fiscalClaimId,
+      codigoGeneracion: reserved!.codigoGeneracion,
+      numeroControl: reserved!.numeroControl,
+      plainJson: { identificacion: reserved },
+      signedJws: "current-owner-signed-jws",
+      donorName: "Dueño actual",
+      donorEmail: null
+    })).resolves.toBe(true);
+
+    await expect(repository.reserveFiscalCorrectionDocumentIdentifiers({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: nextProcessingClaimId,
+      fiscalClaimId,
+      environment: "00",
+      controlPrefix: "M001P004",
+      codigoGeneracion: "93939393-9393-4393-8393-939393939393"
+    })).resolves.toEqual(reserved);
+    expect(signCount).toBe(1);
+    expect(database.prepare(
+      `SELECT next_value FROM document_sequences
+        WHERE environment = '00' AND control_prefix = 'M001P004'`
+    ).get()).toEqual({ next_value: 2 });
+    expect(database.prepare(
+      `SELECT status, signed_jws, codigo_generacion, numero_control
+         FROM dte_documents WHERE id = ?`
+    ).get(documentId)).toEqual({
+      status: "SIGNED",
+      signed_jws: "current-owner-signed-jws",
+      codigo_generacion: reserved!.codigoGeneracion,
+      numero_control: reserved!.numeroControl
+    });
+    database.close();
+  });
+
+  it("does not rotate Wompi correction ownership while its issuance claim is held", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_recovery_fence";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "94949494-9494-4494-8494-949494949494"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected Wompi correction claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+    const issuanceClaimId = `wompi_correction_${correction.id}`;
+    expect(await repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: issuanceClaimId,
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).toBe(true);
+    database.prepare(
+      "UPDATE fiscal_corrections SET processing_started_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+    ).run(correction.id);
+
+    await expect(repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "must_not_rotate_held_wompi",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    })).resolves.toBeNull();
+    await repository.releaseWompiEventIssuance(wompiEventId, issuanceClaimId);
+    const recovered = await repository.recoverFiscalCorrectionProcessingClaim({
+      id: correction.id,
+      currentProcessingClaimId: correction.processing_claim_id,
+      nextProcessingClaimId: "correction_processing_recovered_wompi",
+      staleBefore: "2026-01-01T00:00:00.000Z"
+    });
+    expect(recovered).toMatchObject({
+      processing_claim_id: "correction_processing_recovered_wompi"
+    });
+    await expect(repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: issuanceClaimId,
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).resolves.toBe(false);
+    await expect(repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: issuanceClaimId,
+      correctionId: correction.id,
+      processingClaimId: "correction_processing_recovered_wompi",
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).resolves.toBe(true);
+    database.close();
+  });
+
   it("blocks a second correction in the MH rejection finalization gap", async () => {
     const database = migratedDatabase();
     seedRejectedDocument(database, "doc_rejected_twice");
@@ -240,9 +670,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: first.correction.processing_claim_id,
       fiscalClaimId: first.correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      first.correction,
+      "doc_rejected_twice",
+      "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
+      "DTE-15-M001P004-000000000000111"
+    );
     await repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: first.correction.id,
       documentId: "doc_rejected_twice",
+      processingClaimId: first.correction.processing_claim_id,
       claimId: first.correction.fiscal_claim_id!,
       codigoGeneracion: "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB",
       numeroControl: "DTE-15-M001P004-000000000000111",
@@ -342,9 +781,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: second.correction.processing_claim_id,
       fiscalClaimId: second.correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      second.correction,
+      "doc_rejected_twice",
+      "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC",
+      "DTE-15-M001P004-000000000000112"
+    );
     await expect(repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: second.correction.id,
       documentId: "doc_rejected_twice",
+      processingClaimId: second.correction.processing_claim_id,
       claimId: second.correction.fiscal_claim_id!,
       codigoGeneracion: "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC",
       numeroControl: "DTE-15-M001P004-000000000000112",
@@ -434,9 +882,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: first.correction.processing_claim_id,
       fiscalClaimId: first.correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      first.correction,
+      "doc_accepted_history",
+      "29292929-2929-4929-8929-292929292929",
+      "DTE-15-M001P004-000000000000099"
+    );
     await repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: first.correction.id,
       documentId: "doc_accepted_history",
+      processingClaimId: first.correction.processing_claim_id,
       claimId: first.correction.fiscal_claim_id!,
       codigoGeneracion: "29292929-2929-4929-8929-292929292929",
       numeroControl: "DTE-15-M001P004-000000000000099",
@@ -553,9 +1010,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processing_started_at: expect.any(String),
       mh_dispatch_started_at: null
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      correction,
+      "doc_dispatch_fence",
+      "31313131-3131-4131-8131-313131313131",
+      "DTE-15-M001P004-000000000000100"
+    );
     await repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: correction.id,
       documentId: "doc_dispatch_fence",
+      processingClaimId: correction.processing_claim_id,
       claimId: correction.fiscal_claim_id!,
       codigoGeneracion: "31313131-3131-4131-8131-313131313131",
       numeroControl: "DTE-15-M001P004-000000000000100",
@@ -756,9 +1222,18 @@ describe("fiscal repository SQL on SQLite", () => {
         processingClaimId: correction.processing_claim_id,
         fiscalClaimId: correction.fiscal_claim_id ?? undefined
       });
+      await reserveDocumentCorrectionIdentifiers(
+        database,
+        repository,
+        correction,
+        documentId,
+        `72727272-7272-4272-8272-72727272727${index}`,
+        `DTE-15-M001P004-${String(index + 121).padStart(15, "0")}`
+      );
       await repository.prepareClaimedFiscalCorrectionDocument({
         correctionId: correction.id,
         documentId,
+        processingClaimId: correction.processing_claim_id,
         claimId: correction.fiscal_claim_id!,
         codigoGeneracion: `72727272-7272-4272-8272-72727272727${index}`,
         numeroControl: `DTE-15-M001P004-${String(index + 121).padStart(15, "0")}`,
@@ -1063,9 +1538,18 @@ describe("fiscal repository SQL on SQLite", () => {
         fiscalClaimId: correction.fiscal_claim_id ?? undefined
       });
       const signedJws = `dispatch-required-jws-${index}`;
+      await reserveDocumentCorrectionIdentifiers(
+        database,
+        repository,
+        correction,
+        documentId,
+        `51515151-5151-4151-8151-51515151515${index}`,
+        `DTE-15-M001P004-${String(index + 111).padStart(15, "0")}`
+      );
       await repository.prepareClaimedFiscalCorrectionDocument({
         correctionId: correction.id,
         documentId,
+        processingClaimId: correction.processing_claim_id,
         claimId: correction.fiscal_claim_id!,
         codigoGeneracion: `51515151-5151-4151-8151-51515151515${index}`,
         numeroControl: `DTE-15-M001P004-${String(index + 111).padStart(15, "0")}`,
@@ -1147,9 +1631,18 @@ describe("fiscal repository SQL on SQLite", () => {
         processingClaimId: correction.processing_claim_id,
         fiscalClaimId: correction.fiscal_claim_id ?? undefined
       });
+      await reserveDocumentCorrectionIdentifiers(
+        database,
+        repository,
+        correction,
+        documentId,
+        `76767676-7676-4676-8676-76767676767${index}`,
+        `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`
+      );
       await repository.prepareClaimedFiscalCorrectionDocument({
         correctionId: correction.id,
         documentId,
+        processingClaimId: correction.processing_claim_id,
         claimId: correction.fiscal_claim_id!,
         codigoGeneracion: `76767676-7676-4676-8676-76767676767${index}`,
         numeroControl: `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`,
@@ -1216,9 +1709,18 @@ describe("fiscal repository SQL on SQLite", () => {
         processingClaimId: correction.processing_claim_id,
         fiscalClaimId: correction.fiscal_claim_id ?? undefined
       });
+      await reserveDocumentCorrectionIdentifiers(
+        database,
+        repository,
+        correction,
+        documentId,
+        `78787878-7878-4878-8878-78787878787${index}`,
+        `DTE-15-M001P004-${String(index + 151).padStart(15, "0")}`
+      );
       await repository.prepareClaimedFiscalCorrectionDocument({
         correctionId: correction.id,
         documentId,
+        processingClaimId: correction.processing_claim_id,
         claimId: correction.fiscal_claim_id!,
         codigoGeneracion: `78787878-7878-4878-8878-78787878787${index}`,
         numeroControl: `DTE-15-M001P004-${String(index + 151).padStart(15, "0")}`,
@@ -1298,9 +1800,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: rejected.correction.processing_claim_id,
       fiscalClaimId: rejected.correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      rejected.correction,
+      "doc_explicit_rejection",
+      "43434343-4343-4343-8343-434343434343",
+      "DTE-15-M001P004-000000000000118"
+    );
     await repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: rejected.correction.id,
       documentId: "doc_explicit_rejection",
+      processingClaimId: rejected.correction.processing_claim_id,
       claimId: rejected.correction.fiscal_claim_id!,
       codigoGeneracion: "43434343-4343-4343-8343-434343434343",
       numeroControl: "DTE-15-M001P004-000000000000118",
@@ -1444,9 +1955,18 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: correction.processing_claim_id,
       fiscalClaimId: correction.fiscal_claim_id ?? undefined
     });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      correction,
+      documentId,
+      "56565656-5656-4656-8656-565656565656",
+      "DTE-15-M001P004-000000000000156"
+    );
     await repository.prepareClaimedFiscalCorrectionDocument({
       correctionId: correction.id,
       documentId,
+      processingClaimId: correction.processing_claim_id,
       claimId: correction.fiscal_claim_id!,
       codigoGeneracion: "56565656-5656-4656-8656-565656565656",
       numeroControl: "DTE-15-M001P004-000000000000156",
@@ -2518,6 +3038,133 @@ describe("fiscal repository SQL on SQLite", () => {
     ]);
     database.close();
   });
+
+  it("restores and deletes the real contingency cycle with fiscal corrections in one deferred-FK transaction", () => {
+    const database = migratedDatabase();
+    const protocol = RETENTION_FOREIGN_KEY_PROTOCOL;
+    const restorePhase = (table: string) =>
+      protocol.restorePhases.findIndex((phase) => phase.tables.includes(table));
+    const deletePhase = (table: string) =>
+      protocol.deletePhases.findIndex((phase) => phase.tables.includes(table));
+
+    expect(protocol.transaction).toEqual({
+      begin: "BEGIN IMMEDIATE",
+      deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
+      verify: "PRAGMA foreign_key_check",
+      commit: "COMMIT",
+      rollback: "ROLLBACK"
+    });
+    expect(restorePhase("fiscal_corrections")).toBeGreaterThan(
+      restorePhase("dte_documents")
+    );
+    expect(deletePhase("fiscal_corrections")).toBeLessThan(
+      deletePhase("dte_documents")
+    );
+
+    const restoreOperations: Record<string, () => void> = {
+      wompi_events: () => {
+        database.prepare(
+          `INSERT INTO wompi_events (
+             id, transaction_id, environment, result, amount_cents, raw_body
+           ) VALUES ('restore_wompi', 'restore_transaction', '00',
+                     'ExitosaAprobada', 100, '{}')`
+        ).run();
+      },
+      contingency_periods: () => {
+        database.prepare(
+          `INSERT INTO contingency_periods (
+             id, environment, status, reason, started_at, event_id
+           ) VALUES ('restore_period', '00', 'EVENT_ACCEPTED', 'restore',
+                     '2026-07-01T00:00:00.000Z', 'restore_event')`
+        ).run();
+      },
+      dte_documents: () => {
+        database.prepare(
+          `INSERT INTO dte_documents (
+             id, wompi_event_id, environment, codigo_generacion, numero_control,
+             status, plain_json, amount_cents, issued_at, contingency_period_id
+           ) VALUES ('restore_document', 'restore_wompi', '00',
+                     '45454545-4545-4545-8545-454545454545',
+                     'DTE-15-M001P004-000000000000145', 'REJECTED', '{}', 100,
+                     '2026-07-01T00:00:00.000Z', 'restore_period')`
+        ).run();
+      },
+      dte_events: () => {
+        database.prepare(
+          `INSERT INTO dte_events (
+             id, document_id, event_type, environment, codigo_generacion,
+             status, plain_json
+           ) VALUES ('restore_event', 'restore_document', 'CONTINGENCIA', '00',
+                     '46464646-4646-4646-8646-464646464646', 'ACCEPTED', '{}')`
+        ).run();
+      },
+      fiscal_corrections: () => {
+        database.prepare(
+          `INSERT INTO fiscal_corrections (
+             id, request_id, request_payload_sha256, attempt_number, target_kind,
+             document_id, environment, status, before_receptor_json,
+             corrected_receptor_json, changed_fields_json,
+             source_document_snapshot_json, processing_claim_id, created_by
+           ) VALUES (
+             'restore_correction', '47474747-4747-4747-8747-474747474747',
+             'restore-sha', 1, 'DTE_DOCUMENT', 'restore_document', '00',
+             'FAILED', '{}', '{}', '[]', '{}', 'restore-processing',
+             'user_operator'
+           )`
+        ).run();
+      }
+    };
+
+    database.exec(protocol.transaction.begin);
+    database.exec(protocol.transaction.deferForeignKeys);
+    for (const phase of protocol.restorePhases) {
+      for (const table of phase.tables) restoreOperations[table]?.();
+    }
+    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+    database.exec(protocol.transaction.commit);
+    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+
+    const deleteOperations: Record<string, () => void> = {
+      fiscal_corrections: () => {
+        database.prepare("DELETE FROM fiscal_corrections WHERE id = 'restore_correction'").run();
+      },
+      contingency_periods: () => {
+        database.prepare("DELETE FROM contingency_periods WHERE id = 'restore_period'").run();
+      },
+      dte_documents: () => {
+        database.prepare("DELETE FROM dte_documents WHERE id = 'restore_document'").run();
+      },
+      dte_events: () => {
+        database.prepare("DELETE FROM dte_events WHERE id = 'restore_event'").run();
+      },
+      wompi_events: () => {
+        database.prepare("DELETE FROM wompi_events WHERE id = 'restore_wompi'").run();
+      }
+    };
+    database.exec(protocol.transaction.begin);
+    database.exec(protocol.transaction.deferForeignKeys);
+    for (const phase of protocol.deletePhases) {
+      for (const table of phase.tables) deleteOperations[table]?.();
+    }
+    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+    database.exec(protocol.transaction.commit);
+    expect(database.prepare(protocol.transaction.verify).all()).toEqual([]);
+    expect(database.prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM fiscal_corrections) AS corrections,
+         (SELECT COUNT(*) FROM contingency_periods) AS periods,
+         (SELECT COUNT(*) FROM dte_events) AS events,
+         (SELECT COUNT(*) FROM dte_documents) AS documents,
+         (SELECT COUNT(*) FROM wompi_events) AS wompi`
+    ).get()).toEqual({
+      corrections: 0,
+      periods: 0,
+      events: 0,
+      documents: 0,
+      wompi: 0
+    });
+    database.close();
+  });
 });
 
 class SqliteD1 {
@@ -2643,6 +3290,45 @@ function seedRejectedDocument(database: DatabaseSync, id: string): void {
     `control_${id}`,
     '{"identificacion":{"tipoDte":"15"}}'
   );
+}
+
+async function reserveDocumentCorrectionIdentifiers(
+  database: DatabaseSync,
+  repository: Repository,
+  correction: {
+    id: string;
+    environment: "00" | "01";
+    processing_claim_id: string;
+    fiscal_claim_id: string | null;
+  },
+  documentId: string,
+  codigoGeneracion: string,
+  numeroControl: string
+): Promise<void> {
+  const match = /^DTE-15-([A-Z0-9]{8})-(\d{15})$/.exec(numeroControl);
+  if (!match || !correction.fiscal_claim_id) {
+    throw new Error("invalid test correction reservation");
+  }
+  const [, controlPrefix, sequenceText] = match;
+  database.prepare(
+    `INSERT INTO document_sequences (environment, control_prefix, next_value)
+     VALUES (?, ?, ?)
+     ON CONFLICT(environment, control_prefix)
+     DO UPDATE SET next_value = excluded.next_value`
+  ).run(correction.environment, controlPrefix, Number(sequenceText));
+  await expect(repository.reserveFiscalCorrectionDocumentIdentifiers({
+    correctionId: correction.id,
+    documentId,
+    processingClaimId: correction.processing_claim_id,
+    fiscalClaimId: correction.fiscal_claim_id,
+    environment: correction.environment,
+    controlPrefix,
+    codigoGeneracion
+  })).resolves.toEqual({
+    sequence: Number(sequenceText),
+    codigoGeneracion,
+    numeroControl
+  });
 }
 
 function wompiCorrectionClaimInput(overrides: Record<string, string> = {}) {

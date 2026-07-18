@@ -113,3 +113,91 @@ Result: both passed.
 
 No emails, database rows, Cloudflare resources, deployments, or other external systems
 were mutated by this task.
+
+## Important-review remediation
+
+The Important review found three gaps in the first implementation:
+
+1. a recovered direct-DTE worker could retain the old processing token until after
+   legal identifier allocation;
+2. lifecycle state and audit writes were not durably coupled; and
+3. a flat restore order could not satisfy the real
+   `contingency_periods` ↔ `dte_events` ↔ `dte_documents` foreign-key cycle.
+
+### Review RED
+
+Command:
+
+```bash
+rtk env MINIFLARE_CACHE_DIR=/private/tmp/diezmos-miniflare-task6-review-red npm test -- test/worker/repositoryFiscalSql.test.ts test/worker/retention.test.ts
+```
+
+Result: failed as expected with 9 failures and 66 passes. The failures proved the
+missing token-qualified identifier reservation, unsafe Wompi ownership rotation,
+uncoupled `QUEUED` / `STARTED` / terminal / recovery audits, and the absence of an
+executable deferred-foreign-key restore/delete protocol.
+
+### Review changes
+
+- Migration `0028_fiscal_correction_reservations.sql` persists one generation code
+  and legal control sequence per direct-DTE correction. A token-qualified correction
+  update and database trigger increment the matching sequence atomically, so a
+  recovered owner reuses the reservation while a stale owner cannot allocate, sign,
+  or prepare.
+- `prepareClaimedFiscalCorrectionDocument` now requires the current processing token,
+  exact fiscal claim, exact document relationship, and exact persisted identifiers.
+- Wompi recovery refuses to rotate ownership while the event's issuance claim is
+  held. The old token cannot reclaim the event after a safe rotation.
+- Correction claim, processing, recovery, and terminal transitions write deterministic
+  PII-safe audits in the same D1 batch. Duplicate delivery reconciles missing
+  deterministic rows. Audit constraint failures roll back the state transition and
+  are no longer swallowed.
+- Active correction queue deliveries retry rather than acknowledging work whose
+  durable audit/recovery state is incomplete.
+- Retention restore and cleanup now expose transaction commands and phased tables:
+  `BEGIN IMMEDIATE`, deferred foreign keys, `foreign_key_check`, commit, and rollback.
+  A migrated in-memory SQLite test executes both restore and deletion through the real
+  contingency/DTE cycle plus fiscal-correction dependencies with foreign keys enabled.
+
+### Review GREEN
+
+Focused repository and retention proof:
+
+```bash
+rtk env MINIFLARE_CACHE_DIR=/private/tmp/diezmos-miniflare-task6-review-green-2 npm test -- test/worker/repositoryFiscalSql.test.ts test/worker/retention.test.ts
+```
+
+Result: 2 files passed; 75 tests passed.
+
+Broader integration proof:
+
+```bash
+rtk env MINIFLARE_CACHE_DIR=/private/tmp/diezmos-miniflare-task6-review-focused npm test -- test/worker/repositoryFiscalSql.test.ts test/worker/wompiEventsSchema.test.ts test/worker/workerFetch.test.ts test/worker/retention.test.ts test/client/displayText.test.ts
+```
+
+Result: 5 files passed; 564 tests passed.
+
+Full suite:
+
+```bash
+rtk env MINIFLARE_CACHE_DIR=/private/tmp/diezmos-miniflare-task6-review-full-2 npm test
+```
+
+Result: 74 files passed; 1,357 tests passed and 1 test skipped.
+
+Static and build checks:
+
+```bash
+rtk npm run typecheck
+rtk npm run build
+rtk npm run types:check
+rtk git diff --check
+```
+
+Result: all passed. The build retained the existing non-blocking bundle-size warning.
+`rtk npm run security:check-private-boundary` remains blocked by the pre-existing
+ignored file `node_modules/.cache/wrangler/wrangler-account.json`; this task did not
+remove or expose that local credential artifact.
+
+No emails, database rows, Cloudflare resources, deployments, or other external systems
+were mutated during the review remediation.

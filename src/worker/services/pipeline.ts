@@ -12,7 +12,7 @@ import {
 } from "../storage/repository";
 import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { newId, numeroControl as buildNumeroControl } from "../utils/ids";
+import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
 import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./email";
@@ -687,12 +687,23 @@ export class IssuancePipeline {
       );
     }
 
-    const sequence = await this.repo.nextControlSequence(
-      current.environment,
-      config.controlPrefix
-    );
     const identification = candidate.identificacion as Record<string, unknown>;
-    identification.numeroControl = buildNumeroControl(config.controlPrefix, sequence);
+    const reserved = await this.repo.reserveFiscalCorrectionDocumentIdentifiers({
+      correctionId: correction.id,
+      documentId: current.id,
+      processingClaimId: ownership.processingClaimId,
+      fiscalClaimId: correction.fiscal_claim_id,
+      environment: current.environment,
+      controlPrefix: config.controlPrefix,
+      codigoGeneracion: String(identification.codigoGeneracion)
+    });
+    if (!reserved) {
+      throw new FiscalCorrectionBusyError(
+        "La propiedad de la corrección cambió antes de reservar sus identificadores."
+      );
+    }
+    identification.codigoGeneracion = reserved.codigoGeneracion;
+    identification.numeroControl = reserved.numeroControl;
     validateCde(candidate);
     const identifiers = extractCdeIdentifiers(candidate);
     const summary = cdeDocumentSummary(candidate);
@@ -704,6 +715,7 @@ export class IssuancePipeline {
     const prepared = await this.repo.prepareClaimedFiscalCorrectionDocument({
       correctionId: correction.id,
       documentId: current.id,
+      processingClaimId: ownership.processingClaimId,
       claimId: correction.fiscal_claim_id,
       codigoGeneracion: identifiers.codigoGeneracion,
       numeroControl: identifiers.numeroControl,
@@ -933,19 +945,7 @@ export class IssuancePipeline {
         ? status
         : null;
     if (!actionStatus) return;
-    try {
-      await this.repo.createFiscalCorrectionAudit(
-        correction,
-        actionStatus as
-          | "STARTED"
-          | "ACCEPTED"
-          | "REJECTED"
-          | "FAILED"
-          | "REVIEW_REQUIRED"
-      );
-    } catch (error) {
-      logWorkerError(this.env, "fiscal_correction_audit_failed", error);
-    }
+    await this.repo.reconcileFiscalCorrectionAudits(correction);
   }
 
   private async recordStagingSmokeRun(

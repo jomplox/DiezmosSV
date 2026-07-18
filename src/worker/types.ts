@@ -60,6 +60,10 @@ export interface FiscalCorrectionRecord {
   issuance_attempt_id: string | null;
   fiscal_claim_id: string | null;
   processing_claim_id: string;
+  reserved_control_prefix: string | null;
+  reserved_control_sequence: number | null;
+  reserved_codigo_generacion: string | null;
+  reserved_numero_control: string | null;
   mh_dispatch_started_at: string | null;
   failure_code: string | null;
   failure_message: string | null;
