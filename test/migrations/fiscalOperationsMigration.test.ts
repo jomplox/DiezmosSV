@@ -224,8 +224,236 @@ describe("migration 0024 rate-limit claim ids", () => {
   });
 });
 
+describe("migration 0028 fiscal correction reservations", () => {
+  it("applies through the observed remote D1 statement boundaries", () => {
+    const migrationName = "0028_fiscal_correction_reservations.sql";
+    const database = migratedThroughObservedRemoteD1Boundaries();
+    expect(database.prepare(
+      "SELECT name FROM d1_migrations WHERE name = ?"
+    ).get(migrationName)).toEqual({ name: migrationName });
+    expect(database.prepare(
+      `SELECT name FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name LIKE 'trg_fiscal_correction_%'
+        ORDER BY name`
+    ).all()).toEqual([
+      { name: "trg_fiscal_correction_reservation_complete" },
+      { name: "trg_fiscal_correction_reserve_sequence" }
+    ]);
+    database.close();
+  });
+
+  it("rolls back a mismatched sequence and increments one valid reservation once", () => {
+    const database = migratedThroughObservedRemoteD1Boundaries();
+    database.prepare(
+      `INSERT INTO dte_documents (
+         id, environment, codigo_generacion, numero_control, status, plain_json,
+         amount_cents, issued_at
+       ) VALUES (
+         'reservation_document', '00',
+         '28282828-2828-4828-8828-282828282828',
+         'DTE-15-M001P004-000000000000006', 'REJECTED', '{}', 100,
+         '2026-07-18T12:00:00.000Z'
+       )`
+    ).run();
+    database.prepare(
+      `INSERT INTO fiscal_corrections (
+         id, request_id, request_payload_sha256, attempt_number, target_kind,
+         document_id, environment, status, before_receptor_json,
+         corrected_receptor_json, changed_fields_json,
+         source_document_snapshot_json, fiscal_claim_id, processing_claim_id,
+         created_by
+       ) VALUES (
+         'reservation_correction',
+         '29292929-2929-4929-8929-292929292929',
+         'reservation-sha', 1, 'DTE_DOCUMENT', 'reservation_document', '00',
+         'PROCESSING', '{}', '{}', '[]', '{}', 'fiscal-claim',
+         'processing-claim', 'operator'
+       )`
+    ).run();
+    database.prepare(
+      `INSERT INTO document_sequences (environment, control_prefix, next_value)
+       VALUES ('00', 'M001P004', 7)`
+    ).run();
+    const reserve = database.prepare(
+      `UPDATE fiscal_corrections
+          SET reserved_control_prefix = 'M001P004',
+              reserved_control_sequence = ?,
+              reserved_codigo_generacion = ?,
+              reserved_numero_control = ?
+        WHERE id = 'reservation_correction'`
+    );
+
+    expect(() => reserve.run(
+      8,
+      "30303030-3030-4030-8030-303030303030",
+      "DTE-15-M001P004-000000000000008"
+    )).toThrow(/fiscal correction sequence reservation failed/);
+    expect(database.prepare(
+      `SELECT reserved_control_prefix, reserved_control_sequence,
+              reserved_codigo_generacion, reserved_numero_control
+         FROM fiscal_corrections
+        WHERE id = 'reservation_correction'`
+    ).get()).toEqual({
+      reserved_control_prefix: null,
+      reserved_control_sequence: null,
+      reserved_codigo_generacion: null,
+      reserved_numero_control: null
+    });
+    expect(database.prepare(
+      `SELECT next_value FROM document_sequences
+        WHERE environment = '00' AND control_prefix = 'M001P004'`
+    ).get()).toEqual({ next_value: 7 });
+
+    expect(() => reserve.run(
+      7,
+      "31313131-3131-4131-8131-313131313131",
+      "DTE-15-M001P004-000000000000007"
+    )).not.toThrow();
+    expect(database.prepare(
+      `SELECT reserved_control_sequence, reserved_codigo_generacion,
+              reserved_numero_control
+         FROM fiscal_corrections
+        WHERE id = 'reservation_correction'`
+    ).get()).toEqual({
+      reserved_control_sequence: 7,
+      reserved_codigo_generacion: "31313131-3131-4131-8131-313131313131",
+      reserved_numero_control: "DTE-15-M001P004-000000000000007"
+    });
+    expect(database.prepare(
+      `SELECT next_value FROM document_sequences
+        WHERE environment = '00' AND control_prefix = 'M001P004'`
+    ).get()).toEqual({ next_value: 8 });
+    expect(() => reserve.run(
+      7,
+      "31313131-3131-4131-8131-313131313131",
+      "DTE-15-M001P004-000000000000007"
+    )).not.toThrow();
+    expect(database.prepare(
+      `SELECT next_value FROM document_sequences
+        WHERE environment = '00' AND control_prefix = 'M001P004'`
+    ).get()).toEqual({ next_value: 8 });
+    database.close();
+  });
+});
+
 function migrationFiles(): string[] {
   return readdirSync(migrationsDirectory)
     .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))
     .sort();
+}
+
+function migratedThroughObservedRemoteD1Boundaries(): DatabaseSync {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  for (const filename of migrationFiles().filter((name) => name < "0028_")) {
+    database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
+  }
+  database.exec(
+    `CREATE TABLE d1_migrations (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       name TEXT UNIQUE,
+       applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+     )`
+  );
+  const migrationName = "0028_fiscal_correction_reservations.sql";
+  const migrationQuery = `${
+    readFileSync(resolve(migrationsDirectory, migrationName), "utf8")
+  }
+INSERT INTO d1_migrations (name) VALUES ('${migrationName}');`;
+  executeWithObservedRemoteD1Boundaries(database, migrationQuery);
+  return database;
+}
+
+// Remote D1 accepted a simple trigger under read-only diagnosis but split the
+// nested CASE in migration 0028 at its inner END. This fixture is the relevant
+// compound-statement behavior from Cloudflare workers-sdk before #4951 taught
+// its local splitter to nest CASE as well as BEGIN. It executes the resulting
+// statements against SQLite so the test covers parser boundaries and migration
+// semantics rather than merely matching SQL source text.
+function executeWithObservedRemoteD1Boundaries(
+  database: DatabaseSync,
+  sql: string
+): void {
+  database.exec("BEGIN");
+  try {
+    for (const statement of splitWithObservedRemoteD1Boundaries(sql)) {
+      database.prepare(statement).run();
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+function splitWithObservedRemoteD1Boundaries(sql: string): string[] {
+  const statements: string[] = [];
+  let statement = "";
+  const compoundEnds: Array<(value: string) => boolean> = [];
+  const iterator = sql[Symbol.iterator]();
+  let next = iterator.next();
+
+  while (!next.done) {
+    const character = next.value;
+    if (compoundEnds[0]?.(statement + character)) compoundEnds.shift();
+
+    switch (character) {
+      case "'":
+      case '"':
+      case "`":
+        statement += character + consumeUntilMarker(iterator, character);
+        break;
+      case "-":
+        next = iterator.next();
+        if (!next.done && next.value === "-") {
+          consumeUntilMarker(iterator, "\n");
+          statement += "\n";
+          break;
+        }
+        statement += character;
+        continue;
+      case "/":
+        next = iterator.next();
+        if (!next.done && next.value === "*") {
+          consumeUntilMarker(iterator, "*/");
+          break;
+        }
+        statement += character;
+        continue;
+      case ";":
+        if (compoundEnds.length === 0) {
+          statements.push(statement);
+          statement = "";
+        } else {
+          statement += character;
+        }
+        break;
+      default:
+        statement += character;
+        break;
+    }
+
+    if (/\sBEGIN\s$/i.test(statement)) {
+      compoundEnds.unshift((value) => /\sEND[;\s]$/i.test(value));
+    }
+    next = iterator.next();
+  }
+
+  statements.push(statement);
+  return statements.map((value) => value.trim()).filter(Boolean);
+}
+
+function consumeUntilMarker(
+  iterator: StringIterator<string>,
+  marker: string
+): string {
+  let value = "";
+  let next = iterator.next();
+  while (!next.done) {
+    value += next.value;
+    if (value.endsWith(marker)) break;
+    next = iterator.next();
+  }
+  return value;
 }

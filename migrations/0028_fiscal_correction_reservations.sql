@@ -41,8 +41,6 @@ BEGIN
      AND control_prefix = NEW.reserved_control_prefix
      AND next_value = NEW.reserved_control_sequence;
 
-  SELECT CASE
-    WHEN changes() = 1 THEN 1
-    ELSE RAISE(ABORT, 'fiscal correction sequence reservation failed')
-  END;
+  SELECT RAISE(ABORT, 'fiscal correction sequence reservation failed')
+   WHERE changes() <> 1;
 END;
