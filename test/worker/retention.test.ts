@@ -1,7 +1,12 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { previousElSalvadorMonth, runRetentionExport } from "../../src/worker/services/retention";
+import {
+  RETENTION_DELETE_ORDER,
+  RETENTION_RESTORE_ORDER,
+  previousElSalvadorMonth,
+  runRetentionExport
+} from "../../src/worker/services/retention";
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 
@@ -310,6 +315,7 @@ class InMemoryRetentionD1 {
   readonly donationIntents: Array<Record<string, unknown>> = [];
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
+  readonly fiscalCorrections: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly auditLogs: Array<Record<string, unknown>> = [];
   readonly contingencyPeriods: Array<Record<string, unknown>> = [];
@@ -328,6 +334,7 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM donation_intents")) return this.donationIntents;
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
+    if (sql.includes("FROM fiscal_corrections")) return this.fiscalCorrections;
     if (sql.includes("FROM wompi_events")) return this.wompiEvents;
     if (sql.includes("FROM audit_logs")) return this.auditLogs;
     if (sql.includes("FROM contingency_periods")) return this.contingencyPeriods;
@@ -615,7 +622,7 @@ describe("runRetentionExport", () => {
     };
     expect(manifest.month).toBe("2026-06");
 
-    for (const table of ["dte_documents", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines", "document_sequences"]) {
+    for (const table of ["dte_documents", "fiscal_corrections", "donation_intents", "dte_events", "email_deliveries", "wompi_events", "audit_logs", "contingency_periods", "contingency_batches", "contingency_batch_lines", "document_sequences"]) {
       expect(manifest.tables[table]).toBeDefined();
     }
     expect(manifest.tables.dte_documents.rowCount).toBe(1);
@@ -679,6 +686,99 @@ describe("runRetentionExport", () => {
     ) as { tables: Record<string, { rowCount: number; sha256: string }> };
     expect(manifest.tables.wompi_events.rowCount).toBe(1);
     expect(manifest.tables.wompi_events.sha256).toBe(await sha256Hex(wompiBody));
+  });
+
+  it("retains complete fiscal correction evidence with safe audit metadata and dependency order", async () => {
+    const db = new InMemoryRetentionD1();
+    const beforeReceptor = JSON.stringify({
+      tipoDocumento: "13",
+      numDocumento: "12345678-9",
+      nombre: "Nombre original"
+    });
+    const correctedReceptor = JSON.stringify({
+      tipoDocumento: "13",
+      numDocumento: "10000002-7",
+      nombre: "Nombre corregido"
+    });
+    db.fiscalCorrections.push(
+      row({
+        id: "fiscal_correction_1",
+        request_id: "11111111-1111-4111-8111-111111111111",
+        target_kind: "WOMPI_EVENT",
+        wompi_event_id: "wompi_1",
+        document_id: null,
+        before_receptor_json: beforeReceptor,
+        corrected_receptor_json: correctedReceptor,
+        changed_fields_json: JSON.stringify(["nombre", "numDocumento"])
+      })
+    );
+    db.auditLogs.push(
+      row({
+        id: "audit_fiscal_correction_1",
+        action: "FISCAL_CORRECTION_ACCEPTED",
+        entity_type: "fiscal_correction",
+        entity_id: "fiscal_correction_1",
+        summary: "Corrección fiscal aceptada",
+        metadata_json: JSON.stringify({
+          correctionId: "fiscal_correction_1",
+          target: { kind: "WOMPI_EVENT", id: "wompi_1" },
+          requestIdHash: "a".repeat(64),
+          attemptNumber: 1,
+          changedFields: ["nombre", "numDocumento"],
+          outcomeCode: "ACCEPTED"
+        })
+      })
+    );
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(
+      envWithArchive(db, archive),
+      new Date("2026-07-04T15:00:00.000Z")
+    );
+
+    const correctionKey = "retention/2026/2026-06/fiscal_corrections.ndjson";
+    const correctionBody = archive.objects.get(correctionKey)!.body;
+    const exported = new TextDecoder()
+      .decode(correctionBody)
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(exported).toHaveLength(1);
+    expect(exported[0]).toMatchObject({
+      before_receptor_json: beforeReceptor,
+      corrected_receptor_json: correctedReceptor
+    });
+
+    const manifest = JSON.parse(
+      new TextDecoder().decode(
+        archive.objects.get("retention/2026/2026-06/manifest.json")!.body
+      )
+    ) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    expect(manifest.tables.fiscal_corrections).toEqual({
+      rowCount: 1,
+      sha256: await sha256Hex(correctionBody)
+    });
+
+    const auditBody = new TextDecoder().decode(
+      archive.objects.get("retention/2026/2026-06/audit_logs.ndjson")!.body
+    );
+    expect(auditBody).not.toContain("12345678-9");
+    expect(auditBody).not.toContain("10000002-7");
+    expect(auditBody).not.toContain("Nombre original");
+    expect(auditBody).not.toContain("Nombre corregido");
+
+    expect(RETENTION_RESTORE_ORDER.indexOf("fiscal_corrections")).toBeGreaterThan(
+      RETENTION_RESTORE_ORDER.indexOf("dte_documents")
+    );
+    expect(RETENTION_RESTORE_ORDER.indexOf("fiscal_corrections")).toBeGreaterThan(
+      RETENTION_RESTORE_ORDER.indexOf("wompi_events")
+    );
+    expect(RETENTION_DELETE_ORDER.indexOf("fiscal_corrections")).toBeLessThan(
+      RETENTION_DELETE_ORDER.indexOf("dte_documents")
+    );
+    expect(RETENTION_DELETE_ORDER.indexOf("fiscal_corrections")).toBeLessThan(
+      RETENTION_DELETE_ORDER.indexOf("wompi_events")
+    );
   });
 
   it("snapshots the current Wompi lifecycle again after its received-month archive", async () => {
@@ -920,8 +1020,8 @@ describe("runRetentionExport", () => {
     expect(result.status).toBe("completed");
     const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
     const tempTablePuts = archive.putCalls.filter((call) => call.key.includes(".ndjson.tmp."));
-    expect(finalTablePuts).toHaveLength(10);
-    expect(tempTablePuts).toHaveLength(10);
+    expect(finalTablePuts).toHaveLength(11);
+    expect(tempTablePuts).toHaveLength(11);
     expect(tempTablePuts.every((call) => call.streamed)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
@@ -1184,5 +1284,23 @@ describe("retention restore guidance", () => {
       "MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)"
     );
     expect(guidance).toContain("Never move an existing counter backward");
+  });
+});
+
+describe("fiscal correction operator guidance", () => {
+  it("documents guarded correction fields and uncertain-outcome escalation", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/runbook-operador.md"),
+      "utf8"
+    );
+
+    expect(guidance).toContain("CDE NO CREADO");
+    expect(guidance).toContain("preserva el CDE");
+    expect(guidance).toContain("tipo y número de documento");
+    expect(guidance).toContain("Guardar y");
+    expect(guidance).toContain("reintentar");
+    expect(guidance).toContain("Revisión necesaria");
+    expect(guidance).toContain("no se corrigen ni se reintentan automáticamente");
+    expect(guidance).toContain("no use\nReintentar DTE");
   });
 });

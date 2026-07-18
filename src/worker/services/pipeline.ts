@@ -80,6 +80,7 @@ function isTerminalDteStatus(status: string): boolean {
 }
 
 const STALLED_WOMPI_EVENT_AGE_MS = 60 * 60 * 1000;
+const FISCAL_CORRECTION_STALE_MS = 15 * 60 * 1000;
 const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
 // una alerta operativa MH_UNAVAILABLE (una sola vez por episodio diferido y canal).
@@ -90,22 +91,6 @@ const TERMINAL_FISCAL_CORRECTION_STATUSES = new Set([
   "REJECTED",
   "FAILED",
   "REVIEW_REQUIRED"
-]);
-const FISCAL_CORRECTION_AUDIT_FIELDS = new Set([
-  "tipoDocumento",
-  "numDocumento",
-  "nrc",
-  "nombre",
-  "codActividad",
-  "descActividad",
-  "correo",
-  "telefono",
-  "codDomiciliado",
-  "codPais",
-  "departamento",
-  "municipio",
-  "distrito",
-  "complemento"
 ]);
 
 export interface FiscalCorrectionQueueOwnership {
@@ -213,6 +198,71 @@ export class IssuancePipeline {
         summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora"
       });
     }
+  }
+
+  async recoverStalledFiscalCorrections(
+    limit = 100
+  ): Promise<{ requeued: number }> {
+    const staleBefore = new Date(
+      Date.now() - FISCAL_CORRECTION_STALE_MS
+    ).toISOString();
+    const candidates = await this.repo.listRecoverableFiscalCorrections(
+      staleBefore,
+      limit
+    );
+    let requeued = 0;
+    for (const candidate of candidates) {
+      const safeLifecycle =
+        candidate.status === "QUEUED"
+        || (
+          candidate.status === "PROCESSING"
+          && candidate.mh_dispatch_started_at === null
+        );
+      if (!safeLifecycle) continue;
+      try {
+        assertDeploymentAllowsAmbiente(this.env, candidate.environment);
+      } catch (error) {
+        if (error instanceof EnvironmentNotAllowedError) continue;
+        throw error;
+      }
+      const recovered = await this.repo.recoverFiscalCorrectionProcessingClaim({
+        id: candidate.id,
+        currentProcessingClaimId: candidate.processing_claim_id,
+        nextProcessingClaimId: newId("correction_processing"),
+        staleBefore
+      });
+      if (!recovered) continue;
+      await this.recordFiscalCorrectionAudit(recovered, "STARTED");
+
+      if (
+        recovered.target_kind === "WOMPI_EVENT"
+        && recovered.wompi_event_id
+        && recovered.issuance_attempt_id
+      ) {
+        await this.env.ISSUANCE_QUEUE.send({
+          wompiEventId: recovered.wompi_event_id,
+          issuanceAttemptId: recovered.issuance_attempt_id,
+          fiscalCorrectionId: recovered.id,
+          fiscalCorrectionProcessingClaimId: recovered.processing_claim_id
+        });
+        requeued += 1;
+        continue;
+      }
+      if (
+        recovered.target_kind === "DTE_DOCUMENT"
+        && recovered.document_id
+        && recovered.fiscal_claim_id
+      ) {
+        await this.env.ISSUANCE_QUEUE.send({
+          advancedDocumentId: recovered.document_id,
+          fiscalClaimId: recovered.fiscal_claim_id,
+          fiscalCorrectionId: recovered.id,
+          fiscalCorrectionProcessingClaimId: recovered.processing_claim_id
+        });
+        requeued += 1;
+      }
+    }
+    return { requeued };
   }
 
   async processWompiEvent(
@@ -583,10 +633,15 @@ export class IssuancePipeline {
     const current = await this.repo.getDteDocument(correction.document_id);
     if (
       !current
-      || current.status !== "REJECTED"
       || current.fiscal_operation_claim_id !== correction.fiscal_claim_id
       || current.fiscal_operation_kind !== "TRANSMISSION"
     ) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    if (current.status === "SIGNED") {
+      return this.finishDocumentFiscalCorrection(correction, current.id, ownership);
+    }
+    if (current.status !== "REJECTED") {
       throw new FiscalCorrectionOwnershipError();
     }
     assertDeploymentAllowsAmbiente(this.env, current.environment);
@@ -878,37 +933,16 @@ export class IssuancePipeline {
         ? status
         : null;
     if (!actionStatus) return;
-    let parsed: unknown;
     try {
-      parsed = JSON.parse(correction.changed_fields_json);
-    } catch {
-      parsed = [];
-    }
-    const changedFields = Array.isArray(parsed)
-      ? parsed.reduce<string[]>((fields, candidate) => {
-          if (
-            typeof candidate === "string"
-            && FISCAL_CORRECTION_AUDIT_FIELDS.has(candidate)
-            && !fields.includes(candidate)
-          ) {
-            fields.push(candidate);
-          }
-          return fields;
-        }, [])
-      : [];
-    try {
-      await this.repo.createAuditIfAbsent({
-        action: `FISCAL_CORRECTION_${actionStatus}`,
-        entityType: "fiscal_correction",
-        entityId: correction.id,
-        summary: actionStatus === "STARTED"
-          ? "Procesamiento de corrección fiscal iniciado"
-          : `Corrección fiscal finalizada con estado ${actionStatus}`,
-        metadata: {
-          correctionId: correction.id,
-          changedFields
-        }
-      });
+      await this.repo.createFiscalCorrectionAudit(
+        correction,
+        actionStatus as
+          | "STARTED"
+          | "ACCEPTED"
+          | "REJECTED"
+          | "FAILED"
+          | "REVIEW_REQUIRED"
+      );
     } catch (error) {
       logWorkerError(this.env, "fiscal_correction_audit_failed", error);
     }

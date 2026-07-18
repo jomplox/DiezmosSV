@@ -34,6 +34,25 @@ export interface RetentionManifest {
   tables: Record<string, TableManifestEntry>;
 }
 
+// Dependency order for disaster-recovery tooling. Fiscal corrections reference
+// both Wompi events and DTE documents, so restore them after those parents and
+// delete them before either parent. The exporter itself remains table-agnostic.
+export const RETENTION_RESTORE_ORDER = [
+  "wompi_events",
+  "contingency_periods",
+  "dte_documents",
+  "fiscal_corrections",
+  "donation_intents",
+  "dte_events",
+  "email_deliveries",
+  "contingency_batches",
+  "contingency_batch_lines",
+  "audit_logs",
+  "document_sequences"
+] as const;
+
+export const RETENTION_DELETE_ORDER = [...RETENTION_RESTORE_ORDER].reverse();
+
 // Single source of truth for the R2 archive key layout, shared with the backups
 // service so month listing/verification/download derive keys the same way the
 // export writes them: retention/<YYYY>/<YYYY-MM>/{manifest.json,<table>.ndjson}.

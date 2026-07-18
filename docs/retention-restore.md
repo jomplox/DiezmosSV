@@ -11,6 +11,7 @@ multi-year retention tax law requires survives independently of D1.
 
 ```
 retention/<YYYY>/<YYYY-MM>/dte_documents.ndjson
+retention/<YYYY>/<YYYY-MM>/fiscal_corrections.ndjson
 retention/<YYYY>/<YYYY-MM>/donation_intents.ndjson
 retention/<YYYY>/<YYYY-MM>/dte_events.ndjson
 retention/<YYYY>/<YYYY-MM>/email_deliveries.ndjson
@@ -24,8 +25,9 @@ retention/<YYYY>/<YYYY-MM>/manifest.json
 ```
 
 Each `.ndjson` file has one JSON object per line (one D1 row per line). The
-five windowed tables (`dte_documents`, `donation_intents`, `dte_events`,
-`email_deliveries`, `audit_logs`) are filtered to rows whose `created_at`
+six windowed tables (`dte_documents`, `fiscal_corrections`,
+`donation_intents`, `dte_events`, `email_deliveries`, `audit_logs`) are
+filtered to rows whose `created_at`
 falls in the given month, evaluated in El Salvador local time (UTC-6, no
 DST). The mutable `wompi_events` lifecycle, the legal number counters in
 `document_sequences`, and the three contingency tables are full snapshots as
@@ -111,10 +113,16 @@ table:
 3. Apply via `wrangler d1 execute <database> --env <env> --remote --file
    restore.sql`, batching inserts (D1 has a statement-size limit) rather
    than issuing thousands of individual `wrangler d1 execute` calls.
-4. Foreign keys matter for ordering: restore `dte_documents` and
+4. Foreign keys matter for ordering: restore `wompi_events` and
+   `dte_documents` before `fiscal_corrections`; the correction rows reference
+   one of those two parents and contain the immutable before/after receptor
+   evidence. Restore `dte_documents` and
    `contingency_periods` before `dte_events`, `contingency_batches`, and
    `contingency_batch_lines` (which reference them), and restore
    `wompi_events` before `dte_documents` (which references it).
+   If a cleanup or rollback must delete these records, use the reverse
+   dependency order: delete `fiscal_corrections` before its referenced
+   `dte_documents` or `wompi_events` rows.
 5. After restoring, spot-check row counts against the manifest's
    `rowCount` for each table, and re-run the read paths (`GET
    /api/documents`, `GET /api/audit`) to confirm the restored data renders

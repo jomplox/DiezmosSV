@@ -483,6 +483,11 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
     logWorkerError(env, "stalled_wompi_event_sweep_failed", error);
   }
   try {
+    await pipeline.recoverStalledFiscalCorrections();
+  } catch (error) {
+    logWorkerError(env, "fiscal_correction_recovery_failed", error);
+  }
+  try {
     // Process a bounded page per tick: snapshot the capped set of expiring intents,
     // then expire exactly that page by id, so public intent creation cannot force one
     // cron invocation to snapshot or deactivate an unbounded row set. The remainder
@@ -2292,6 +2297,10 @@ async function handleWompiFiscalCorrection(
   if (!claim.correction.issuance_attempt_id) {
     throw new Error("La corrección Wompi reclamada no tiene intento de emisión.");
   }
+  await repo.createFiscalCorrectionAudit(claim.correction, "QUEUED", {
+    type: "USER",
+    id: actor.id
+  });
   try {
     await env.ISSUANCE_QUEUE.send({
       wompiEventId,
@@ -2387,6 +2396,10 @@ async function handleDocumentFiscalCorrection(
   if (!claim.correction.fiscal_claim_id) {
     throw new Error("La corrección de CDE reclamada no tiene propiedad fiscal.");
   }
+  await repo.createFiscalCorrectionAudit(claim.correction, "QUEUED", {
+    type: "USER",
+    id: actor.id
+  });
   try {
     await env.ISSUANCE_QUEUE.send({
       advancedDocumentId: documentId,
