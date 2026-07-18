@@ -15,7 +15,7 @@ import {
 } from "../../src/worker/services/pipeline";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { EmailService } from "../../src/worker/services/email";
-import { MhClient } from "../../src/worker/services/mhClient";
+import { MhClient, MhPreDispatchError } from "../../src/worker/services/mhClient";
 import { previousElSalvadorMonth } from "../../src/worker/services/retention";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import { bytesToBase64, hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
@@ -778,6 +778,94 @@ describe("guarded fiscal correction API", () => {
     };
   }
 
+  function stubQueuedCorrectionLifecycle(
+    correction: FiscalCorrectionRecord,
+    event: Record<string, unknown>
+  ): void {
+    vi.spyOn(Repository.prototype, "getFiscalCorrection").mockImplementation(async (id) =>
+      id === correction.id ? correction : null
+    );
+    vi.spyOn(Repository.prototype, "claimFiscalCorrectionProcessing").mockImplementation(async (input) => {
+      if (["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)) {
+        return "terminal";
+      }
+      if (
+        input.id !== correction.id
+        || input.processingClaimId !== correction.processing_claim_id
+        || input.issuanceAttemptId !== correction.issuance_attempt_id
+        || input.fiscalClaimId !== undefined
+        || event.issuance_attempt_id !== correction.issuance_attempt_id
+        || event.issuance_status !== "RETRY_QUEUED"
+        || correction.status !== "QUEUED"
+      ) {
+        return "busy";
+      }
+      correction.status = "PROCESSING";
+      correction.processing_started_at = new Date().toISOString();
+      return "claimed";
+    });
+    vi.spyOn(Repository.prototype, "markFiscalCorrectionMhDispatchStarted")
+      .mockImplementation(async (id, processingClaimId) => {
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+        ) {
+          return false;
+        }
+        correction.mh_dispatch_started_at ??= new Date().toISOString();
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "clearFiscalCorrectionMhDispatchStarted")
+      .mockImplementation(async (id, processingClaimId) => {
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+          || correction.mh_dispatch_started_at === null
+        ) {
+          return false;
+        }
+        correction.mh_dispatch_started_at = null;
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "finalizeFiscalCorrection")
+      .mockImplementation(async (id, processingClaimId, outcome) => {
+        const dispatchStateMatches = outcome.status === "FAILED"
+          ? correction.mh_dispatch_started_at === null
+          : correction.mh_dispatch_started_at !== null;
+        if (
+          id !== correction.id
+          || processingClaimId !== correction.processing_claim_id
+          || correction.status !== "PROCESSING"
+          || !dispatchStateMatches
+        ) {
+          return false;
+        }
+        correction.status = outcome.status;
+        correction.failure_code = outcome.failureCode ?? null;
+        correction.failure_message = outcome.failureMessage ?? null;
+        correction.completed_at = new Date().toISOString();
+        return true;
+      });
+  }
+
+  async function consumeCorrectionMessage(
+    runtime: Env,
+    body: IssuanceMessage,
+    id = crypto.randomUUID()
+  ): Promise<{ ack: ReturnType<typeof vi.fn>; retry: ReturnType<typeof vi.fn> }> {
+    const ack = vi.fn();
+    const retry = vi.fn();
+    await worker.queue({
+      queue: "diezmossv-staging-issuance-example",
+      messages: [{ id, timestamp: new Date(), body, attempts: 1, ack, retry }],
+      ackAll: vi.fn(),
+      retryAll: vi.fn()
+    } as unknown as MessageBatch<IssuanceMessage>, runtime);
+    return { ack, retry };
+  }
+
   function rejectedCorrectionDocument(
     overrides: Partial<DteDocumentRecord> = {}
   ): DteDocumentRecord {
@@ -1037,6 +1125,614 @@ describe("guarded fiscal correction API", () => {
         fiscalClaimId: "fiscal_claim_document"
       }
     ]);
+  });
+
+  it("issues a corrected pre-CDE Wompi failure with its existing reservation", async () => {
+    const db = correctionDb();
+    const codigoGeneracion = "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA";
+    const numeroControl = "DTE-15-M001P004-000000000000041";
+    const event = correctionEvent({
+      control_prefix: "M001P004",
+      control_sequence: 41,
+      reserved_numero_control: numeroControl,
+      reserved_codigo_generacion: codigoGeneracion
+    });
+    db.wompiEvents.push(event);
+    db.nextSequence = 42;
+    const rawBodyBefore = String(event.raw_body);
+    const intentsBefore = JSON.stringify(db.donationIntents);
+    const sequenceBefore = db.nextSequence;
+    const correction = correctionRecord({
+      wompi_event_id: String(event.id),
+      issuance_attempt_id: "issuance_attempt_corrected_1",
+      processing_claim_id: "correction_processing_corrected_1"
+    });
+    const queued: IssuanceMessage[] = [];
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockImplementation(async () => {
+      event.processed_at = null;
+      event.issuance_status = "RETRY_QUEUED";
+      event.issuance_attempt_id = correction.issuance_attempt_id;
+      return { kind: "claimed", correction };
+    });
+    vi.spyOn(Repository.prototype, "getFiscalCorrection").mockImplementation(async (id) =>
+      id === correction.id ? correction : null
+    );
+    vi.spyOn(Repository.prototype, "claimFiscalCorrectionProcessing").mockImplementation(async (input) => {
+      if (
+        input.id !== correction.id
+        || input.processingClaimId !== correction.processing_claim_id
+        || input.issuanceAttemptId !== correction.issuance_attempt_id
+        || correction.status !== "QUEUED"
+      ) {
+        return "busy";
+      }
+      correction.status = "PROCESSING";
+      correction.processing_started_at = new Date().toISOString();
+      return "claimed";
+    });
+    vi.spyOn(Repository.prototype, "markFiscalCorrectionMhDispatchStarted")
+      .mockImplementation(async (id, processingClaimId) => {
+        if (id !== correction.id || processingClaimId !== correction.processing_claim_id) {
+          return false;
+        }
+        correction.mh_dispatch_started_at = new Date().toISOString();
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "finalizeFiscalCorrection")
+      .mockImplementation(async (id, processingClaimId, outcome) => {
+        if (id !== correction.id || processingClaimId !== correction.processing_claim_id) {
+          return false;
+        }
+        correction.status = outcome.status;
+        correction.failure_code = outcome.failureCode ?? null;
+        correction.failure_message = outcome.failureMessage ?? null;
+        correction.completed_at = new Date().toISOString();
+        return true;
+      });
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const response = await worker.fetch(correctionRequest(
+      `/api/wompi-events/${String(event.id)}/correct-and-retry`,
+      {
+        correctionRequestId: correction.request_id,
+        receptor: correctionReceptor()
+      }
+    ), runtime);
+
+    expect(response.status).toBe(202);
+    expect(queued).toEqual([expect.objectContaining({
+      fiscalCorrectionId: expect.any(String),
+      fiscalCorrectionProcessingClaimId: expect.any(String),
+      issuanceAttemptId: expect.any(String)
+    })]);
+    const ack = vi.fn();
+    const retry = vi.fn();
+    await worker.queue({
+      queue: "diezmossv-staging-issuance-example",
+      messages: [{
+        id: "msg_corrected_wompi_1",
+        timestamp: new Date(),
+        body: queued[0],
+        attempts: 1,
+        ack,
+        retry
+      }],
+      ackAll: vi.fn(),
+      retryAll: vi.fn()
+    } as unknown as MessageBatch<IssuanceMessage>, runtime);
+
+    expect(correction).toMatchObject({
+      status: "ACCEPTED",
+      failure_code: null,
+      failure_message: null
+    });
+    expect(ack).toHaveBeenCalledTimes(1);
+    expect(retry).not.toHaveBeenCalled();
+    const created = db.documents[0];
+    expect(created.numero_control).toBe(numeroControl);
+    expect(created.codigo_generacion).toBe(codigoGeneracion);
+    expect(JSON.parse(created.plain_json).receptor.numDocumento).toBe("10000002-7");
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(event.raw_body).toBe(rawBodyBefore);
+    expect(JSON.stringify(db.donationIntents)).toBe(intentsBefore);
+  });
+
+  it("validates before allocating one reservation for a corrected event without identifiers", async () => {
+    const db = correctionDb();
+    db.nextSequence = 51;
+    const correction = correctionRecord({
+      id: "fiscal_correction_unreserved",
+      wompi_event_id: "wompi_correction_unreserved",
+      issuance_attempt_id: "issuance_attempt_unreserved",
+      processing_claim_id: "correction_processing_unreserved"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: null,
+      control_sequence: null,
+      reserved_numero_control: null,
+      reserved_codigo_generacion: null
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const sequenceBefore = db.nextSequence;
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction.status).toBe("ACCEPTED");
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
+    expect(db.documents).toHaveLength(1);
+    expect(db.documents[0].numero_control).toBe(
+      `DTE-15-M001P004-${String(sequenceBefore).padStart(15, "0")}`
+    );
+    expect(transmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not allocate when the durable corrected candidate fails validation", async () => {
+    const db = correctionDb();
+    db.nextSequence = 56;
+    const correction = correctionRecord({
+      id: "fiscal_correction_invalid_candidate",
+      wompi_event_id: "wompi_correction_invalid_candidate",
+      issuance_attempt_id: "issuance_attempt_invalid_candidate",
+      processing_claim_id: "correction_processing_invalid_candidate",
+      corrected_receptor_json: JSON.stringify(correctionReceptor({
+        numDocumento: "12345678-9"
+      }))
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: null,
+      control_sequence: null,
+      reserved_numero_control: null,
+      reserved_codigo_generacion: null
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = correctionRuntime(db);
+    const sequenceBefore = db.nextSequence;
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "FAILED",
+      failure_code: "FISCAL_CORRECTION_INVALID_CANDIDATE",
+      mh_dispatch_started_at: null
+    });
+    expect(event.issuance_claim_id ?? null).toBeNull();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(sign).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+  });
+
+  it("acks a duplicate correction delivery without allocating or transmitting twice", async () => {
+    const db = correctionDb();
+    db.nextSequence = 61;
+    const correction = correctionRecord({
+      id: "fiscal_correction_duplicate",
+      wompi_event_id: "wompi_correction_duplicate",
+      issuance_attempt_id: "issuance_attempt_duplicate",
+      processing_claim_id: "correction_processing_duplicate"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: null,
+      control_sequence: null,
+      reserved_numero_control: null,
+      reserved_codigo_generacion: null
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const body: IssuanceMessage = {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    };
+    const sequenceBefore = db.nextSequence;
+
+    const first = await consumeCorrectionMessage(runtime, body, "msg_correction_duplicate_1");
+    const second = await consumeCorrectionMessage(runtime, body, "msg_correction_duplicate_2");
+
+    expect(first.ack).toHaveBeenCalledTimes(1);
+    expect(second.ack).toHaveBeenCalledTimes(1);
+    expect(first.retry).not.toHaveBeenCalled();
+    expect(second.retry).not.toHaveBeenCalled();
+    expect(correction.status).toBe("ACCEPTED");
+    expect(db.nextSequence).toBe(sequenceBefore + 1);
+    expect(db.documents).toHaveLength(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+  });
+
+  it("acks missing or stale correction ownership without allocating, signing, or transmitting", async () => {
+    const db = correctionDb();
+    db.nextSequence = 71;
+    const correction = correctionRecord({
+      id: "fiscal_correction_stale_ownership",
+      wompi_event_id: "wompi_correction_stale_ownership",
+      issuance_attempt_id: "issuance_attempt_owned",
+      processing_claim_id: "correction_processing_owned"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: null,
+      control_sequence: null,
+      reserved_numero_control: null,
+      reserved_codigo_generacion: null
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = correctionRuntime(db);
+    const sequenceBefore = db.nextSequence;
+    const messages: IssuanceMessage[] = [
+      {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        issuanceAttemptId: correction.issuance_attempt_id!
+      },
+      {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: "correction_processing_stale",
+        issuanceAttemptId: correction.issuance_attempt_id!
+      },
+      {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: "issuance_attempt_stale"
+      },
+      {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: correction.issuance_attempt_id!,
+        fiscalClaimId: "unexpected_fiscal_claim"
+      }
+    ];
+
+    const dispositions = [];
+    for (const [index, message] of messages.entries()) {
+      dispositions.push(await consumeCorrectionMessage(
+        runtime,
+        message,
+        `msg_correction_stale_${index}`
+      ));
+    }
+
+    for (const disposition of dispositions) {
+      expect(disposition.ack).toHaveBeenCalledTimes(1);
+      expect(disposition.retry).not.toHaveBeenCalled();
+    }
+    expect(correction.status).toBe("QUEUED");
+    expect(event.issuance_claim_id ?? null).toBeNull();
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(db.documents).toHaveLength(0);
+    expect(sign).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+  });
+
+  it("finalizes a corrected CDE rejected by MH as REJECTED", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_rejected",
+      wompi_event_id: "wompi_correction_rejected",
+      issuance_attempt_id: "issuance_attempt_rejected",
+      processing_claim_id: "correction_processing_rejected"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockImplementation(async () => {
+      expect(correction.mh_dispatch_started_at).toBeTruthy();
+      return {
+        accepted: false,
+        estado: "RECHAZADO",
+        selloRecibido: null,
+        observaciones: ["#/receptor/numDocumento rechazado"],
+        raw: { estado: "RECHAZADO" }
+      };
+    });
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(correction.status).toBe("REJECTED");
+    expect(correction.mh_dispatch_started_at).toBeTruthy();
+    expect(db.documents[0]).toMatchObject({
+      status: "REJECTED",
+      fiscal_operation_claim_id: null
+    });
+  });
+
+  it("marks a proven MH pre-dispatch correction failure FAILED and clears claims", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_pre_dispatch",
+      wompi_event_id: "wompi_correction_pre_dispatch",
+      issuance_attempt_id: "issuance_attempt_pre_dispatch",
+      processing_claim_id: "correction_processing_pre_dispatch"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockRejectedValue(
+      new MhPreDispatchError("MH auth unavailable", new Error("auth unavailable"))
+    );
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(correction).toMatchObject({
+      status: "FAILED",
+      mh_dispatch_started_at: null,
+      failure_code: "MH_PRE_DISPATCH_ERROR"
+    });
+    expect(db.documents[0]).toMatchObject({
+      status: "FAILED",
+      fiscal_operation_claim_id: null
+    });
+  });
+
+  it("keeps an ambiguous corrected MH dispatch claimed and REVIEW_REQUIRED", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_uncertain",
+      wompi_event_id: "wompi_correction_uncertain",
+      issuance_attempt_id: "issuance_attempt_uncertain",
+      processing_claim_id: "correction_processing_uncertain"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: correction.issuance_attempt_id
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockImplementation(async () => {
+      expect(correction.mh_dispatch_started_at).toBeTruthy();
+      throw new Error("connection reset after request write");
+    });
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(correction).toMatchObject({
+      status: "REVIEW_REQUIRED",
+      mh_dispatch_started_at: expect.any(String),
+      failure_code: "MH_DISPATCH_UNCERTAIN"
+    });
+    expect(db.documents[0]).toMatchObject({
+      status: "SIGNED",
+      fiscal_operation_claim_id: `fiscal_correction_${correction.id}`,
+      fiscal_operation_kind: "TRANSMISSION"
+    });
+  });
+
+  it("turns a redelivered post-boundary PROCESSING correction into REVIEW_REQUIRED", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_post_boundary_redelivery",
+      wompi_event_id: "wompi_correction_post_boundary_redelivery",
+      issuance_attempt_id: "issuance_attempt_post_boundary_redelivery",
+      processing_claim_id: "correction_processing_post_boundary_redelivery",
+      status: "PROCESSING",
+      processing_started_at: "2026-07-18T12:01:00.000Z",
+      mh_dispatch_started_at: "2026-07-18T12:02:00.000Z"
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      processed_at: null,
+      issuance_status: "PROCESSING",
+      issuance_attempt_id: correction.issuance_attempt_id
+    });
+    db.wompiEvents.push(event);
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    const runtime = correctionRuntime(db);
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(transmit).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "REVIEW_REQUIRED",
+      mh_dispatch_started_at: "2026-07-18T12:02:00.000Z",
+      failure_code: "MH_DISPATCH_UNCERTAIN"
+    });
+  });
+
+  it("retries token-owned safe pre-dispatch work while its CDE claim is busy", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_safe_busy",
+      wompi_event_id: "wompi_correction_safe_busy",
+      issuance_attempt_id: "issuance_attempt_safe_busy",
+      processing_claim_id: "correction_processing_safe_busy",
+      status: "PROCESSING",
+      processing_started_at: "2026-07-18T12:01:00.000Z"
+    });
+    const payload = correctionWebhook({
+      IdTransaccion: "wompi_correction_safe_busy_tx",
+      Cliente: {
+        ...(correctionWebhook().Cliente ?? {}),
+        DocumentoIdentidad: "10000002-7"
+      }
+    });
+    const document = buildCdeDocument(payload, emisorConfig(), {
+      sequence: 81,
+      environment: "00",
+      issuedAt: new Date(payload.FechaTransaccion)
+    });
+    const identifiers = (document.identificacion ?? {}) as Record<string, unknown>;
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      transaction_id: payload.IdTransaccion,
+      raw_body: JSON.stringify(payload),
+      processed_at: "2026-07-18T12:02:00.000Z",
+      created_document_id: "dte_correction_safe_busy",
+      issuance_status: "DOCUMENT_CREATED",
+      issuance_attempt_id: correction.issuance_attempt_id
+    });
+    db.wompiEvents.push(event);
+    db.documents.push(testDocument({
+      id: "dte_correction_safe_busy",
+      wompi_event_id: String(event.id),
+      status: "SIGNED",
+      plain_json: JSON.stringify(document),
+      signed_jws: "signed-by-other-owner",
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null,
+      codigo_generacion: String(identifiers.codigoGeneracion),
+      numero_control: String(identifiers.numeroControl),
+      fiscal_operation_claim_id: "foreign-safe-predispatch-claim",
+      fiscal_operation_claimed_at: "2026-07-18T12:02:01.000Z",
+      fiscal_operation_kind: "TRANSMISSION"
+    }));
+    stubQueuedCorrectionLifecycle(correction, event);
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = correctionRuntime(db);
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    expect(disposition.ack).not.toHaveBeenCalled();
+    expect(disposition.retry).toHaveBeenCalledTimes(1);
+    expect(transmit).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "PROCESSING",
+      mh_dispatch_started_at: null
+    });
+    expect(db.documents[0].fiscal_operation_claim_id).toBe("foreign-safe-predispatch-claim");
+  });
+
+  it("retries a token-owned document correction with a bounded Task 5 error", async () => {
+    const db = correctionDb();
+    const correction = correctionRecord({
+      id: "fiscal_correction_document_task_5",
+      target_kind: "DTE_DOCUMENT",
+      wompi_event_id: null,
+      document_id: "doc_rejected_task_5",
+      issuance_attempt_id: null,
+      fiscal_claim_id: "fiscal_claim_task_5",
+      processing_claim_id: "correction_processing_task_5"
+    });
+    vi.spyOn(Repository.prototype, "getFiscalCorrection").mockResolvedValue(correction);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const runtime = correctionRuntime(db);
+
+    await expect(new IssuancePipeline(runtime).processFiscalCorrection(correction.id, {
+      processingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    })).rejects.toThrow("La corrección de documentos rechazados aún no está habilitada.");
+    const disposition = await consumeCorrectionMessage(runtime, {
+      advancedDocumentId: correction.document_id!,
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id!
+    });
+
+    expect(disposition.ack).not.toHaveBeenCalled();
+    expect(disposition.retry).toHaveBeenCalledTimes(1);
+    expect(correction.status).toBe("QUEUED");
+    expect(db.documents).toHaveLength(0);
   });
 
   it("preflights a Wompi-backed rejected document from its durable source", async () => {

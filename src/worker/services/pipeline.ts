@@ -6,7 +6,7 @@ import { signMhDocument } from "../domain/signer";
 import { amountCents, donorName, isApprovedDonation, normalizeWompiWebhook } from "../domain/wompi";
 import { assertValidDui, cleanDui, isDuiDocumentType } from "../../shared/dui";
 import { legacyIssuanceAttemptId, Repository } from "../storage/repository";
-import type { DonationIntentRecord, DteDocumentRecord, Env, MhResponse, WompiWebhook } from "../types";
+import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, MhResponse, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
@@ -19,6 +19,8 @@ import { logWorkerError } from "./observability";
 import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
+import { buildCorrectedWompiCandidate } from "./fiscalCorrection";
+import type { FiscalReceptorCorrection } from "../../shared/fiscalCorrection";
 
 // Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
 // (otro reintento concurrente ya lo reclamó). El handler HTTP lo traduce a un 409.
@@ -78,6 +80,46 @@ const MAX_WOMPI_EVENT_REQUEUES = 3;
 // Un CDE diferido que sigue sin transmitirse una hora después de emitido dispara
 // una alerta operativa MH_UNAVAILABLE (una sola vez por episodio diferido y canal).
 const DEFERRED_ALERT_AGE_MS = 60 * 60 * 1000;
+
+const TERMINAL_FISCAL_CORRECTION_STATUSES = new Set([
+  "ACCEPTED",
+  "REJECTED",
+  "FAILED",
+  "REVIEW_REQUIRED"
+]);
+
+export interface FiscalCorrectionQueueOwnership {
+  processingClaimId: string;
+  issuanceAttemptId?: string;
+  fiscalClaimId?: string;
+}
+
+interface FiscalCorrectionContext {
+  correctionId: string;
+  processingClaimId: string;
+  claimId: string;
+}
+
+export class FiscalCorrectionOwnershipError extends Error {
+  constructor() {
+    super("La corrección fiscal perdió su propiedad de procesamiento.");
+    this.name = "FiscalCorrectionOwnershipError";
+  }
+}
+
+export class UnsupportedFiscalCorrectionTargetError extends Error {
+  constructor() {
+    super("La corrección de documentos rechazados aún no está habilitada.");
+    this.name = "UnsupportedFiscalCorrectionTargetError";
+  }
+}
+
+class FiscalCorrectionBusyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FiscalCorrectionBusyError";
+  }
+}
 
 export class IssuancePipeline {
   private readonly repo: Repository;
@@ -301,6 +343,277 @@ export class IssuancePipeline {
     return this.processDteDocument(record.id, activeAttemptId);
   }
 
+  async processFiscalCorrection(
+    correctionId: string,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    let correction = await this.repo.getFiscalCorrection(correctionId);
+    if (!correction) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    assertFiscalCorrectionOwnership(correction, ownership);
+    if (TERMINAL_FISCAL_CORRECTION_STATUSES.has(correction.status)) {
+      return correction;
+    }
+    if (correction.target_kind !== "WOMPI_EVENT") {
+      throw new UnsupportedFiscalCorrectionTargetError();
+    }
+    if (!correction.wompi_event_id || !ownership.issuanceAttemptId) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+
+    if (correction.status === "QUEUED") {
+      const claim = await this.repo.claimFiscalCorrectionProcessing({
+        id: correction.id,
+        processingClaimId: ownership.processingClaimId,
+        issuanceAttemptId: ownership.issuanceAttemptId,
+        fiscalClaimId: ownership.fiscalClaimId
+      });
+      correction = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+      assertFiscalCorrectionOwnership(correction, ownership);
+      if (claim === "terminal" || TERMINAL_FISCAL_CORRECTION_STATUSES.has(correction.status)) {
+        return correction;
+      }
+      if (claim !== "claimed" && correction.status !== "PROCESSING") {
+        throw new FiscalCorrectionOwnershipError();
+      }
+    }
+    if (correction.status !== "PROCESSING") {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    if (correction.mh_dispatch_started_at) {
+      return this.finalizeFiscalCorrectionReview(correction, ownership);
+    }
+    if (!correction.wompi_event_id || !ownership.issuanceAttemptId) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+
+    const event = await this.repo.getWompiEventById(correction.wompi_event_id);
+    if (
+      !event
+      || event.issuance_attempt_id !== ownership.issuanceAttemptId
+    ) {
+      throw new FiscalCorrectionOwnershipError();
+    }
+    assertDeploymentAllowsAmbiente(this.env, event.environment);
+
+    const existing = await this.repo.getDteDocumentByWompiEvent(event.id);
+    if (existing) {
+      try {
+        return await this.finishWompiFiscalCorrection(correction, existing, ownership);
+      } catch (error) {
+        if (error instanceof FiscalCorrectionBusyError) throw error;
+        return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+      }
+    }
+
+    let payload: WompiWebhook;
+    try {
+      payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
+    } catch (error) {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "FISCAL_CORRECTION_INVALID_SOURCE",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+    if (!isApprovedDonation(payload)) {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "WOMPI_PAYMENT_NOT_APPROVED",
+        "El pago Wompi original no está aprobado."
+      );
+    }
+    const binding = await resolveDonationIntentBinding(this.repo, payload);
+    const intent = binding.kind === "bound" ? binding.intent : null;
+    const config = getEmisorConfig(this.env);
+    let correctedReceptor: FiscalReceptorCorrection;
+
+    try {
+      correctedReceptor = JSON.parse(
+        correction.corrected_receptor_json
+      ) as FiscalReceptorCorrection;
+      buildCorrectedWompiCandidate({
+        payload,
+        intent,
+        correction: correctedReceptor,
+        config,
+        environment: event.environment,
+        sequence: event.control_sequence ?? 1,
+        codigoGeneracion: event.reserved_codigo_generacion ?? undefined
+      });
+    } catch (error) {
+      return this.finalizeFiscalCorrectionFailure(
+        correction,
+        "FISCAL_CORRECTION_INVALID_CANDIDATE",
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+
+    const issuanceClaimId = `wompi_correction_${correction.id}`;
+    let eventClaimed = false;
+    try {
+      eventClaimed = await this.repo.claimCorrectedWompiEventIssuance({
+        id: event.id,
+        claimId: issuanceClaimId,
+        correctionId: correction.id,
+        processingClaimId: ownership.processingClaimId,
+        issuanceAttemptId: ownership.issuanceAttemptId
+      });
+      if (!eventClaimed) {
+        const createdByWinner = await this.repo.getDteDocumentByWompiEvent(event.id);
+        if (createdByWinner) {
+          return await this.finishWompiFiscalCorrection(correction, createdByWinner, ownership);
+        }
+        throw new FiscalCorrectionBusyError(
+          "El evento corregido está ocupado por otro procesamiento."
+        );
+      }
+
+      const reserved = await this.repo.reserveWompiDocumentIdentifiers(
+        event.id,
+        event.environment,
+        config.controlPrefix
+      );
+      const document = buildCorrectedWompiCandidate({
+        payload,
+        intent,
+        correction: correctedReceptor,
+        config,
+        environment: event.environment,
+        sequence: reserved.sequence,
+        codigoGeneracion: reserved.codigoGeneracion
+      });
+      const identifiers = extractCdeIdentifiers(document);
+      const summary = cdeDocumentSummary(document);
+      const created = await this.repo.createClaimedWompiDteDocument({
+        wompiEventId: event.id,
+        issuanceClaimId,
+        environment: event.environment,
+        codigoGeneracion: identifiers.codigoGeneracion,
+        numeroControl: identifiers.numeroControl,
+        plainJson: document,
+        donorEmail: summary.donorEmail,
+        donorName: summary.donorName,
+        amountCents: amountCents(payload),
+        issuedAt: nowIso()
+      });
+      if (!created) {
+        const createdByWinner = await this.repo.getDteDocumentByWompiEvent(event.id);
+        if (createdByWinner) {
+          return await this.finishWompiFiscalCorrection(correction, createdByWinner, ownership);
+        }
+        throw new FiscalCorrectionBusyError(
+          "No se pudo persistir el CDE corregido bajo su reserva."
+        );
+      }
+      eventClaimed = false;
+      return await this.finishWompiFiscalCorrection(correction, created, ownership);
+    } catch (error) {
+      if (eventClaimed) {
+        await this.repo.releaseWompiEventIssuance(event.id, issuanceClaimId);
+      }
+      if (error instanceof FiscalCorrectionBusyError) throw error;
+      return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+    }
+  }
+
+  private async finishWompiFiscalCorrection(
+    correction: FiscalCorrectionRecord,
+    document: DteDocumentRecord,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    const claimId = `fiscal_correction_${correction.id}`;
+    const processed = await this.processDteDocument(
+      document.id,
+      ownership.issuanceAttemptId,
+      {
+        correctionId: correction.id,
+        processingClaimId: ownership.processingClaimId,
+        claimId
+      }
+    );
+    if (processed.status !== "ACCEPTED" && processed.status !== "REJECTED") {
+      throw new FiscalCorrectionBusyError(
+        "El CDE corregido sigue ocupado antes de un resultado fiscal."
+      );
+    }
+    const finalized = await this.repo.finalizeFiscalCorrection(correction.id, ownership.processingClaimId, {
+      status: processed.status
+    });
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      return latest;
+    }
+    throw new Error("No se pudo finalizar el resultado de la corrección fiscal.");
+  }
+
+  private async finalizeFiscalCorrectionFailure(
+    correction: FiscalCorrectionRecord,
+    failureCode: string,
+    failureMessage: string
+  ): Promise<FiscalCorrectionRecord> {
+    const finalized = await this.repo.finalizeFiscalCorrection(correction.id, correction.processing_claim_id, {
+      status: "FAILED",
+      failureCode,
+      failureMessage
+    });
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      return latest;
+    }
+    throw new Error("No se pudo finalizar el fallo previo al despacho fiscal.");
+  }
+
+  private async finalizeFiscalCorrectionReview(
+    correction: FiscalCorrectionRecord,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    const finalized = await this.repo.finalizeFiscalCorrection(
+      correction.id,
+      ownership.processingClaimId,
+      {
+        status: "REVIEW_REQUIRED",
+        failureCode: "MH_DISPATCH_UNCERTAIN",
+        failureMessage: "La respuesta de Hacienda no pudo determinarse con certeza."
+      }
+    );
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      return latest;
+    }
+    throw new Error("No se pudo registrar la revisión requerida de la corrección fiscal.");
+  }
+
+  private async finalizeFiscalCorrectionProcessingError(
+    correction: FiscalCorrectionRecord,
+    ownership: FiscalCorrectionQueueOwnership,
+    error: unknown
+  ): Promise<FiscalCorrectionRecord> {
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (error instanceof MhPreDispatchError) {
+      if (latest.mh_dispatch_started_at) {
+        await this.repo.clearFiscalCorrectionMhDispatchStarted(
+          latest.id,
+          ownership.processingClaimId
+        );
+      }
+      return this.finalizeFiscalCorrectionFailure(
+        latest,
+        "MH_PRE_DISPATCH_ERROR",
+        error.message
+      );
+    }
+    if (latest.mh_dispatch_started_at) {
+      return this.finalizeFiscalCorrectionReview(latest, ownership);
+    }
+    return this.finalizeFiscalCorrectionFailure(
+      latest,
+      "FISCAL_CORRECTION_FAILED",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+
   private async recordStagingSmokeRun(
     documentId: string,
     transactionId: string
@@ -437,7 +750,8 @@ export class IssuancePipeline {
 
   async processDteDocument(
     documentId: string,
-    issuanceIncidentId?: string
+    issuanceIncidentId?: string,
+    correctionContext?: FiscalCorrectionContext
   ): Promise<DteDocumentRecord> {
     let record = await this.repo.getDteDocument(documentId);
     if (!record) {
@@ -471,9 +785,32 @@ export class IssuancePipeline {
         }
         expectedStatus = "SIGNED";
       }
-      claimId = newId("fiscal");
-      if (!(await this.repo.claimDocumentTransmission(record.id, expectedStatus, signedJws, claimId))) {
+      claimId = correctionContext?.claimId ?? newId("fiscal");
+      const alreadyClaimedByCorrection = Boolean(
+        correctionContext
+        && record.status === "SIGNED"
+        && record.signed_jws === signedJws
+        && record.fiscal_operation_claim_id === claimId
+        && record.fiscal_operation_kind === "TRANSMISSION"
+      );
+      if (
+        !alreadyClaimedByCorrection
+        && !(await this.repo.claimDocumentTransmission(record.id, expectedStatus, signedJws, claimId))
+      ) {
         return (await this.repo.getDteDocument(record.id)) ?? record;
+      }
+      if (correctionContext) {
+        const marked = await this.repo.markFiscalCorrectionMhDispatchStarted(
+          correctionContext.correctionId,
+          correctionContext.processingClaimId
+        );
+        if (!marked) {
+          await this.repo.markDocumentFailed(record.id, claimId, {
+            mhEstado: "FISCAL_CORRECTION_OWNERSHIP_LOST",
+            observaciones: ["La corrección perdió propiedad antes del despacho fiscal."]
+          });
+          throw new FiscalCorrectionOwnershipError();
+        }
       }
       const mhResult = await this.mh.transmitDte({
         ambiente: summary.environment,
@@ -511,6 +848,16 @@ export class IssuancePipeline {
       return (await this.repo.getDteDocument(record.id)) ?? record;
     } catch (error) {
       if (error instanceof MhPreDispatchError && claimId) {
+        if (correctionContext) {
+          const failed = await this.repo.markDocumentFailed(record.id, claimId, {
+            mhEstado: "MH_PRE_DISPATCH_ERROR",
+            observaciones: [String(error.message)]
+          });
+          if (!failed) {
+            await this.repo.releaseDocumentFiscalOperation(record.id, claimId);
+          }
+          throw error;
+        }
         // Firmado pero sin poder transmitir: se difiere (no es un fallo del CDE).
         return this.deferTransmission(record.id, claimId, String(error.message));
       }
@@ -1138,4 +1485,17 @@ function extractCdeIdentifiers(document: Record<string, unknown>): { codigoGener
     codigoGeneracion: identificacion.codigoGeneracion,
     numeroControl: identificacion.numeroControl
   };
+}
+
+function assertFiscalCorrectionOwnership(
+  correction: FiscalCorrectionRecord,
+  ownership: FiscalCorrectionQueueOwnership
+): void {
+  if (
+    correction.processing_claim_id !== ownership.processingClaimId
+    || correction.issuance_attempt_id !== (ownership.issuanceAttemptId ?? null)
+    || correction.fiscal_claim_id !== (ownership.fiscalClaimId ?? null)
+  ) {
+    throw new FiscalCorrectionOwnershipError();
+  }
 }

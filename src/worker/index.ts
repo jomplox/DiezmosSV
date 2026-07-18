@@ -334,6 +334,10 @@ async function handleQueueBatch(batch: MessageBatch<IssuanceMessage>, env: Env):
   const pipeline = new IssuancePipeline(env);
   const repo = new Repository(env.DB);
   for (const message of batch.messages) {
+    if (message.body.fiscalCorrectionId) {
+      await handleFiscalCorrectionQueueMessage(message, pipeline, repo, env);
+      continue;
+    }
     const wompiEventId = message.body.wompiEventId;
     const legacyMessage = Boolean(wompiEventId && !message.body.issuanceAttemptId);
     const issuanceAttemptId = wompiEventId
@@ -389,6 +393,62 @@ async function handleQueueBatch(batch: MessageBatch<IssuanceMessage>, env: Env):
       }
       message.retry();
     }
+  }
+}
+
+async function handleFiscalCorrectionQueueMessage(
+  message: Message<IssuanceMessage>,
+  pipeline: IssuancePipeline,
+  repo: Repository,
+  env: Env
+): Promise<void> {
+  const correctionId = message.body.fiscalCorrectionId;
+  const processingClaimId = message.body.fiscalCorrectionProcessingClaimId;
+  const issuanceAttemptId = message.body.issuanceAttemptId;
+  const fiscalClaimId = message.body.fiscalClaimId;
+  try {
+    if (
+      !correctionId
+      || !processingClaimId
+      || Boolean(issuanceAttemptId) === Boolean(fiscalClaimId)
+    ) {
+      throw new Error("Fiscal correction message is missing an ownership token");
+    }
+    await pipeline.processFiscalCorrection(correctionId, {
+      processingClaimId,
+      ...(issuanceAttemptId ? { issuanceAttemptId } : {}),
+      ...(fiscalClaimId ? { fiscalClaimId } : {})
+    });
+    message.ack();
+  } catch (error) {
+    logWorkerError(env, "fiscal_correction_message_failed", error);
+    const correction = correctionId
+      ? await repo.getFiscalCorrection(correctionId)
+      : null;
+    const ownsCorrection = Boolean(
+      correction
+      && processingClaimId
+      && correction.processing_claim_id === processingClaimId
+      && correction.issuance_attempt_id === (issuanceAttemptId ?? null)
+      && correction.fiscal_claim_id === (fiscalClaimId ?? null)
+    );
+    if (
+      !correction
+      || !ownsCorrection
+      || ["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)
+      || (correction.status === "PROCESSING" && correction.mh_dispatch_started_at !== null)
+    ) {
+      message.ack();
+      return;
+    }
+    if (
+      correction.status === "QUEUED"
+      || (correction.status === "PROCESSING" && correction.mh_dispatch_started_at === null)
+    ) {
+      message.retry();
+      return;
+    }
+    message.ack();
   }
 }
 
