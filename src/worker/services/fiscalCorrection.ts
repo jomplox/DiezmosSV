@@ -5,7 +5,6 @@ import {
 } from "../../shared/fiscalCorrection";
 import {
   assertCdeIssuerMatchesConfig,
-  buildAdvancedCdeDocument,
   buildCdeDocument,
   type IntentDonorOverride
 } from "../domain/dteBuilder";
@@ -24,11 +23,14 @@ import type {
   FiscalCorrectionData,
   WompiWebhook
 } from "../types";
+import { generationCode, numeroControl } from "../utils/ids";
 
 const CONFIGURATION_GUIDANCE =
   "Revise Configuración y la evidencia técnica antes de volver a intentar.";
-const RECEPTOR_FAILURE_PATTERN =
-  /receptor|donante|dui|nit|documento|direcci[oó]n|domicili|pa[ií]s|departamento|municipio|distrito|correo|tel[eé]fono|actividad/i;
+const LOCAL_RECEPTOR_FAILURE_CODE_PATTERN =
+  /(?:^|_)(?:DONOR|RECEPTOR)(?:_|$)/;
+const MH_RECEPTOR_FIELD_PATH_PATTERN =
+  /(?:#\/receptor(?:\/|$)|\breceptor\.[A-Za-z])/i;
 
 export async function effectiveWompiCorrectionData(
   repo: Repository,
@@ -102,12 +104,16 @@ export function buildCorrectedDirectCandidate(input: {
   sequence: number;
 }): Record<string, unknown> {
   const source = parseDocument(input.sourceDocument.plain_json);
-  assertCdeIssuerMatchesConfig(source, input.config);
   applyCorrectedReceptor(source, normalizeCorrection(input.correction));
-  return buildAdvancedCdeDocument(source, input.config, {
-    sequence: input.sequence,
-    environment: input.sourceDocument.environment
-  });
+  source.identificacion = {
+    ...record(source.identificacion),
+    ambiente: input.sourceDocument.environment,
+    tipoDte: "15",
+    numeroControl: numeroControl(input.config.controlPrefix, input.sequence),
+    codigoGeneracion: generationCode()
+  };
+  validateCde(source);
+  return source;
 }
 
 function normalizeCorrection(
@@ -265,7 +271,8 @@ function isCorrectableFailure(
   code: string | null | undefined,
   reason: string
 ): boolean {
-  return RECEPTOR_FAILURE_PATTERN.test(`${code ?? ""} ${reason}`);
+  return LOCAL_RECEPTOR_FAILURE_CODE_PATTERN.test(code ?? "")
+    || MH_RECEPTOR_FIELD_PATH_PATTERN.test(reason);
 }
 
 function foreignAddressFromAppendix(document: Record<string, unknown>): string {

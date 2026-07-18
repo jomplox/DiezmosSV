@@ -10,11 +10,15 @@ import {
 import { buildDirectCdeDocument } from "../../src/worker/domain/dteBuilder";
 import {
   buildCorrectedDirectCandidate,
-  buildCorrectedWompiCandidate
+  buildCorrectedWompiCandidate,
+  effectiveDocumentCorrectionData,
+  effectiveWompiCorrectionData
 } from "../../src/worker/services/fiscalCorrection";
+import type { Repository } from "../../src/worker/storage/repository";
 import type {
   DonationIntentRecord,
   DteDocumentRecord,
+  WompiEventRecord,
   WompiWebhook
 } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
@@ -195,6 +199,46 @@ describe("fiscal correction candidates", () => {
       .toBe("DTE-15-00010001-000000000000042");
   });
 
+  it("preserves protected source sections for a Wompi-backed rejected correction", () => {
+    const source = {
+      ...rejectedDirectDocument(),
+      wompi_event_id: "wompi_rejected_source"
+    };
+    const durable = JSON.parse(source.plain_json) as Record<string, any>;
+    durable.apendice.push({
+      campo: "Protegido",
+      etiqueta: "Evidencia original",
+      valor: "No reconstruir"
+    });
+    source.plain_json = JSON.stringify(durable);
+    const currentConfig = {
+      ...emisorConfig,
+      nombre: "Emisor configurado después del rechazo"
+    };
+
+    const corrected = buildCorrectedDirectCandidate({
+      sourceDocument: source,
+      correction: validCorrection({ nombre: "Receptor Corregido" }),
+      config: currentConfig,
+      sequence: 43
+    }) as Record<string, any>;
+
+    expect(corrected.receptor.nombre).toBe("Receptor Corregido");
+    expect(corrected.emisor).toEqual(durable.emisor);
+    expect(corrected.cuerpoDocumento).toEqual(durable.cuerpoDocumento);
+    expect(corrected.resumen).toEqual(durable.resumen);
+    expect(corrected.otrosDocumentos).toEqual(durable.otrosDocumentos);
+    expect(corrected.apendice).toContainEqual({
+      campo: "Protegido",
+      etiqueta: "Evidencia original",
+      valor: "No reconstruir"
+    });
+    expect(corrected.identificacion.codigoGeneracion)
+      .not.toBe(durable.identificacion.codigoGeneracion);
+    expect(corrected.identificacion.numeroControl)
+      .not.toBe(durable.identificacion.numeroControl);
+  });
+
   it("keeps Wompi amount, gift type, transaction, and authorization immutable", () => {
     const payload = {
       ...wompiSample,
@@ -250,6 +294,68 @@ describe("fiscal correction candidates", () => {
       campo: "DireccionExtranjera",
       etiqueta: "Dirección en el extranjero",
       valor: "Guatemala: Zona 10, Ciudad de Guatemala"
+    });
+  });
+});
+
+describe("fiscal correction failure classification", () => {
+  it.each([
+    ["Campo #/receptor/numDocumento contiene un valor inválido", true],
+    ["receptor.codActividad no existe en CAT-019", true],
+    ["NIT del emisor inválido", false],
+    ["Actividad del emisor inválida", false],
+    ["Documento inválido", false],
+    ["Dirección inválida", false]
+  ])("classifies receptor-specific evidence only: %s", (reason, correctable) => {
+    const data = effectiveDocumentCorrectionData({
+      ...rejectedDirectDocument(),
+      mh_observaciones_json: JSON.stringify([reason])
+    });
+
+    expect(data.correctable).toBe(correctable);
+    expect(data.guidance).toBe(
+      correctable
+        ? null
+        : "Revise Configuración y la evidencia técnica antes de volver a intentar."
+    );
+  });
+
+  it("recognizes the structured local invalid-donor DUI code", async () => {
+    const event = {
+      id: "wompi_known_donor_code",
+      transaction_id: "transaction_known_donor_code",
+      environment: "00",
+      result: "ExitosaAprobada",
+      amount_cents: 1000,
+      donor_email: "donante@example.org",
+      donor_name: "Donante Demo",
+      raw_body: JSON.stringify(wompiSample),
+      headers_json: "{}",
+      received_at: "2026-07-18T12:00:00.000Z",
+      processed_at: "2026-07-18T12:01:00.000Z",
+      created_document_id: null,
+      issuance_status: "FAILED",
+      control_prefix: null,
+      control_sequence: null,
+      reserved_numero_control: null,
+      reserved_codigo_generacion: null,
+      issuance_attempt_count: 1,
+      issuance_attempt_id: null,
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: "La identidad suministrada no es válida.",
+      issuance_last_attempt_at: "2026-07-18T12:01:00.000Z",
+      issuance_failed_at: "2026-07-18T12:01:00.000Z",
+      issuance_dead_lettered_at: null
+    } satisfies WompiEventRecord;
+    const repo = {
+      getWompiEventById: async () => event
+    } as unknown as Repository;
+
+    await expect(
+      effectiveWompiCorrectionData(repo, event.id)
+    ).resolves.toMatchObject({
+      correctable: true,
+      guidance: null
     });
   });
 });

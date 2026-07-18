@@ -2194,6 +2194,9 @@ async function handleWompiFiscalCorrection(
 
   const beforeData = await effectiveWompiCorrectionData(repo, wompiEventId);
   if (!beforeData) return notFound();
+  if (!beforeData.correctable) {
+    return fiscalCorrectionNotAllowedResponse(beforeData.guidance);
+  }
   const changedFields = fiscalCorrectionChangedFields(
     beforeData.receptor,
     parsed.receptor
@@ -2290,6 +2293,9 @@ async function handleDocumentFiscalCorrection(
   assertDeploymentAllowsAmbiente(env, document.environment);
 
   const beforeData = effectiveDocumentCorrectionData(document);
+  if (!beforeData.correctable) {
+    return fiscalCorrectionNotAllowedResponse(beforeData.guidance);
+  }
   const changedFields = fiscalCorrectionChangedFields(
     beforeData.receptor,
     parsed.receptor
@@ -2297,32 +2303,12 @@ async function handleDocumentFiscalCorrection(
   if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
 
   const config = getEmisorConfig(env);
-  if (document.wompi_event_id) {
-    const event = await repo.getWompiEventById(document.wompi_event_id);
-    if (!event) {
-      return fiscalCorrectionConflict(
-        "source_payment_not_found",
-        "No se encontró el pago original de este CDE."
-      );
-    }
-    const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
-    const binding = await resolveDonationIntentBinding(repo, payload);
-    buildCorrectedWompiCandidate({
-      payload,
-      intent: binding.kind === "bound" ? binding.intent : null,
-      correction: parsed.receptor,
-      config,
-      environment: document.environment,
-      sequence: 1
-    });
-  } else {
-    buildCorrectedDirectCandidate({
-      sourceDocument: document,
-      correction: parsed.receptor,
-      config,
-      sequence: 1
-    });
-  }
+  buildCorrectedDirectCandidate({
+    sourceDocument: document,
+    correction: parsed.receptor,
+    config,
+    sequence: 1
+  });
 
   const claim = await repo.claimDocumentFiscalCorrection({
     documentId,
@@ -2487,6 +2473,13 @@ function unchangedFiscalCorrectionResponse(): Response {
 
 function fiscalCorrectionConflict(error: string, message: string): Response {
   return jsonResponse({ error, message }, { status: 409 });
+}
+
+function fiscalCorrectionNotAllowedResponse(guidance: string | null): Response {
+  return fiscalCorrectionConflict(
+    "fiscal_correction_not_allowed",
+    guidance ?? "Revise Configuración o solicite soporte técnico antes de volver a intentar."
+  );
 }
 
 function fiscalCorrectionQueueFailedResponse(): Response {
