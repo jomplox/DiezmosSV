@@ -11,6 +11,7 @@ import {
 import type { Env } from "../types";
 import { hexFromBytes, utf8Bytes } from "../utils/encoding";
 import { sendOperationalAlert } from "./alerts";
+import { logWorkerError } from "./observability";
 
 const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
@@ -233,8 +234,7 @@ async function streamRetentionTable<Cursor>(
       await env.ARCHIVE.delete(tempKey);
     } catch (cleanupError) {
       try {
-        const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-        console.error("Retention partial-object cleanup failed", { key: tempKey, error: message });
+        logWorkerError(env, "retention_partial_object_cleanup_failed", cleanupError);
       } catch {
         // Cleanup diagnostics must never replace the primary export failure.
       }
@@ -248,8 +248,7 @@ async function cleanupRetentionTempObject(env: Env, tempKey: string): Promise<vo
     await env.ARCHIVE.delete(tempKey);
   } catch (cleanupError) {
     try {
-      const message = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
-      console.error("Retention temp-object cleanup failed", { key: tempKey, error: message });
+      logWorkerError(env, "retention_temp_object_cleanup_failed", cleanupError);
     } catch {
       // Cleanup diagnostics must never replace a successful export.
     }

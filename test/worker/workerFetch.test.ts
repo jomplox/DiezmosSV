@@ -107,7 +107,12 @@ describe("Worker fetch error handling", () => {
     const payload = await response.json();
     expect(payload).toEqual({ error: "internal_error", message: "Ocurrió un error interno." });
     expect(JSON.stringify(payload)).not.toContain(sensitiveMessage);
-    expect(errorSpy).toHaveBeenCalledWith("Unhandled Worker request error", expect.any(Error));
+    expect(errorSpy).toHaveBeenCalledWith({
+      event: "unhandled_worker_request_error",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    });
   });
 });
 
@@ -527,7 +532,12 @@ describe("Wompi issuance failure recovery API", () => {
       action: "WOMPI_ISSUANCE_RETRY_QUEUED",
       entity_id: "wompi_failed"
     }));
-    expect(consoleError).toHaveBeenCalledWith("Wompi issuance retry failed", failure);
+    expect(consoleError).toHaveBeenCalledWith({
+      event: "wompi_issuance_retry_failed",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    });
   });
 
   it("returns the same stable generic error when the failure list query rejects", async () => {
@@ -558,7 +568,12 @@ describe("Wompi issuance failure recovery API", () => {
     expect(responseText).not.toContain("sk-live");
     expect(responseText).not.toContain("at retryIssuance");
     expect(responseText.length).toBeLessThan(256);
-    expect(consoleError).toHaveBeenCalledWith("Wompi issuance failure list failed", failure);
+    expect(consoleError).toHaveBeenCalledWith({
+      event: "wompi_issuance_failure_list_failed",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    });
   });
 });
 
@@ -9571,11 +9586,12 @@ describe("deferred transmission when MH is unavailable", () => {
       status: "SIGNED",
       signed_jws: null
     });
-    expect(errorLog).toHaveBeenCalledWith(
-      "Reintento de transmisión diferida falló",
-      "doc_deferred_issuer_drift",
-      expect.objectContaining({ message: expect.stringMatching(/emisor/i) })
-    );
+    expect(errorLog).toHaveBeenCalledWith({
+      event: "deferred_transmission_retry_failed",
+      app_env: "local",
+      error_name: "error",
+      error_code: "unknown"
+    });
   });
 
   it("defers an operator rejected-doc rebuild when MH is unavailable", async () => {

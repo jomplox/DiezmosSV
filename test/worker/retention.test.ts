@@ -1039,9 +1039,11 @@ describe("runRetentionExport", () => {
       expect(db.audits).toContainEqual(
         expect.objectContaining({ action: "RETENTION_EXPORT_FAILED", summary: "page read failed before cleanup" })
       );
-      expect(consoleError).toHaveBeenCalledWith("Retention partial-object cleanup failed", {
-        key: deletedTempKey,
-        error: "partial delete failed"
+      expect(consoleError).toHaveBeenCalledWith({
+        event: "retention_partial_object_cleanup_failed",
+        app_env: "unknown",
+        error_name: "error",
+        error_code: "unknown"
       });
       expect(unhandled.reasons).toEqual([]);
     } finally {

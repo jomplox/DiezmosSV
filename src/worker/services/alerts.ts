@@ -3,6 +3,7 @@ import type { Repository } from "../storage/repository";
 import { brandingOrigin, loadEmailBranding } from "./branding";
 import { operationalAlertHtml } from "./emailHtml";
 import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
+import { logOperationalAlert } from "./observability";
 
 export const ALERT_EMAIL_SETTING_KEY = "alert_email";
 const ALERT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -41,6 +42,7 @@ export async function sendOperationalAlert(env: Env, repo: Repository, alert: Op
   if (!incidentId) {
     return;
   }
+  logOperationalAlert(env, alert.kind, alert.entityType);
   const safeAlert = sanitizeOperationalAlert(alert);
   const displayAlert = sanitizeOperationalAlertIdentity(safeAlert);
 

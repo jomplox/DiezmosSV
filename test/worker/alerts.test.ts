@@ -138,6 +138,39 @@ describe("operational alert dispatch", () => {
     expect(db.audits).toHaveLength(0);
   });
 
+  it("emits a privacy-safe native event without an alert-email recipient", async () => {
+    const db = new InMemoryAlertD1();
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false"
+    } as Env;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await sendOperationalAlert(env, new Repository(env.DB), {
+      kind: "DTE_FAILED",
+      title: "Fallo para ana@example.org",
+      detail: "https://private.example/dte_123 incident attempt_1",
+      entityType: "dte_document",
+      entityId: "dte_123",
+      incidentId: "attempt_1"
+    });
+
+    expect(spy).toHaveBeenCalledWith({
+      event: "operational_alert",
+      app_env: "staging",
+      alert_kind: "dte_failed",
+      entity_type: "dte_document"
+    });
+    expect(spy.mock.calls[0][0]).not.toHaveProperty("title");
+    expect(spy.mock.calls[0][0]).not.toHaveProperty("detail");
+    expect(spy.mock.calls[0][0]).not.toHaveProperty("entity_id");
+    expect(spy.mock.calls[0][0]).not.toHaveProperty("incident_id");
+    spy.mockRestore();
+  });
+
   it("suppresses a second alert for the same entity and kind", async () => {
     const db = new InMemoryAlertD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
