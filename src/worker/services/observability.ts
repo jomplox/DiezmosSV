@@ -1,6 +1,68 @@
 import type { Env } from "../types";
 
 const TOKEN_MAX_LENGTH = 64;
+const APP_ENVIRONMENTS = new Set(["local", "staging", "production"]);
+const ERROR_NAMES = new Set([
+  "aggregateerror",
+  "emaildispatcherror",
+  "error",
+  "evalerror",
+  "mhpredispatcherror",
+  "rangeerror",
+  "referenceerror",
+  "syntaxerror",
+  "typeerror",
+  "urierror"
+]);
+const ERROR_CODES = new Set([
+  "analytics_range_too_large",
+  "email_dispatch_unknown",
+  "email_pre_dispatch_failed",
+  "environment_not_allowed",
+  "payment_collection_disabled",
+  "wompi_intent_quarantined"
+]);
+const ERROR_EVENTS = new Set([
+  "accepted_wompi_finalization_failed",
+  "accepted_wompi_finalization_retry_failed",
+  "certificate_expiry_check_failed",
+  "deferred_transmission_retry_failed",
+  "deferred_transmission_retry_sweep_failed",
+  "donation_intent_expiry_sweep_failed",
+  "issuance_message_failed",
+  "manual_receipt_resend_audit_failed",
+  "mark_intent_paid_from_webhook_failed",
+  "password_reset_request_failed",
+  "post_accept_finalization_failed",
+  "post_accept_finalization_sweep_failed",
+  "queue_handler_failed",
+  "receipt_delivery_audit_failed",
+  "retention_export_failed",
+  "retention_partial_object_cleanup_failed",
+  "retention_temp_object_cleanup_failed",
+  "scheduled_handler_failed",
+  "stalled_wompi_event_sweep_failed",
+  "unhandled_worker_request_error",
+  "wompi_issuance_failure_list_failed",
+  "wompi_issuance_retry_failed",
+  "wompi_link_deactivation_failed"
+]);
+const ALERT_KINDS = new Set([
+  "cert_expiring",
+  "dte_failed",
+  "email_failed",
+  "issuance_dead_lettered",
+  "mh_unavailable",
+  "retention_export_failed",
+  "retention_verify_failed",
+  "wompi_event_stalled"
+]);
+const ALERT_ENTITY_TYPES = new Set([
+  "credentials",
+  "dte_document",
+  "retention_export",
+  "wompi_event"
+]);
 
 type ErrorEvent = {
   event: string;
@@ -17,12 +79,11 @@ type OperationalAlertEvent = {
 };
 
 export function logWorkerError(env: Env, event: string, error: unknown): void {
-  const errorRecord = error instanceof Error ? error as Error & { code?: unknown } : null;
   const output: ErrorEvent = {
-    event: normalizedToken(event),
-    app_env: normalizedToken(env.APP_ENV),
-    error_name: normalizedToken(errorRecord?.name),
-    error_code: normalizedToken(errorRecord?.code)
+    event: allowlistedToken(event, ERROR_EVENTS),
+    app_env: allowlistedToken(safeProperty(env, "APP_ENV"), APP_ENVIRONMENTS),
+    error_name: allowlistedToken(safeErrorProperty(error, "name"), ERROR_NAMES),
+    error_code: allowlistedToken(safeErrorProperty(error, "code"), ERROR_CODES)
   };
   console.error(output);
 }
@@ -30,21 +91,44 @@ export function logWorkerError(env: Env, event: string, error: unknown): void {
 export function logOperationalAlert(env: Env, alertKind: string, entityType: string): void {
   const output: OperationalAlertEvent = {
     event: "operational_alert",
-    app_env: normalizedToken(env.APP_ENV),
-    alert_kind: normalizedToken(alertKind),
-    entity_type: normalizedToken(entityType)
+    app_env: allowlistedToken(safeProperty(env, "APP_ENV"), APP_ENVIRONMENTS),
+    alert_kind: allowlistedToken(alertKind, ALERT_KINDS),
+    entity_type: allowlistedToken(entityType, ALERT_ENTITY_TYPES)
   };
   console.error(output);
 }
 
+function allowlistedToken(value: unknown, allowed: ReadonlySet<string>): string {
+  const normalized = normalizedToken(value);
+  return allowed.has(normalized) ? normalized : "unknown";
+}
+
 function normalizedToken(value: unknown): string {
-  if (typeof value !== "string" && typeof value !== "number") {
+  if (typeof value !== "string") {
     return "unknown";
   }
-  const normalized = String(value)
+  const normalized = value
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "")
     .slice(0, TOKEN_MAX_LENGTH);
   return normalized || "unknown";
+}
+
+function safeErrorProperty(error: unknown, key: "name" | "code"): unknown {
+  try {
+    return error instanceof Error ? Reflect.get(error, key) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function safeProperty(value: unknown, key: string): unknown {
+  try {
+    return value !== null && (typeof value === "object" || typeof value === "function")
+      ? Reflect.get(value, key)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }

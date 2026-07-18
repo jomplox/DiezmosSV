@@ -291,137 +291,158 @@ export default {
   },
 
   async queue(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
-    if (batch.queue.endsWith("-dlq")) {
-      await handleDeadLetterBatch(batch, env);
-      return;
-    }
-    const pipeline = new IssuancePipeline(env);
-    const repo = new Repository(env.DB);
-    for (const message of batch.messages) {
-      const wompiEventId = message.body.wompiEventId;
-      const legacyMessage = Boolean(wompiEventId && !message.body.issuanceAttemptId);
-      const issuanceAttemptId = wompiEventId
-        ? message.body.issuanceAttemptId ?? legacyIssuanceAttemptId(wompiEventId)
-        : null;
-      let currentWompiAttempt = false;
-      try {
-        if (message.body.advancedDocumentId) {
-          await pipeline.processDteDocument(
-            message.body.advancedDocumentId,
-            message.body.issuanceAttemptId ?? message.id
-          );
-        } else if (wompiEventId && issuanceAttemptId) {
-          currentWompiAttempt = await repo.markWompiIssuanceProcessing(
-            wompiEventId,
-            issuanceAttemptId,
-            legacyMessage
-          );
-          if (!currentWompiAttempt) {
-            const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
-            if (!existing) {
-              message.ack();
-              continue;
-            }
-            // A prior delivery may already have created/accepted the CDE and then
-            // crashed during intent/email bookkeeping. Resume that persisted row
-            // without reopening the pre-CDE lifecycle or retransmitting a terminal CDE.
-            await pipeline.processDteDocument(existing.id, issuanceAttemptId);
-          } else {
-            await pipeline.processWompiEvent(wompiEventId, issuanceAttemptId);
-          }
-        } else {
-          throw new Error("Issuance message did not include a target id");
-        }
-        message.ack();
-      } catch (error) {
-        logWorkerError(env, "issuance_message_failed", error);
-        if (wompiEventId && issuanceAttemptId) {
-          const recorded = currentWompiAttempt && await repo.recordWompiIssuanceFailure(
-            wompiEventId,
-            issuanceAttemptId,
-            issuanceFailureEvidence(error)
-          );
-          if (!recorded) {
-            const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
-            if (existing) {
-              message.retry();
-            } else {
-              message.ack();
-            }
-            continue;
-          }
-        }
-        message.retry();
-      }
+    try {
+      await handleQueueBatch(batch, env);
+    } catch (error) {
+      // retryAll applies only to messages without an earlier per-message ack/retry;
+      // Cloudflare's first explicit disposition wins for already-processed messages.
+      batch.retryAll();
+      logWorkerError(env, "queue_handler_failed", error);
     }
   },
 
   async scheduled(event: ScheduledEvent, env: Env): Promise<void> {
-    if (event.cron === RETENTION_EXPORT_CRON) {
-      try {
-        await runRetentionExport(env, new Date(event.scheduledTime));
-      } catch (error) {
-        logWorkerError(env, "retention_export_failed", error);
-      }
-      return;
-    }
-    const repo = new Repository(env.DB);
-    const now = nowIso();
-    await repo.deleteExpiredLoginRateLimits(now);
-    await repo.deleteExpiredSecurityRateLimitClaims(now);
-    const pipeline = new IssuancePipeline(env);
     try {
-      await pipeline.retryDeferredTransmissions();
+      await handleScheduled(event, env);
     } catch (error) {
-      logWorkerError(env, "deferred_transmission_retry_sweep_failed", error);
-    }
-    try {
-      await pipeline.retryPendingPostAcceptFinalizations();
-    } catch (error) {
-      logWorkerError(env, "post_accept_finalization_sweep_failed", error);
-    }
-    try {
-      await pipeline.retryAcceptedWompiFinalizations();
-    } catch (error) {
-      logWorkerError(env, "accepted_wompi_finalization_retry_failed", error);
-    }
-    try {
-      await pipeline.sweepStalledWompiEvents();
-    } catch (error) {
-      logWorkerError(env, "stalled_wompi_event_sweep_failed", error);
-    }
-    try {
-      // Process a bounded page per tick: snapshot the capped set of expiring intents,
-      // then expire exactly that page by id, so public intent creation cannot force one
-      // cron invocation to snapshot or deactivate an unbounded row set. The remainder
-      // is picked up by the next tick.
-      const expiring = await repo.listIntentsExpiringBefore(now);
-      await repo.expireDonationIntentsByIds(expiring.map((intent) => intent.id), now);
-      const wompi = new WompiApiService(env);
-      for (const intent of expiring) {
-        if (intent.wompi_id_enlace == null) {
-          continue;
-        }
-        // Each deactivation is isolated: one Wompi failure must not abort the sweep
-        // or the other deactivations. The intent is already EXPIRED regardless.
-        try {
-          await wompi.deactivatePaymentLink(intent);
-        } catch (error) {
-          logWorkerError(env, "wompi_link_deactivation_failed", error);
-        }
-      }
-    } catch (error) {
-      logWorkerError(env, "donation_intent_expiry_sweep_failed", error);
-    }
-    try {
-      // Drive the expiry math from the scheduled tick's time, the same reference the
-      // retention export above uses, so the countdown never depends on the wall clock.
-      await checkCertificateExpiry(env, new Repository(env.DB), event.scheduledTime ?? Date.now());
-    } catch (error) {
-      logWorkerError(env, "certificate_expiry_check_failed", error);
+      // Cron has no queue-style retry contract. Abort this tick after one safe event;
+      // a later scheduled tick can retry the prerequisites and subsequent sweeps.
+      logWorkerError(env, "scheduled_handler_failed", error);
     }
   }
 };
+
+async function handleQueueBatch(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
+  if (batch.queue.endsWith("-dlq")) {
+    await handleDeadLetterBatch(batch, env);
+    return;
+  }
+  const pipeline = new IssuancePipeline(env);
+  const repo = new Repository(env.DB);
+  for (const message of batch.messages) {
+    const wompiEventId = message.body.wompiEventId;
+    const legacyMessage = Boolean(wompiEventId && !message.body.issuanceAttemptId);
+    const issuanceAttemptId = wompiEventId
+      ? message.body.issuanceAttemptId ?? legacyIssuanceAttemptId(wompiEventId)
+      : null;
+    let currentWompiAttempt = false;
+    try {
+      if (message.body.advancedDocumentId) {
+        await pipeline.processDteDocument(
+          message.body.advancedDocumentId,
+          message.body.issuanceAttemptId ?? message.id
+        );
+      } else if (wompiEventId && issuanceAttemptId) {
+        currentWompiAttempt = await repo.markWompiIssuanceProcessing(
+          wompiEventId,
+          issuanceAttemptId,
+          legacyMessage
+        );
+        if (!currentWompiAttempt) {
+          const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
+          if (!existing) {
+            message.ack();
+            continue;
+          }
+          // A prior delivery may already have created/accepted the CDE and then
+          // crashed during intent/email bookkeeping. Resume that persisted row
+          // without reopening the pre-CDE lifecycle or retransmitting a terminal CDE.
+          await pipeline.processDteDocument(existing.id, issuanceAttemptId);
+        } else {
+          await pipeline.processWompiEvent(wompiEventId, issuanceAttemptId);
+        }
+      } else {
+        throw new Error("Issuance message did not include a target id");
+      }
+      message.ack();
+    } catch (error) {
+      logWorkerError(env, "issuance_message_failed", error);
+      if (wompiEventId && issuanceAttemptId) {
+        const recorded = currentWompiAttempt && await repo.recordWompiIssuanceFailure(
+          wompiEventId,
+          issuanceAttemptId,
+          issuanceFailureEvidence(error)
+        );
+        if (!recorded) {
+          const existing = await repo.getDteDocumentByWompiEvent(wompiEventId);
+          if (existing) {
+            message.retry();
+          } else {
+            message.ack();
+          }
+          continue;
+        }
+      }
+      message.retry();
+    }
+  }
+}
+
+async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
+  if (event.cron === RETENTION_EXPORT_CRON) {
+    try {
+      await runRetentionExport(env, new Date(event.scheduledTime));
+    } catch (error) {
+      logWorkerError(env, "retention_export_failed", error);
+    }
+    return;
+  }
+  const repo = new Repository(env.DB);
+  const now = nowIso();
+  await repo.deleteExpiredLoginRateLimits(now);
+  await repo.deleteExpiredSecurityRateLimitClaims(now);
+  const pipeline = new IssuancePipeline(env);
+  try {
+    await pipeline.retryDeferredTransmissions();
+  } catch (error) {
+    logWorkerError(env, "deferred_transmission_retry_sweep_failed", error);
+  }
+  try {
+    await pipeline.retryPendingPostAcceptFinalizations();
+  } catch (error) {
+    logWorkerError(env, "post_accept_finalization_sweep_failed", error);
+  }
+  try {
+    await pipeline.retryAcceptedWompiFinalizations();
+  } catch (error) {
+    logWorkerError(env, "accepted_wompi_finalization_retry_failed", error);
+  }
+  try {
+    await pipeline.sweepStalledWompiEvents();
+  } catch (error) {
+    logWorkerError(env, "stalled_wompi_event_sweep_failed", error);
+  }
+  try {
+    // Process a bounded page per tick: snapshot the capped set of expiring intents,
+    // then expire exactly that page by id, so public intent creation cannot force one
+    // cron invocation to snapshot or deactivate an unbounded row set. The remainder
+    // is picked up by the next tick.
+    const expiring = await repo.listIntentsExpiringBefore(now);
+    await repo.expireDonationIntentsByIds(expiring.map((intent) => intent.id), now);
+    const wompi = new WompiApiService(env);
+    for (const intent of expiring) {
+      if (intent.wompi_id_enlace == null) {
+        continue;
+      }
+      // Each deactivation is isolated: one Wompi failure must not abort the sweep
+      // or the other deactivations. The intent is already EXPIRED regardless.
+      try {
+        await wompi.deactivatePaymentLink(intent);
+      } catch (error) {
+        logWorkerError(env, "wompi_link_deactivation_failed", error);
+      }
+    }
+  } catch (error) {
+    logWorkerError(env, "donation_intent_expiry_sweep_failed", error);
+  }
+  try {
+    // Drive the expiry math from the scheduled tick's time, the same reference the
+    // retention export above uses, so the countdown never depends on the wall clock.
+    await checkCertificateExpiry(env, new Repository(env.DB), event.scheduledTime ?? Date.now());
+  } catch (error) {
+    logWorkerError(env, "certificate_expiry_check_failed", error);
+  }
+}
 
 async function handleDeadLetterBatch(batch: MessageBatch<IssuanceMessage>, env: Env): Promise<void> {
   const repo = new Repository(env.DB);

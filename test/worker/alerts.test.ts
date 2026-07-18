@@ -5,6 +5,7 @@ import type { Env } from "../../src/worker/types";
 
 describe("operational alert dispatch", () => {
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
@@ -194,6 +195,91 @@ describe("operational alert dispatch", () => {
     expect(spy.mock.calls[0][0]).not.toHaveProperty("entity_id");
     expect(spy.mock.calls[0][0]).not.toHaveProperty("incident_id");
     spy.mockRestore();
+  });
+
+  it("emits exactly one native event when app email is configured", async () => {
+    const db = new InMemoryAlertD1();
+    db.settings.push({ key: "alert_email", value: "owner@example.org" });
+    const send = vi.fn(async () => ({ messageId: "alert-independent" }));
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "alerts@example.org",
+      EMAIL: { send } as SendEmail
+    } as Env;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await sendOperationalAlert(env, new Repository(env.DB), {
+      kind: "DTE_FAILED",
+      title: "Fallo al emitir DTE",
+      detail: "detalle",
+      entityType: "dte_document",
+      entityId: "dte_independent",
+      incidentId: "attempt_independent"
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(
+      spy.mock.calls.filter(([entry]) =>
+        (entry as { event?: unknown }).event === "operational_alert"
+      )
+    ).toEqual([[
+      {
+        event: "operational_alert",
+        app_env: "staging",
+        alert_kind: "dte_failed",
+        entity_type: "dte_document"
+      }
+    ]]);
+  });
+
+  it("emits exactly one native event when the D1 recipient lookup fails", async () => {
+    const db = new InMemoryAlertD1();
+    const originalPrepare = db.prepare.bind(db);
+    db.prepare = (sql: string) => {
+      const statement = originalPrepare(sql);
+      if (sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
+        statement.first = async () => {
+          throw new Error("D1 lookup failed for owner@example.org");
+        };
+      }
+      return statement;
+    };
+    const env = {
+      DB: db as unknown as D1Database,
+      ISSUANCE_QUEUE: {} as Queue,
+      ASSETS: {} as Fetcher,
+      APP_ENV: "staging",
+      MOCK_EXTERNAL_SERVICES: "false"
+    } as Env;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      sendOperationalAlert(env, new Repository(env.DB), {
+        kind: "DTE_FAILED",
+        title: "Fallo al emitir DTE",
+        detail: "detalle",
+        entityType: "dte_document",
+        entityId: "dte_lookup_failure",
+        incidentId: "attempt_lookup_failure"
+      })
+    ).resolves.toBeUndefined();
+
+    expect(
+      spy.mock.calls.filter(([entry]) =>
+        (entry as { event?: unknown }).event === "operational_alert"
+      )
+    ).toEqual([[
+      {
+        event: "operational_alert",
+        app_env: "staging",
+        alert_kind: "dte_failed",
+        entity_type: "dte_document"
+      }
+    ]]);
   });
 
   it("suppresses a second alert for the same entity and kind", async () => {
