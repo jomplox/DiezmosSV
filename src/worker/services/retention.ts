@@ -39,6 +39,73 @@ interface RetentionForeignKeyPhase {
   tables: readonly string[];
 }
 
+interface RetentionAuthoritativeOverlay {
+  archiveTable: string;
+  targetTable: string;
+  conflictTarget: string;
+  updateColumns: readonly string[];
+  suspendedTriggers: readonly RetentionSuspendedTrigger[];
+}
+
+interface RetentionSuspendedTrigger {
+  name: string;
+  dropSql: string;
+  createSql: string;
+}
+
+export const FISCAL_CORRECTION_LATEST_SNAPSHOT = "fiscal_corrections_latest";
+
+const FISCAL_CORRECTION_RESTORE_UPDATE_COLUMNS = [
+  "request_id",
+  "request_payload_sha256",
+  "attempt_number",
+  "target_kind",
+  "wompi_event_id",
+  "document_id",
+  "environment",
+  "status",
+  "before_receptor_json",
+  "corrected_receptor_json",
+  "changed_fields_json",
+  "source_document_snapshot_json",
+  "issuance_attempt_id",
+  "fiscal_claim_id",
+  "processing_claim_id",
+  "mh_dispatch_started_at",
+  "failure_code",
+  "failure_message",
+  "created_by",
+  "created_at",
+  "processing_started_at",
+  "completed_at",
+  "updated_at",
+  "reserved_control_prefix",
+  "reserved_control_sequence",
+  "reserved_codigo_generacion",
+  "reserved_numero_control"
+] as const;
+
+const FISCAL_CORRECTION_RESERVATION_TRIGGER: RetentionSuspendedTrigger = {
+  name: "trg_fiscal_correction_reserve_sequence",
+  dropSql: "DROP TRIGGER IF EXISTS trg_fiscal_correction_reserve_sequence",
+  createSql: `CREATE TRIGGER trg_fiscal_correction_reserve_sequence
+AFTER UPDATE OF reserved_control_sequence ON fiscal_corrections
+WHEN (
+  OLD.reserved_control_sequence IS NULL
+  AND NEW.reserved_control_sequence IS NOT NULL
+)
+BEGIN
+  UPDATE document_sequences
+     SET next_value = next_value + 1
+   WHERE environment = NEW.environment
+     AND control_prefix = NEW.reserved_control_prefix
+     AND next_value = NEW.reserved_control_sequence;
+
+  SELECT RAISE(ABORT, 'fiscal correction sequence reservation failed')
+   WHERE changes() <> 1;
+END;`
+};
+
 // Wrangler wraps each D1 --file execution in a transaction, so the file itself
 // must not contain transaction statements. Local SQLite rehearsals still need
 // an explicit outer transaction. contingency_periods, dte_events, and
@@ -56,6 +123,7 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
   };
   restorePhases: readonly RetentionForeignKeyPhase[];
   deletePhases: readonly RetentionForeignKeyPhase[];
+  authoritativeOverlays: readonly RetentionAuthoritativeOverlay[];
 } = {
   wranglerFile: {
     deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
@@ -109,6 +177,15 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
     {
       name: "roots",
       tables: ["wompi_events", "document_sequences"]
+    }
+  ],
+  authoritativeOverlays: [
+    {
+      archiveTable: FISCAL_CORRECTION_LATEST_SNAPSHOT,
+      targetTable: "fiscal_corrections",
+      conflictTarget: "id",
+      updateColumns: FISCAL_CORRECTION_RESTORE_UPDATE_COLUMNS,
+      suspendedTriggers: [FISCAL_CORRECTION_RESERVATION_TRIGGER]
     }
   ]
 };
@@ -166,6 +243,9 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
     }
+    const fiscalCorrectionSnapshotEntry = await exportFiscalCorrectionSnapshot(env, prefix);
+    manifest.tables[FISCAL_CORRECTION_LATEST_SNAPSHOT] = fiscalCorrectionSnapshotEntry;
+    totalRows += fiscalCorrectionSnapshotEntry.rowCount;
     for (const table of RETENTION_SNAPSHOT_TABLES) {
       const entry = await exportSnapshotTable(env, repo, table, prefix);
       manifest.tables[table] = entry;
@@ -222,6 +302,37 @@ async function exportWindowedTable(
     env,
     `${prefix}/${table}.ndjson`,
     (cursor) => repo.listRowsCreatedBetween(table, { startIso, endIso }, cursor, RETENTION_PAGE_SIZE),
+    (row) => ({
+      createdAt: String(row.created_at),
+      id: String(row.id)
+    })
+  );
+}
+
+async function exportFiscalCorrectionSnapshot(
+  env: Env,
+  prefix: string
+): Promise<TableManifestEntry> {
+  return streamRetentionTable<RetentionCursor>(
+    env,
+    `${prefix}/${FISCAL_CORRECTION_LATEST_SNAPSHOT}.ndjson`,
+    async (cursor) => {
+      const conditions: string[] = [];
+      const bindings: Array<string | number> = [];
+      if (cursor) {
+        conditions.push("(created_at, id) > (?, ?)");
+        bindings.push(cursor.createdAt, cursor.id);
+      }
+      const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+      const rows = await env.DB
+        .prepare(
+          `SELECT * FROM fiscal_corrections ${where}
+           ORDER BY created_at ASC, id ASC LIMIT ?`
+        )
+        .bind(...bindings, RETENTION_PAGE_SIZE)
+        .all<Record<string, unknown>>();
+      return rows.results ?? [];
+    },
     (row) => ({
       createdAt: String(row.created_at),
       id: String(row.id)

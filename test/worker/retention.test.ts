@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   RETENTION_FOREIGN_KEY_PROTOCOL,
@@ -830,6 +831,80 @@ describe("runRetentionExport", () => {
     }));
   });
 
+  it("snapshots the latest fiscal correction state after its created-month archive", async () => {
+    const db = new InMemoryRetentionD1();
+    const correction: Record<string, unknown> = {
+      id: "fiscal_correction_completed_later",
+      request_id: "11111111-1111-4111-8111-111111111111",
+      request_payload_sha256: "a".repeat(64),
+      attempt_number: 1,
+      target_kind: "WOMPI_EVENT",
+      wompi_event_id: "wompi_1",
+      document_id: null,
+      environment: "00",
+      status: "PROCESSING",
+      before_receptor_json: JSON.stringify({ nombre: "Nombre original" }),
+      corrected_receptor_json: JSON.stringify({ nombre: "Nombre corregido" }),
+      changed_fields_json: JSON.stringify(["nombre"]),
+      source_document_snapshot_json: null,
+      issuance_attempt_id: "issuance_1",
+      fiscal_claim_id: "fiscal_claim_1",
+      processing_claim_id: "processing_claim_1",
+      mh_dispatch_started_at: null,
+      failure_code: null,
+      failure_message: null,
+      created_by: "user_1",
+      created_at: "2026-05-15T12:00:00.000Z",
+      processing_started_at: "2026-05-15T12:01:00.000Z",
+      completed_at: null,
+      updated_at: "2026-05-15T12:01:00.000Z"
+    };
+    db.fiscalCorrections.push(correction);
+    const archive = new FakeArchiveBucket();
+    const runtime = envWithArchive(db, archive);
+
+    await runRetentionExport(runtime, new Date("2026-06-04T15:00:00.000Z"), {
+      month: "2026-05"
+    });
+    correction.status = "ACCEPTED";
+    correction.completed_at = "2026-06-20T12:00:00.000Z";
+    correction.updated_at = "2026-06-20T12:00:00.000Z";
+    correction.reserved_control_prefix = "M001P004";
+    correction.reserved_control_sequence = 42;
+    correction.reserved_codigo_generacion =
+      "70000003-2222-4222-8222-700000032222";
+    correction.reserved_numero_control =
+      "DTE-15-M001P004-000000000000042";
+    await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"), {
+      month: "2026-06"
+    });
+
+    const readRows = (month: string, name: string) =>
+      new TextDecoder()
+        .decode(archive.objects.get(`retention/2026/${month}/${name}.ndjson`)!.body)
+        .split("\n")
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(readRows("2026-05", "fiscal_corrections")).toContainEqual(
+      expect.objectContaining({ id: correction.id, status: "PROCESSING", completed_at: null })
+    );
+    expect(readRows("2026-06", "fiscal_corrections")).toEqual([]);
+    expect(readRows("2026-06", "fiscal_corrections_latest")).toEqual([correction]);
+
+    const manifest = JSON.parse(
+      new TextDecoder().decode(
+        archive.objects.get("retention/2026/2026-06/manifest.json")!.body
+      )
+    ) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    const latestBody = archive.objects.get(
+      "retention/2026/2026-06/fiscal_corrections_latest.ndjson"
+    )!.body;
+    expect(manifest.tables.fiscal_corrections_latest).toEqual({
+      rowCount: 1,
+      sha256: await sha256Hex(latestBody)
+    });
+  });
+
   it("exports a bounded full document-sequence snapshot with a composite cursor", async () => {
     const db = new InMemoryRetentionD1();
     for (let index = 0; index < 1_200; index += 1) {
@@ -1027,8 +1102,8 @@ describe("runRetentionExport", () => {
     expect(result.status).toBe("completed");
     const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
     const tempTablePuts = archive.putCalls.filter((call) => call.key.includes(".ndjson.tmp."));
-    expect(finalTablePuts).toHaveLength(11);
-    expect(tempTablePuts).toHaveLength(11);
+    expect(finalTablePuts).toHaveLength(12);
+    expect(tempTablePuts).toHaveLength(12);
     expect(tempTablePuts.every((call) => call.streamed)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
@@ -1317,9 +1392,11 @@ describe("retention restore guidance", () => {
 
     expect(guidance).toContain("latest `wompi_events.ndjson` snapshot");
     expect(guidance).toContain("latest `document_sequences.ndjson` snapshot");
-    expect(guidance.toLowerCase()).toContain("archives created before `document_sequences.ndjson`");
+    expect(guidance.toLowerCase()).toMatch(
+      /archives created before\s+`document_sequences\.ndjson`/
+    );
     expect(guidance).toContain(
-      "MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)"
+      "MAX(snapshot `next_value`, restored document maximum + 1, restored Wompi reservation maximum + 1, restored fiscal-correction reservation maximum + 1)"
     );
     expect(guidance).toContain("Never move an existing counter backward");
     expect(guidance).toContain(
@@ -1334,6 +1411,217 @@ describe("retention restore guidance", () => {
       "`contingency_periods` ↔ `dte_events` ↔ `dte_documents`"
     );
     expect(guidance).not.toContain("Foreign keys matter for ordering");
+  });
+
+  it("applies the latest fiscal correction snapshot last and idempotently", () => {
+    const protocol = RETENTION_FOREIGN_KEY_PROTOCOL as unknown as {
+      authoritativeOverlays: Array<{
+        archiveTable: string;
+        targetTable: string;
+        conflictTarget: string;
+        updateColumns: string[];
+        suspendedTriggers: Array<{
+          name: string;
+          dropSql: string;
+          createSql: string;
+        }>;
+      }>;
+    };
+    const overlay = protocol.authoritativeOverlays?.find(
+      (candidate) => candidate.targetTable === "fiscal_corrections"
+    );
+    expect(overlay).toMatchObject({
+      archiveTable: "fiscal_corrections_latest",
+      targetTable: "fiscal_corrections",
+      conflictTarget: "id"
+    });
+    expect(overlay!.suspendedTriggers).toEqual([
+      expect.objectContaining({
+        name: "trg_fiscal_correction_reserve_sequence",
+        dropSql: "DROP TRIGGER IF EXISTS trg_fiscal_correction_reserve_sequence"
+      })
+    ]);
+
+    const database = new DatabaseSync(":memory:");
+    database.exec(`
+      CREATE TABLE wompi_events (id TEXT PRIMARY KEY);
+      CREATE TABLE dte_documents (id TEXT PRIMARY KEY);
+      CREATE TABLE document_sequences (
+        environment TEXT NOT NULL,
+        control_prefix TEXT NOT NULL,
+        next_value INTEGER NOT NULL,
+        PRIMARY KEY (environment, control_prefix)
+      );
+      INSERT INTO wompi_events (id) VALUES ('wompi_1'), ('wompi_2');
+      INSERT INTO document_sequences (environment, control_prefix, next_value)
+      VALUES ('00', 'M001P004', 100);
+    `);
+    database.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0027_fiscal_corrections.sql"),
+      "utf8"
+    ));
+    database.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0028_fiscal_correction_reservations.sql"),
+      "utf8"
+    ));
+    const migratedReservationTrigger = database
+      .prepare(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?"
+      )
+      .get("trg_fiscal_correction_reserve_sequence") as { sql: string };
+    const normalizeSql = (sql: string) =>
+      sql.replace(/\s+/g, " ").trim().replace(/;$/, "");
+    expect(normalizeSql(overlay!.suspendedTriggers[0].createSql)).toBe(
+      normalizeSql(migratedReservationTrigger.sql)
+    );
+    const columns = database
+      .prepare("PRAGMA table_info(fiscal_corrections)")
+      .all()
+      .map((column) => String(column.name));
+    expect([overlay!.conflictTarget, ...overlay!.updateColumns]).toEqual(columns);
+
+    const historical = {
+      id: "fiscal_correction_restored",
+      request_id: "11111111-1111-4111-8111-111111111111",
+      request_payload_sha256: "a".repeat(64),
+      attempt_number: 1,
+      target_kind: "WOMPI_EVENT",
+      wompi_event_id: "wompi_1",
+      document_id: null,
+      environment: "00",
+      status: "PROCESSING",
+      before_receptor_json: JSON.stringify({ nombre: "Nombre original" }),
+      corrected_receptor_json: JSON.stringify({ nombre: "Nombre corregido" }),
+      changed_fields_json: JSON.stringify(["nombre"]),
+      source_document_snapshot_json: null,
+      issuance_attempt_id: "issuance_1",
+      fiscal_claim_id: "fiscal_claim_1",
+      processing_claim_id: "processing_claim_1",
+      mh_dispatch_started_at: null,
+      failure_code: null,
+      failure_message: null,
+      created_by: "user_1",
+      created_at: "2026-05-15T12:00:00.000Z",
+      processing_started_at: "2026-05-15T12:01:00.000Z",
+      completed_at: null,
+      updated_at: "2026-05-15T12:01:00.000Z",
+      reserved_control_prefix: null,
+      reserved_control_sequence: null,
+      reserved_codigo_generacion: null,
+      reserved_numero_control: null
+    };
+    const terminal = {
+      ...historical,
+      status: "ACCEPTED",
+      completed_at: "2026-06-20T12:00:00.000Z",
+      updated_at: "2026-06-20T12:00:00.000Z",
+      reserved_control_prefix: "M001P004",
+      reserved_control_sequence: 42,
+      reserved_codigo_generacion: "70000003-2222-4222-8222-700000032222",
+      reserved_numero_control: "DTE-15-M001P004-000000000000042"
+    };
+    const placeholders = columns.map(() => "?").join(", ");
+    const updates = overlay!.updateColumns
+      .map((column) => `${column} = excluded.${column}`)
+      .join(", ");
+    const values = (record: Record<string, unknown>) =>
+      columns.map((column) => record[column] as SQLInputValue);
+    const applyOverlay = (record: Record<string, unknown>): void => {
+      database.exec("BEGIN IMMEDIATE");
+      try {
+        for (const trigger of overlay!.suspendedTriggers) {
+          database.exec(`${trigger.dropSql};`);
+        }
+        database
+          .prepare(
+            `INSERT INTO fiscal_corrections (${columns.join(", ")})
+             VALUES (${placeholders})
+             ON CONFLICT(${overlay!.conflictTarget}) DO UPDATE SET ${updates}`
+          )
+          .run(...values(record));
+        for (const trigger of overlay!.suspendedTriggers) {
+          database.exec(trigger.createSql);
+        }
+        expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    };
+
+    applyOverlay(historical);
+    applyOverlay(terminal);
+    applyOverlay(terminal);
+
+    expect(database.prepare("SELECT * FROM fiscal_corrections").all()).toEqual([
+      terminal
+    ]);
+    expect(
+      database
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = ?"
+        )
+        .get("trg_fiscal_correction_reserve_sequence")
+    ).toEqual({ name: "trg_fiscal_correction_reserve_sequence" });
+
+    const laterReservation = {
+      ...historical,
+      id: "fiscal_correction_later_reservation",
+      request_id: "33333333-3333-4333-8333-333333333333",
+      wompi_event_id: "wompi_2",
+      issuance_attempt_id: "issuance_2",
+      fiscal_claim_id: "fiscal_claim_2",
+      processing_claim_id: "processing_claim_2"
+    };
+    applyOverlay(laterReservation);
+    database
+      .prepare(
+        `UPDATE fiscal_corrections
+            SET reserved_control_prefix = ?,
+                reserved_control_sequence = ?,
+                reserved_codigo_generacion = ?,
+                reserved_numero_control = ?
+          WHERE id = ?`
+      )
+      .run(
+        "M001P004",
+        100,
+        "44444444-4444-4444-8444-444444444444",
+        "DTE-15-M001P004-000000000000100",
+        laterReservation.id
+      );
+    expect(
+      database
+        .prepare(
+          `SELECT next_value FROM document_sequences
+            WHERE environment = '00' AND control_prefix = 'M001P004'`
+        )
+        .get()
+    ).toEqual({ next_value: 101 });
+    database.close();
+  });
+
+  it("documents the latest correction overlay and legacy archive fallback", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+
+    expect(guidance).toContain("latest `fiscal_corrections_latest.ndjson` snapshot");
+    expect(guidance).toMatch(
+      /after the\s+historical `fiscal_corrections\.ndjson` rows/
+    );
+    expect(guidance).toContain("ON CONFLICT(id) DO UPDATE");
+    expect(guidance).toContain(
+      "DROP TRIGGER IF EXISTS trg_fiscal_correction_reserve_sequence"
+    );
+    expect(guidance).toContain(
+      "CREATE TRIGGER trg_fiscal_correction_reserve_sequence"
+    );
+    expect(guidance).toContain(
+      "Archives created before `fiscal_corrections_latest.ndjson`"
+    );
   });
 });
 
