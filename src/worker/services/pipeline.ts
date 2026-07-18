@@ -216,6 +216,22 @@ export class IssuancePipeline {
     );
     let requeued = 0;
     for (const candidate of candidates) {
+      try {
+        assertDeploymentAllowsAmbiente(this.env, candidate.environment);
+      } catch (error) {
+        if (error instanceof EnvironmentNotAllowedError) continue;
+        throw error;
+      }
+      if (
+        candidate.status === "PROCESSING"
+        && candidate.mh_dispatch_started_at !== null
+      ) {
+        await this.reconcileKnownTerminalFiscalCorrection(
+          candidate,
+          candidate.processing_claim_id
+        );
+        continue;
+      }
       const safeLifecycle =
         candidate.status === "QUEUED"
         || (
@@ -223,12 +239,6 @@ export class IssuancePipeline {
           && candidate.mh_dispatch_started_at === null
         );
       if (!safeLifecycle) continue;
-      try {
-        assertDeploymentAllowsAmbiente(this.env, candidate.environment);
-      } catch (error) {
-        if (error instanceof EnvironmentNotAllowedError) continue;
-        throw error;
-      }
       const recovered = await this.repo.recoverFiscalCorrectionProcessingClaim({
         id: candidate.id,
         currentProcessingClaimId: candidate.processing_claim_id,
@@ -461,6 +471,11 @@ export class IssuancePipeline {
     }
     await this.recordFiscalCorrectionAudit(correction, "STARTED");
     if (correction.mh_dispatch_started_at) {
+      const reconciled = await this.reconcileKnownTerminalFiscalCorrection(
+        correction,
+        ownership.processingClaimId
+      );
+      if (reconciled) return reconciled;
       return this.finalizeFiscalCorrectionReview(correction, ownership);
     }
     if (correction.target_kind === "DTE_DOCUMENT") {
@@ -897,33 +912,11 @@ export class IssuancePipeline {
     error: unknown
   ): Promise<FiscalCorrectionRecord> {
     const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
-    const document = latest.document_id
-      ? await this.repo.getDteDocument(latest.document_id)
-      : latest.wompi_event_id
-        ? await this.repo.getDteDocumentByWompiEvent(latest.wompi_event_id)
-        : null;
-    if (document?.status === "ACCEPTED") {
-      const finalized = await this.repo.finalizeFiscalCorrection(
-        latest.id,
-        ownership.processingClaimId,
-        {
-          status: "ACCEPTED",
-          document: this.fiscalCorrectionDocumentEvidence(latest, document)
-        }
-      );
-      const acceptedCorrection = (await this.repo.getFiscalCorrection(latest.id)) ?? latest;
-      if (
-        finalized
-        || TERMINAL_FISCAL_CORRECTION_STATUSES.has(acceptedCorrection.status)
-      ) {
-        await this.recordFiscalCorrectionAudit(
-          acceptedCorrection,
-          acceptedCorrection.status
-        );
-        return acceptedCorrection;
-      }
-      throw new Error("No se pudo finalizar la aceptación conocida de la corrección fiscal.");
-    }
+    const reconciled = await this.reconcileKnownTerminalFiscalCorrection(
+      latest,
+      ownership.processingClaimId
+    );
+    if (reconciled) return reconciled;
     if (error instanceof MhPreDispatchError) {
       if (latest.mh_dispatch_started_at) {
         await this.repo.clearFiscalCorrectionMhDispatchStarted(
@@ -945,6 +938,41 @@ export class IssuancePipeline {
       "FISCAL_CORRECTION_FAILED",
       error instanceof Error ? error.message : String(error)
     );
+  }
+
+  private async reconcileKnownTerminalFiscalCorrection(
+    correction: FiscalCorrectionRecord,
+    processingClaimId: string
+  ): Promise<FiscalCorrectionRecord | null> {
+    const document = correction.document_id
+      ? await this.repo.getDteDocument(correction.document_id)
+      : correction.wompi_event_id
+        ? await this.repo.getDteDocumentByWompiEvent(correction.wompi_event_id)
+        : null;
+    if (document?.status !== "ACCEPTED" && document?.status !== "REJECTED") {
+      return null;
+    }
+    const finalized = await this.repo.finalizeFiscalCorrection(
+      correction.id,
+      processingClaimId,
+      {
+        status: document.status,
+        document: this.fiscalCorrectionDocumentEvidence(correction, document)
+      }
+    );
+    const terminalCorrection =
+      (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (
+      finalized
+      || TERMINAL_FISCAL_CORRECTION_STATUSES.has(terminalCorrection.status)
+    ) {
+      await this.recordFiscalCorrectionAudit(
+        terminalCorrection,
+        terminalCorrection.status
+      );
+      return terminalCorrection;
+    }
+    return null;
   }
 
   private fiscalCorrectionDocumentEvidence(
