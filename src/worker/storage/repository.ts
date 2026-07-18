@@ -540,7 +540,7 @@ export class Repository {
          FROM fiscal_corrections
         WHERE target_kind = ?
           AND ${targetColumn} = ?
-          AND status IN ('QUEUED', 'PROCESSING')
+          AND status IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED')
         ORDER BY attempt_number DESC
         LIMIT 1`
     ).bind(targetKind, targetId).first<Pick<FiscalCorrectionRecord, "id" | "status">>();

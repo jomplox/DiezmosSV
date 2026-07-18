@@ -102,6 +102,31 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("keeps REVIEW_REQUIRED visible as the active non-actionable correction", async () => {
+    const database = migratedDatabase();
+    seedFailedWompiEvent(database, "wompi_review_required");
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: "wompi_review_required",
+        requestId: "24242424-2424-4424-8424-242424242424"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected review-required claim");
+    database.prepare(
+      "UPDATE fiscal_corrections SET status = 'REVIEW_REQUIRED' WHERE id = ?"
+    ).run(claimed.correction.id);
+
+    await expect(repository.getActiveFiscalCorrectionForTarget(
+      "WOMPI_EVENT",
+      "wompi_review_required"
+    )).resolves.toEqual({
+      id: claimed.correction.id,
+      status: "REVIEW_REQUIRED"
+    });
+    database.close();
+  });
+
   it("snapshots a rejected document before claiming it", async () => {
     const database = migratedDatabase();
     seedRejectedDocument(database, "doc_rejected");
