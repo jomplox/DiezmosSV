@@ -226,6 +226,11 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
     expect(appSource).toContain("Página de donación");
   });
 
+  it("explains that email clients can adjust the preview in dark mode", () => {
+    expect(appSource).toContain("Vista aproximada.");
+    expect(appSource).toContain("modo oscuro");
+  });
+
   it("drives the preview from the editor's unsaved draft values", () => {
     // The email header mock tints with the draft accent color (colorForPicker) and shows
     // the draft display name; the footer shows the draft support email. The logo comes
