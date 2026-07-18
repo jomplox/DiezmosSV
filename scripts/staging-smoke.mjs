@@ -12,7 +12,7 @@ Required env:
   STAGING_URL              Deployed Worker URL, for example https://diezmossv-staging-resource-example.<account>.workers.dev
   STAGING_EMAIL            Admin/operator login email
   STAGING_PASSWORD         Admin/operator login password
-  SMOKE_DONOR_DOCUMENT     Donor document to place on the TEST CDE
+  SMOKE_DONOR_DOCUMENT     Valid Salvadoran DUI to place on the TEST CDE
 
 Optional env:
   WOMPI_API_SECRET         Required when SMOKE_PATHS includes webhook
@@ -91,6 +91,9 @@ const config = {
   retryDocumentId: process.env.SMOKE_RETRY_DOCUMENT_ID,
   allowEmailFailure: process.env.SMOKE_ALLOW_EMAIL_FAILURE === "1"
 };
+if (!isValidDui(config.donorDocument)) {
+  fail("SMOKE_DONOR_DOCUMENT must be a valid Salvadoran DUI");
+}
 const smokeRunId = randomUUID();
 
 if (dryRun) {
@@ -418,6 +421,13 @@ function parsePositiveInt(value, fallback) {
   const parsed = Number.parseInt(value, 10);
   if (!Number.isFinite(parsed) || parsed <= 0) fail(`Expected positive integer, got ${value}`);
   return parsed;
+}
+
+function isValidDui(value) {
+  const digits = value.replace(/\D/g, "");
+  if (digits.length !== 9) return false;
+  const total = [...digits.slice(0, 8)].reduce((sum, digit, index) => sum + Number(digit) * (9 - index), 0);
+  return (10 - (total % 10)) % 10 === Number(digits[8]);
 }
 
 function withTag(email, tag) {
