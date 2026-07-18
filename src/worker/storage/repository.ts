@@ -615,6 +615,20 @@ export class Repository {
     return Boolean(row);
   }
 
+  async clearFiscalCorrectionMhDispatchStarted(id: string, claimId: string): Promise<boolean> {
+    const row = await this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET mh_dispatch_started_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND mh_dispatch_started_at IS NOT NULL
+        RETURNING id`
+    ).bind(nowIso(), id, claimId).first<{ id: string }>();
+    return Boolean(row);
+  }
+
   async finalizeFiscalCorrection(
     id: string,
     claimId: string,
@@ -738,6 +752,48 @@ export class Repository {
           RETURNING id`
       )
       .bind(claimId, claimedAt, id, staleBefore)
+      .first<{ id: string }>();
+    return Boolean(row);
+  }
+
+  async claimCorrectedWompiEventIssuance(input: {
+    id: string;
+    claimId: string;
+    correctionId: string;
+    processingClaimId: string;
+    issuanceAttemptId: string;
+  }): Promise<boolean> {
+    const claimedAt = nowIso();
+    const row = await this.db
+      .prepare(
+        `UPDATE wompi_events
+            SET issuance_claim_id = ?, issuance_claimed_at = ?
+          WHERE id = ?
+            AND processed_at IS NULL
+            AND created_document_id IS NULL
+            AND issuance_attempt_id = ?
+            AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+            AND (issuance_claim_id IS NULL OR issuance_claim_id = ?)
+            AND EXISTS (
+              SELECT 1 FROM fiscal_corrections
+               WHERE id = ?
+                 AND target_kind = 'WOMPI_EVENT'
+                 AND wompi_event_id = wompi_events.id
+                 AND status = 'PROCESSING'
+                 AND processing_claim_id = ?
+                 AND issuance_attempt_id = wompi_events.issuance_attempt_id
+            )
+          RETURNING id`
+      )
+      .bind(
+        input.claimId,
+        claimedAt,
+        input.id,
+        input.issuanceAttemptId,
+        input.claimId,
+        input.correctionId,
+        input.processingClaimId
+      )
       .first<{ id: string }>();
     return Boolean(row);
   }
