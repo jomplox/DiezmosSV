@@ -20,6 +20,7 @@ import {
 import {
   FiscalCorrectionValidationError,
   fiscalCorrectionChangedFields,
+  fiscalCorrectionPayload,
   validateFiscalReceptorCorrection,
   type FiscalCorrectionStatus,
   type FiscalReceptorCorrection
@@ -44,20 +45,50 @@ export interface FiscalCorrectionFormState {
   validationError: string;
 }
 
+export interface FiscalCorrectionPendingSubmission {
+  correctionRequestId: string;
+  receptor: FiscalReceptorCorrection;
+}
+
+export interface FiscalCorrectionSubmitResponse {
+  status: FiscalCorrectionStatus;
+  queued?: boolean;
+  duplicate?: boolean;
+  correctionId?: string;
+}
+
 export function fiscalCorrectionFormState(
   before: FiscalReceptorCorrection,
   draft: FiscalReceptorCorrection,
-  activeStatus: FiscalCorrectionStatus | null
+  activeStatus: FiscalCorrectionStatus | null,
+  options: {
+    initialDraft?: FiscalReceptorCorrection;
+    retryingSubmittedPayload?: boolean;
+  } = {}
 ): FiscalCorrectionFormState {
   try {
     const normalized = validateFiscalReceptorCorrection(
       draft as unknown as Record<string, unknown>
     );
-    const changed = fiscalCorrectionChangedFields(before, normalized).length > 0;
+    const initialDraft = options.initialDraft ?? before;
+    const changed = fiscalCorrectionPayload(initialDraft) !== fiscalCorrectionPayload(draft);
+    let changesSource = changed;
+    try {
+      const normalizedBefore = validateFiscalReceptorCorrection(
+        before as unknown as Record<string, unknown>
+      );
+      changesSource =
+        fiscalCorrectionChangedFields(normalizedBefore, normalized).length > 0;
+    } catch {
+      // A rejected source can itself be invalid. In that case an actual draft
+      // edit plus a valid corrected payload is sufficient.
+    }
     return {
       normalized,
       changed,
-      canSubmit: changed && activeStatus === null,
+      canSubmit:
+        (options.retryingSubmittedPayload || (changed && changesSource))
+        && activeStatus === null,
       validationError: ""
     };
   } catch (error) {
@@ -97,21 +128,54 @@ export function isReviewRequiredPreCdeFailure(
   return item.correction_available === false;
 }
 
-export function fiscalCorrectionRequestIdForTarget(
-  requestIds: Map<string, string>,
+export function fiscalCorrectionSubmissionForTarget(
+  submissions: Map<string, FiscalCorrectionPendingSubmission>,
   targetKey: string,
+  receptor: FiscalReceptorCorrection,
   create: () => string = () => crypto.randomUUID()
+): FiscalCorrectionPendingSubmission {
+  const existing = submissions.get(targetKey);
+  if (
+    existing
+    && fiscalCorrectionPayload(existing.receptor) === fiscalCorrectionPayload(receptor)
+  ) {
+    return existing;
+  }
+  const submission = {
+    correctionRequestId: create(),
+    receptor: { ...receptor }
+  };
+  submissions.set(targetKey, submission);
+  return submission;
+}
+
+export function fiscalCorrectionDraftForTarget(
+  submissions: Map<string, FiscalCorrectionPendingSubmission>,
+  targetKey: string,
+  fallback: FiscalReceptorCorrection
+): FiscalReceptorCorrection {
+  return submissions.get(targetKey)?.receptor ?? fallback;
+}
+
+export function fiscalCorrectionSubmissionMessage(
+  response: Pick<FiscalCorrectionSubmitResponse, "status" | "duplicate">
 ): string {
-  const existing = requestIds.get(targetKey);
-  if (existing) return existing;
-  const requestId = create();
-  requestIds.set(targetKey, requestId);
-  return requestId;
+  const messages: Record<FiscalCorrectionStatus, string> = {
+    QUEUED: "Corrección en cola",
+    PROCESSING: "Corrección en proceso",
+    ACCEPTED: "La corrección ya fue aceptada por Hacienda.",
+    REJECTED: "Hacienda rechazó la corrección. Revise el detalle.",
+    FAILED: "La corrección falló. Revise el detalle.",
+    REVIEW_REQUIRED: "La corrección requiere revisión antes de continuar."
+  };
+  return messages[response.status];
 }
 
 export function FiscalCorrectionDialog({
   open,
   data,
+  initialDraft,
+  retryingSubmittedPayload,
   protectedContext,
   busy,
   error,
@@ -120,6 +184,8 @@ export function FiscalCorrectionDialog({
 }: {
   open: boolean;
   data: FiscalCorrectionData | null;
+  initialDraft?: FiscalReceptorCorrection;
+  retryingSubmittedPayload?: boolean;
   protectedContext: FiscalCorrectionProtectedContext;
   busy: boolean;
   error: string;
@@ -127,7 +193,7 @@ export function FiscalCorrectionDialog({
   onSubmit: (value: FiscalReceptorCorrection) => Promise<void>;
 }) {
   const [form, setForm] = useState<FiscalReceptorCorrection>(
-    () => data?.receptor ?? emptyCorrection()
+    () => initialDraft ?? data?.receptor ?? emptyCorrection()
   );
   const dialogRef = useRef<HTMLElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
@@ -135,12 +201,6 @@ export function FiscalCorrectionDialog({
   const onCancelRef = useRef(onCancel);
   busyRef.current = busy;
   onCancelRef.current = onCancel;
-
-  useEffect(() => {
-    if (open && data) {
-      setForm(data.receptor);
-    }
-  }, [open, data]);
 
   useEffect(() => {
     if (!open) return;
@@ -182,10 +242,11 @@ export function FiscalCorrectionDialog({
         ? fiscalCorrectionFormState(
             data.receptor,
             form,
-            data.activeCorrection?.status ?? null
+            data.activeCorrection?.status ?? null,
+            { initialDraft, retryingSubmittedPayload }
           )
         : null,
-    [data, form]
+    [data, form, initialDraft, retryingSubmittedPayload]
   );
 
   if (!open || !data || !formState) return null;
