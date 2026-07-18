@@ -15,6 +15,7 @@ import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, t
 import { EMAIL_TEMPLATES_SETTING_KEY, parseEmailTemplates } from "./emailTemplates";
 import { resolveDonationIntentBinding } from "./donationIntentBinding";
 import type { DonationIntentBinding } from "./donationIntentBinding";
+import { logWorkerError } from "./observability";
 import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
 import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
@@ -658,7 +659,7 @@ export class IssuancePipeline {
         // cron de 15 minutos sería puro ruido. La visibilidad la da la alerta de
         // backlog de alertOnDeferredBacklog.
         if (!(error instanceof MhPreDispatchError)) {
-          console.error("Reintento de transmisión diferida falló", record.id, error);
+          logWorkerError(this.env, "deferred_transmission_retry_failed", error);
         }
         pending += 1;
       }
@@ -678,7 +679,7 @@ export class IssuancePipeline {
         }
       } catch (error) {
         failed += 1;
-        console.error("Post-accept finalization failed", document.id, error);
+        logWorkerError(this.env, "post_accept_finalization_failed", error);
       }
     }
     return { finalized, failed };
@@ -696,7 +697,7 @@ export class IssuancePipeline {
           pending += 1;
         }
       } catch (error) {
-        console.error("Finalización de CDE aceptado falló", record.id, error);
+        logWorkerError(this.env, "accepted_wompi_finalization_failed", error);
         pending += 1;
       }
     }
@@ -1064,7 +1065,7 @@ export class IssuancePipeline {
     } catch (error) {
       // The durable SENT delivery is the side-effect authority. A secondary audit
       // failure must not turn an accepted fiscal document into retryable work.
-      console.error("Receipt delivery audit failed", record.id, error);
+      logWorkerError(this.env, "receipt_delivery_audit_failed", error);
     }
     return true;
   }

@@ -25,6 +25,7 @@ import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, t
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
+import { logWorkerError } from "./services/observability";
 import { stagingSmokeRunId } from "./services/stagingSmoke";
 import {
   assertDeploymentCanCollectPayments,
@@ -284,7 +285,7 @@ export default {
       if (error instanceof PaymentCollectionDisabledError) {
         return jsonResponse({ error: error.code, message: error.message }, { status: 503 });
       }
-      console.error("Unhandled Worker request error", error);
+      logWorkerError(env, "unhandled_worker_request_error", error);
       return jsonResponse({ error: "internal_error", message: "Ocurrió un error interno." }, { status: 500 });
     }
   },
@@ -333,7 +334,7 @@ export default {
         }
         message.ack();
       } catch (error) {
-        console.error("Issuance message failed", error);
+        logWorkerError(env, "issuance_message_failed", error);
         if (wompiEventId && issuanceAttemptId) {
           const recorded = currentWompiAttempt && await repo.recordWompiIssuanceFailure(
             wompiEventId,
@@ -360,7 +361,7 @@ export default {
       try {
         await runRetentionExport(env, new Date(event.scheduledTime));
       } catch (error) {
-        console.error("Retention export failed", error);
+        logWorkerError(env, "retention_export_failed", error);
       }
       return;
     }
@@ -372,22 +373,22 @@ export default {
     try {
       await pipeline.retryDeferredTransmissions();
     } catch (error) {
-      console.error("Deferred transmission retry failed", error);
+      logWorkerError(env, "deferred_transmission_retry_sweep_failed", error);
     }
     try {
       await pipeline.retryPendingPostAcceptFinalizations();
     } catch (error) {
-      console.error("Post-accept finalization sweep failed", error);
+      logWorkerError(env, "post_accept_finalization_sweep_failed", error);
     }
     try {
       await pipeline.retryAcceptedWompiFinalizations();
     } catch (error) {
-      console.error("Accepted Wompi finalization retry failed", error);
+      logWorkerError(env, "accepted_wompi_finalization_retry_failed", error);
     }
     try {
       await pipeline.sweepStalledWompiEvents();
     } catch (error) {
-      console.error("Stalled Wompi event sweep failed", error);
+      logWorkerError(env, "stalled_wompi_event_sweep_failed", error);
     }
     try {
       // Process a bounded page per tick: snapshot the capped set of expiring intents,
@@ -406,18 +407,18 @@ export default {
         try {
           await wompi.deactivatePaymentLink(intent);
         } catch (error) {
-          console.error("Wompi link deactivation failed", intent.id, error);
+          logWorkerError(env, "wompi_link_deactivation_failed", error);
         }
       }
     } catch (error) {
-      console.error("Donation intent expiry sweep failed", error);
+      logWorkerError(env, "donation_intent_expiry_sweep_failed", error);
     }
     try {
       // Drive the expiry math from the scheduled tick's time, the same reference the
       // retention export above uses, so the countdown never depends on the wall clock.
       await checkCertificateExpiry(env, new Repository(env.DB), event.scheduledTime ?? Date.now());
     } catch (error) {
-      console.error("Certificate expiry check failed", error);
+      logWorkerError(env, "certificate_expiry_check_failed", error);
     }
   }
 };
@@ -567,7 +568,7 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // Runs on replays too (markIntentPaid is idempotent). Wrapped defensively — a
   // bad/unknown intent id must never break webhook processing.
   if (environmentAllowed) {
-    await markIntentPaidFromWebhook(repo, payload);
+    await markIntentPaidFromWebhook(env, repo, payload);
   }
   let queued = false;
   if (inserted && environmentAllowed && isApprovedDonation(payload)) {
@@ -583,7 +584,7 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
 // Marks payment only after the shared resolver binds both Wompi identifiers to the
 // exact stored intent/link. Legacy static-link payloads remain untouched. Never throws:
 // the paid marker is donor-UI convenience while the pipeline owns fiscal completion.
-async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook): Promise<void> {
+async function markIntentPaidFromWebhook(env: Env, repo: Repository, payload: WompiWebhook): Promise<void> {
   try {
     if (!isApprovedDonation(payload)) {
       return;
@@ -594,7 +595,7 @@ async function markIntentPaidFromWebhook(repo: Repository, payload: WompiWebhook
     }
     await repo.markIntentPaid(binding.intent.id, binding.intent.wompi_id_enlace);
   } catch (error) {
-    console.error("No se pudo marcar la intención como pagada", error);
+    logWorkerError(env, "mark_intent_paid_from_webhook_failed", error);
   }
 }
 
@@ -878,7 +879,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     const email = String(body.email ?? "").trim();
     if (email) {
       const task = processPasswordResetRequest(repo, auth, env, url, email, clientIpFrom(request))
-        .catch((error) => console.error("Password reset request failed", error));
+        .catch((error) => logWorkerError(env, "password_reset_request_failed", error));
       if (ctx) {
         ctx.waitUntil(task);
       } else {
@@ -927,7 +928,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     try {
       return jsonResponse({ failures: await repo.listWompiIssuanceFailures(100) });
     } catch (error) {
-      console.error("Wompi issuance failure list failed", error);
+      logWorkerError(env, "wompi_issuance_failure_list_failed", error);
       return wompiIssuanceOperationFailedResponse();
     }
   }
@@ -958,7 +959,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
       await env.ISSUANCE_QUEUE.send({ wompiEventId, issuanceAttemptId: attemptId });
       return jsonResponse({ ok: true, queued: true }, { status: 202 });
     } catch (error) {
-      console.error("Wompi issuance retry failed", error);
+      logWorkerError(env, "wompi_issuance_retry_failed", error);
       return wompiIssuanceOperationFailedResponse();
     }
   }
@@ -2310,7 +2311,7 @@ async function handleDocumentRoute(
     } catch (error) {
       // SENT is the side-effect authority. An audit failure must not permit another
       // provider dispatch when the browser repeats the same resend request.
-      console.error("Manual receipt resend audit failed", document.id, error);
+      logWorkerError(env, "manual_receipt_resend_audit_failed", error);
     }
     return jsonResponse({ ok: true, duplicateSuppressed: false, attemptNo: claim.attemptNo });
   }

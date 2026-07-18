@@ -4,6 +4,10 @@ compatibility_date = "2026-06-02"
 compatibility_flags = ["nodejs_compat"]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
 [[send_email]]
 name = "EMAIL"
 allowed_sender_addresses = ["legacy-contact-4@example.com"]
@@ -53,6 +57,10 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 # Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
 [env.staging]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[env.staging.observability]
+enabled = true
+head_sampling_rate = 1
 
 [[env.staging.send_email]]
 name = "EMAIL"
@@ -107,6 +115,10 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 # secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
 [env.production]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+
+[env.production.observability]
+enabled = true
+head_sampling_rate = 1
 
 [[env.production.send_email]]
 name = "EMAIL"
