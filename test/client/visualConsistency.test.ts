@@ -93,7 +93,7 @@ describe("visual consistency pack", () => {
     expect(appSource).toContain('documentListEmptyMessage(view === "failures" ? "failures" : "documents", query, preCdeFailuresLoading)');
   });
 
-  it("renders exact pre-CDE evidence with safe retry states and no document actions", () => {
+  it("renders exact pre-CDE evidence with guarded correction and safe retry states", () => {
     const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
 
     expect(panelBlock).toContain('<span className="status pre-cde">CDE NO CREADO</span>');
@@ -105,8 +105,11 @@ describe("visual consistency pack", () => {
     expect(panelBlock).toContain('"Número aún no asignado"');
     expect(panelBlock).toContain('item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING"');
     expect(panelBlock).toContain("{canRetry && (");
-    expect(panelBlock).toContain('disabled={retryQueued || busy === `pre-cde-retry:${item.id}`}');
-    expect(panelBlock).toContain('{retryQueued ? "Reintento en cola" : "Reintentar creación"}');
+    expect(panelBlock).toContain("isCorrectablePreCdeFailure(item)");
+    expect(panelBlock).toContain('"Corregir y reintentar"');
+    expect(panelBlock).toContain('"Reintentar creación"');
+    expect(panelBlock).toContain('"Corrección en cola"');
+    expect(panelBlock).toContain('"Procesando corrección"');
 
     for (const forbiddenAction of ["PDF", "JSON", "Sello", "Invalidar", "DetailPanel", "onDownload", "documentAction"]) {
       expect(panelBlock).not.toContain(forbiddenAction);
