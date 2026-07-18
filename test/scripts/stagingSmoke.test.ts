@@ -74,9 +74,40 @@ describe("staging smoke private environment file", () => {
     expect(result.stdout + result.stderr).toContain("regular non-symlink file");
   });
 
+  it("allows an admin-only dry run without a Wompi signing secret", () => {
+    const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-"));
+    const envFile = join(directory, "staging-smoke.env");
+    writeFileSync(
+      envFile,
+      [
+        "STAGING_URL=https://staging.example.org",
+        "STAGING_EMAIL=operator@example.org",
+        "STAGING_PASSWORD=SENTINEL_STAGING_PASSWORD",
+        "SMOKE_DONOR_DOCUMENT=10000000-1",
+        "SMOKE_DONOR_EMAIL=smoke@example.org",
+        "SMOKE_PATHS=admin"
+      ].join("\n"),
+      { mode: 0o600 }
+    );
+
+    const result = runSmoke(envFile, ["--dry-run"]);
+    const output = result.stdout + result.stderr;
+
+    expect(result.status).toBe(0);
+    expect(output).toContain('"admin"');
+    expect(output).not.toContain("Missing required env: WOMPI_API_SECRET");
+  });
+
   it("documents the out-of-tree smoke env file without inline credentials or donor identity", () => {
     expect(stagingUatSource).toContain("DIEZMOSSV_ENV_FILE");
     expect(stagingUatSource).not.toMatch(/^(?:STAGING_PASSWORD|STAGING_BOOTSTRAP_TOKEN|WOMPI_API_SECRET|SMOKE_DONOR_DOCUMENT|SMOKE_DONOR_EMAIL)=/m);
+  });
+});
+
+describe("staging smoke supported routes", () => {
+  it("does not call the removed contingency sweep route", () => {
+    expect(smokeSource).not.toContain("/api/contingency/sweep");
+    expect(stagingUatSource).not.toContain("contingency sweep");
   });
 });
 

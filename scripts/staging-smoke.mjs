@@ -12,10 +12,10 @@ Required env:
   STAGING_URL              Deployed Worker URL, for example https://diezmossv-staging-resource-example.<account>.workers.dev
   STAGING_EMAIL            Admin/operator login email
   STAGING_PASSWORD         Admin/operator login password
-  WOMPI_API_SECRET         Staging Wompi webhook secret
   SMOKE_DONOR_DOCUMENT     Donor document to place on the TEST CDE
 
 Optional env:
+  WOMPI_API_SECRET         Required when SMOKE_PATHS includes webhook
   STAGING_BOOTSTRAP=1      Bootstrap owner before login if login fails and D1 is empty
   STAGING_BOOTSTRAP_TOKEN  Required when STAGING_BOOTSTRAP=1; sent as X-Bootstrap-Owner-Token
   STAGING_NAME             Bootstrap owner name, default "Staging Owner"
@@ -57,7 +57,11 @@ try {
 loadEnvFile(envFile);
 
 const dryRun = args.has("--dry-run");
-const required = ["STAGING_URL", "STAGING_EMAIL", "STAGING_PASSWORD", "WOMPI_API_SECRET", "SMOKE_DONOR_DOCUMENT"];
+const paths = parsePaths(process.env.SMOKE_PATHS ?? "webhook,admin");
+const required = ["STAGING_URL", "STAGING_EMAIL", "STAGING_PASSWORD", "SMOKE_DONOR_DOCUMENT"];
+if (paths.includes("webhook")) {
+  required.push("WOMPI_API_SECRET");
+}
 if (process.env.STAGING_BOOTSTRAP === "1") {
   required.push("STAGING_BOOTSTRAP_TOKEN");
 }
@@ -73,13 +77,13 @@ const config = {
   bootstrap: process.env.STAGING_BOOTSTRAP === "1",
   bootstrapToken: process.env.STAGING_BOOTSTRAP_TOKEN ?? "",
   name: process.env.STAGING_NAME ?? "Staging Owner",
-  wompiSecret: requiredEnv("WOMPI_API_SECRET"),
+  wompiSecret: process.env.WOMPI_API_SECRET ?? "",
   amount: process.env.SMOKE_AMOUNT ?? "1.00",
   donorName: process.env.SMOKE_DONOR_NAME ?? "Staging Smoke",
   donorEmail: process.env.SMOKE_DONOR_EMAIL ?? `smoke+${Date.now()}@example.org`,
   donorDocument: requiredEnv("SMOKE_DONOR_DOCUMENT"),
   donorPhone: process.env.SMOKE_DONOR_PHONE ?? "00000000",
-  paths: parsePaths(process.env.SMOKE_PATHS ?? "webhook,admin"),
+  paths,
   timeoutMs: parsePositiveInt(process.env.SMOKE_TIMEOUT_MS, 120_000),
   pollMs: parsePositiveInt(process.env.SMOKE_POLL_MS, 5_000),
   createUser: process.env.SMOKE_CREATE_USER === "1",
@@ -96,7 +100,9 @@ if (dryRun) {
     paths: config.paths,
     donorIdentityConfigured: Boolean(config.donorEmail && config.donorDocument),
     amount: config.amount,
-    signedWebhookShape: Boolean(signWompiPayload(JSON.stringify(payload), config.wompiSecret)),
+    signedWebhookShape: config.paths.includes("webhook")
+      ? Boolean(signWompiPayload(JSON.stringify(payload), config.wompiSecret))
+      : null,
     willCreateUser: config.createUser,
     willBootstrap: config.bootstrap,
     willInvalidate: config.invalidate,
@@ -190,10 +196,6 @@ async function main() {
   } else {
     results.push({ check: "retry_supplied_document", ok: null, skipped: "Set SMOKE_RETRY_DOCUMENT_ID for a failed/rejected document" });
   }
-
-  logStep("Running contingency sweep");
-  const sweep = await jsonRequest("/api/contingency/sweep", { method: "POST", token: auth.token, body: {} });
-  results.push({ check: "contingency_sweep", ok: true, transmitted: sweep.transmitted, periodId: sweep.periodId });
 
   if (config.invalidate) {
     logStep("Invalidating accepted TEST DTE");
