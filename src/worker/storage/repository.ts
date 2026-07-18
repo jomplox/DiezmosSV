@@ -1310,6 +1310,10 @@ export class Repository {
                     fiscal_corrections.target_kind = 'DTE_DOCUMENT'
                     AND fiscal_corrections.document_id = dte_documents.id
                     AND fiscal_corrections.fiscal_claim_id = ?
+                    AND fiscal_corrections.reserved_codigo_generacion =
+                        dte_documents.codigo_generacion
+                    AND fiscal_corrections.reserved_numero_control =
+                        dte_documents.numero_control
                   )
                   OR
                   (
@@ -1320,6 +1324,12 @@ export class Repository {
                         FROM wompi_events
                        WHERE id = fiscal_corrections.wompi_event_id
                          AND created_document_id = dte_documents.id
+                         AND issuance_attempt_id =
+                             fiscal_corrections.issuance_attempt_id
+                         AND reserved_codigo_generacion =
+                             dte_documents.codigo_generacion
+                         AND reserved_numero_control =
+                             dte_documents.numero_control
                     )
                   )
                 )
@@ -1527,10 +1537,46 @@ export class Repository {
           status = 'PROCESSING'
           AND processing_started_at < ?
           AND mh_dispatch_started_at IS NULL
+        ) OR (
+          status = 'PROCESSING'
+          AND processing_started_at < ?
+          AND mh_dispatch_started_at IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE status IN ('ACCEPTED', 'REJECTED')
+               AND signed_jws IS NOT NULL
+               AND fiscal_operation_claim_id IS NULL
+               AND fiscal_operation_claimed_at IS NULL
+               AND fiscal_operation_kind IS NULL
+               AND fiscal_operation_event_id IS NULL
+               AND (
+                 (
+                   fiscal_corrections.target_kind = 'DTE_DOCUMENT'
+                   AND id = fiscal_corrections.document_id
+                   AND codigo_generacion = fiscal_corrections.reserved_codigo_generacion
+                   AND numero_control = fiscal_corrections.reserved_numero_control
+                 )
+                 OR
+                 (
+                   fiscal_corrections.target_kind = 'WOMPI_EVENT'
+                   AND wompi_event_id = fiscal_corrections.wompi_event_id
+                   AND EXISTS (
+                     SELECT 1
+                       FROM wompi_events
+                      WHERE id = fiscal_corrections.wompi_event_id
+                        AND created_document_id = dte_documents.id
+                        AND issuance_attempt_id = fiscal_corrections.issuance_attempt_id
+                        AND reserved_codigo_generacion = dte_documents.codigo_generacion
+                        AND reserved_numero_control = dte_documents.numero_control
+                   )
+                 )
+               )
+          )
         )
         ORDER BY COALESCE(processing_started_at, updated_at), id
         LIMIT ?`
-    ).bind(staleBefore, staleBefore, safeLimit).all<FiscalCorrectionRecord>();
+    ).bind(staleBefore, staleBefore, staleBefore, safeLimit).all<FiscalCorrectionRecord>();
     return rows.results ?? [];
   }
 

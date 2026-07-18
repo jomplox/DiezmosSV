@@ -1622,6 +1622,65 @@ describe("guarded fiscal correction API", () => {
     expect(transmit).not.toHaveBeenCalled();
   });
 
+  it.each(["ACCEPTED", "REJECTED"] as const)(
+    "reconciles a stale dispatch-started %s correction without rotating ownership or requeueing",
+    async (terminalStatus) => {
+      const db = correctionDb();
+      const documentId = `doc_stale_terminal_${terminalStatus.toLowerCase()}`;
+      const correction = correctionRecord({
+        id: `fiscal_correction_stale_terminal_${terminalStatus.toLowerCase()}`,
+        wompi_event_id: `wompi_stale_terminal_${terminalStatus.toLowerCase()}`,
+        issuance_attempt_id: `issuance_stale_terminal_${terminalStatus.toLowerCase()}`,
+        processing_claim_id: `processing_stale_terminal_${terminalStatus.toLowerCase()}`,
+        status: "PROCESSING",
+        processing_started_at: "2000-01-01T00:00:00.000Z",
+        mh_dispatch_started_at: "2000-01-01T00:01:00.000Z"
+      });
+      const event = correctionEvent({
+        id: correction.wompi_event_id,
+        created_document_id: documentId,
+        issuance_attempt_id: correction.issuance_attempt_id,
+        issuance_status: "DOCUMENT_CREATED",
+        processed_at: "2000-01-01T00:00:30.000Z"
+      });
+      const document = testDocument({
+        id: documentId,
+        wompi_event_id: correction.wompi_event_id,
+        status: terminalStatus,
+        signed_jws: `signed-${terminalStatus.toLowerCase()}`,
+        fiscal_operation_claim_id: null,
+        fiscal_operation_claimed_at: null,
+        fiscal_operation_kind: null,
+        post_accept_finalized_at:
+          terminalStatus === "ACCEPTED" ? "2000-01-01T00:02:00.000Z" : null
+      });
+      db.wompiEvents.push(event);
+      db.documents.push(document);
+      stubQueuedCorrectionLifecycle(correction, event, db);
+      vi.spyOn(Repository.prototype, "listRecoverableFiscalCorrections")
+        .mockResolvedValue([correction]);
+      const recovered = vi.spyOn(
+        Repository.prototype,
+        "recoverFiscalCorrectionProcessingClaim"
+      );
+      const queued: IssuanceMessage[] = [];
+      const runtime = correctionRuntime(db, {
+        send: async (message: IssuanceMessage) => queued.push(message)
+      } as unknown as Queue<IssuanceMessage>);
+      const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+      const originalProcessingClaimId = correction.processing_claim_id;
+
+      await new IssuancePipeline(runtime).recoverStalledFiscalCorrections();
+
+      expect(correction.status).toBe(terminalStatus);
+      expect(correction.processing_claim_id).toBe(originalProcessingClaimId);
+      expect(recovered).not.toHaveBeenCalled();
+      expect(queued).toEqual([]);
+      expect(transmit).not.toHaveBeenCalled();
+      expectCorrectionAudits(db, correction, terminalStatus);
+    }
+  );
+
   it("resumes a recovered signed document without rebuilding or allocating again", async () => {
     const db = correctionDb();
     const fiscalClaimId = "fiscal_claim_recovered_signed";
@@ -2649,6 +2708,68 @@ describe("guarded fiscal correction API", () => {
     expectCorrectionAudits(db, correction, "REJECTED");
   });
 
+  it.each(["ACCEPTED", "REJECTED"] as const)(
+    "recovers a known %s correction when terminal DTE persistence is followed by a finalization crash",
+    async (terminalStatus) => {
+      const db = correctionDb();
+      const suffix = terminalStatus.toLowerCase();
+      const correction = correctionRecord({
+        id: `fiscal_correction_terminal_crash_${suffix}`,
+        wompi_event_id: `wompi_correction_terminal_crash_${suffix}`,
+        issuance_attempt_id: `issuance_attempt_terminal_crash_${suffix}`,
+        processing_claim_id: `correction_processing_terminal_crash_${suffix}`
+      });
+      const event = correctionEvent({
+        id: correction.wompi_event_id,
+        processed_at: null,
+        issuance_status: "RETRY_QUEUED",
+        issuance_attempt_id: correction.issuance_attempt_id
+      });
+      db.wompiEvents.push(event);
+      stubQueuedCorrectionLifecycle(correction, event, db);
+      const finalize = vi.mocked(
+        Repository.prototype.finalizeFiscalCorrection
+      );
+      const finalizeImplementation = finalize.getMockImplementation();
+      if (!finalizeImplementation) {
+        throw new Error("expected fiscal correction finalization stub");
+      }
+      finalize
+        .mockRejectedValueOnce(new Error("injected post-MH finalization crash"))
+        .mockImplementation(finalizeImplementation);
+      const transmit = vi.spyOn(MhClient.prototype, "transmitDte")
+        .mockResolvedValue({
+          accepted: terminalStatus === "ACCEPTED",
+          estado: terminalStatus === "ACCEPTED" ? "PROCESADO" : "RECHAZADO",
+          selloRecibido:
+            terminalStatus === "ACCEPTED" ? `SELLO-${suffix}` : null,
+          observaciones:
+            terminalStatus === "ACCEPTED" ? [] : ["Rechazo conocido"],
+          raw: { estado: terminalStatus }
+        });
+      const runtime = correctionRuntime(db);
+      runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+      runtime.MH_CERT_PASSWORD = "cert-password";
+
+      const disposition = await consumeCorrectionMessage(runtime, {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: correction.issuance_attempt_id!
+      });
+
+      expect(disposition.ack).toHaveBeenCalledTimes(1);
+      expect(disposition.retry).not.toHaveBeenCalled();
+      expect(transmit).toHaveBeenCalledTimes(1);
+      expect(correction.status).toBe(terminalStatus);
+      expect(db.documents[0]).toMatchObject({
+        status: terminalStatus,
+        fiscal_operation_claim_id: null
+      });
+      expectCorrectionAudits(db, correction, terminalStatus);
+    }
+  );
+
   it("marks a proven MH pre-dispatch correction failure FAILED and clears claims", async () => {
     const db = correctionDb();
     const correction = correctionRecord({
@@ -2790,6 +2911,63 @@ describe("guarded fiscal correction API", () => {
       failure_code: "MH_DISPATCH_UNCERTAIN"
     });
   });
+
+  it.each(["ACCEPTED", "REJECTED"] as const)(
+    "finalizes a redelivered post-boundary correction from its durable %s DTE without redispatching",
+    async (terminalStatus) => {
+      const db = correctionDb();
+      const suffix = terminalStatus.toLowerCase();
+      const documentId = `dte_correction_terminal_redelivery_${suffix}`;
+      const correction = correctionRecord({
+        id: `fiscal_correction_terminal_redelivery_${suffix}`,
+        wompi_event_id: `wompi_correction_terminal_redelivery_${suffix}`,
+        issuance_attempt_id: `issuance_attempt_terminal_redelivery_${suffix}`,
+        processing_claim_id: `correction_processing_terminal_redelivery_${suffix}`,
+        status: "PROCESSING",
+        processing_started_at: "2026-07-18T12:01:00.000Z",
+        mh_dispatch_started_at: "2026-07-18T12:02:00.000Z"
+      });
+      const event = correctionEvent({
+        id: correction.wompi_event_id,
+        processed_at: "2026-07-18T12:01:30.000Z",
+        created_document_id: documentId,
+        issuance_status: "DOCUMENT_CREATED",
+        issuance_attempt_id: correction.issuance_attempt_id
+      });
+      db.wompiEvents.push(event);
+      db.documents.push(testDocument({
+        id: documentId,
+        wompi_event_id: String(correction.wompi_event_id),
+        status: terminalStatus,
+        signed_jws: `signed-terminal-redelivery-${suffix}`,
+        fiscal_operation_claim_id: null,
+        fiscal_operation_claimed_at: null,
+        fiscal_operation_kind: null,
+        post_accept_finalized_at:
+          terminalStatus === "ACCEPTED" ? "2026-07-18T12:03:00.000Z" : null
+      }));
+      stubQueuedCorrectionLifecycle(correction, event, db);
+      const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+      const runtime = correctionRuntime(db);
+
+      const disposition = await consumeCorrectionMessage(runtime, {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: correction.issuance_attempt_id!
+      });
+
+      expect(disposition.ack).toHaveBeenCalledTimes(1);
+      expect(disposition.retry).not.toHaveBeenCalled();
+      expect(transmit).not.toHaveBeenCalled();
+      expect(correction).toMatchObject({
+        status: terminalStatus,
+        mh_dispatch_started_at: "2026-07-18T12:02:00.000Z",
+        failure_code: null
+      });
+      expectCorrectionAudits(db, correction, terminalStatus);
+    }
+  );
 
   it("retries token-owned safe pre-dispatch work while its CDE claim is busy", async () => {
     const db = correctionDb();

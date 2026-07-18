@@ -1829,6 +1829,18 @@ describe("fiscal repository SQL on SQLite", () => {
     });
     const documentClaimId = `fiscal_correction_${correction.id}`;
     database.prepare(
+      `UPDATE wompi_events
+          SET control_prefix = 'M001P004',
+              control_sequence = 161,
+              reserved_codigo_generacion = ?,
+              reserved_numero_control = ?
+        WHERE id = ?`
+    ).run(
+      "82828282-8282-4282-8282-828282828282",
+      "DTE-15-M001P004-000000000000161",
+      eventId
+    );
+    database.prepare(
       `INSERT INTO dte_documents (
          id, wompi_event_id, environment, codigo_generacion, numero_control,
          status, plain_json, signed_jws, amount_cents, issued_at, created_at,
@@ -1877,6 +1889,30 @@ describe("fiscal repository SQL on SQLite", () => {
       "SELECT status FROM fiscal_corrections WHERE id = ?"
     ).get(correction.id)).toEqual({ status: "PROCESSING" });
 
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_attempt_id = 'different-correction-attempt',
+              reserved_codigo_generacion = 'different-generation-code'
+        WHERE id = ?`
+    ).run(eventId);
+    await expect(repository.finalizeFiscalCorrection(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        status: "REJECTED",
+        document: { documentId, documentClaimId, signedJws }
+      }
+    )).resolves.toBe(false);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_attempt_id = ?,
+              reserved_codigo_generacion = ?
+        WHERE id = ?`
+    ).run(
+      correction.issuance_attempt_id,
+      "82828282-8282-4282-8282-828282828282",
+      eventId
+    );
     await expect(repository.finalizeFiscalCorrection(
       correction.id,
       correction.processing_claim_id,
@@ -2107,6 +2143,10 @@ describe("fiscal repository SQL on SQLite", () => {
     for (const [index, status] of (["ACCEPTED", "REJECTED"] as const).entries()) {
       const documentId = `doc_terminal_evidence_${index}`;
       const signedJws = `terminal-evidence-jws-${index}`;
+      const codigoGeneracion =
+        `76767676-7676-4676-8676-76767676767${index}`;
+      const numeroControl =
+        `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`;
       seedRejectedDocument(database, documentId);
       const claimed = await repository.claimDocumentFiscalCorrection(
         documentCorrectionClaimInput({
@@ -2126,16 +2166,16 @@ describe("fiscal repository SQL on SQLite", () => {
         repository,
         correction,
         documentId,
-        `76767676-7676-4676-8676-76767676767${index}`,
-        `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`
+        codigoGeneracion,
+        numeroControl
       );
       await repository.prepareClaimedFiscalCorrectionDocument({
         correctionId: correction.id,
         documentId,
         processingClaimId: correction.processing_claim_id,
         claimId: correction.fiscal_claim_id!,
-        codigoGeneracion: `76767676-7676-4676-8676-76767676767${index}`,
-        numeroControl: `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`,
+        codigoGeneracion,
+        numeroControl,
         plainJson: { identificacion: { tipoDte: "15" } },
         signedJws,
         donorName: "Donante corregida",
@@ -2165,11 +2205,20 @@ describe("fiscal repository SQL on SQLite", () => {
       database.prepare(
         `UPDATE dte_documents
             SET status = ?,
+                codigo_generacion = 'mismatched-generation-code',
                 fiscal_operation_claim_id = NULL,
                 fiscal_operation_claimed_at = NULL,
                 fiscal_operation_kind = NULL
           WHERE id = ?`
       ).run(status, documentId);
+      await expect(repository.finalizeFiscalCorrection(
+        correction.id,
+        correction.processing_claim_id,
+        outcome
+      )).resolves.toBe(false);
+      database.prepare(
+        "UPDATE dte_documents SET codigo_generacion = ? WHERE id = ?"
+      ).run(codigoGeneracion, documentId);
       await expect(repository.finalizeFiscalCorrection(
         correction.id,
         correction.processing_claim_id,
@@ -2424,6 +2473,122 @@ describe("fiscal repository SQL on SQLite", () => {
       nextProcessingClaimId: "must_not_recover_stale_owner",
       staleBefore: "2030-01-01T00:00:00.000Z"
     })).resolves.toBeNull();
+    database.close();
+  });
+
+  it("discovers stale terminal dispatches without exposing an ambiguous signed dispatch for recovery", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    const terminalDocumentId = "doc_terminal_dispatch_reconciliation";
+    const ambiguousDocumentId = "doc_ambiguous_dispatch_reconciliation";
+    seedRejectedDocument(database, terminalDocumentId);
+    seedRejectedDocument(database, ambiguousDocumentId);
+    const terminalClaim = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId: terminalDocumentId,
+        requestId: "57575757-5757-4757-8757-575757575757"
+      })
+    );
+    const ambiguousClaim = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({
+        documentId: ambiguousDocumentId,
+        requestId: "58585858-5858-4858-8858-585858585858"
+      })
+    );
+    if (terminalClaim.kind !== "claimed" || ambiguousClaim.kind !== "claimed") {
+      throw new Error("expected terminal reconciliation correction claims");
+    }
+    const cases = [
+      {
+        correction: terminalClaim.correction,
+        documentId: terminalDocumentId,
+        codigoGeneracion: "57575757-5757-4757-8757-575757575757",
+        numeroControl: "DTE-15-M001P004-000000000000157",
+        signedJws: "signed-terminal-dispatch"
+      },
+      {
+        correction: ambiguousClaim.correction,
+        documentId: ambiguousDocumentId,
+        codigoGeneracion: "58585858-5858-4858-8858-585858585858",
+        numeroControl: "DTE-15-M001P004-000000000000158",
+        signedJws: "signed-ambiguous-dispatch"
+      }
+    ];
+    for (const item of cases) {
+      await repository.claimFiscalCorrectionProcessing({
+        id: item.correction.id,
+        processingClaimId: item.correction.processing_claim_id,
+        fiscalClaimId: item.correction.fiscal_claim_id ?? undefined
+      });
+      await reserveDocumentCorrectionIdentifiers(
+        database,
+        repository,
+        item.correction,
+        item.documentId,
+        item.codigoGeneracion,
+        item.numeroControl
+      );
+      await repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: item.correction.id,
+        documentId: item.documentId,
+        processingClaimId: item.correction.processing_claim_id,
+        claimId: item.correction.fiscal_claim_id!,
+        codigoGeneracion: item.codigoGeneracion,
+        numeroControl: item.numeroControl,
+        plainJson: {
+          identificacion: {
+            tipoDte: "15",
+            codigoGeneracion: item.codigoGeneracion,
+            numeroControl: item.numeroControl
+          }
+        },
+        signedJws: item.signedJws,
+        donorName: "Donante corregida",
+        donorEmail: "corregida@example.org"
+      });
+      await repository.markFiscalCorrectionMhDispatchStarted({
+        correctionId: item.correction.id,
+        processingClaimId: item.correction.processing_claim_id,
+        documentId: item.documentId,
+        documentClaimId: item.correction.fiscal_claim_id!,
+        signedJws: item.signedJws
+      });
+      database.prepare(
+        "UPDATE fiscal_corrections SET processing_started_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
+      ).run(item.correction.id);
+    }
+    await repository.completeDocumentTransmission(
+      terminalDocumentId,
+      terminalClaim.correction.fiscal_claim_id!,
+      {
+        status: "REJECTED",
+        sello: null,
+        mhEstado: "RECHAZADO",
+        observaciones: ["Rechazo conocido"],
+        acceptedAt: null
+      }
+    );
+
+    await expect(repository.listRecoverableFiscalCorrections(
+      "2026-01-01T00:00:00.000Z"
+    )).resolves.toEqual([
+      expect.objectContaining({
+        id: terminalClaim.correction.id,
+        status: "PROCESSING",
+        processing_claim_id: terminalClaim.correction.processing_claim_id,
+        mh_dispatch_started_at: expect.any(String)
+      })
+    ]);
+    expect(database.prepare(
+      "SELECT processing_claim_id FROM fiscal_corrections WHERE id = ?"
+    ).get(terminalClaim.correction.id)).toEqual({
+      processing_claim_id: terminalClaim.correction.processing_claim_id
+    });
+    expect(database.prepare(
+      "SELECT processing_claim_id FROM fiscal_corrections WHERE id = ?"
+    ).get(ambiguousClaim.correction.id)).toEqual({
+      processing_claim_id: ambiguousClaim.correction.processing_claim_id
+    });
     database.close();
   });
 
