@@ -793,6 +793,100 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("classifies only the known pre-dispatch legacy header rejection as retry-safe", async () => {
+    const database = migratedDatabaseThrough("0025");
+    seedAcceptedDocument(database, "doc_legacy_header_rejection", "2026-06-01T12:00:02.000Z", "donor@example.org", "5");
+    seedAcceptedDocument(database, "doc_legacy_unknown_failure", "2026-06-01T12:00:02.000Z", "donor@example.org", "6");
+    seedAcceptedDocument(database, "doc_legacy_post_dispatch", "2026-06-01T12:00:02.000Z", "donor@example.org", "7");
+    const headerRejection =
+      "custom header 'Idempotency-Key' is not allowed. Only whitelisted headers and X-* headers are accepted.";
+    const insert = database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, provider_response_json,
+         email_type, document_status_at_send, provider_dispatch_started_at,
+         outcome_class, failure_code, retry_safe, attempt_no, created_at
+       ) VALUES (?, ?, 'donor@example.org', 'FAILED', ?, 'dteReceipt',
+                 'ACCEPTED', ?, NULL, NULL, 0, 1, ?)`
+    );
+    insert.run(
+      "legacy_header_rejection",
+      "doc_legacy_header_rejection",
+      JSON.stringify({ error: headerRejection }),
+      null,
+      "2026-07-17T17:00:00.000Z"
+    );
+    insert.run(
+      "legacy_unknown_failure",
+      "doc_legacy_unknown_failure",
+      JSON.stringify({ error: "provider request timed out" }),
+      null,
+      "2026-07-17T17:01:00.000Z"
+    );
+    insert.run(
+      "legacy_post_dispatch",
+      "doc_legacy_post_dispatch",
+      JSON.stringify({ error: headerRejection }),
+      "2026-07-17T17:02:00.000Z",
+      "2026-07-17T17:02:00.000Z"
+    );
+
+    for (const filename of readdirSync(migrationsDirectory)
+      .filter((name) => /^\d{4}_.+\.sql$/.test(name) && name.slice(0, 4) > "0025")
+      .sort()) {
+      database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
+    }
+
+    expect(database.prepare(
+      `SELECT id, outcome_class, failure_code, retry_safe
+         FROM email_deliveries
+        WHERE id LIKE 'legacy_%'
+        ORDER BY id`
+    ).all()).toEqual([
+      {
+        id: "legacy_header_rejection",
+        outcome_class: "NOT_SENT",
+        failure_code: "E_HEADER_NOT_ALLOWED",
+        retry_safe: 1
+      },
+      {
+        id: "legacy_post_dispatch",
+        outcome_class: null,
+        failure_code: null,
+        retry_safe: 0
+      },
+      {
+        id: "legacy_unknown_failure",
+        outcome_class: null,
+        failure_code: null,
+        retry_safe: 0
+      }
+    ]);
+
+    const repository = new Repository(new SqliteD1(database).database);
+    await expect(repository.claimManualEmailDelivery({
+      documentId: "doc_legacy_header_rejection",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "99999999-9999-4999-8999-999999999999"
+    })).resolves.toMatchObject({ kind: "claimed", attemptNo: 2 });
+    await expect(repository.claimManualEmailDelivery({
+      documentId: "doc_legacy_unknown_failure",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    })).resolves.toMatchObject({ kind: "manual_review", outcomeClass: null });
+    await expect(repository.claimManualEmailDelivery({
+      documentId: "doc_legacy_post_dispatch",
+      toEmail: "donor@example.org",
+      emailType: "dteReceipt",
+      documentStatusAtSend: "ACCEPTED",
+      resendRequestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    })).resolves.toMatchObject({ kind: "manual_review", outcomeClass: null });
+    database.close();
+  });
+
   it("clears an older ambiguous claim when a newer terminal legacy receipt supersedes it", async () => {
     const database = migratedDatabaseThrough("0024");
     seedAcceptedDocument(database, "doc_legacy_superseded", "2026-06-01T12:00:02.000Z", "donor@example.org");
