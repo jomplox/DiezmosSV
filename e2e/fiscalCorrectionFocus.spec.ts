@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import {
   restoreFiscalCorrectionDialogFocus,
   trapFiscalCorrectionDialogFocus
-} from "../src/client/fiscalCorrectionDialog";
+} from "../src/client/fiscalCorrectionFocus";
 
 test("fiscal correction focus wraps from the container and restores its opener", async ({ page }) => {
   const trapSource = trapFiscalCorrectionDialogFocus.toString();

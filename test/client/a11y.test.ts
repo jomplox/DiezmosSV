@@ -4,6 +4,10 @@ import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
+const fiscalCorrectionFocusSource = readFileSync(
+  resolve(import.meta.dirname, "../../src/client/fiscalCorrectionFocus.ts"),
+  "utf8"
+);
 
 describe("keyboard accessibility contract", () => {
   it("gives the toast a polite status live region that stays mounted", () => {
@@ -28,7 +32,7 @@ describe("keyboard accessibility contract", () => {
     expect(fiscalCorrectionSource).toContain('aria-modal="true"');
     expect(fiscalCorrectionSource).toContain('aria-labelledby="fiscal-correction-title"');
     expect(fiscalCorrectionSource).toContain('event.key === "Escape"');
-    expect(fiscalCorrectionSource).toContain('event.key !== "Tab"');
+    expect(fiscalCorrectionFocusSource).toContain('event.key !== "Tab"');
     expect(fiscalCorrectionSource).toContain("previouslyFocusedRef");
     expect(fiscalCorrectionSource).toContain(
       "document.activeElement instanceof HTMLElement"
@@ -37,6 +41,8 @@ describe("keyboard accessibility contract", () => {
       "restoreFiscalCorrectionDialogFocus(previouslyFocusedRef.current)"
     );
     expect(fiscalCorrectionSource).toContain('document.addEventListener("focusin"');
+    expect(fiscalCorrectionSource).toContain('from "./fiscalCorrectionFocus"');
+    expect(fiscalCorrectionFocusSource).not.toMatch(/from ["'](?:react|lucide-react)["']/);
   });
 
   it("labels the quick-DTE Monto input for screen readers", () => {
