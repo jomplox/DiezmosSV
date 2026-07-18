@@ -251,10 +251,13 @@ describe("fiscal repository SQL on SQLite", () => {
       donorName: "Primera corrección",
       donorEmail: null
     });
-    await repository.markFiscalCorrectionMhDispatchStarted(
-      first.correction.id,
-      first.correction.processing_claim_id
-    );
+    await repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: first.correction.id,
+      processingClaimId: first.correction.processing_claim_id,
+      documentId: "doc_rejected_twice",
+      documentClaimId: first.correction.fiscal_claim_id!,
+      signedJws: "first-corrected-jws"
+    });
     await repository.completeDocumentTransmission(
       "doc_rejected_twice",
       first.correction.fiscal_claim_id!,
@@ -269,7 +272,14 @@ describe("fiscal repository SQL on SQLite", () => {
     await repository.finalizeFiscalCorrection(
       first.correction.id,
       first.correction.processing_claim_id,
-      { status: "REJECTED" }
+      {
+        status: "REJECTED",
+        document: {
+          documentId: "doc_rejected_twice",
+          documentClaimId: first.correction.fiscal_claim_id!,
+          signedJws: "first-corrected-jws"
+        }
+      }
     );
 
     const second = await repository.claimDocumentFiscalCorrection(
@@ -400,19 +410,51 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: first.correction.processing_claim_id,
       fiscalClaimId: first.correction.fiscal_claim_id ?? undefined
     });
-    await repository.markFiscalCorrectionMhDispatchStarted(
-      first.correction.id,
-      first.correction.processing_claim_id
+    await repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: first.correction.id,
+      documentId: "doc_accepted_history",
+      claimId: first.correction.fiscal_claim_id!,
+      codigoGeneracion: "29292929-2929-4929-8929-292929292929",
+      numeroControl: "DTE-15-M001P004-000000000000099",
+      plainJson: { identificacion: { tipoDte: "15" } },
+      signedJws: "accepted-history-jws",
+      donorName: "Donante corregida",
+      donorEmail: null
+    });
+    await repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: first.correction.id,
+      processingClaimId: first.correction.processing_claim_id,
+      documentId: "doc_accepted_history",
+      documentClaimId: first.correction.fiscal_claim_id!,
+      signedJws: "accepted-history-jws"
+    });
+    await repository.completeDocumentTransmission(
+      "doc_accepted_history",
+      first.correction.fiscal_claim_id!,
+      {
+        status: "ACCEPTED",
+        sello: "accepted-history-seal",
+        mhEstado: "PROCESADO",
+        observaciones: [],
+        acceptedAt: "2026-07-18T12:03:00.000Z"
+      }
     );
     await expect(repository.finalizeFiscalCorrection(
       first.correction.id,
       first.correction.processing_claim_id,
-      { status: "ACCEPTED" }
+      {
+        status: "ACCEPTED",
+        document: {
+          documentId: "doc_accepted_history",
+          documentClaimId: first.correction.fiscal_claim_id!,
+          signedJws: "accepted-history-jws"
+        }
+      }
     )).resolves.toBe(true);
 
     expect(database.prepare(
       "SELECT status FROM dte_documents WHERE id = ?"
-    ).get("doc_accepted_history")).toEqual({ status: "REJECTED" });
+    ).get("doc_accepted_history")).toEqual({ status: "ACCEPTED" });
     await expect(repository.claimDocumentFiscalCorrection(
       documentCorrectionClaimInput({
         documentId: "doc_accepted_history",
@@ -487,13 +529,30 @@ describe("fiscal repository SQL on SQLite", () => {
       processing_started_at: expect.any(String),
       mh_dispatch_started_at: null
     });
+    await repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: correction.id,
+      documentId: "doc_dispatch_fence",
+      claimId: correction.fiscal_claim_id!,
+      codigoGeneracion: "31313131-3131-4131-8131-313131313131",
+      numeroControl: "DTE-15-M001P004-000000000000100",
+      plainJson: { identificacion: { tipoDte: "15" } },
+      signedJws: "dispatch-fence-jws",
+      donorName: "Donante corregida",
+      donorEmail: null
+    });
+    const dispatchInput = {
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      documentId: "doc_dispatch_fence",
+      documentClaimId: correction.fiscal_claim_id!,
+      signedJws: "dispatch-fence-jws"
+    };
+    await expect(repository.markFiscalCorrectionMhDispatchStarted({
+      ...dispatchInput,
+      processingClaimId: "stale-processing-token"
+    })).resolves.toBe(false);
     await expect(repository.markFiscalCorrectionMhDispatchStarted(
-      correction.id,
-      "stale-processing-token"
-    )).resolves.toBe(false);
-    await expect(repository.markFiscalCorrectionMhDispatchStarted(
-      correction.id,
-      correction.processing_claim_id
+      dispatchInput
     )).resolves.toBe(true);
     expect(database.prepare(
       `SELECT processing_started_at, mh_dispatch_started_at
@@ -505,12 +564,30 @@ describe("fiscal repository SQL on SQLite", () => {
     await expect(repository.finalizeFiscalCorrection(
       correction.id,
       "stale-processing-token",
-      { status: "REVIEW_REQUIRED", failureCode: "MH_OUTCOME_UNKNOWN", failureMessage: "Sin respuesta definitiva" }
+      {
+        status: "REVIEW_REQUIRED",
+        failureCode: "MH_OUTCOME_UNKNOWN",
+        failureMessage: "Sin respuesta definitiva",
+        document: {
+          documentId: dispatchInput.documentId,
+          documentClaimId: dispatchInput.documentClaimId,
+          signedJws: dispatchInput.signedJws
+        }
+      }
     )).resolves.toBe(false);
     await expect(repository.finalizeFiscalCorrection(
       correction.id,
       correction.processing_claim_id,
-      { status: "REVIEW_REQUIRED", failureCode: "MH_OUTCOME_UNKNOWN", failureMessage: "Sin respuesta definitiva" }
+      {
+        status: "REVIEW_REQUIRED",
+        failureCode: "MH_OUTCOME_UNKNOWN",
+        failureMessage: "Sin respuesta definitiva",
+        document: {
+          documentId: dispatchInput.documentId,
+          documentClaimId: dispatchInput.documentClaimId,
+          signedJws: dispatchInput.signedJws
+        }
+      }
     )).resolves.toBe(true);
     expect(database.prepare(
       "SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?"
@@ -548,21 +625,196 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: correction.processing_claim_id,
       issuanceAttemptId: correction.issuance_attempt_id ?? undefined
     });
-
+    const documentId = "doc_wompi_dispatch_cas";
+    const documentClaimId = `fiscal_correction_${correction.id}`;
+    database.prepare(
+      `INSERT INTO dte_documents (
+         id, wompi_event_id, environment, codigo_generacion, numero_control,
+         status, plain_json, signed_jws, amount_cents, issued_at, created_at,
+         updated_at, fiscal_operation_claim_id, fiscal_operation_claimed_at,
+         fiscal_operation_kind
+       ) VALUES (?, 'wompi_dispatch_cas', '00', ?, ?, 'SIGNED', '{}',
+                 'dispatch-cas-jws', 2500, ?, ?, ?, ?, ?, 'TRANSMISSION')`
+    ).run(
+      documentId,
+      "41414141-4141-4141-8141-414141414141",
+      "DTE-15-M001P004-000000000000109",
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      documentClaimId,
+      "2026-07-18T12:00:00.000Z"
+    );
+    database.prepare(
+      "UPDATE wompi_events SET created_document_id = ?, issuance_status = 'DOCUMENT_CREATED' WHERE id = ?"
+    ).run(documentId, "wompi_dispatch_cas");
+    const dispatchInput = {
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      documentId,
+      documentClaimId,
+      signedJws: "dispatch-cas-jws"
+    };
     await expect(repository.markFiscalCorrectionMhDispatchStarted(
-      correction.id,
-      correction.processing_claim_id
+      dispatchInput
     )).resolves.toBe(true);
     const firstMarker = database.prepare(
       "SELECT mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
     ).get(correction.id);
     await expect(repository.markFiscalCorrectionMhDispatchStarted(
-      correction.id,
-      correction.processing_claim_id
+      dispatchInput
     )).resolves.toBe(false);
     expect(database.prepare(
       "SELECT mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
     ).get(correction.id)).toEqual(firstMarker);
+    database.close();
+  });
+
+  it("couples document correction dispatch to the exact current signed candidate owner", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    const scenarios = [
+      {
+        name: "released claim",
+        mutate: (documentId: string) => database.prepare(
+          `UPDATE dte_documents
+              SET fiscal_operation_claim_id = NULL,
+                  fiscal_operation_claimed_at = NULL,
+                  fiscal_operation_kind = NULL
+            WHERE id = ?`
+        ).run(documentId),
+        expected: false
+      },
+      {
+        name: "reassigned claim",
+        mutate: (documentId: string) => database.prepare(
+          "UPDATE dte_documents SET fiscal_operation_claim_id = 'foreign-claim' WHERE id = ?"
+        ).run(documentId),
+        expected: false
+      },
+      {
+        name: "status mismatch",
+        mutate: (documentId: string) => database.prepare(
+          "UPDATE dte_documents SET status = 'REJECTED' WHERE id = ?"
+        ).run(documentId),
+        expected: false
+      },
+      {
+        name: "JWS mismatch",
+        mutate: (documentId: string) => database.prepare(
+          "UPDATE dte_documents SET signed_jws = 'foreign-signed-jws' WHERE id = ?"
+        ).run(documentId),
+        expected: false
+      },
+      {
+        name: "current owner",
+        mutate: (_documentId: string) => undefined,
+        expected: true
+      }
+    ];
+
+    for (const [index, scenario] of scenarios.entries()) {
+      const documentId = `doc_dispatch_owner_${index}`;
+      const signedJws = `corrected-signed-jws-${index}`;
+      seedRejectedDocument(database, documentId);
+      const claimed = await repository.claimDocumentFiscalCorrection(
+        documentCorrectionClaimInput({
+          documentId,
+          requestId: `71717171-7171-4171-8171-71717171717${index}`
+        })
+      );
+      if (claimed.kind !== "claimed") {
+        throw new Error(`expected ${scenario.name} correction claim`);
+      }
+      const correction = claimed.correction;
+      await repository.claimFiscalCorrectionProcessing({
+        id: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        fiscalClaimId: correction.fiscal_claim_id ?? undefined
+      });
+      await repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: correction.id,
+        documentId,
+        claimId: correction.fiscal_claim_id!,
+        codigoGeneracion: `72727272-7272-4272-8272-72727272727${index}`,
+        numeroControl: `DTE-15-M001P004-${String(index + 121).padStart(15, "0")}`,
+        plainJson: { identificacion: { tipoDte: "15" } },
+        signedJws,
+        donorName: "Donante corregida",
+        donorEmail: null
+      });
+      scenario.mutate(documentId);
+
+      await expect(repository.markFiscalCorrectionMhDispatchStarted({
+        correctionId: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        documentId,
+        documentClaimId: correction.fiscal_claim_id!,
+        signedJws
+      })).resolves.toBe(scenario.expected);
+    }
+    database.close();
+  });
+
+  it("couples Wompi correction dispatch to the event-created document relationship", async () => {
+    const database = migratedDatabase();
+    const eventId = "wompi_dispatch_relationship";
+    const documentId = "doc_wompi_dispatch_relationship";
+    const documentClaimId = "fiscal_correction_document_claim";
+    const signedJws = "wompi-corrected-signed-jws";
+    seedFailedWompiEvent(database, eventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: eventId,
+        requestId: "73737373-7373-4373-8373-737373737373"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected Wompi relationship claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    });
+    database.prepare(
+      `INSERT INTO dte_documents (
+         id, wompi_event_id, environment, codigo_generacion, numero_control,
+         status, plain_json, signed_jws, amount_cents, issued_at, created_at,
+         updated_at, fiscal_operation_claim_id, fiscal_operation_claimed_at,
+         fiscal_operation_kind
+       ) VALUES (?, ?, '00', ?, ?, 'SIGNED', '{}', ?, 2500, ?, ?, ?, ?, ?,
+                 'TRANSMISSION')`
+    ).run(
+      documentId,
+      eventId,
+      "74747474-7474-4474-8474-747474747474",
+      "DTE-15-M001P004-000000000000131",
+      signedJws,
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      "2026-07-18T12:00:00.000Z",
+      documentClaimId,
+      "2026-07-18T12:00:00.000Z"
+    );
+    database.prepare(
+      "UPDATE wompi_events SET created_document_id = ?, issuance_status = 'DOCUMENT_CREATED' WHERE id = ?"
+    ).run(documentId, eventId);
+
+    await expect(repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      documentId: "foreign-document",
+      documentClaimId,
+      signedJws
+    })).resolves.toBe(false);
+    await expect(repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      documentId,
+      documentClaimId,
+      signedJws
+    })).resolves.toBe(true);
     database.close();
   });
 
@@ -689,11 +941,29 @@ describe("fiscal repository SQL on SQLite", () => {
         processingClaimId: correction.processing_claim_id,
         fiscalClaimId: correction.fiscal_claim_id ?? undefined
       });
+      const signedJws = `dispatch-required-jws-${index}`;
+      await repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: correction.id,
+        documentId,
+        claimId: correction.fiscal_claim_id!,
+        codigoGeneracion: `51515151-5151-4151-8151-51515151515${index}`,
+        numeroControl: `DTE-15-M001P004-${String(index + 111).padStart(15, "0")}`,
+        plainJson: { identificacion: { tipoDte: "15" } },
+        signedJws,
+        donorName: "Donante corregida",
+        donorEmail: null
+      });
+      const document = {
+        documentId,
+        documentClaimId: correction.fiscal_claim_id!,
+        signedJws
+      };
+      const documentedOutcome = { ...outcome, document };
 
       await expect(repository.finalizeFiscalCorrection(
         correction.id,
         correction.processing_claim_id,
-        outcome
+        documentedOutcome
       )).resolves.toBe(false);
       expect(database.prepare(
         "SELECT status, mh_dispatch_started_at FROM fiscal_corrections WHERE id = ?"
@@ -707,15 +977,163 @@ describe("fiscal repository SQL on SQLite", () => {
         fiscal_operation_claim_id: correction.fiscal_claim_id
       });
 
-      await repository.markFiscalCorrectionMhDispatchStarted(
+      await repository.markFiscalCorrectionMhDispatchStarted({
+        correctionId: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        ...document
+      });
+      if (outcome.status === "ACCEPTED" || outcome.status === "REJECTED") {
+        await repository.completeDocumentTransmission(
+          documentId,
+          correction.fiscal_claim_id!,
+          {
+            status: outcome.status,
+            sello: outcome.status === "ACCEPTED" ? `seal-${index}` : null,
+            mhEstado: outcome.status === "ACCEPTED" ? "PROCESADO" : "RECHAZADO",
+            observaciones: [],
+            acceptedAt: outcome.status === "ACCEPTED"
+              ? "2026-07-18T12:07:00.000Z"
+              : null
+          }
+        );
+      }
+      await expect(repository.finalizeFiscalCorrection(
         correction.id,
-        correction.processing_claim_id
+        correction.processing_claim_id,
+        documentedOutcome
+      )).resolves.toBe(true);
+    }
+    database.close();
+  });
+
+  it("refuses false terminal correction verdicts until the exact document result is durable", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    for (const [index, status] of (["ACCEPTED", "REJECTED"] as const).entries()) {
+      const documentId = `doc_terminal_evidence_${index}`;
+      const signedJws = `terminal-evidence-jws-${index}`;
+      seedRejectedDocument(database, documentId);
+      const claimed = await repository.claimDocumentFiscalCorrection(
+        documentCorrectionClaimInput({
+          documentId,
+          requestId: `75757575-7575-4575-8575-75757575757${index}`
+        })
       );
+      if (claimed.kind !== "claimed") throw new Error("expected terminal evidence claim");
+      const correction = claimed.correction;
+      await repository.claimFiscalCorrectionProcessing({
+        id: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        fiscalClaimId: correction.fiscal_claim_id ?? undefined
+      });
+      await repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: correction.id,
+        documentId,
+        claimId: correction.fiscal_claim_id!,
+        codigoGeneracion: `76767676-7676-4676-8676-76767676767${index}`,
+        numeroControl: `DTE-15-M001P004-${String(index + 141).padStart(15, "0")}`,
+        plainJson: { identificacion: { tipoDte: "15" } },
+        signedJws,
+        donorName: "Donante corregida",
+        donorEmail: null
+      });
+      database.prepare(
+        "UPDATE fiscal_corrections SET mh_dispatch_started_at = ? WHERE id = ?"
+      ).run("2026-07-18T12:05:00.000Z", correction.id);
+      const outcome = {
+        status,
+        document: {
+          documentId,
+          documentClaimId: correction.fiscal_claim_id!,
+          signedJws
+        }
+      };
+
+      await expect(repository.finalizeFiscalCorrection(
+        correction.id,
+        correction.processing_claim_id,
+        outcome
+      )).resolves.toBe(false);
+      expect(database.prepare(
+        "SELECT status FROM fiscal_corrections WHERE id = ?"
+      ).get(correction.id)).toEqual({ status: "PROCESSING" });
+
+      database.prepare(
+        `UPDATE dte_documents
+            SET status = ?,
+                fiscal_operation_claim_id = NULL,
+                fiscal_operation_claimed_at = NULL,
+                fiscal_operation_kind = NULL
+          WHERE id = ?`
+      ).run(status, documentId);
       await expect(repository.finalizeFiscalCorrection(
         correction.id,
         correction.processing_claim_id,
         outcome
       )).resolves.toBe(true);
+    }
+    database.close();
+  });
+
+  it("requires REVIEW_REQUIRED to retain the exact signed correction claim", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    for (const [index, retained] of [false, true].entries()) {
+      const documentId = `doc_review_owner_${index}`;
+      const signedJws = `review-owner-jws-${index}`;
+      seedRejectedDocument(database, documentId);
+      const claimed = await repository.claimDocumentFiscalCorrection(
+        documentCorrectionClaimInput({
+          documentId,
+          requestId: `70000005-7777-4777-8777-70000005777${index}`
+        })
+      );
+      if (claimed.kind !== "claimed") throw new Error("expected review owner claim");
+      const correction = claimed.correction;
+      await repository.claimFiscalCorrectionProcessing({
+        id: correction.id,
+        processingClaimId: correction.processing_claim_id,
+        fiscalClaimId: correction.fiscal_claim_id ?? undefined
+      });
+      await repository.prepareClaimedFiscalCorrectionDocument({
+        correctionId: correction.id,
+        documentId,
+        claimId: correction.fiscal_claim_id!,
+        codigoGeneracion: `78787878-7878-4878-8878-78787878787${index}`,
+        numeroControl: `DTE-15-M001P004-${String(index + 151).padStart(15, "0")}`,
+        plainJson: { identificacion: { tipoDte: "15" } },
+        signedJws,
+        donorName: "Donante corregida",
+        donorEmail: null
+      });
+      database.prepare(
+        "UPDATE fiscal_corrections SET mh_dispatch_started_at = ? WHERE id = ?"
+      ).run("2026-07-18T12:06:00.000Z", correction.id);
+      if (!retained) {
+        database.prepare(
+          "UPDATE dte_documents SET fiscal_operation_claim_id = 'reassigned-claim' WHERE id = ?"
+        ).run(documentId);
+      }
+
+      await expect(repository.finalizeFiscalCorrection(
+        correction.id,
+        correction.processing_claim_id,
+        {
+          status: "REVIEW_REQUIRED",
+          document: {
+            documentId,
+            documentClaimId: correction.fiscal_claim_id!,
+            signedJws
+          }
+        }
+      )).resolves.toBe(retained);
+      expect(database.prepare(
+        "SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?"
+      ).get(documentId)).toEqual({
+        fiscal_operation_claim_id: retained
+          ? correction.fiscal_claim_id
+          : "reassigned-claim"
+      });
     }
     database.close();
   });
@@ -759,14 +1177,47 @@ describe("fiscal repository SQL on SQLite", () => {
       processingClaimId: rejected.correction.processing_claim_id,
       fiscalClaimId: rejected.correction.fiscal_claim_id ?? undefined
     });
-    await repository.markFiscalCorrectionMhDispatchStarted(
-      rejected.correction.id,
-      rejected.correction.processing_claim_id
+    await repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: rejected.correction.id,
+      documentId: "doc_explicit_rejection",
+      claimId: rejected.correction.fiscal_claim_id!,
+      codigoGeneracion: "43434343-4343-4343-8343-434343434343",
+      numeroControl: "DTE-15-M001P004-000000000000118",
+      plainJson: { identificacion: { tipoDte: "15" } },
+      signedJws: "explicit-rejection-jws",
+      donorName: "Donante corregida",
+      donorEmail: null
+    });
+    const rejectedDocument = {
+      documentId: "doc_explicit_rejection",
+      documentClaimId: rejected.correction.fiscal_claim_id!,
+      signedJws: "explicit-rejection-jws"
+    };
+    await repository.markFiscalCorrectionMhDispatchStarted({
+      correctionId: rejected.correction.id,
+      processingClaimId: rejected.correction.processing_claim_id,
+      ...rejectedDocument
+    });
+    await repository.completeDocumentTransmission(
+      "doc_explicit_rejection",
+      rejected.correction.fiscal_claim_id!,
+      {
+        status: "REJECTED",
+        sello: null,
+        mhEstado: "RECHAZADO",
+        observaciones: ["Rechazo explícito"],
+        acceptedAt: null
+      }
     );
     await expect(repository.finalizeFiscalCorrection(
       rejected.correction.id,
       rejected.correction.processing_claim_id,
-      { status: "REJECTED", failureCode: "MH_REJECTED", failureMessage: "Rechazo explícito" }
+      {
+        status: "REJECTED",
+        failureCode: "MH_REJECTED",
+        failureMessage: "Rechazo explícito",
+        document: rejectedDocument
+      }
     )).resolves.toBe(true);
     expect(database.prepare(
       "SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?"
@@ -802,10 +1253,9 @@ describe("fiscal repository SQL on SQLite", () => {
         "UPDATE fiscal_corrections SET processing_started_at = '2000-01-01T00:00:00.000Z' WHERE id = ?"
       ).run(correction.id);
     }
-    await repository.markFiscalCorrectionMhDispatchStarted(
-      claims[2].id,
-      claims[2].processing_claim_id
-    );
+    database.prepare(
+      "UPDATE fiscal_corrections SET mh_dispatch_started_at = ? WHERE id = ?"
+    ).run("2026-07-18T12:08:00.000Z", claims[2].id);
 
     expect((await repository.listRecoverableFiscalCorrections(
       "2026-01-01T00:00:00.000Z"

@@ -127,6 +127,18 @@ export interface FiscalCorrectionOutcome {
   status: Exclude<FiscalCorrectionStatus, "QUEUED" | "PROCESSING">;
   failureCode?: string | null;
   failureMessage?: string | null;
+  document?: FiscalCorrectionDocumentEvidence;
+}
+
+export interface FiscalCorrectionDocumentEvidence {
+  documentId: string;
+  documentClaimId: string;
+  signedJws: string;
+}
+
+export interface FiscalCorrectionMhDispatchInput extends FiscalCorrectionDocumentEvidence {
+  correctionId: string;
+  processingClaimId: string;
 }
 
 async function emailDeliveryIdempotencyKey(
@@ -602,7 +614,9 @@ export class Repository {
     return "busy";
   }
 
-  async markFiscalCorrectionMhDispatchStarted(id: string, claimId: string): Promise<boolean> {
+  async markFiscalCorrectionMhDispatchStarted(
+    input: FiscalCorrectionMhDispatchInput
+  ): Promise<boolean> {
     const dispatchStartedAt = nowIso();
     const row = await this.db.prepare(
       `UPDATE fiscal_corrections
@@ -612,8 +626,44 @@ export class Repository {
           AND status = 'PROCESSING'
           AND processing_claim_id = ?
           AND mh_dispatch_started_at IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE id = ?
+               AND status = 'SIGNED'
+               AND fiscal_operation_claim_id = ?
+               AND fiscal_operation_kind = 'TRANSMISSION'
+               AND signed_jws = ?
+               AND (
+                 (
+                   fiscal_corrections.target_kind = 'DTE_DOCUMENT'
+                   AND fiscal_corrections.document_id = dte_documents.id
+                   AND fiscal_corrections.fiscal_claim_id = ?
+                 )
+                 OR
+                 (
+                   fiscal_corrections.target_kind = 'WOMPI_EVENT'
+                   AND fiscal_corrections.wompi_event_id = dte_documents.wompi_event_id
+                   AND EXISTS (
+                     SELECT 1
+                       FROM wompi_events
+                      WHERE id = fiscal_corrections.wompi_event_id
+                        AND created_document_id = dte_documents.id
+                   )
+                 )
+               )
+          )
         RETURNING id`
-    ).bind(dispatchStartedAt, dispatchStartedAt, id, claimId).first<{ id: string }>();
+    ).bind(
+      dispatchStartedAt,
+      dispatchStartedAt,
+      input.correctionId,
+      input.processingClaimId,
+      input.documentId,
+      input.documentClaimId,
+      input.signedJws,
+      input.documentClaimId
+    ).first<{ id: string }>();
     return Boolean(row);
   }
 
@@ -703,35 +753,122 @@ export class Repository {
     outcome: FiscalCorrectionOutcome
   ): Promise<boolean> {
     const completedAt = nowIso();
+    const document = outcome.document;
+    if (outcome.status !== "FAILED" && !document) {
+      return false;
+    }
+    const documentPredicate = outcome.status === "FAILED"
+      ? "mh_dispatch_started_at IS NULL"
+      : outcome.status === "REVIEW_REQUIRED"
+        ? `mh_dispatch_started_at IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+               FROM dte_documents
+              WHERE id = ?
+                AND status = 'SIGNED'
+                AND fiscal_operation_claim_id = ?
+                AND fiscal_operation_kind = 'TRANSMISSION'
+                AND signed_jws = ?
+                AND (
+                  (
+                    fiscal_corrections.target_kind = 'DTE_DOCUMENT'
+                    AND fiscal_corrections.document_id = dte_documents.id
+                    AND fiscal_corrections.fiscal_claim_id = ?
+                  )
+                  OR
+                  (
+                    fiscal_corrections.target_kind = 'WOMPI_EVENT'
+                    AND fiscal_corrections.wompi_event_id = dte_documents.wompi_event_id
+                    AND EXISTS (
+                      SELECT 1
+                        FROM wompi_events
+                       WHERE id = fiscal_corrections.wompi_event_id
+                         AND created_document_id = dte_documents.id
+                    )
+                  )
+                )
+           )`
+        : `mh_dispatch_started_at IS NOT NULL
+           AND EXISTS (
+             SELECT 1
+               FROM dte_documents
+              WHERE id = ?
+                AND status = ?
+                AND fiscal_operation_claim_id IS NULL
+                AND fiscal_operation_claimed_at IS NULL
+                AND fiscal_operation_kind IS NULL
+                AND fiscal_operation_event_id IS NULL
+                AND signed_jws = ?
+                AND (
+                  (
+                    fiscal_corrections.target_kind = 'DTE_DOCUMENT'
+                    AND fiscal_corrections.document_id = dte_documents.id
+                    AND fiscal_corrections.fiscal_claim_id = ?
+                  )
+                  OR
+                  (
+                    fiscal_corrections.target_kind = 'WOMPI_EVENT'
+                    AND fiscal_corrections.wompi_event_id = dte_documents.wompi_event_id
+                    AND EXISTS (
+                      SELECT 1
+                        FROM wompi_events
+                       WHERE id = fiscal_corrections.wompi_event_id
+                         AND created_document_id = dte_documents.id
+                    )
+                  )
+                )
+           )`;
+    const correctionUpdate = this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET status = ?,
+              failure_code = ?,
+              failure_message = ?,
+              completed_at = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND ${documentPredicate}`
+    );
+    const boundCorrectionUpdate = outcome.status === "FAILED"
+      ? correctionUpdate.bind(
+          outcome.status,
+          outcome.failureCode ?? null,
+          outcome.failureMessage ?? null,
+          completedAt,
+          completedAt,
+          id,
+          claimId
+        )
+      : outcome.status === "REVIEW_REQUIRED"
+        ? correctionUpdate.bind(
+            outcome.status,
+            outcome.failureCode ?? null,
+            outcome.failureMessage ?? null,
+            completedAt,
+            completedAt,
+            id,
+            claimId,
+            document!.documentId,
+            document!.documentClaimId,
+            document!.signedJws,
+            document!.documentClaimId
+          )
+        : correctionUpdate.bind(
+            outcome.status,
+            outcome.failureCode ?? null,
+            outcome.failureMessage ?? null,
+            completedAt,
+            completedAt,
+            id,
+            claimId,
+            document!.documentId,
+            outcome.status,
+            document!.signedJws,
+            document!.documentClaimId
+          );
     const results = await this.db.batch([
-      this.db.prepare(
-        `UPDATE fiscal_corrections
-            SET status = ?,
-                failure_code = ?,
-                failure_message = ?,
-                completed_at = ?,
-                updated_at = ?
-          WHERE id = ?
-            AND status = 'PROCESSING'
-            AND processing_claim_id = ?
-            AND (
-              (? = 'FAILED' AND mh_dispatch_started_at IS NULL)
-              OR (
-                ? IN ('ACCEPTED', 'REJECTED', 'REVIEW_REQUIRED')
-                AND mh_dispatch_started_at IS NOT NULL
-              )
-            )`
-      ).bind(
-        outcome.status,
-        outcome.failureCode ?? null,
-        outcome.failureMessage ?? null,
-        completedAt,
-        completedAt,
-        id,
-        claimId,
-        outcome.status,
-        outcome.status
-      ),
+      boundCorrectionUpdate,
       this.db.prepare(
         `UPDATE dte_documents
             SET fiscal_operation_claim_id = NULL,
@@ -745,10 +882,8 @@ export class Repository {
                AND processing_claim_id = ?
                AND status = ?
                AND target_kind = 'DTE_DOCUMENT'
-               AND (
-                 status IN ('ACCEPTED', 'REJECTED')
-                 OR (status = 'FAILED' AND mh_dispatch_started_at IS NULL)
-               )
+               AND status = 'FAILED'
+               AND mh_dispatch_started_at IS NULL
           )
             AND fiscal_operation_claim_id = (
               SELECT fiscal_claim_id FROM fiscal_corrections
