@@ -232,7 +232,7 @@ export function legacyIssuanceAttemptId(wompiEventId: string): string {
 }
 
 const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_name, donor_email,
-  received_at, issuance_status, issuance_attempt_count, issuance_error_code,
+  received_at, processed_at, issuance_status, issuance_attempt_count, issuance_error_code,
   issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
   issuance_dead_lettered_at, reserved_numero_control`;
 
@@ -391,7 +391,21 @@ export class Repository {
               AND environment = ?
               AND created_document_id IS NULL
               AND issuance_claim_id IS NULL
-              AND issuance_status IN ('FAILED', 'DEAD_LETTERED')`
+              AND (
+                issuance_status IN ('FAILED', 'DEAD_LETTERED')
+                OR (
+                  issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+                  AND processed_at IS NOT NULL
+                )
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM fiscal_corrections AS blocking_correction
+                 WHERE blocking_correction.target_kind = 'WOMPI_EVENT'
+                   AND blocking_correction.wompi_event_id = wompi_events.id
+                   AND blocking_correction.status IN (
+                     'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
+                   )
+              )`
         ).bind(
           correctionId,
           input.requestId,
@@ -415,7 +429,13 @@ export class Repository {
               AND environment = ?
               AND created_document_id IS NULL
               AND issuance_claim_id IS NULL
-              AND issuance_status IN ('FAILED', 'DEAD_LETTERED')
+              AND (
+                issuance_status IN ('FAILED', 'DEAD_LETTERED')
+                OR (
+                  issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+                  AND processed_at IS NOT NULL
+                )
+              )
               AND EXISTS (
                 SELECT 1 FROM fiscal_corrections
                  WHERE id = ?
@@ -459,7 +479,21 @@ export class Repository {
             AND environment = ?
             AND created_document_id IS NULL
             AND issuance_claim_id IS NULL
-            AND issuance_status IN ('FAILED', 'DEAD_LETTERED')`
+            AND (
+              issuance_status IN ('FAILED', 'DEAD_LETTERED')
+              OR (
+                issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+                AND processed_at IS NOT NULL
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM fiscal_corrections AS blocking_correction
+               WHERE blocking_correction.target_kind = 'WOMPI_EVENT'
+                 AND blocking_correction.wompi_event_id = wompi_events.id
+                 AND blocking_correction.status IN (
+                   'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
+                 )
+            )`
       ).bind(input.wompiEventId, input.environment).first<{ id: string }>();
       if (!eligible) return { kind: "ineligible" };
     }
@@ -1706,12 +1740,28 @@ export class Repository {
       this.db
         .prepare(
           `UPDATE wompi_events
-           SET issuance_status = 'RETRY_QUEUED',
+           SET processed_at = NULL,
+               issuance_status = 'RETRY_QUEUED',
                issuance_attempt_id = ?,
                issuance_last_attempt_at = ?
            WHERE id = ?
              AND created_document_id IS NULL
-             AND issuance_status IN ('FAILED', 'DEAD_LETTERED')`
+             AND issuance_claim_id IS NULL
+             AND (
+               issuance_status IN ('FAILED', 'DEAD_LETTERED')
+               OR (
+                 issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
+                 AND processed_at IS NOT NULL
+               )
+             )
+             AND NOT EXISTS (
+               SELECT 1 FROM fiscal_corrections AS blocking_correction
+                WHERE blocking_correction.target_kind = 'WOMPI_EVENT'
+                  AND blocking_correction.wompi_event_id = wompi_events.id
+                  AND blocking_correction.status IN (
+                    'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
+                  )
+             )`
         )
         .bind(attemptId, retryQueuedAt, wompiEventId),
       this.db
@@ -1749,9 +1799,8 @@ export class Repository {
   ): Promise<string | null> {
     const attemptId = newId("issuance_attempt");
     const queuedAt = nowIso();
-    // Operator retries from DEAD_LETTERED keep processed_at as historical evidence,
-    // so tokenized work is fenced by attempt + eligible status. Only the legacy
-    // null-token path also requires processed_at to remain null.
+    // Runnable retry work always has processed_at NULL. A non-null value is terminal
+    // evidence that only an explicit operator retry or guarded correction may clear.
     const statement = currentAttemptId
       ? this.db.prepare(
           `UPDATE wompi_events
@@ -1761,6 +1810,7 @@ export class Repository {
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_attempt_id = ?
+             AND processed_at IS NULL
              AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
              AND COALESCE(issuance_last_attempt_at, received_at) < ?
              AND NOT EXISTS (
@@ -4736,6 +4786,8 @@ export class Repository {
                AND received_at < ?
              )
              OR (
+               processed_at IS NULL
+               AND
                issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
                AND COALESCE(issuance_last_attempt_at, received_at) < ?
              )

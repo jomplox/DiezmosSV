@@ -42,3 +42,27 @@ export function filterPreCdeFailures(
     ].some((value) => value.toLowerCase().includes(normalizedQuery))
   );
 }
+
+export function isPreCdeRetryInFlight(
+  item: Pick<WompiIssuanceFailureItem, "issuance_status" | "processed_at">
+): boolean {
+  return item.processed_at === null
+    && (
+      item.issuance_status === "RETRY_QUEUED"
+      || item.issuance_status === "PROCESSING"
+    );
+}
+
+export function preCdeActionLabel(
+  item: Pick<WompiIssuanceFailureItem, "issuance_status" | "processed_at">,
+  correctable: boolean
+): string {
+  const retryInFlight = isPreCdeRetryInFlight(item);
+  if (correctable) {
+    if (!retryInFlight) return "Corregir y reintentar";
+    return item.issuance_status === "RETRY_QUEUED"
+      ? "Corrección en cola"
+      : "Procesando corrección";
+  }
+  return retryInFlight ? "Reintento en cola" : "Reintentar creación";
+}

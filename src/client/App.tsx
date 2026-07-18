@@ -40,7 +40,12 @@ import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstr
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
-import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";
+import {
+  createLatestRequestGate,
+  filterPreCdeFailures,
+  isPreCdeRetryInFlight,
+  preCdeActionLabel
+} from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage } from "./passwordReset";
 import { isDonarGraciasPath, isDonarPath } from "./donation";
@@ -4517,17 +4522,9 @@ function PreCdeFailuresPanel({
       {items.length > 0 && (
         <div className="pre-cde-failure-grid">
           {items.map((item) => {
-            const retryQueued = item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING";
+            const retryQueued = isPreCdeRetryInFlight(item);
             const correctable = isCorrectablePreCdeFailure(item);
-            const actionLabel = correctable
-              ? item.issuance_status === "RETRY_QUEUED"
-                ? "Corrección en cola"
-                : item.issuance_status === "PROCESSING"
-                  ? "Procesando corrección"
-                  : "Corregir y reintentar"
-              : retryQueued
-                ? "Reintento en cola"
-                : "Reintentar creación";
+            const actionLabel = preCdeActionLabel(item, correctable);
             const actionBusy = correctable
               ? busy === `fiscal-correction-load:WOMPI_EVENT:${item.id}`
               : busy === `pre-cde-retry:${item.id}`;

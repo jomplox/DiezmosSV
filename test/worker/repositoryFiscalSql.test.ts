@@ -8,6 +8,210 @@ import { Repository } from "../../src/worker/storage/repository";
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
 describe("fiscal repository SQL on SQLite", () => {
+  it("clears terminal processed evidence when an operator queues a generic retry", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_operator_retry";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+
+    await expect(repository.claimWompiIssuanceRetry(
+      wompiEventId,
+      "user_operator"
+    )).resolves.toEqual(expect.any(String));
+    expect(database.prepare(
+      `SELECT issuance_status, processed_at, issuance_attempt_id
+         FROM wompi_events WHERE id = ?`
+    ).get(wompiEventId)).toMatchObject({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: null,
+      issuance_attempt_id: expect.any(String)
+    });
+    database.close();
+  });
+
+  it.each(["RETRY_QUEUED", "PROCESSING"] as const)(
+    "claims a non-correctable legacy terminal row stuck in %s",
+    async (issuanceStatus) => {
+      const database = migratedDatabase();
+      const wompiEventId = `wompi_operator_legacy_${issuanceStatus.toLowerCase()}`;
+      seedFailedWompiEvent(database, wompiEventId);
+      database.prepare(
+        `UPDATE wompi_events
+            SET issuance_status = ?,
+                issuance_attempt_id = 'legacy-stuck-attempt'
+          WHERE id = ?`
+      ).run(issuanceStatus, wompiEventId);
+      const repository = new Repository(new SqliteD1(database).database);
+
+      await expect(repository.claimWompiIssuanceRetry(
+        wompiEventId,
+        "user_operator"
+      )).resolves.toEqual(expect.any(String));
+      expect(database.prepare(
+        `SELECT issuance_status, processed_at, issuance_attempt_id
+           FROM wompi_events WHERE id = ?`
+      ).get(wompiEventId)).toMatchObject({
+        issuance_status: "RETRY_QUEUED",
+        processed_at: null,
+        issuance_attempt_id: expect.not.stringMatching(/^legacy-/)
+      });
+      expect(database.prepare(
+        `SELECT COUNT(*) AS count FROM audit_logs
+          WHERE action = 'WOMPI_ISSUANCE_RETRY_QUEUED'
+            AND entity_id = ?`
+      ).get(wompiEventId)).toEqual({ count: 1 });
+      database.close();
+    }
+  );
+
+  it("keeps generic retry off rows owned by an issuance claim or active correction", async () => {
+    const database = migratedDatabase();
+    const heldEventId = "wompi_operator_held_claim";
+    const correctedEventId = "wompi_operator_active_correction";
+    seedFailedWompiEvent(database, heldEventId);
+    seedFailedWompiEvent(database, correctedEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_status = 'PROCESSING',
+              issuance_claim_id = 'held-issuance-claim',
+              issuance_claimed_at = '2026-07-18T12:05:00.000Z'
+        WHERE id = ?`
+    ).run(heldEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const active = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId: correctedEventId,
+        requestId: "06060606-0606-4606-8606-060606060606"
+      })
+    );
+    if (active.kind !== "claimed") throw new Error("expected active correction");
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_status = 'PROCESSING',
+              processed_at = '2026-07-18T12:05:00.000Z'
+        WHERE id = ?`
+    ).run(correctedEventId);
+
+    await expect(repository.claimWompiIssuanceRetry(
+      heldEventId,
+      "user_operator"
+    )).resolves.toBeNull();
+    await expect(repository.claimWompiIssuanceRetry(
+      correctedEventId,
+      "user_operator"
+    )).resolves.toBeNull();
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE wompi_event_id = ?"
+    ).get(correctedEventId)).toEqual({ count: 1 });
+    database.close();
+  });
+
+  it("does not sweep a legacy terminal row whose in-flight status is stale", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_legacy_terminal";
+    seedFailedWompiEvent(database, wompiEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_status = 'PROCESSING',
+              issuance_attempt_id = 'legacy-stuck-attempt',
+              issuance_last_attempt_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+
+    await expect(repository.listStalledApprovedWompiEvents(
+      "2026-01-01T00:00:00.000Z"
+    )).resolves.toEqual([]);
+    await expect(repository.claimStalledWompiIssuanceAttempt(
+      wompiEventId,
+      "legacy-stuck-attempt",
+      "2026-01-01T00:00:00.000Z"
+    )).resolves.toBeNull();
+    expect(database.prepare(
+      `SELECT issuance_status, processed_at, issuance_attempt_id
+         FROM wompi_events WHERE id = ?`
+    ).get(wompiEventId)).toEqual({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-18T12:00:00.000Z",
+      issuance_attempt_id: "legacy-stuck-attempt"
+    });
+    database.close();
+  });
+
+  it("claims exactly one guarded correction for a legacy stuck correctable event", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_legacy_stuck_correction";
+    seedFailedWompiEvent(database, wompiEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_status = 'PROCESSING',
+              issuance_attempt_id = 'legacy-stuck-attempt',
+              issuance_last_attempt_at = '2000-01-01T00:00:00.000Z'
+        WHERE id = ?`
+    ).run(wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+
+    const [first, second] = await Promise.all([
+      repository.claimWompiFiscalCorrection(
+        wompiCorrectionClaimInput({
+          wompiEventId,
+          requestId: "01010101-0101-4101-8101-010101010101"
+        })
+      ),
+      repository.claimWompiFiscalCorrection(
+        wompiCorrectionClaimInput({
+          wompiEventId,
+          requestId: "02020202-0202-4202-8202-020202020202"
+        })
+      )
+    ]);
+
+    expect([first.kind, second.kind].sort()).toEqual(["claimed", "ineligible"]);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE wompi_event_id = ?"
+    ).get(wompiEventId)).toEqual({ count: 1 });
+    expect(database.prepare(
+      `SELECT issuance_status, processed_at, issuance_attempt_id
+         FROM wompi_events WHERE id = ?`
+    ).get(wompiEventId)).toMatchObject({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: null,
+      issuance_attempt_id: expect.any(String)
+    });
+    database.close();
+  });
+
+  it("keeps a legacy row blocked while an active correction owns it", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_legacy_active_correction";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const first = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "03030303-0303-4303-8303-030303030303"
+      })
+    );
+    if (first.kind !== "claimed") throw new Error("expected active correction");
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_status = 'PROCESSING',
+              processed_at = '2026-07-18T12:05:00.000Z'
+        WHERE id = ?`
+    ).run(wompiEventId);
+
+    await expect(repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "04040404-0404-4404-8404-040404040404"
+      })
+    )).resolves.toEqual({ kind: "ineligible" });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE wompi_event_id = ?"
+    ).get(wompiEventId)).toEqual({ count: 1 });
+    database.close();
+  });
+
   it("stores one correction for concurrent reuse of the same request id", async () => {
     const database = migratedDatabase();
     const repository = new Repository(new SqliteD1(database).database);

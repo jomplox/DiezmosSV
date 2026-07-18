@@ -390,6 +390,7 @@ describe("Wompi issuance failure recovery API", () => {
       donor_name: "Example Person",
       donor_email: "donor@example.org",
       received_at: "2026-07-13T22:06:32.756Z",
+      processed_at: "2026-07-13T22:06:52.000Z",
       issuance_status: status,
       issuance_attempt_count: 4,
       issuance_error_code: "CDE_SCHEMA",
@@ -524,6 +525,43 @@ describe("Wompi issuance failure recovery API", () => {
     }));
   });
 
+  it("queues a generic retry for a non-correctable legacy terminal row stuck in PROCESSING", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-13T22:06:52.000Z",
+      issuance_attempt_id: "legacy-stuck-attempt",
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: "El proveedor no respondió."
+    }));
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ ok: true, queued: true });
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: null,
+      issuance_attempt_id: expect.not.stringMatching(/^legacy-/)
+    });
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_failed",
+      issuanceAttemptId: db.wompiEvents[0].issuance_attempt_id
+    }]);
+  });
+
   it("allows only one concurrent retry claim and returns the safe current state to the loser", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
@@ -552,6 +590,7 @@ describe("Wompi issuance failure recovery API", () => {
     await expect(loser?.json()).resolves.toEqual({
       queued: false,
       failure: expectedFailureItem("RETRY_QUEUED", {
+        processed_at: null,
         issuance_last_attempt_at: db.wompiEvents[0].issuance_last_attempt_at
       })
     });
@@ -1685,6 +1724,41 @@ describe("guarded fiscal correction API", () => {
         fiscalClaimId: "fiscal_claim_document"
       }
     ]);
+  });
+
+  it("accepts a guarded correction for a legacy terminal event stuck in PROCESSING", async () => {
+    const db = correctionDb();
+    const event = correctionEvent({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-17T17:00:00.000Z",
+      issuance_attempt_id: "legacy-stuck-attempt"
+    });
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(event as any);
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord()
+    });
+    const queued: IssuanceMessage[] = [];
+    const runtime = correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>);
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: "05050505-0505-4505-8505-050505050505",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), runtime);
+
+    expect(response.status).toBe(202);
+    expect(queued).toEqual([{
+      wompiEventId: "wompi_bad_dui",
+      fiscalCorrectionId: "fiscal_correction_1",
+      fiscalCorrectionProcessingClaimId: "correction_processing_1",
+      issuanceAttemptId: "issuance_attempt_1"
+    }]);
   });
 
   it("issues a corrected pre-CDE Wompi failure with its existing reservation", async () => {
@@ -3108,7 +3182,7 @@ describe("guarded fiscal correction API", () => {
   it("suppresses duplicate queue sends and rejects a conflicting request id", async () => {
     const db = correctionDb();
     vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(
-      correctionEvent({ issuance_status: "RETRY_QUEUED" }) as any
+      correctionEvent({ issuance_status: "RETRY_QUEUED", processed_at: null }) as any
     );
     vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
     const existing = correctionRecord({
@@ -13930,7 +14004,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     const queued: IssuanceMessage[] = [];
     db.wompiEvents.push(stalledWompiEvent({
       id: "wompi_retry_stale",
-      processed_at: "2026-01-01T00:05:00.000Z",
+      processed_at: null,
       issuance_status: "RETRY_QUEUED",
       issuance_attempt_id: "attempt-retry-stale",
       issuance_last_attempt_at: "2026-01-01T00:04:00.000Z"
@@ -13966,7 +14040,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     const eventId = "wompi_retry_new_epoch";
     db.wompiEvents.push(stalledWompiEvent({
       id: eventId,
-      processed_at: "2026-06-01T00:00:00.000Z",
+      processed_at: null,
       issuance_status: "RETRY_QUEUED",
       issuance_attempt_id: "attempt-new-epoch",
       issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
@@ -14004,7 +14078,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     const eventId = "wompi_retry_current_epoch";
     db.wompiEvents.push(stalledWompiEvent({
       id: eventId,
-      processed_at: "2026-06-01T00:00:00.000Z",
+      processed_at: null,
       issuance_status: "PROCESSING",
       issuance_attempt_id: "attempt-current-epoch",
       issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
@@ -16567,6 +16641,7 @@ const WOMPI_ISSUANCE_FAILURE_FIELDS = [
   "donor_name",
   "donor_email",
   "received_at",
+  "processed_at",
   "issuance_status",
   "issuance_attempt_count",
   "issuance_error_code",
@@ -17725,7 +17800,7 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&
-      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')") &&
       this.sql.includes("RETURNING id")
     ) {
@@ -17736,11 +17811,20 @@ class Statement {
         (row) =>
           row.id === wompiEventId &&
           row.created_document_id == null &&
-          (row.issuance_status === "FAILED" || row.issuance_status === "DEAD_LETTERED")
+          row.issuance_claim_id == null &&
+          (
+            row.issuance_status === "FAILED"
+            || row.issuance_status === "DEAD_LETTERED"
+            || (
+              (row.issuance_status === "RETRY_QUEUED" || row.issuance_status === "PROCESSING")
+              && row.processed_at != null
+            )
+          )
       );
       if (!event) {
         return null;
       }
+      event.processed_at = null;
       event.issuance_status = "RETRY_QUEUED";
       event.issuance_last_attempt_at = String(retryQueuedAt);
       return { id: wompiEventId } as T;
@@ -18501,6 +18585,7 @@ class Statement {
               String(event.received_at) < receivedCutoff
             ) ||
             (
+              !event.processed_at &&
               (event.issuance_status === "RETRY_QUEUED" || event.issuance_status === "PROCESSING") &&
               String(event.issuance_last_attempt_at ?? event.received_at) < retryCutoff
             )
@@ -19862,7 +19947,7 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&
-      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("issuance_status IS NULL") &&
       !this.sql.includes("COALESCE(issuance_last_attempt_at")
     ) {
@@ -19875,6 +19960,7 @@ class Statement {
           row.issuance_status == null
       );
       if (event) {
+        event.processed_at = null;
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = String(attemptId);
         event.issuance_last_attempt_at = String(queuedAt);
@@ -19883,7 +19969,7 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&
-      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
     ) {
       const [attemptId, queuedAt, wompiEventId] = this.args;
@@ -19891,9 +19977,18 @@ class Statement {
         (row) =>
           row.id === wompiEventId &&
           row.created_document_id == null &&
-          (row.issuance_status === "FAILED" || row.issuance_status === "DEAD_LETTERED")
+          row.issuance_claim_id == null &&
+          (
+            row.issuance_status === "FAILED"
+            || row.issuance_status === "DEAD_LETTERED"
+            || (
+              (row.issuance_status === "RETRY_QUEUED" || row.issuance_status === "PROCESSING")
+              && row.processed_at != null
+            )
+          )
       );
       if (event) {
+        event.processed_at = null;
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = String(attemptId);
         event.issuance_last_attempt_at = String(queuedAt);
@@ -19902,7 +19997,7 @@ class Statement {
     }
     if (
       this.sql.includes("UPDATE wompi_events") &&
-      this.sql.includes("SET issuance_status = 'RETRY_QUEUED'") &&
+      this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("COALESCE(issuance_last_attempt_at, received_at) < ?")
     ) {
       const guardsExistingAttempt = this.sql.includes("AND issuance_attempt_id = ?");
@@ -19932,7 +20027,7 @@ class Statement {
         event &&
         event.created_document_id == null &&
         attemptMatches &&
-        (guardsExistingAttempt || event.processed_at == null) &&
+        event.processed_at == null &&
         statusEligible &&
         String(event.issuance_last_attempt_at ?? event.received_at) < staleBefore
       ) {

@@ -47,7 +47,7 @@ describe("visual consistency pack", () => {
     const statsRenderIndex = appSource.indexOf("<Stats documents={documents}");
     const tableRenderIndex = appSource.indexOf("<DocumentTable documents={documents}");
 
-    expect(appSource).toContain('import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";');
+    expect(appSource).toContain("isPreCdeRetryInFlight");
     expect(panelRenderIndex).toBeGreaterThan(-1);
     expect(panelRenderIndex).toBeLessThan(statsRenderIndex);
     expect(panelRenderIndex).toBeLessThan(tableRenderIndex);
@@ -63,7 +63,7 @@ describe("visual consistency pack", () => {
     const logoutBlock = appSource.match(/function logout\(\) \{[\s\S]*?\n  \}\n\n  async function retryPreCdeFailure/)?.[0] ?? "";
     const expireBlock = appSource.match(/function expireSession\(\) \{[\s\S]*?\n  \}\n\n  function toggleSidebar/)?.[0] ?? "";
 
-    expect(appSource).toContain('import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";');
+    expect(appSource).toContain("isPreCdeRetryInFlight");
     expect(fetchBlock).toContain("const request = preCdeFailureRequests.current.start();");
     expect(fetchBlock.match(/request\.commit/g)).toHaveLength(3);
     expect(fetchBlock).toContain("setPreCdeFailuresLoading(true);");
@@ -103,13 +103,10 @@ describe("visual consistency pack", () => {
     expect(panelBlock).toContain('<p>{item.issuance_error_message}</p>');
     expect(panelBlock).toContain('`Número reservado: ${item.reserved_numero_control}`');
     expect(panelBlock).toContain('"Número aún no asignado"');
-    expect(panelBlock).toContain('item.issuance_status === "RETRY_QUEUED" || item.issuance_status === "PROCESSING"');
+    expect(panelBlock).toContain("isPreCdeRetryInFlight(item)");
     expect(panelBlock).toContain("{canRetry && (");
     expect(panelBlock).toContain("isCorrectablePreCdeFailure(item)");
-    expect(panelBlock).toContain('"Corregir y reintentar"');
-    expect(panelBlock).toContain('"Reintentar creación"');
-    expect(panelBlock).toContain('"Corrección en cola"');
-    expect(panelBlock).toContain('"Procesando corrección"');
+    expect(panelBlock).toContain("preCdeActionLabel(item, correctable)");
 
     for (const forbiddenAction of ["PDF", "JSON", "Sello", "Invalidar", "DetailPanel", "onDownload", "documentAction"]) {
       expect(panelBlock).not.toContain(forbiddenAction);

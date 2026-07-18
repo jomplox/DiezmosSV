@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { createLatestRequestGate, filterPreCdeFailures } from "../../src/client/preCdeFailures";
+import {
+  createLatestRequestGate,
+  filterPreCdeFailures,
+  isPreCdeRetryInFlight,
+  preCdeActionLabel
+} from "../../src/client/preCdeFailures";
 import type { WompiIssuanceFailureItem } from "../../src/client/types";
 
 const items: WompiIssuanceFailureItem[] = [
@@ -10,6 +15,7 @@ const items: WompiIssuanceFailureItem[] = [
     donor_name: "Jose Pérez",
     donor_email: "jose@example.com",
     received_at: "2026-07-13T20:00:00.000Z",
+    processed_at: "2026-07-13T20:02:00.000Z",
     issuance_status: "FAILED",
     issuance_attempt_count: 2,
     issuance_error_code: "CDE_SCHEMA",
@@ -26,6 +32,7 @@ const items: WompiIssuanceFailureItem[] = [
     donor_name: "Ana López",
     donor_email: "ana@example.com",
     received_at: "2026-07-13T21:00:00.000Z",
+    processed_at: "2026-07-13T21:05:00.000Z",
     issuance_status: "DEAD_LETTERED",
     issuance_attempt_count: 5,
     issuance_error_code: "CDE_BUILD_FAILED",
@@ -58,6 +65,57 @@ describe("filterPreCdeFailures", () => {
 
   it("returns the original items for an empty query", () => {
     expect(filterPreCdeFailures(items, "")).toEqual(items);
+  });
+});
+
+describe("isPreCdeRetryInFlight", () => {
+  it("distinguishes live retry work from a legacy terminal row stuck in an in-flight status", () => {
+    expect(isPreCdeRetryInFlight({
+      issuance_status: "PROCESSING",
+      processed_at: null
+    })).toBe(true);
+    expect(isPreCdeRetryInFlight({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: null
+    })).toBe(true);
+    expect(isPreCdeRetryInFlight({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    })).toBe(false);
+    expect(isPreCdeRetryInFlight({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    })).toBe(false);
+  });
+
+  it("exposes the guarded correction label for legacy terminal in-flight statuses", () => {
+    expect(preCdeActionLabel({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    }, true)).toBe("Corregir y reintentar");
+    expect(preCdeActionLabel({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    }, true)).toBe("Corregir y reintentar");
+    expect(preCdeActionLabel({
+      issuance_status: "PROCESSING",
+      processed_at: null
+    }, true)).toBe("Procesando corrección");
+    expect(preCdeActionLabel({
+      issuance_status: "RETRY_QUEUED",
+      processed_at: null
+    }, true)).toBe("Corrección en cola");
+  });
+
+  it("exposes generic retry only for a non-correctable legacy terminal row", () => {
+    expect(preCdeActionLabel({
+      issuance_status: "PROCESSING",
+      processed_at: "2026-07-17T17:00:00.000Z"
+    }, false)).toBe("Reintentar creación");
+    expect(preCdeActionLabel({
+      issuance_status: "PROCESSING",
+      processed_at: null
+    }, false)).toBe("Reintento en cola");
   });
 });
 
