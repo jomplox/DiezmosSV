@@ -166,6 +166,39 @@ const FISCAL_CORRECTION_AUDIT_FIELDS = new Set([
   "complemento"
 ]);
 
+const FISCAL_CORRECTION_AUDIT_SUMMARIES: Record<
+  FiscalCorrectionAuditTransition,
+  string
+> = {
+  QUEUED: "Corrección fiscal en cola",
+  STARTED: "Procesamiento de corrección fiscal iniciado",
+  ACCEPTED: "Corrección fiscal aceptada",
+  REJECTED: "Corrección fiscal rechazada",
+  FAILED: "Corrección fiscal fallida",
+  REVIEW_REQUIRED: "Corrección fiscal requiere revisión"
+};
+
+function fiscalCorrectionAuditFields(changedFieldsJson: string): string[] {
+  let parsedFields: unknown;
+  try {
+    parsedFields = JSON.parse(changedFieldsJson);
+  } catch {
+    parsedFields = [];
+  }
+  return Array.isArray(parsedFields)
+    ? parsedFields.reduce<string[]>((safeFields, value) => {
+        if (
+          typeof value === "string"
+          && FISCAL_CORRECTION_AUDIT_FIELDS.has(value)
+          && !safeFields.includes(value)
+        ) {
+          safeFields.push(value);
+        }
+        return safeFields;
+      }, [])
+    : [];
+}
+
 async function emailDeliveryIdempotencyKey(
   documentId: string,
   emailType: string,
@@ -328,6 +361,8 @@ export class Repository {
   async claimWompiFiscalCorrection(
     input: WompiFiscalCorrectionClaimInput
   ): Promise<FiscalCorrectionClaimResult> {
+    const requestIdHash = await sha256Hex(utf8Bytes(input.requestId));
+    const changedFields = fiscalCorrectionAuditFields(input.changedFieldsJson);
     for (let collisionRetry = 0; collisionRetry < 3; collisionRetry += 1) {
       const correctionId = newId("fiscal_correction");
       const issuanceAttemptId = newId("issuance_attempt");
@@ -394,16 +429,29 @@ export class Repository {
           input.environment,
           correctionId,
           issuanceAttemptId
-        )
+        ),
+        this.fiscalCorrectionAuditInsertStatement({
+          correctionId,
+          transition: "QUEUED",
+          requestIdHash,
+          changedFields,
+          outcomeCode: "QUEUED",
+          actorType: "USER",
+          actorId: input.createdBy
+        })
       ]);
 
       const existing = await this.getFiscalCorrectionByRequestId(input.requestId);
       if (existing) {
-        return this.resolveFiscalCorrectionClaim(existing, correctionId, {
+        const resolved = this.resolveFiscalCorrectionClaim(existing, correctionId, {
           targetKind: "WOMPI_EVENT",
           targetId: input.wompiEventId,
           requestPayloadSha256: input.requestPayloadSha256
         });
+        if (resolved.kind === "duplicate") {
+          await this.reconcileFiscalCorrectionAudits(existing);
+        }
+        return resolved;
       }
       const eligible = await this.db.prepare(
         `SELECT id FROM wompi_events
@@ -423,6 +471,8 @@ export class Repository {
   async claimDocumentFiscalCorrection(
     input: DocumentFiscalCorrectionClaimInput
   ): Promise<FiscalCorrectionClaimResult> {
+    const requestIdHash = await sha256Hex(utf8Bytes(input.requestId));
+    const changedFields = fiscalCorrectionAuditFields(input.changedFieldsJson);
     for (let collisionRetry = 0; collisionRetry < 3; collisionRetry += 1) {
       const correctionId = newId("fiscal_correction");
       const fiscalClaimId = newId("fiscal_claim");
@@ -544,16 +594,29 @@ export class Repository {
           correctionId,
           correctionId,
           fiscalClaimId
-        )
+        ),
+        this.fiscalCorrectionAuditInsertStatement({
+          correctionId,
+          transition: "QUEUED",
+          requestIdHash,
+          changedFields,
+          outcomeCode: "QUEUED",
+          actorType: "USER",
+          actorId: input.createdBy
+        })
       ]);
 
       const existing = await this.getFiscalCorrectionByRequestId(input.requestId);
       if (existing) {
-        return this.resolveFiscalCorrectionClaim(existing, correctionId, {
+        const resolved = this.resolveFiscalCorrectionClaim(existing, correctionId, {
           targetKind: "DTE_DOCUMENT",
           targetId: input.documentId,
           requestPayloadSha256: input.requestPayloadSha256
         });
+        if (resolved.kind === "duplicate") {
+          await this.reconcileFiscalCorrectionAudits(existing);
+        }
+        return resolved;
       }
       const eligible = await this.db.prepare(
         `SELECT id FROM dte_documents
@@ -596,60 +659,142 @@ export class Repository {
     ).bind(requestId).first<FiscalCorrectionRecord>();
   }
 
+  private fiscalCorrectionAuditInsertStatement(input: {
+    correctionId: string;
+    transition: FiscalCorrectionAuditTransition;
+    requestIdHash: string;
+    changedFields: string[];
+    outcomeCode: string;
+    actorType?: "SYSTEM" | "USER";
+    actorId?: string | null;
+  }): D1PreparedStatement {
+    const actorType = input.actorType
+      ?? (input.transition === "QUEUED" ? "USER" : "SYSTEM");
+    const statePredicate = input.transition === "QUEUED"
+      ? "1 = 1"
+      : input.transition === "STARTED"
+        ? "(processing_started_at IS NOT NULL OR status <> 'QUEUED')"
+        : "status = ?";
+    const statement = this.db.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, actor_id, action, entity_type, entity_id, summary,
+         metadata_json, actor_ip, actor_context
+       )
+       SELECT ?, ?, CASE WHEN ? = 'USER' THEN COALESCE(?, created_by) ELSE NULL END,
+              ?, 'fiscal_correction', id, ?,
+              json_object(
+                'correctionId', id,
+                'target', json_object(
+                  'kind', target_kind,
+                  'id', CASE
+                    WHEN target_kind = 'WOMPI_EVENT' THEN wompi_event_id
+                    ELSE document_id
+                  END
+                ),
+                'requestIdHash', ?,
+                'attemptNumber', attempt_number,
+                'changedFields', json(?),
+                'outcomeCode', ?
+              ),
+              NULL, NULL
+         FROM fiscal_corrections
+        WHERE id = ?
+          AND ${statePredicate}
+       ON CONFLICT(id) DO NOTHING`
+    );
+    const args: unknown[] = [
+      `fiscal_correction_audit:${input.correctionId}:${input.transition}`,
+      actorType,
+      actorType,
+      input.actorId ?? null,
+      `FISCAL_CORRECTION_${input.transition}`,
+      FISCAL_CORRECTION_AUDIT_SUMMARIES[input.transition],
+      input.requestIdHash,
+      JSON.stringify(input.changedFields),
+      input.outcomeCode,
+      input.correctionId
+    ];
+    if (
+      input.transition !== "QUEUED"
+      && input.transition !== "STARTED"
+    ) {
+      args.push(input.transition);
+    }
+    return statement.bind(...args);
+  }
+
+  private async fiscalCorrectionAuditStatements(
+    correction: FiscalCorrectionRecord,
+    transitions: Array<{
+      transition: FiscalCorrectionAuditTransition;
+      outcomeCode: string;
+    }>
+  ): Promise<D1PreparedStatement[]> {
+    const requestIdHash = await sha256Hex(utf8Bytes(correction.request_id));
+    const changedFields = fiscalCorrectionAuditFields(
+      correction.changed_fields_json
+    );
+    return transitions.map(({ transition, outcomeCode }) =>
+      this.fiscalCorrectionAuditInsertStatement({
+        correctionId: correction.id,
+        transition,
+        requestIdHash,
+        changedFields,
+        outcomeCode,
+        actorType: transition === "QUEUED" ? "USER" : "SYSTEM",
+        actorId: transition === "QUEUED" ? correction.created_by : null
+      })
+    );
+  }
+
   async createFiscalCorrectionAudit(
     correction: FiscalCorrectionRecord,
     transition: FiscalCorrectionAuditTransition,
     actor?: { type: "SYSTEM" | "USER"; id?: string | null }
   ): Promise<boolean> {
-    let parsedFields: unknown;
-    try {
-      parsedFields = JSON.parse(correction.changed_fields_json);
-    } catch {
-      parsedFields = [];
-    }
-    const changedFields = Array.isArray(parsedFields)
-      ? parsedFields.reduce<string[]>((safeFields, value) => {
-          if (
-            typeof value === "string"
-            && FISCAL_CORRECTION_AUDIT_FIELDS.has(value)
-            && !safeFields.includes(value)
-          ) {
-            safeFields.push(value);
-          }
-          return safeFields;
-        }, [])
-      : [];
-    const targetId = correction.target_kind === "WOMPI_EVENT"
-      ? correction.wompi_event_id
-      : correction.document_id;
     const requestIdHash = await sha256Hex(utf8Bytes(correction.request_id));
     const outcomeCode = transition === "STARTED"
       ? "PROCESSING"
       : correction.failure_code ?? transition;
-    const summaries: Record<FiscalCorrectionAuditTransition, string> = {
-      QUEUED: "Corrección fiscal en cola",
-      STARTED: "Procesamiento de corrección fiscal iniciado",
-      ACCEPTED: "Corrección fiscal aceptada",
-      REJECTED: "Corrección fiscal rechazada",
-      FAILED: "Corrección fiscal fallida",
-      REVIEW_REQUIRED: "Corrección fiscal requiere revisión"
-    };
-    return this.createAuditIfAbsent({
+    const result = await this.fiscalCorrectionAuditInsertStatement({
+      correctionId: correction.id,
+      transition,
+      requestIdHash,
+      changedFields: fiscalCorrectionAuditFields(correction.changed_fields_json),
+      outcomeCode,
       actorType: actor?.type,
-      actorId: actor?.id,
-      action: `FISCAL_CORRECTION_${transition}`,
-      entityType: "fiscal_correction",
-      entityId: correction.id,
-      summary: summaries[transition],
-      metadata: {
-        correctionId: correction.id,
-        target: { kind: correction.target_kind, id: targetId },
-        requestIdHash,
-        attemptNumber: correction.attempt_number,
-        changedFields,
-        outcomeCode
-      }
-    });
+      actorId: actor?.id
+    }).run();
+    return Number(result.meta?.changes ?? 0) === 1;
+  }
+
+  async reconcileFiscalCorrectionAudits(
+    correction: FiscalCorrectionRecord
+  ): Promise<void> {
+    const transitions: Array<{
+      transition: FiscalCorrectionAuditTransition;
+      outcomeCode: string;
+    }> = [{ transition: "QUEUED", outcomeCode: "QUEUED" }];
+    if (
+      correction.processing_started_at
+      || correction.status !== "QUEUED"
+    ) {
+      transitions.push({ transition: "STARTED", outcomeCode: "PROCESSING" });
+    }
+    if (
+      correction.status === "ACCEPTED"
+      || correction.status === "REJECTED"
+      || correction.status === "FAILED"
+      || correction.status === "REVIEW_REQUIRED"
+    ) {
+      transitions.push({
+        transition: correction.status,
+        outcomeCode: correction.failure_code ?? correction.status
+      });
+    }
+    await this.db.batch(
+      await this.fiscalCorrectionAuditStatements(correction, transitions)
+    );
   }
 
   async getActiveFiscalCorrectionForTarget(
@@ -676,8 +821,17 @@ export class Repository {
     issuanceAttemptId?: string;
     fiscalClaimId?: string;
   }): Promise<"claimed" | "busy" | "terminal"> {
+    const correctionBeforeClaim = await this.getFiscalCorrection(input.id);
+    if (!correctionBeforeClaim) return "busy";
+    const requestIdHash = await sha256Hex(
+      utf8Bytes(correctionBeforeClaim.request_id)
+    );
+    const changedFields = fiscalCorrectionAuditFields(
+      correctionBeforeClaim.changed_fields_json
+    );
     const processingStartedAt = nowIso();
-    const claimed = await this.db.prepare(
+    const results = await this.db.batch([
+      this.db.prepare(
       `UPDATE fiscal_corrections
           SET status = 'PROCESSING',
               processing_started_at = ?,
@@ -708,17 +862,33 @@ export class Repository {
                    AND fiscal_operation_kind = 'TRANSMISSION'
               )
             )
-          )
-        RETURNING id`
-    ).bind(
-      processingStartedAt,
-      processingStartedAt,
-      input.id,
-      input.processingClaimId,
-      input.issuanceAttemptId ?? null,
-      input.fiscalClaimId ?? null
-    ).first<{ id: string }>();
-    if (claimed) return "claimed";
+          )`
+      ).bind(
+        processingStartedAt,
+        processingStartedAt,
+        input.id,
+        input.processingClaimId,
+        input.issuanceAttemptId ?? null,
+        input.fiscalClaimId ?? null
+      ),
+      this.fiscalCorrectionAuditInsertStatement({
+        correctionId: input.id,
+        transition: "QUEUED",
+        requestIdHash,
+        changedFields,
+        outcomeCode: "QUEUED",
+        actorType: "USER",
+        actorId: correctionBeforeClaim.created_by
+      }),
+      this.fiscalCorrectionAuditInsertStatement({
+        correctionId: input.id,
+        transition: "STARTED",
+        requestIdHash,
+        changedFields,
+        outcomeCode: "PROCESSING"
+      })
+    ]);
+    if (Number(results[0]?.meta?.changes ?? 0) === 1) return "claimed";
     const correction = await this.getFiscalCorrection(input.id);
     if (correction && ["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)) {
       return "terminal";
@@ -793,9 +963,119 @@ export class Repository {
     return Boolean(row);
   }
 
+  async reserveFiscalCorrectionDocumentIdentifiers(input: {
+    correctionId: string;
+    documentId: string;
+    processingClaimId: string;
+    fiscalClaimId: string;
+    environment: Ambiente;
+    controlPrefix: string;
+    codigoGeneracion: string;
+  }): Promise<WompiDocumentIdentifiers | null> {
+    const controlPrefix = normalizeControlPrefix(input.controlPrefix);
+    await this.db.prepare(
+      `INSERT OR IGNORE INTO document_sequences (
+         environment, control_prefix, next_value
+       ) VALUES (?, ?, 1)`
+    ).bind(input.environment, controlPrefix).run();
+    const updatedAt = nowIso();
+    const reserved = await this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET reserved_control_prefix = ?,
+              reserved_control_sequence = (
+                SELECT next_value
+                  FROM document_sequences
+                 WHERE environment = ? AND control_prefix = ?
+              ),
+              reserved_codigo_generacion = ?,
+              reserved_numero_control = 'DTE-15-' || ? || '-' || printf(
+                '%015d',
+                (
+                  SELECT next_value
+                    FROM document_sequences
+                   WHERE environment = ? AND control_prefix = ?
+                )
+              ),
+              updated_at = ?
+        WHERE id = ?
+          AND target_kind = 'DTE_DOCUMENT'
+          AND document_id = ?
+          AND environment = ?
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND fiscal_claim_id = ?
+          AND reserved_control_sequence IS NULL
+          AND reserved_codigo_generacion IS NULL
+          AND reserved_numero_control IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE id = fiscal_corrections.document_id
+               AND environment = fiscal_corrections.environment
+               AND status = 'REJECTED'
+               AND fiscal_operation_claim_id = fiscal_corrections.fiscal_claim_id
+               AND fiscal_operation_kind = 'TRANSMISSION'
+               AND fiscal_operation_event_id IS NULL
+          )
+        RETURNING reserved_control_sequence AS sequence,
+                  reserved_codigo_generacion AS codigoGeneracion,
+                  reserved_numero_control AS numeroControl`
+    ).bind(
+      controlPrefix,
+      input.environment,
+      controlPrefix,
+      input.codigoGeneracion,
+      controlPrefix,
+      input.environment,
+      controlPrefix,
+      updatedAt,
+      input.correctionId,
+      input.documentId,
+      input.environment,
+      input.processingClaimId,
+      input.fiscalClaimId
+    ).first<WompiDocumentIdentifiers>();
+    if (reserved) return reserved;
+    return this.db.prepare(
+      `SELECT reserved_control_sequence AS sequence,
+              reserved_codigo_generacion AS codigoGeneracion,
+              reserved_numero_control AS numeroControl
+         FROM fiscal_corrections
+        WHERE id = ?
+          AND target_kind = 'DTE_DOCUMENT'
+          AND document_id = ?
+          AND environment = ?
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND fiscal_claim_id = ?
+          AND reserved_control_prefix = ?
+          AND reserved_control_sequence IS NOT NULL
+          AND reserved_codigo_generacion IS NOT NULL
+          AND reserved_numero_control IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE id = fiscal_corrections.document_id
+               AND environment = fiscal_corrections.environment
+               AND status IN ('REJECTED', 'SIGNED')
+               AND fiscal_operation_claim_id = fiscal_corrections.fiscal_claim_id
+               AND fiscal_operation_kind = 'TRANSMISSION'
+               AND fiscal_operation_event_id IS NULL
+          )`
+    ).bind(
+      input.correctionId,
+      input.documentId,
+      input.environment,
+      input.processingClaimId,
+      input.fiscalClaimId,
+      controlPrefix
+    ).first<WompiDocumentIdentifiers>();
+  }
+
   async prepareClaimedFiscalCorrectionDocument(input: {
     correctionId: string;
     documentId: string;
+    processingClaimId: string;
     claimId: string;
     codigoGeneracion: string;
     numeroControl: string;
@@ -837,7 +1117,10 @@ export class Repository {
                AND document_id = dte_documents.id
                AND environment = dte_documents.environment
                AND status = 'PROCESSING'
+               AND processing_claim_id = ?
                AND fiscal_claim_id = ?
+               AND reserved_codigo_generacion = ?
+               AND reserved_numero_control = ?
                AND source_document_snapshot_json IS NOT NULL
           )
         RETURNING id`
@@ -852,7 +1135,10 @@ export class Repository {
       input.documentId,
       input.claimId,
       input.correctionId,
-      input.claimId
+      input.processingClaimId,
+      input.claimId,
+      input.codigoGeneracion,
+      input.numeroControl
     ).first<{ id: string }>();
     if (!row) return false;
     await this.indexDteDocumentById(input.documentId);
@@ -864,6 +1150,8 @@ export class Repository {
     claimId: string,
     outcome: FiscalCorrectionOutcome
   ): Promise<boolean> {
+    const correction = await this.getFiscalCorrection(id);
+    if (!correction) return false;
     const completedAt = nowIso();
     const document = outcome.document;
     if (outcome.status !== "FAILED" && !document) {
@@ -979,6 +1267,17 @@ export class Repository {
             document!.signedJws,
             document!.documentClaimId
           );
+    const auditStatements = await this.fiscalCorrectionAuditStatements(
+      correction,
+      [
+        { transition: "QUEUED", outcomeCode: "QUEUED" },
+        { transition: "STARTED", outcomeCode: "PROCESSING" },
+        {
+          transition: outcome.status,
+          outcomeCode: outcome.failureCode ?? outcome.status
+        }
+      ]
+    );
     const results = await this.db.batch([
       boundCorrectionUpdate,
       this.db.prepare(
@@ -1001,7 +1300,8 @@ export class Repository {
               SELECT fiscal_claim_id FROM fiscal_corrections
                WHERE id = ? AND processing_claim_id = ?
             )`
-      ).bind(completedAt, id, claimId, outcome.status, id, claimId)
+      ).bind(completedAt, id, claimId, outcome.status, id, claimId),
+      ...auditStatements
     ]);
     return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
@@ -1011,9 +1311,19 @@ export class Repository {
     claimId: string,
     outcome: Pick<FiscalCorrectionOutcome, "failureCode" | "failureMessage">
   ): Promise<boolean> {
+    const correction = await this.getFiscalCorrection(id);
+    if (!correction) return false;
     const completedAt = nowIso();
     const failureCode = outcome.failureCode ?? "FISCAL_CORRECTION_FAILED";
     const failureMessage = outcome.failureMessage ?? "La corrección fiscal falló antes de crear el CDE.";
+    const auditStatements = await this.fiscalCorrectionAuditStatements(
+      correction,
+      [
+        { transition: "QUEUED", outcomeCode: "QUEUED" },
+        { transition: "STARTED", outcomeCode: "PROCESSING" },
+        { transition: "FAILED", outcomeCode: failureCode }
+      ]
+    );
     const results = await this.db.batch([
       this.db.prepare(
         `UPDATE wompi_events
@@ -1088,7 +1398,8 @@ export class Repository {
         claimId,
         completedAt,
         failureCode
-      )
+      ),
+      ...auditStatements
     ]);
     return (
       Number(results[0]?.meta?.changes ?? 0) === 1
@@ -1123,8 +1434,18 @@ export class Repository {
     nextProcessingClaimId: string;
     staleBefore: string;
   }): Promise<FiscalCorrectionRecord | null> {
+    const correction = await this.getFiscalCorrection(input.id);
+    if (!correction) return null;
     const recoveredAt = nowIso();
-    return this.db.prepare(
+    const auditStatements = await this.fiscalCorrectionAuditStatements(
+      correction,
+      [
+        { transition: "QUEUED", outcomeCode: "QUEUED" },
+        { transition: "STARTED", outcomeCode: "PROCESSING" }
+      ]
+    );
+    const results = await this.db.batch([
+      this.db.prepare(
       `UPDATE fiscal_corrections
           SET status = 'PROCESSING',
               processing_claim_id = ?,
@@ -1147,6 +1468,7 @@ export class Repository {
                   FROM wompi_events
                  WHERE id = fiscal_corrections.wompi_event_id
                    AND issuance_attempt_id = fiscal_corrections.issuance_attempt_id
+                   AND issuance_claim_id IS NULL
                    AND issuance_status IN (
                      'RETRY_QUEUED', 'PROCESSING', 'DOCUMENT_CREATED'
                    )
@@ -1165,17 +1487,20 @@ export class Repository {
                    AND fiscal_operation_kind = 'TRANSMISSION'
               )
             )
-          )
-        RETURNING *`
-    ).bind(
-      input.nextProcessingClaimId,
-      recoveredAt,
-      recoveredAt,
-      input.id,
-      input.currentProcessingClaimId,
-      input.staleBefore,
-      input.staleBefore
-    ).first<FiscalCorrectionRecord>();
+          )`
+      ).bind(
+        input.nextProcessingClaimId,
+        recoveredAt,
+        recoveredAt,
+        input.id,
+        input.currentProcessingClaimId,
+        input.staleBefore,
+        input.staleBefore
+      ),
+      ...auditStatements
+    ]);
+    if (Number(results[0]?.meta?.changes ?? 0) !== 1) return null;
+    return this.getFiscalCorrection(input.id);
   }
 
   private resolveFiscalCorrectionClaim(

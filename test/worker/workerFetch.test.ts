@@ -766,6 +766,10 @@ describe("guarded fiscal correction API", () => {
       issuance_attempt_id: "issuance_attempt_1",
       fiscal_claim_id: null,
       processing_claim_id: "correction_processing_1",
+      reserved_control_prefix: null,
+      reserved_control_sequence: null,
+      reserved_codigo_generacion: null,
+      reserved_numero_control: null,
       mh_dispatch_started_at: null,
       failure_code: null,
       failure_message: null,
@@ -783,6 +787,7 @@ describe("guarded fiscal correction API", () => {
     event: Record<string, unknown>,
     db: InMemoryD1
   ): void {
+    stubCorrectionAuditReconciliation(correction, db);
     const ownedDocument = () => {
       const currentEvent = db.wompiEvents.find(
         (candidate) => candidate.id === correction.wompi_event_id
@@ -920,6 +925,7 @@ describe("guarded fiscal correction API", () => {
     correction: FiscalCorrectionRecord,
     db: InMemoryD1
   ): void {
+    stubCorrectionAuditReconciliation(correction, db);
     const ownedDocument = () => db.documents.find(
       (document) => document.id === correction.document_id
     );
@@ -948,13 +954,54 @@ describe("guarded fiscal correction API", () => {
         correction.processing_started_at = new Date().toISOString();
         return "claimed";
       });
+    vi.spyOn(Repository.prototype, "reserveFiscalCorrectionDocumentIdentifiers")
+      .mockImplementation(async (input) => {
+        const document = ownedDocument();
+        if (
+          input.correctionId !== correction.id
+          || input.documentId !== correction.document_id
+          || input.processingClaimId !== correction.processing_claim_id
+          || input.fiscalClaimId !== correction.fiscal_claim_id
+          || correction.status !== "PROCESSING"
+          || !document
+          || !["REJECTED", "SIGNED"].includes(document.status)
+          || document.fiscal_operation_claim_id !== correction.fiscal_claim_id
+        ) {
+          return null;
+        }
+        if (
+          correction.reserved_control_sequence !== null
+          && correction.reserved_codigo_generacion
+          && correction.reserved_numero_control
+        ) {
+          return {
+            sequence: correction.reserved_control_sequence,
+            codigoGeneracion: correction.reserved_codigo_generacion,
+            numeroControl: correction.reserved_numero_control
+          };
+        }
+        const sequence = db.nextSequence++;
+        correction.reserved_control_prefix = input.controlPrefix;
+        correction.reserved_control_sequence = sequence;
+        correction.reserved_codigo_generacion = input.codigoGeneracion;
+        correction.reserved_numero_control =
+          `DTE-15-${input.controlPrefix}-${String(sequence).padStart(15, "0")}`;
+        return {
+          sequence,
+          codigoGeneracion: correction.reserved_codigo_generacion,
+          numeroControl: correction.reserved_numero_control
+        };
+      });
     vi.spyOn(Repository.prototype, "prepareClaimedFiscalCorrectionDocument")
       .mockImplementation(async (input) => {
         const document = ownedDocument();
         if (
           input.correctionId !== correction.id
           || input.documentId !== correction.document_id
+          || input.processingClaimId !== correction.processing_claim_id
           || input.claimId !== correction.fiscal_claim_id
+          || input.codigoGeneracion !== correction.reserved_codigo_generacion
+          || input.numeroControl !== correction.reserved_numero_control
           || correction.status !== "PROCESSING"
           || !document
           || document.status !== "REJECTED"
@@ -1123,7 +1170,7 @@ describe("guarded fiscal correction API", () => {
     correction: FiscalCorrectionRecord,
     terminalStatus: "ACCEPTED" | "REJECTED" | "FAILED" | "REVIEW_REQUIRED",
     changedFields = ["numDocumento"],
-    includeQueued = false
+    includeQueued = true
   ): void {
     const audits = db.audits.filter(
       (audit) =>
@@ -1162,6 +1209,80 @@ describe("guarded fiscal correction API", () => {
       expect(metadataText).not.toContain("Ana Donante");
       expect(metadataText).not.toContain(correction.request_id);
     }
+  }
+
+  function stubCorrectionAuditReconciliation(
+    correction: FiscalCorrectionRecord,
+    db: InMemoryD1
+  ): void {
+    vi.spyOn(Repository.prototype, "reconcileFiscalCorrectionAudits")
+      .mockImplementation(async (candidate) => {
+        if (candidate.id !== correction.id) return;
+        const transitions = ["QUEUED"];
+        if (candidate.processing_started_at || candidate.status !== "QUEUED") {
+          transitions.push("STARTED");
+        }
+        if (["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(
+          candidate.status
+        )) {
+          transitions.push(candidate.status);
+        }
+        const requestIdHash = await sha256Hex(utf8Bytes(candidate.request_id));
+        const changedFields = [
+          ...new Set(
+            (JSON.parse(candidate.changed_fields_json) as unknown[])
+              .filter((field): field is string =>
+                typeof field === "string"
+                && [
+                  "tipoDocumento", "numDocumento", "nrc", "nombre",
+                  "codActividad", "descActividad", "correo", "telefono",
+                  "codDomiciliado", "codPais", "departamento", "municipio",
+                  "distrito", "complemento"
+                ].includes(field)
+              )
+          )
+        ];
+        for (const transition of transitions) {
+          const action = `FISCAL_CORRECTION_${transition}`;
+          if (db.audits.some(
+            (audit) =>
+              audit.action === action
+              && audit.entity_type === "fiscal_correction"
+              && audit.entity_id === candidate.id
+          )) {
+            continue;
+          }
+          db.audits.push({
+            id: `fiscal_correction_audit:${candidate.id}:${transition}`,
+            actor_type: transition === "QUEUED" ? "USER" : "SYSTEM",
+            actor_id: transition === "QUEUED" ? candidate.created_by : null,
+            action,
+            entity_type: "fiscal_correction",
+            entity_id: candidate.id,
+            summary: action,
+            metadata_json: JSON.stringify({
+              correctionId: candidate.id,
+              target: {
+                kind: candidate.target_kind,
+                id: candidate.target_kind === "WOMPI_EVENT"
+                  ? candidate.wompi_event_id
+                  : candidate.document_id
+              },
+              requestIdHash,
+              attemptNumber: candidate.attempt_number,
+              changedFields,
+              outcomeCode: transition === "STARTED"
+                ? "PROCESSING"
+                : transition === candidate.status && candidate.failure_code
+                  ? candidate.failure_code
+                  : transition
+            }),
+            actor_ip: null,
+            actor_context: null,
+            created_at: "2026-07-18T12:00:00.000Z"
+          });
+        }
+      });
   }
 
   it("requeues only stale queued and proven pre-dispatch fiscal corrections with fresh ownership", async () => {
@@ -1224,6 +1345,10 @@ describe("guarded fiscal correction API", () => {
       candidate.processing_started_at = new Date().toISOString();
       return candidate;
     });
+    const auditReconciliation = vi.spyOn(
+      Repository.prototype,
+      "reconcileFiscalCorrectionAudits"
+    ).mockResolvedValue();
     const queued: IssuanceMessage[] = [];
     const runtime = correctionRuntime(correctionDb(), {
       send: async (message: IssuanceMessage) => queued.push(message)
@@ -1237,6 +1362,7 @@ describe("guarded fiscal correction API", () => {
       staleQueued.id,
       safeProcessing.id
     ]);
+    expect(auditReconciliation).toHaveBeenCalledTimes(2);
     expect(queued).toEqual([
       {
         wompiEventId: staleQueued.wompi_event_id,
@@ -1565,6 +1691,7 @@ describe("guarded fiscal correction API", () => {
         42
       ])
     });
+    stubCorrectionAuditReconciliation(correction, db);
     const queued: IssuanceMessage[] = [];
     vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockImplementation(async () => {
       event.processed_at = null;
@@ -1939,10 +2066,8 @@ describe("guarded fiscal correction API", () => {
     ]);
 
     expect(transmit).toHaveBeenCalledTimes(1);
-    expect(first.ack).toHaveBeenCalledTimes(1);
-    expect(second.ack).toHaveBeenCalledTimes(1);
-    expect(first.retry).not.toHaveBeenCalled();
-    expect(second.retry).not.toHaveBeenCalled();
+    expect(first.ack.mock.calls.length + second.ack.mock.calls.length).toBe(1);
+    expect(first.retry.mock.calls.length + second.retry.mock.calls.length).toBe(1);
     expect(correction).toMatchObject({
       status: "ACCEPTED",
       mh_dispatch_started_at: "2026-07-18T12:03:00.000Z"
@@ -2377,8 +2502,11 @@ describe("guarded fiscal correction API", () => {
       processingClaimId: correction.processing_claim_id,
       documentId: source.id,
       documentClaimId: correction.fiscal_claim_id,
-      signedJws: source.signed_jws
+      signedJws: expect.any(String)
     });
+    expect((markerInput as { signedJws: string }).signedJws).not.toBe(
+      "original.signed.jws"
+    );
     expect(correction).toMatchObject({
       status: "PROCESSING",
       mh_dispatch_started_at: null

@@ -34,24 +34,77 @@ export interface RetentionManifest {
   tables: Record<string, TableManifestEntry>;
 }
 
-// Dependency order for disaster-recovery tooling. Fiscal corrections reference
-// both Wompi events and DTE documents, so restore them after those parents and
-// delete them before either parent. The exporter itself remains table-agnostic.
-export const RETENTION_RESTORE_ORDER = [
-  "wompi_events",
-  "contingency_periods",
-  "dte_documents",
-  "fiscal_corrections",
-  "donation_intents",
-  "dte_events",
-  "email_deliveries",
-  "contingency_batches",
-  "contingency_batch_lines",
-  "audit_logs",
-  "document_sequences"
-] as const;
+interface RetentionForeignKeyPhase {
+  name: string;
+  tables: readonly string[];
+}
 
-export const RETENTION_DELETE_ORDER = [...RETENTION_RESTORE_ORDER].reverse();
+// Disaster-recovery tooling must run these phases in one deferred-foreign-key
+// transaction. contingency_periods, dte_events, and dte_documents form a real
+// cycle, so no flat table order can satisfy every immediate foreign key.
+export const RETENTION_FOREIGN_KEY_PROTOCOL: {
+  transaction: {
+    begin: string;
+    deferForeignKeys: string;
+    verify: string;
+    commit: string;
+    rollback: string;
+  };
+  restorePhases: readonly RetentionForeignKeyPhase[];
+  deletePhases: readonly RetentionForeignKeyPhase[];
+} = {
+  transaction: {
+    begin: "BEGIN IMMEDIATE",
+    deferForeignKeys: "PRAGMA defer_foreign_keys = ON",
+    verify: "PRAGMA foreign_key_check",
+    commit: "COMMIT",
+    rollback: "ROLLBACK"
+  },
+  restorePhases: [
+    {
+      name: "roots",
+      tables: ["wompi_events", "document_sequences"]
+    },
+    {
+      name: "deferred-cycle",
+      tables: ["contingency_periods", "dte_documents", "dte_events"]
+    },
+    {
+      name: "dependents",
+      tables: [
+        "fiscal_corrections",
+        "email_deliveries",
+        "contingency_batches",
+        "donation_intents"
+      ]
+    },
+    {
+      name: "leaves",
+      tables: ["contingency_batch_lines", "audit_logs"]
+    }
+  ],
+  deletePhases: [
+    {
+      name: "leaves-and-dependents",
+      tables: [
+        "fiscal_corrections",
+        "email_deliveries",
+        "contingency_batch_lines",
+        "contingency_batches",
+        "donation_intents",
+        "audit_logs"
+      ]
+    },
+    {
+      name: "deferred-cycle",
+      tables: ["dte_events", "dte_documents", "contingency_periods"]
+    },
+    {
+      name: "roots",
+      tables: ["wompi_events", "document_sequences"]
+    }
+  ]
+};
 
 // Single source of truth for the R2 archive key layout, shared with the backups
 // service so month listing/verification/download derive keys the same way the

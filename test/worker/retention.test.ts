@@ -2,8 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  RETENTION_DELETE_ORDER,
-  RETENTION_RESTORE_ORDER,
+  RETENTION_FOREIGN_KEY_PROTOCOL,
   previousElSalvadorMonth,
   runRetentionExport
 } from "../../src/worker/services/retention";
@@ -767,17 +766,25 @@ describe("runRetentionExport", () => {
     expect(auditBody).not.toContain("Nombre original");
     expect(auditBody).not.toContain("Nombre corregido");
 
-    expect(RETENTION_RESTORE_ORDER.indexOf("fiscal_corrections")).toBeGreaterThan(
-      RETENTION_RESTORE_ORDER.indexOf("dte_documents")
+    const restorePhase = (table: string) =>
+      RETENTION_FOREIGN_KEY_PROTOCOL.restorePhases.findIndex(
+        (phase) => phase.tables.includes(table)
+      );
+    const deletePhase = (table: string) =>
+      RETENTION_FOREIGN_KEY_PROTOCOL.deletePhases.findIndex(
+        (phase) => phase.tables.includes(table)
+      );
+    expect(restorePhase("fiscal_corrections")).toBeGreaterThan(
+      restorePhase("dte_documents")
     );
-    expect(RETENTION_RESTORE_ORDER.indexOf("fiscal_corrections")).toBeGreaterThan(
-      RETENTION_RESTORE_ORDER.indexOf("wompi_events")
+    expect(restorePhase("fiscal_corrections")).toBeGreaterThan(
+      restorePhase("wompi_events")
     );
-    expect(RETENTION_DELETE_ORDER.indexOf("fiscal_corrections")).toBeLessThan(
-      RETENTION_DELETE_ORDER.indexOf("dte_documents")
+    expect(deletePhase("fiscal_corrections")).toBeLessThan(
+      deletePhase("dte_documents")
     );
-    expect(RETENTION_DELETE_ORDER.indexOf("fiscal_corrections")).toBeLessThan(
-      RETENTION_DELETE_ORDER.indexOf("wompi_events")
+    expect(deletePhase("fiscal_corrections")).toBeLessThan(
+      deletePhase("wompi_events")
     );
   });
 
@@ -1284,6 +1291,14 @@ describe("retention restore guidance", () => {
       "MAX(snapshot `next_value`, restored document maximum + 1, restored reservation maximum + 1)"
     );
     expect(guidance).toContain("Never move an existing counter backward");
+    expect(guidance).toContain("BEGIN IMMEDIATE");
+    expect(guidance).toContain("PRAGMA defer_foreign_keys = ON");
+    expect(guidance).toContain("PRAGMA foreign_key_check");
+    expect(guidance).toContain("ROLLBACK");
+    expect(guidance).toContain(
+      "`contingency_periods` ↔ `dte_events` ↔ `dte_documents`"
+    );
+    expect(guidance).not.toContain("Foreign keys matter for ordering");
   });
 });
 

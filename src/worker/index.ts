@@ -428,18 +428,23 @@ async function handleFiscalCorrectionQueueMessage(
       && correction.issuance_attempt_id === (issuanceAttemptId ?? null)
       && correction.fiscal_claim_id === (fiscalClaimId ?? null)
     );
-    if (
-      !correction
-      || !ownsCorrection
-      || ["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)
-      || (correction.status === "PROCESSING" && correction.mh_dispatch_started_at !== null)
-    ) {
+    if (!correction || !ownsCorrection) {
       message.ack();
+      return;
+    }
+    if (["ACCEPTED", "REJECTED", "FAILED", "REVIEW_REQUIRED"].includes(correction.status)) {
+      try {
+        await repo.reconcileFiscalCorrectionAudits(correction);
+        message.ack();
+      } catch (auditError) {
+        logWorkerError(env, "fiscal_correction_audit_reconciliation_failed", auditError);
+        message.retry();
+      }
       return;
     }
     if (
       correction.status === "QUEUED"
-      || (correction.status === "PROCESSING" && correction.mh_dispatch_started_at === null)
+      || correction.status === "PROCESSING"
     ) {
       message.retry();
       return;
@@ -2297,10 +2302,6 @@ async function handleWompiFiscalCorrection(
   if (!claim.correction.issuance_attempt_id) {
     throw new Error("La corrección Wompi reclamada no tiene intento de emisión.");
   }
-  await repo.createFiscalCorrectionAudit(claim.correction, "QUEUED", {
-    type: "USER",
-    id: actor.id
-  });
   try {
     await env.ISSUANCE_QUEUE.send({
       wompiEventId,
@@ -2396,10 +2397,6 @@ async function handleDocumentFiscalCorrection(
   if (!claim.correction.fiscal_claim_id) {
     throw new Error("La corrección de CDE reclamada no tiene propiedad fiscal.");
   }
-  await repo.createFiscalCorrectionAudit(claim.correction, "QUEUED", {
-    type: "USER",
-    id: actor.id
-  });
   try {
     await env.ISSUANCE_QUEUE.send({
       advancedDocumentId: documentId,
