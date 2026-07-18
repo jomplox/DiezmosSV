@@ -29,6 +29,14 @@ describe("keyboard accessibility contract", () => {
     expect(fiscalCorrectionSource).toContain('aria-labelledby="fiscal-correction-title"');
     expect(fiscalCorrectionSource).toContain('event.key === "Escape"');
     expect(fiscalCorrectionSource).toContain('event.key !== "Tab"');
+    expect(fiscalCorrectionSource).toContain("previouslyFocusedRef");
+    expect(fiscalCorrectionSource).toContain(
+      "document.activeElement instanceof HTMLElement"
+    );
+    expect(fiscalCorrectionSource).toContain(
+      "restoreFiscalCorrectionDialogFocus(previouslyFocusedRef.current)"
+    );
+    expect(fiscalCorrectionSource).toContain('document.addEventListener("focusin"');
   });
 
   it("labels the quick-DTE Monto input for screen readers", () => {

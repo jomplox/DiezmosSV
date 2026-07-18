@@ -103,6 +103,47 @@ export function fiscalCorrectionRequestIdForTarget(
   return requestId;
 }
 
+export function trapFiscalCorrectionDialogFocus(
+  dialog: HTMLElement,
+  event: KeyboardEvent
+): void {
+  if (event.key !== "Tab") return;
+  const focusable = Array.from(
+    dialog.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )
+  ).filter(
+    (element) =>
+      !element.hidden && element.getAttribute("aria-hidden") !== "true"
+  );
+  if (focusable.length === 0) {
+    event.preventDefault();
+    dialog.focus();
+    return;
+  }
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = dialog.ownerDocument.activeElement;
+  const activeIndex = focusable.indexOf(active as HTMLElement);
+  if (
+    event.shiftKey
+      ? active === dialog || activeIndex <= 0 || !dialog.contains(active)
+      : active === dialog
+        || activeIndex === -1
+        || activeIndex === focusable.length - 1
+        || !dialog.contains(active)
+  ) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  }
+}
+
+export function restoreFiscalCorrectionDialogFocus(
+  opener: HTMLElement | null
+): void {
+  if (opener?.isConnected) opener.focus();
+}
+
 export function FiscalCorrectionDialog({
   open,
   data,
@@ -124,6 +165,11 @@ export function FiscalCorrectionDialog({
     () => data?.receptor ?? emptyCorrection()
   );
   const dialogRef = useRef<HTMLElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const busyRef = useRef(busy);
+  const onCancelRef = useRef(onCancel);
+  busyRef.current = busy;
+  onCancelRef.current = onCancel;
 
   useEffect(() => {
     if (open && data) {
@@ -133,39 +179,37 @@ export function FiscalCorrectionDialog({
 
   useEffect(() => {
     if (!open) return;
+    previouslyFocusedRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
     dialogRef.current?.focus();
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (!busy) onCancel();
+        if (!busyRef.current) onCancelRef.current();
         return;
       }
-      if (event.key !== "Tab") return;
       const dialog = dialogRef.current;
       if (!dialog) return;
-      const focusable = Array.from(
-        dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
-      ).filter(
-        (element) =>
-          element.offsetParent !== null || element === document.activeElement
-      );
-      if (focusable.length === 0) {
-        event.preventDefault();
-        dialog.focus();
+      trapFiscalCorrectionDialogFocus(dialog, event);
+    }
+    function handleFocusIn(event: FocusEvent) {
+      const dialog = dialogRef.current;
+      if (!dialog || !(event.target instanceof Node) || dialog.contains(event.target)) {
         return;
       }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
+      const first = dialog.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+      (first ?? dialog).focus();
     }
     document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, busy, onCancel]);
+    document.addEventListener("focusin", handleFocusIn);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("focusin", handleFocusIn);
+      restoreFiscalCorrectionDialogFocus(previouslyFocusedRef.current);
+      previouslyFocusedRef.current = null;
+    };
+  }, [open]);
 
   const formState = useMemo(
     () =>

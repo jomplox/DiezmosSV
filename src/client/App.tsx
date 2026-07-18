@@ -874,11 +874,6 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   function closeFiscalCorrection() {
-    if (fiscalCorrectionTarget) {
-      fiscalCorrectionRequestIds.current.delete(
-        fiscalCorrectionTargetKey(fiscalCorrectionTarget)
-      );
-    }
     setFiscalCorrectionTarget(null);
     setFiscalCorrectionData(null);
     setFiscalCorrectionProtectedContext(emptyFiscalCorrectionProtectedContext());
