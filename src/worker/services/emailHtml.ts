@@ -166,11 +166,15 @@ function emailDocument(
   // The logo is centered above the name; without one, the header keeps its historical
   // left-aligned layout so a logo-less deployment renders exactly as before.
   const headerAlign = logo ? "text-align:center;" : "";
+  // Standards-aware clients can honor `only light`; the HTML bgcolor plus solid
+  // background image preserves a branded header fallback in clients that ignore it.
   return `<!DOCTYPE html>
 <html lang="es">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="only light" />
+    <style>:root { color-scheme: only light; }</style>
   </head>
   <body style="margin:0;padding:0;background:#eef3f4;">
     <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef3f4;padding:24px 12px;">
@@ -178,7 +182,7 @@ function emailDocument(
         <td align="center">
           <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border:1px solid ${BORDER_COLOR};border-radius:10px;overflow:hidden;">
             <tr>
-              <td style="background:${brandColor};padding:18px 28px;${headerAlign}">
+              <td bgcolor="${brandColor}" style="background-color:${brandColor};background-image:linear-gradient(${brandColor},${brandColor});padding:18px 28px;${headerAlign}">
                 ${logo}<span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">${escapeHtml(organizationName)}</span><br />
                 <span style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#d2eae7;">Comprobante de Donación Electrónico</span>
               </td>

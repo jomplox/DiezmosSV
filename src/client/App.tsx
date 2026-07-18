@@ -3290,7 +3290,7 @@ function BrandingEditor({
       <div className="credential-field-block branding-preview-block">
         <div className="credential-section-title">
           <h3>Vista previa</h3>
-          <p>Así se verán su nombre, color y logo antes de guardar los cambios.</p>
+          <p>Vista aproximada. Algunos servicios de correo pueden ajustar los colores en modo oscuro.</p>
         </div>
         <div className="branding-preview-grid">
           {/* Correo: a pure div/CSS miniature of the email chrome — NOT an iframe of real

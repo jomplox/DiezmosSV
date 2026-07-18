@@ -5,6 +5,38 @@ import type { DteDocumentRecord } from "../../src/worker/types";
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
 
 describe("HTML email rendering", () => {
+  it("signals a light-only color scheme on every generated HTML email", () => {
+    const htmlEmails = [
+      dteEmailHtml(record(), "Cuerpo", { organizationName: "Misión ExampleOrganization" }),
+      dteEmailHtml(record({ status: "INVALIDATED" }), "Cuerpo", { organizationName: "Misión ExampleOrganization" }),
+      passwordResetEmailHtml("José", "https://example.org/?reset=tok", 45, { organizationName: "Misión ExampleOrganization" }),
+      operationalAlertHtml(
+        {
+          kind: "DTE_FAILED",
+          title: "Fallo al emitir DTE",
+          detail: "Detalle",
+          entityType: "dte_document",
+          entityId: "dte_1"
+        },
+        "https://example.org/",
+        { organizationName: "Misión ExampleOrganization" }
+      ),
+      certificateEmailHtml({
+        organizationName: "Misión ExampleOrganization",
+        donorName: "María",
+        year: 2026,
+        count: 3,
+        totalLabel: "$100.00",
+        isTestEnvironment: false
+      })
+    ];
+
+    for (const html of htmlEmails) {
+      expect(html).toContain('<meta name="color-scheme" content="only light" />');
+      expect(html).toContain(":root { color-scheme: only light; }");
+    }
+  });
+
   it("renders a branded receipt with the document details card", () => {
     const html = dteEmailHtml(record(), "Hola María:\n\nGracias por su donación de $25.50.", { organizationName: "Misión ExampleOrganization" });
 
@@ -86,6 +118,18 @@ describe("HTML email rendering", () => {
 });
 
 describe("HTML email header logo", () => {
+  it("protects the branded header from Gmail dark-mode color inversion", () => {
+    const html = dteEmailHtml(record(), "Cuerpo", {
+      organizationName: "Misión ExampleOrganization",
+      brandColor: "#000000",
+      logoUrl: LOGO_URL
+    });
+
+    expect(html).toContain('bgcolor="#000000"');
+    expect(html).toContain("background-color:#000000");
+    expect(html).toContain("background-image:linear-gradient(#000000,#000000)");
+  });
+
   it("renders the absolute logo image above the organization name on a receipt when a logoUrl is set", () => {
     const html = dteEmailHtml(record(), "Cuerpo", { organizationName: "Misión ExampleOrganization", logoUrl: LOGO_URL });
 
