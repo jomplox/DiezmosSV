@@ -98,6 +98,30 @@ describe("staging smoke private environment file", () => {
     expect(output).not.toContain("Missing required env: WOMPI_API_SECRET");
   });
 
+  it("rejects an invalid smoke DUI before any staging request", () => {
+    const directory = mkdtempSync(join(tmpdir(), "diezmos-staging-smoke-"));
+    const envFile = join(directory, "staging-smoke.env");
+    writeFileSync(
+      envFile,
+      [
+        "STAGING_URL=https://staging.example.org",
+        "STAGING_EMAIL=operator@example.org",
+        "STAGING_PASSWORD=SENTINEL_STAGING_PASSWORD",
+        "WOMPI_API_SECRET=SENTINEL_WOMPI_SECRET",
+        "SMOKE_DONOR_DOCUMENT=01234567-0",
+        "SMOKE_DONOR_EMAIL=smoke@example.org"
+      ].join("\n"),
+      { mode: 0o600 }
+    );
+
+    const result = runSmoke(envFile, ["--dry-run"]);
+    const output = result.stdout + result.stderr;
+
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("SMOKE_DONOR_DOCUMENT must be a valid Salvadoran DUI");
+    expect(output).not.toContain("01234567-0");
+  });
+
   it("documents the out-of-tree smoke env file without inline credentials or donor identity", () => {
     expect(stagingUatSource).toContain("DIEZMOSSV_ENV_FILE");
     expect(stagingUatSource).not.toMatch(/^(?:STAGING_PASSWORD|STAGING_BOOTSTRAP_TOKEN|WOMPI_API_SECRET|SMOKE_DONOR_DOCUMENT|SMOKE_DONOR_EMAIL)=/m);
