@@ -31,6 +31,7 @@ CREATE TABLE fiscal_corrections (
     OR
     (
       target_kind = 'DTE_DOCUMENT'
+      AND wompi_event_id IS NULL
       AND document_id IS NOT NULL
       AND source_document_snapshot_json IS NOT NULL
     )

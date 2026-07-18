@@ -124,6 +124,18 @@ describe("Wompi issuance reservation migration", () => {
          'WOMPI_EVENT', 'wompi_b', 'document_too', '00', 'QUEUED', '{}', '{}',
          '[]', NULL, 'processing', 'user_operator')`
     ).run()).toThrow(/CHECK constraint failed/);
+
+    insertAcceptedDocument(database, "wompi_a", "doc_dte_target_integrity");
+    expect(() => database.prepare(
+      `INSERT INTO fiscal_corrections (
+         id, request_id, request_payload_sha256, attempt_number, target_kind,
+         wompi_event_id, document_id, environment, status, before_receptor_json,
+         corrected_receptor_json, changed_fields_json,
+         source_document_snapshot_json, processing_claim_id, created_by
+       ) VALUES ('correction_dte_with_wompi_target', 'request_dte_with_wompi_target',
+         'sha', 1, 'DTE_DOCUMENT', 'wompi_a', 'doc_dte_target_integrity', '00',
+         'QUEUED', '{}', '{}', '[]', '{}', 'processing', 'user_operator')`
+    ).run()).toThrow(/CHECK constraint failed/);
   });
 
   it("persists claimant fencing tokens for DTE transmission and receipt delivery", () => {
