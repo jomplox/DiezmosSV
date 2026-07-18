@@ -8,6 +8,45 @@ import { Repository } from "../../src/worker/storage/repository";
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
 describe("fiscal repository SQL on SQLite", () => {
+  it("does not claim a generic retry after the observed failure becomes receptor-correctable", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_retry_failure_race";
+    seedFailedWompiEvent(database, wompiEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_error_code = 'ISSUANCE_ERROR',
+              issuance_error_message = 'El proveedor no respondió.'
+        WHERE id = ?`
+    ).run(wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const observed = await observedWompiRetry(repository, wompiEventId);
+    database.prepare(
+      `UPDATE wompi_events
+          SET issuance_error_code = 'WOMPI_INVALID_DONOR_DUI',
+              issuance_error_message = 'Los datos del donante contienen un DUI inválido.'
+        WHERE id = ?`
+    ).run(wompiEventId);
+
+    await expect(repository.claimWompiIssuanceRetry(
+      wompiEventId,
+      "user_operator",
+      observed
+    )).resolves.toBeNull();
+    expect(database.prepare(
+      `SELECT issuance_status, processed_at, issuance_attempt_id,
+              issuance_error_code, issuance_error_message
+         FROM wompi_events
+        WHERE id = ?`
+    ).get(wompiEventId)).toEqual({
+      issuance_status: "FAILED",
+      processed_at: "2026-07-18T12:00:00.000Z",
+      issuance_attempt_id: "previous-attempt",
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: "Los datos del donante contienen un DUI inválido."
+    });
+    database.close();
+  });
+
   it("clears terminal processed evidence when an operator queues a generic retry", async () => {
     const database = migratedDatabase();
     const wompiEventId = "wompi_operator_retry";
@@ -16,7 +55,8 @@ describe("fiscal repository SQL on SQLite", () => {
 
     await expect(repository.claimWompiIssuanceRetry(
       wompiEventId,
-      "user_operator"
+      "user_operator",
+      await observedWompiRetry(repository, wompiEventId)
     )).resolves.toEqual(expect.any(String));
     expect(database.prepare(
       `SELECT issuance_status, processed_at, issuance_attempt_id
@@ -45,7 +85,8 @@ describe("fiscal repository SQL on SQLite", () => {
 
       await expect(repository.claimWompiIssuanceRetry(
         wompiEventId,
-        "user_operator"
+        "user_operator",
+        await observedWompiRetry(repository, wompiEventId)
       )).resolves.toEqual(expect.any(String));
       expect(database.prepare(
         `SELECT issuance_status, processed_at, issuance_attempt_id
@@ -94,11 +135,13 @@ describe("fiscal repository SQL on SQLite", () => {
 
     await expect(repository.claimWompiIssuanceRetry(
       heldEventId,
-      "user_operator"
+      "user_operator",
+      await observedWompiRetry(repository, heldEventId)
     )).resolves.toBeNull();
     await expect(repository.claimWompiIssuanceRetry(
       correctedEventId,
-      "user_operator"
+      "user_operator",
+      await observedWompiRetry(repository, correctedEventId)
     )).resolves.toBeNull();
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM fiscal_corrections WHERE wompi_event_id = ?"
@@ -3625,6 +3668,15 @@ function seedFailedWompiEvent(database: DatabaseSync, id: string): void {
      ) VALUES (?, ?, '00', 'ExitosaAprobada', 2500, '{}', 'FAILED',
        'previous-attempt', 'INVALID_DUI', 'DUI inválido', ?)`
   ).run(id, `transaction_${id}`, "2026-07-18T12:00:00.000Z");
+}
+
+async function observedWompiRetry(
+  repository: Repository,
+  wompiEventId: string
+) {
+  const observed = await repository.getWompiIssuanceRetrySnapshotById(wompiEventId);
+  if (!observed) throw new Error(`missing Wompi retry snapshot ${wompiEventId}`);
+  return observed;
 }
 
 function seedRejectedDocument(database: DatabaseSync, id: string): void {

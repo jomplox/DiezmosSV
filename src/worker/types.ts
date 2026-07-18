@@ -338,6 +338,12 @@ export interface WompiIssuanceFailureItem {
   issuance_failed_at: string | null;
   issuance_dead_lettered_at: string | null;
   reserved_numero_control: string | null;
+  correction_available?: boolean | null;
+}
+
+export interface WompiIssuanceRetrySnapshot extends WompiIssuanceFailureItem {
+  issuance_attempt_id: string | null;
+  issuance_claim_id: string | null;
 }
 
 export interface WompiDocumentIdentifiers {

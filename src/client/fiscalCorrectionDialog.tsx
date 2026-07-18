@@ -37,9 +37,6 @@ import type {
 
 const FOCUSABLE_SELECTOR =
   'button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
-const CORRECTABLE_LOCAL_CODE = /(?:^|_)(?:DONOR|RECEPTOR)(?:_|$)/;
-const CORRECTABLE_RECEPTOR_PATH = /(?:#\/receptor(?:\/|$)|\breceptor\.[A-Za-z])/i;
-
 export interface FiscalCorrectionFormState {
   normalized: FiscalReceptorCorrection | null;
   changed: boolean;
@@ -89,10 +86,15 @@ export function fiscalCorrectionStatusLabel(status: FiscalCorrectionStatus): str
 }
 
 export function isCorrectablePreCdeFailure(
-  item: Pick<WompiIssuanceFailureItem, "issuance_error_code" | "issuance_error_message">
+  item: Pick<WompiIssuanceFailureItem, "correction_available">
 ): boolean {
-  return CORRECTABLE_LOCAL_CODE.test(item.issuance_error_code ?? "")
-    || CORRECTABLE_RECEPTOR_PATH.test(item.issuance_error_message ?? "");
+  return item.correction_available === true;
+}
+
+export function isReviewRequiredPreCdeFailure(
+  item: Pick<WompiIssuanceFailureItem, "correction_available">
+): boolean {
+  return item.correction_available === false;
 }
 
 export function fiscalCorrectionRequestIdForTarget(

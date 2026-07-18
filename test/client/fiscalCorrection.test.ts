@@ -220,17 +220,26 @@ describe("Fallos fiscal correction wiring", () => {
   it("distinguishes deterministic donor errors from transient pre-CDE failures", () => {
     const deterministic = {
       issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
-      issuance_error_message: "Los datos del donante contienen un DUI inválido."
+      issuance_error_message: "Los datos del donante contienen un DUI inválido.",
+      correction_available: true
     } as WompiIssuanceFailureItem;
     const transient = {
       issuance_error_code: "ISSUANCE_ERROR",
-      issuance_error_message: "El proveedor no respondió."
+      issuance_error_message: "El proveedor no respondió.",
+      correction_available: null
+    } as WompiIssuanceFailureItem;
+    const blocked = {
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: "Los datos del donante contienen un DUI inválido.",
+      correction_available: false
     } as WompiIssuanceFailureItem;
 
     expect(isCorrectablePreCdeFailure(deterministic)).toBe(true);
     expect(isCorrectablePreCdeFailure(transient)).toBe(false);
-    expect(appSource).toContain("preCdeActionLabel(item, correctable)");
+    expect(isCorrectablePreCdeFailure(blocked)).toBe(false);
+    expect(appSource).toContain("preCdeActionLabel(item, correctable, reviewRequired)");
     expect(appSource).toContain("isCorrectablePreCdeFailure(item)");
+    expect(appSource).toContain("disabled={reviewRequired || retryQueued || actionBusy}");
   });
 
   it("corrects rejected content instead of blindly retrying its rejected JWS", () => {

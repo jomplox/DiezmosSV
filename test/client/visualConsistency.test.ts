@@ -106,7 +106,8 @@ describe("visual consistency pack", () => {
     expect(panelBlock).toContain("isPreCdeRetryInFlight(item)");
     expect(panelBlock).toContain("{canRetry && (");
     expect(panelBlock).toContain("isCorrectablePreCdeFailure(item)");
-    expect(panelBlock).toContain("preCdeActionLabel(item, correctable)");
+    expect(panelBlock).toContain("preCdeActionLabel(item, correctable, reviewRequired)");
+    expect(panelBlock).toContain("disabled={reviewRequired || retryQueued || actionBusy}");
 
     for (const forbiddenAction of ["PDF", "JSON", "Sello", "Invalidar", "DetailPanel", "onDownload", "documentAction"]) {
       expect(panelBlock).not.toContain(forbiddenAction);

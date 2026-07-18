@@ -399,6 +399,7 @@ describe("Wompi issuance failure recovery API", () => {
       issuance_failed_at: "2026-07-13T22:06:49.000Z",
       issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
       reserved_numero_control: "DTE-15-M001P004-000000000000031",
+      correction_available: null,
       ...overrides
     };
   }
@@ -525,6 +526,131 @@ describe("Wompi issuance failure recovery API", () => {
     }));
   });
 
+  it("returns correction_required when the failure becomes correctable between read and retry claim", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({
+      issuance_status: "FAILED",
+      processed_at: null,
+      issuance_error_code: "ISSUANCE_ERROR",
+      issuance_error_message: "El proveedor no respondió."
+    }));
+    db.beforeWompiIssuanceRetryClaim = () => {
+      db.wompiEvents[0].issuance_error_code = "WOMPI_INVALID_DONOR_DUI";
+      db.wompiEvents[0].issuance_error_message =
+        "Los datos del donante contienen un DUI inválido.";
+    };
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "correction_required",
+      message: "Corrija los datos del donante antes de reintentar la creación del CDE."
+    });
+    expect(db.wompiEvents[0]).toMatchObject({
+      issuance_status: "FAILED",
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI"
+    });
+    expect(queued).toHaveLength(0);
+  });
+
+  it("projects correction availability without resolving bindings for transient failures", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const legacyPayload = {
+      ...wompiSample,
+      IdTransaccion: "list_legacy",
+      Cliente: {
+        ...wompiSample.Cliente,
+        DocumentoIdentidad: "12345678-9"
+      }
+    };
+    const boundPayload = {
+      ...legacyPayload,
+      IdTransaccion: "list_bound",
+      IdExterno: "di_list_bound",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_list_bound"
+      }
+    };
+    const unboundPayload = {
+      ...legacyPayload,
+      IdTransaccion: "list_unbound",
+      IdExterno: "di_list_missing",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_list_missing"
+      }
+    };
+    db.donationIntents.push({
+      id: "di_list_bound",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987654
+    });
+    db.wompiEvents.push(
+      failedWompiEvent({
+        id: "wompi_list_legacy",
+        raw_body: JSON.stringify(legacyPayload),
+        issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+        issuance_error_message: "Los datos del donante contienen un DUI inválido."
+      }),
+      failedWompiEvent({
+        id: "wompi_list_bound",
+        raw_body: JSON.stringify(boundPayload),
+        issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+        issuance_error_message: "Los datos del donante contienen un DUI inválido."
+      }),
+      failedWompiEvent({
+        id: "wompi_list_unbound",
+        raw_body: JSON.stringify(unboundPayload),
+        issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+        issuance_error_message: "Los datos del donante contienen un DUI inválido."
+      }),
+      failedWompiEvent({
+        id: "wompi_list_transient",
+        issuance_error_code: "ISSUANCE_ERROR",
+        issuance_error_message: "El proveedor no respondió."
+      })
+    );
+    const intentLookups = vi.spyOn(Repository.prototype, "getDonationIntent");
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/issuance-failures", {
+        headers: authorization
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const body = await response.json() as {
+      failures: Array<{ id: string; correction_available: boolean | null }>;
+    };
+    expect(Object.fromEntries(
+      body.failures.map((failure) => [failure.id, failure.correction_available])
+    )).toEqual({
+      wompi_list_bound: true,
+      wompi_list_legacy: true,
+      wompi_list_transient: null,
+      wompi_list_unbound: false
+    });
+    expect(intentLookups).toHaveBeenCalledTimes(2);
+    expect(intentLookups).toHaveBeenCalledWith("di_list_bound");
+    expect(intentLookups).toHaveBeenCalledWith("di_list_missing");
+  });
+
   it("queues a generic retry for a non-correctable legacy terminal row stuck in PROCESSING", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
@@ -560,6 +686,53 @@ describe("Wompi issuance failure recovery API", () => {
       wompiEventId: "wompi_failed",
       issuanceAttemptId: db.wompiEvents[0].issuance_attempt_id
     }]);
+  });
+
+  it.each([
+    {
+      label: "ordinary failed row",
+      overrides: {
+        issuance_status: "FAILED",
+        processed_at: null
+      }
+    },
+    {
+      label: "legacy terminal row stuck in PROCESSING",
+      overrides: {
+        issuance_status: "PROCESSING",
+        processed_at: "2026-07-13T22:06:52.000Z",
+        issuance_attempt_id: "legacy-stuck-attempt"
+      }
+    }
+  ])("requires guarded correction instead of generic retry for a correctable $label", async ({ overrides }) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.wompiEvents.push(failedWompiEvent({
+      ...overrides,
+      issuance_error_code: "WOMPI_INVALID_DONOR_DUI",
+      issuance_error_message: "Los datos del donante contienen un DUI inválido."
+    }));
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+        method: "POST",
+        headers: authorization
+      }),
+      env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>
+      })
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "correction_required",
+      message: "Corrija los datos del donante antes de reintentar la creación del CDE."
+    });
+    expect(db.wompiIssuanceRetryClaimCount).toBe(0);
+    expect(queued).toHaveLength(0);
   });
 
   it("allows only one concurrent retry claim and returns the safe current state to the loser", async () => {
@@ -1726,6 +1899,89 @@ describe("guarded fiscal correction API", () => {
     ]);
   });
 
+  it("rejects a guarded Wompi correction when its app intent binding is unresolved", async () => {
+    const db = correctionDb();
+    const payload = correctionWebhook({
+      IdExterno: "di_missing_correction",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_missing_correction"
+      }
+    });
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(
+      correctionEvent({ raw_body: JSON.stringify(payload) }) as any
+    );
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+    const claim = vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection");
+    const queued: IssuanceMessage[] = [];
+
+    const dataResponse = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correction-data",
+      {},
+      "GET"
+    ), correctionRuntime(db));
+    const response = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: "03030303-0303-4303-8303-030303030303",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>));
+
+    expect(dataResponse.status).toBe(200);
+    await expect(dataResponse.json()).resolves.toMatchObject({
+      correctable: false,
+      guidance: "La intención de donación no coincide con este evento Wompi. Revise el vínculo antes de reintentar."
+    });
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "wompi_intent_binding_unresolved",
+      message: "La intención de donación no coincide con este evento Wompi."
+    });
+    expect(claim).not.toHaveBeenCalled();
+    expect(queued).toHaveLength(0);
+  });
+
+  it("keeps guarded Wompi correction available for a bound app intent", async () => {
+    const db = correctionDb();
+    const payload = correctionWebhook({
+      IdExterno: "di_bound_correction",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_bound_correction"
+      }
+    });
+    vi.spyOn(Repository.prototype, "getWompiEventById").mockResolvedValue(
+      correctionEvent({ raw_body: JSON.stringify(payload) }) as any
+    );
+    vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue({
+      id: "di_bound_correction",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987654,
+      gift_type: "DIEZMO"
+    } as any);
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrection").mockResolvedValue({
+      kind: "claimed",
+      correction: correctionRecord()
+    });
+    const queued: IssuanceMessage[] = [];
+
+    const response = await worker.fetch(correctionRequest(
+      "/api/wompi-events/wompi_bad_dui/correct-and-retry",
+      {
+        correctionRequestId: "04040404-0404-4404-8404-040404040404",
+        receptor: correctionReceptor({ nombre: "Nombre corregido" })
+      }
+    ), correctionRuntime(db, {
+      send: async (message: IssuanceMessage) => queued.push(message)
+    } as unknown as Queue<IssuanceMessage>));
+
+    expect(response.status).toBe(202);
+    expect(queued).toHaveLength(1);
+  });
+
   it("accepts a guarded correction for a legacy terminal event stuck in PROCESSING", async () => {
     const db = correctionDb();
     const event = correctionEvent({
@@ -1759,6 +2015,59 @@ describe("guarded fiscal correction API", () => {
       fiscalCorrectionProcessingClaimId: "correction_processing_1",
       issuanceAttemptId: "issuance_attempt_1"
     }]);
+  });
+
+  it("stops a claimed Wompi correction when its bound intent becomes unresolved before queue processing", async () => {
+    const db = correctionDb();
+    const payload = correctionWebhook({
+      IdExterno: "di_raced_correction",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_raced_correction"
+      }
+    });
+    const event = correctionEvent({
+      raw_body: JSON.stringify(payload),
+      processed_at: null,
+      issuance_status: "RETRY_QUEUED",
+      issuance_attempt_id: "issuance_attempt_raced"
+    });
+    const correction = correctionRecord({
+      issuance_attempt_id: "issuance_attempt_raced"
+    });
+    db.wompiEvents.push(event);
+    const intent = {
+      id: "di_raced_correction",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987654
+    };
+    db.donationIntents.push(intent);
+    stubQueuedCorrectionLifecycle(correction, event, db);
+    // The HTTP request claimed the correction while the intent was bound. Before the
+    // queued worker starts, another lifecycle write makes that binding ineligible.
+    intent.status = "COMPLETED";
+    const sequenceBefore = db.nextSequence;
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+
+    const disposition = await consumeCorrectionMessage(
+      correctionRuntime(db),
+      {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: "issuance_attempt_raced"
+      }
+    );
+
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      status: "FAILED",
+      failure_code: "WOMPI_INTENT_QUARANTINED"
+    });
+    expect(db.documents).toHaveLength(0);
+    expect(db.nextSequence).toBe(sequenceBefore);
+    expect(transmit).not.toHaveBeenCalled();
   });
 
   it("issues a corrected pre-CDE Wompi failure with its existing reservation", async () => {
@@ -16719,6 +17028,7 @@ class InMemoryD1 {
   beforeDocumentSignedUpdate: (() => void | Promise<void>) | null = null;
   beforeRejectedWompiClaim: (() => void | Promise<void>) | null = null;
   beforeWompiIssuanceClaim: (() => void | Promise<void>) | null = null;
+  beforeWompiIssuanceRetryClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptFinalizationClaim: (() => void | Promise<void>) | null = null;
   beforePostAcceptEmailDispatchMark: (() => void | Promise<void>) | null = null;
   beforeAuditCount: ((action: string, entityId: string) => Promise<void>) | null = null;
@@ -16765,6 +17075,12 @@ class InMemoryD1 {
         statement.sql.includes("event_type = 'INVALIDACION'") &&
         statement.sql.includes("SET status = ?")
     );
+    const wompiIssuanceRetry = statements.some(
+      (statement) =>
+        statement.sql.includes("UPDATE wompi_events") &&
+        statement.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
+        statement.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
+    );
     if (credentialGuarded && this.beforeCredentialGuardedSessionBatch) {
       const beforeBatch = this.beforeCredentialGuardedSessionBatch;
       this.beforeCredentialGuardedSessionBatch = null;
@@ -16779,6 +17095,11 @@ class InMemoryD1 {
       const beforeMutation = this.beforeGuardedUserMutation;
       this.beforeGuardedUserMutation = null;
       await beforeMutation();
+    }
+    if (wompiIssuanceRetry && this.beforeWompiIssuanceRetryClaim) {
+      const beforeClaim = this.beforeWompiIssuanceRetryClaim;
+      this.beforeWompiIssuanceRetryClaim = null;
+      await beforeClaim();
     }
 
     const previous = this.batchTail;
@@ -18270,7 +18591,13 @@ class Statement {
       const event = withWompiIssuanceDefaults(
         this.db.wompiEvents.find((row) => row.id === this.args[0])
       );
-      return (event ? wompiIssuanceFailureProjection(event) : null) as T | null;
+      if (!event) return null;
+      const failure = wompiIssuanceFailureProjection(event);
+      if (this.sql.includes("issuance_attempt_id, issuance_claim_id")) {
+        failure.issuance_attempt_id = event.issuance_attempt_id ?? null;
+        failure.issuance_claim_id = event.issuance_claim_id ?? null;
+      }
+      return failure as T;
     }
     if (this.sql.includes("SELECT * FROM wompi_events WHERE id = ?")) {
       return (withWompiIssuanceDefaults(
@@ -19973,6 +20300,16 @@ class Statement {
       this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
     ) {
       const [attemptId, queuedAt, wompiEventId] = this.args;
+      const observed = this.sql.includes("AND issuance_error_code IS ?")
+        ? {
+            status: this.args[3],
+            processedAt: this.args[4],
+            attemptId: this.args[5],
+            claimId: this.args[6],
+            errorCode: this.args[7],
+            errorMessage: this.args[8]
+          }
+        : null;
       const event = this.db.wompiEvents.find(
         (row) =>
           row.id === wompiEventId &&
@@ -19984,6 +20321,17 @@ class Statement {
             || (
               (row.issuance_status === "RETRY_QUEUED" || row.issuance_status === "PROCESSING")
               && row.processed_at != null
+            )
+          ) &&
+          (
+            observed === null
+            || (
+              (row.issuance_status ?? null) === observed.status
+              && (row.processed_at ?? null) === observed.processedAt
+              && (row.issuance_attempt_id ?? null) === observed.attemptId
+              && (row.issuance_claim_id ?? null) === observed.claimId
+              && (row.issuance_error_code ?? null) === observed.errorCode
+              && (row.issuance_error_message ?? null) === observed.errorMessage
             )
           )
       );

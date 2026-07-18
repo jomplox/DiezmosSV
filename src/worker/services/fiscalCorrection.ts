@@ -27,6 +27,8 @@ import { generationCode, numeroControl } from "../utils/ids";
 
 const CONFIGURATION_GUIDANCE =
   "Revise Configuración y la evidencia técnica antes de volver a intentar.";
+const INTENT_BINDING_GUIDANCE =
+  "La intención de donación no coincide con este evento Wompi. Revise el vínculo antes de reintentar.";
 const LOCAL_RECEPTOR_FAILURE_CODE_PATTERN =
   /(?:^|_)(?:DONOR|RECEPTOR)(?:_|$)/;
 const MH_RECEPTOR_FIELD_PATH_PATTERN =
@@ -47,13 +49,20 @@ export async function effectiveWompiCorrectionData(
     event.issuance_error_code,
     "La emisión no pudo crear el CDE."
   );
-  const correctable = isCorrectableFailure(event.issuance_error_code, failureReason);
+  const correctable = binding.kind !== "unbound" && requiresFiscalReceptorCorrection(
+    event.issuance_error_code,
+    failureReason
+  );
   return {
     receptor: effectiveWompiReceptor(payload, intent),
     targetStatus: event.issuance_status ?? "FAILED",
     failureReason,
     correctable,
-    guidance: correctable ? null : CONFIGURATION_GUIDANCE,
+    guidance: binding.kind === "unbound"
+      ? INTENT_BINDING_GUIDANCE
+      : correctable
+        ? null
+        : CONFIGURATION_GUIDANCE,
     activeCorrection: null
   };
 }
@@ -63,7 +72,10 @@ export function effectiveDocumentCorrectionData(
 ): FiscalCorrectionData {
   const source = parseDocument(document.plain_json);
   const failureReason = documentFailureReason(document);
-  const correctable = isCorrectableFailure(document.mh_estado, failureReason);
+  const correctable = requiresFiscalReceptorCorrection(
+    document.mh_estado,
+    failureReason
+  );
   return {
     receptor: receptorFromDocument(source),
     targetStatus: document.status,
@@ -267,7 +279,7 @@ function safeFailureReason(
   return (clean(message) ?? clean(code) ?? fallback).slice(0, 500);
 }
 
-function isCorrectableFailure(
+export function requiresFiscalReceptorCorrection(
   code: string | null | undefined,
   reason: string
 ): boolean {
