@@ -4,9 +4,9 @@ import { brandingOrigin, loadEmailBranding } from "./branding";
 import { operationalAlertHtml } from "./emailHtml";
 import { classifyEmailDispatchError, EmailService } from "./email";
 import { logOperationalAlert } from "./observability";
+import { isValidEmail } from "../../shared/email";
 
 export const ALERT_EMAIL_SETTING_KEY = "alert_email";
-const ALERT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export interface OperationalAlert {
   kind: string;
@@ -223,7 +223,7 @@ function parseAlertRecipients(value: string | null | undefined): string[] | null
   }
   const parts = raw.split(",");
   const recipients = parts.map((part) => part.trim());
-  if (recipients.some((recipient) => !recipient || !ALERT_EMAIL_PATTERN.test(recipient))) {
+  if (recipients.some((recipient) => !recipient || !isValidEmail(recipient))) {
     return null;
   }
   return recipients;

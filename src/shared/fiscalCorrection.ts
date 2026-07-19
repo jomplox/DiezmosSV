@@ -9,6 +9,7 @@ import {
   normalizeCat020CountryCode
 } from "./catalogs";
 import { formatDui, isDuiDocumentType, isValidDui } from "./dui";
+import { isValidEmail } from "./email";
 import { formatNit, isValidNitFormat } from "./nit";
 
 export interface FiscalReceptorCorrection {
@@ -94,7 +95,7 @@ function normalizeAndValidate(input: Record<string, unknown>): FiscalReceptorCor
   }
 
   const correo = optionalText(input.correo, "correo", 6, 100)?.toLowerCase() ?? null;
-  if (correo !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correo)) {
+  if (correo !== null && !isValidEmail(correo)) {
     invalid("correo debe tener formato de correo válido.");
   }
   const telefono = optionalText(input.telefono, "telefono", 8, 30);

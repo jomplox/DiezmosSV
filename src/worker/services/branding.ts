@@ -5,6 +5,8 @@
 // (content type, size, cache-busting version) mirrored into branding_logo. Defaults
 // keep an unbranded deployment identical to the historical "ExamplePerson1" build.
 
+import { EMAIL_PATTERN } from "../../shared/email";
+
 export const BRANDING_DISPLAY_NAME_SETTING_KEY = "branding_display_name";
 export const BRANDING_ACCENT_COLOR_SETTING_KEY = "branding_accent_color";
 export const BRANDING_SUPPORT_EMAIL_SETTING_KEY = "branding_support_email";
@@ -39,9 +41,9 @@ const LOGO_EXTENSIONS: Record<BrandingLogoContentType, string> = {
 };
 
 const ACCENT_COLOR_PATTERN = /^#[0-9a-f]{6}$/;
-// The same pragmatic email shape used elsewhere (isValidEmail in App.tsx, normalizeEmail
-// in the worker index): one @, a dot in the domain, no whitespace. Deliberately lenient.
-const SUPPORT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Support email uses the shared pragmatic shape (src/shared/email.ts): one @, a dot
+// in the domain, no whitespace. Deliberately lenient.
+const SUPPORT_EMAIL_PATTERN = EMAIL_PATTERN;
 
 export class BrandingValidationError extends Error {}
 

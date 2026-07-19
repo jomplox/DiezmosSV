@@ -4,6 +4,8 @@
 // the same endpoint for their logo. Defaults keep an unbranded build on the historical
 // "ExamplePerson1" identity.
 
+import { EMAIL_PATTERN } from "../shared/email";
+
 export const CLIENT_BRANDING_DEFAULTS = {
   displayName: "ExamplePerson1",
   accentColor: "#0f766e",
@@ -22,9 +24,9 @@ export const BRANDING_LOGO_MAX_BYTES = 512 * 1024;
 export const BRANDING_LOGO_ACCEPT = ".svg,.png,.jpg,.jpeg,image/svg+xml,image/png,image/jpeg";
 
 const ACCENT_COLOR_PATTERN = /^#[0-9a-f]{6}$/i;
-// Same pragmatic email shape the worker uses (normalizeBrandingSupportEmail): one @, a
-// dot in the domain, no whitespace.
-const SUPPORT_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Same pragmatic email shape the worker uses (src/shared/email.ts): one @, a dot in
+// the domain, no whitespace.
+const SUPPORT_EMAIL_PATTERN = EMAIL_PATTERN;
 
 // Client-side pre-validation mirroring the worker's rules, so the Marca form can flag
 // obvious problems before the round-trip. Returns a Spanish error, or null when valid.
