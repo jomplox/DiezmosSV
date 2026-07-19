@@ -4,7 +4,7 @@ import { describe, expect, test } from "vitest";
 import type { CredentialStatus } from "../../src/client/types";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
 
-const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 
 const status: CredentialStatus = {
   target: {
@@ -157,54 +157,54 @@ describe("certificateExpiryStatus", () => {
 
 describe("Firmador panel certificate expiry wiring (source contract)", () => {
   test("computes the certificate expiry status from the credentials status field and renders it inside the Ministerio de Hacienda section", () => {
-    expect(appSource).toContain("certificateExpiryStatus(status?.certificateExpiresAt ?? null)");
-    expect(appSource).toContain("<h3>Firmador del Ministerio de Hacienda</h3>");
-    expect(appSource).toContain("<h3>Credenciales API del Ministerio de Hacienda ({activeEnvironmentLabel})</h3>");
-    expect(appSource).toContain("className={`legal-box ${certificateExpiry.tone} span-2`}");
-    expect(appSource).toContain("<strong>{certificateExpiry.label}</strong>");
+    expect(credentialsPanelSource).toContain("certificateExpiryStatus(status?.certificateExpiresAt ?? null)");
+    expect(credentialsPanelSource).toContain("<h3>Firmador del Ministerio de Hacienda</h3>");
+    expect(credentialsPanelSource).toContain("<h3>Credenciales API del Ministerio de Hacienda ({activeEnvironmentLabel})</h3>");
+    expect(credentialsPanelSource).toContain("className={`legal-box ${certificateExpiry.tone} span-2`}");
+    expect(credentialsPanelSource).toContain("<strong>{certificateExpiry.label}</strong>");
   });
 });
 
 describe("Emisor code field helper text (source contract)", () => {
   test("explains each similar establishment and point-of-sale code field", () => {
-    expect(appSource).toContain("Identificador oficial del establecimiento autorizado por el Ministerio de Hacienda.");
-    expect(appSource).toContain("Identificador oficial del punto de venta o terminal reconocido por el Ministerio de Hacienda.");
-    expect(appSource).toContain("Código propio del emisor para agrupar documentos por sede interna; puede coincidir con el código MH si no manejan otro.");
-    expect(appSource).toContain("Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.");
-    expect(appSource).toContain("Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.");
+    expect(credentialsPanelSource).toContain("Identificador oficial del establecimiento autorizado por el Ministerio de Hacienda.");
+    expect(credentialsPanelSource).toContain("Identificador oficial del punto de venta o terminal reconocido por el Ministerio de Hacienda.");
+    expect(credentialsPanelSource).toContain("Código propio del emisor para agrupar documentos por sede interna; puede coincidir con el código MH si no manejan otro.");
+    expect(credentialsPanelSource).toContain("Código propio del emisor para la caja, terminal o flujo interno que genera el CDE; no reemplaza el código MH.");
+    expect(credentialsPanelSource).toContain("Prefijo usado para construir el número de control del CDE; normalmente combina establecimiento y punto de venta internos.");
   });
 
   test("treats the active issuer configuration as replacement-only", () => {
-    expect(appSource).not.toContain('credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue');
-    expect(appSource).not.toContain("Datos activos cargados en campos editables");
-    expect(appSource).toContain("Configuración protegida; complete todos los campos para reemplazarla");
+    expect(credentialsPanelSource).not.toContain('credentialItem(status, "EMISOR_CONFIG_JSON")?.displayValue');
+    expect(credentialsPanelSource).not.toContain("Datos activos cargados en campos editables");
+    expect(credentialsPanelSource).toContain("Configuración protegida; complete todos los campos para reemplazarla");
   });
 });
 
 describe("Correo alert recipients (source contract)", () => {
   test("allows multiple operational alert recipients separated by commas", () => {
-    expect(appSource).toContain("Correos para avisos operativos");
-    expect(appSource).toContain('placeholder="admin@example.org, soporte@example.org"');
-    expect(appSource).toContain('type="email"');
-    expect(appSource).toContain("multiple");
-    expect(appSource).toContain("Separe varios correos con una sola coma (,).");
-    expect(appSource).toContain("Guardar correos de alertas");
+    expect(credentialsPanelSource).toContain("Correos para avisos operativos");
+    expect(credentialsPanelSource).toContain('placeholder="admin@example.org, soporte@example.org"');
+    expect(credentialsPanelSource).toContain('type="email"');
+    expect(credentialsPanelSource).toContain("multiple");
+    expect(credentialsPanelSource).toContain("Separe varios correos con una sola coma (,).");
+    expect(credentialsPanelSource).toContain("Guardar correos de alertas");
   });
 });
 
 describe("Correo provider destination authority (source contract)", () => {
   test("shows the provider destination as deployment-managed and not editable", () => {
-    expect(appSource).toContain("EMAIL_PROVIDER_URL");
-    expect(appSource).toContain("Administrado por el despliegue");
-    expect(appSource).not.toContain("input.emailApiUrl");
-    expect(appSource).not.toContain("EMAIL_API_URL");
+    expect(credentialsPanelSource).toContain("EMAIL_PROVIDER_URL");
+    expect(credentialsPanelSource).toContain("Administrado por el despliegue");
+    expect(credentialsPanelSource).not.toContain("input.emailApiUrl");
+    expect(credentialsPanelSource).not.toContain("EMAIL_API_URL");
   });
 });
 
 describe("Ambiente emission-environment save guard (source contract)", () => {
   test("rejects deployment-incompatible choices and only short-circuits a matching persisted setting", () => {
-    expect(appSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");
-    expect(appSource).toContain('emissionEnvironment.environment === environment && emissionEnvironment.source === "setting"');
-    expect(appSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
+    expect(credentialsPanelSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");
+    expect(credentialsPanelSource).toContain('emissionEnvironment.environment === environment && emissionEnvironment.source === "setting"');
+    expect(credentialsPanelSource).not.toContain("if (emissionBusy || runtimeEnvironment.environment === environment) return;");
   });
 });
