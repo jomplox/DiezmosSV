@@ -35,6 +35,9 @@ import { wompiEventForReservation } from "./support/wompiEventFixtures";
 installWorkerFetchGlobals();
 
 
+
+
+
 describe("advanced CDE generation", () => {
   it.each([
     ["production", "/api/test/dte"],
