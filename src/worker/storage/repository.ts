@@ -5,6 +5,7 @@ import { amountCents, donorName } from "../domain/wompi";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
+import { redactSensitiveAuditRows } from "./shared";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -263,24 +264,6 @@ function retentionSnapshotTimestampColumn(
   table: RetentionSnapshotTable
 ): "created_at" | "received_at" {
   return table === "wompi_events" ? "received_at" : "created_at";
-}
-
-// The alert-email setting is OWNER-only, but its ALERT_EMAIL_UPDATED audit rows are
-// readable by lower roles through the audit trail. Newer writes never record the
-// address, but rows written before that fix still carry it in the summary/metadata, so
-// the read path scrubs those columns for the app_setting/alert_email entity regardless
-// of role. It keeps that an update happened; it only drops the address value.
-function redactSensitiveAuditRows(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return rows.map((row) => {
-    if (row.entity_type !== "app_setting" || row.entity_id !== "alert_email") {
-      return row;
-    }
-    return {
-      ...row,
-      summary: row.action === "ALERT_EMAIL_UPDATED" ? "Correo de alertas actualizado" : row.summary,
-      metadata_json: "{}"
-    };
-  });
 }
 
 // Raw D1 column shape for the contacts export join (snake_case, intent_* columns
