@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { INTENT_EXPIRY_SWEEP_LIMIT } from "../../src/worker/storage/repository";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { emisorConfig } from "./support/dteFixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { sha256Hex } from "./support/workerFetchHelpers";
 
 installWorkerFetchGlobals();
 
@@ -1118,7 +1119,3 @@ describe("donation intents", () => {
     });
   });
 });
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}

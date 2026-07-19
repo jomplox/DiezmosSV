@@ -5,7 +5,7 @@ import worker from "../../src/worker/index";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { MhClient } from "../../src/worker/services/mhClient";
 import { Repository } from "../../src/worker/storage/repository";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env, IssuanceMessage, WompiWebhook } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { makeDocument as testDocument } from "./fixtures";
@@ -17,19 +17,9 @@ import {
 } from "./support/dteFixtures";
 import { TEST_RESEND_REQUEST_ID } from "./support/documentDeliveryFixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { jsonResponse, sha256Hex } from "./support/workerFetchHelpers";
 
 installWorkerFetchGlobals();
-
-function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) }
-  });
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}
 
 describe("donation intent correlation", () => {
   const INTENT_ADDRESS = {
