@@ -975,6 +975,115 @@ async function handleDonationIntentStatus(ctx: ApiRouteContext): Promise<Respons
   return jsonResponse({ status: intent.status, paid: intent.paid_at != null });
 }
 
+async function handleBootstrapOwner(ctx: ApiRouteContext): Promise<Response> {
+  if (!isBootstrapOwnerTokenConfigured(ctx.env)) {
+    return jsonResponse({ error: "bootstrap_configuration_invalid" }, { status: 503 });
+  }
+  const claimNow = nowIso();
+  const accepted = await ctx.repo.claimLoginAttempt(
+    await rateLimitKey(`bootstrap-owner:${clientIpFrom(ctx.request)}`),
+    claimNow,
+    authThrottleSinceIso(),
+    authThrottleExpiresIso(),
+    BOOTSTRAP_ATTEMPT_LIMIT
+  );
+  if (!accepted) {
+    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  }
+  if (!(await hasValidBootstrapOwnerToken(ctx.request, ctx.env))) {
+    return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
+  }
+  const body = (await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; password: string };
+  let owner;
+  try {
+    owner = await ctx.auth.bootstrapOwner(body);
+  } catch (error) {
+    if (error instanceof BootstrapUnavailableError) {
+      return jsonResponse({ error: "bootstrap_unavailable", message: error.message }, { status: 409 });
+    }
+    throw error;
+  }
+  await ctx.repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
+  return jsonResponse({ user: owner }, { status: 201 });
+}
+
+async function handleLogin(ctx: ApiRouteContext): Promise<Response> {
+  const body = (await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
+  const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
+  const { ip: callerIp } = auditContextFrom(ctx.request);
+  const claimNow = nowIso();
+  const accepted = await ctx.repo.claimLoginAttempt(
+    await rateLimitKey(callerIp),
+    claimNow,
+    authThrottleSinceIso(),
+    authThrottleExpiresIso(),
+    LOGIN_IP_ATTEMPT_LIMIT
+  );
+  if (!accepted) {
+    return jsonResponse(
+      {
+        error: "too_many_attempts",
+        message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
+      },
+      { status: 429 }
+    );
+  }
+  const recentFailures = await ctx.repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
+  if (recentFailures >= LOGIN_FAILED_LIMIT) {
+    // Short-circuit before authenticating so a throttled attempt costs the same as
+    // any other rejection — no PBKDF2 work, no DB read, no timing signal. Keyed on
+    // (email, caller IP) so only the abusing IP is throttled, not the victim.
+    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  }
+  let result;
+  try {
+    result = await ctx.auth.login(body.email, body.password);
+  } catch (error) {
+    await ctx.repo.createAudit({ action: "LOGIN_FAILED", entityType: "user", entityId: normalizedEmail, summary: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
+  await ctx.repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
+  return jsonResponse(result);
+}
+
+async function handleLogout(ctx: ApiRouteContext): Promise<Response> {
+  await ctx.auth.logout(ctx.request);
+  return new Response(null, { status: 204 });
+}
+
+async function handlePasswordResetRequest(ctx: ApiRouteContext): Promise<Response> {
+  const body = (await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
+  const email = String(body.email ?? "").trim();
+  if (email) {
+    const task = processPasswordResetRequest(ctx.repo, ctx.auth, ctx.env, ctx.url, email, clientIpFrom(ctx.request))
+      .catch((error) => logWorkerError(ctx.env, "password_reset_request_failed", error));
+    if (ctx.executionContext) {
+      ctx.executionContext.waitUntil(task);
+    } else {
+      void task;
+    }
+  }
+  // Always report success so the endpoint cannot be used to probe which emails exist.
+  return jsonResponse({ ok: true });
+}
+
+async function handlePasswordResetConfirm(ctx: ApiRouteContext): Promise<Response> {
+  const body = (await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { token?: string; password?: string };
+  try {
+    const resetUser = await ctx.auth.confirmPasswordReset(String(body.token ?? ""), String(body.password ?? ""));
+    await ctx.repo.createAudit({ actorType: "USER", actorId: resetUser.id, action: "PASSWORD_RESET_COMPLETED", entityType: "user", entityId: resetUser.id, summary: resetUser.email });
+    return jsonResponse({ ok: true });
+  } catch (error) {
+    if (error instanceof PasswordResetError) {
+      return jsonResponse({ error: "invalid_reset_token", message: error.message }, { status: 400 });
+    }
+    if (error instanceof PasswordPolicyError) {
+      return jsonResponse({ error: "weak_password", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -984,6 +1093,14 @@ const publicRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/donations/intent", handler: handleCreateDonationIntent },
   { method: "POST", pattern: /^\/api\/donations\/intent\/([^/]+)\/datos$/, handler: handleDonationIntentDatos },
   { method: "GET", pattern: /^\/api\/donations\/intent\/([^/]+)\/status$/, handler: handleDonationIntentStatus }
+];
+
+const authRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "POST", pattern: "/api/auth/bootstrap-owner", handler: handleBootstrapOwner },
+  { method: "POST", pattern: "/api/auth/login", handler: handleLogin },
+  { method: "POST", pattern: "/api/auth/logout", handler: handleLogout },
+  { method: "POST", pattern: "/api/auth/password-reset/request", handler: handlePasswordResetRequest },
+  { method: "POST", pattern: "/api/auth/password-reset/confirm", handler: handlePasswordResetConfirm }
 ];
 
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
@@ -1008,115 +1125,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   };
   const publicResponse = await dispatchRoutes(publicRoutes, apiContext, requireRole);
   if (publicResponse) return publicResponse;
-
-  if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
-    if (!isBootstrapOwnerTokenConfigured(env)) {
-      return jsonResponse({ error: "bootstrap_configuration_invalid" }, { status: 503 });
-    }
-    const claimNow = nowIso();
-    const accepted = await repo.claimLoginAttempt(
-      await rateLimitKey(`bootstrap-owner:${clientIpFrom(request)}`),
-      claimNow,
-      authThrottleSinceIso(),
-      authThrottleExpiresIso(),
-      BOOTSTRAP_ATTEMPT_LIMIT
-    );
-    if (!accepted) {
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
-    if (!(await hasValidBootstrapOwnerToken(request, env))) {
-      return jsonResponse({ error: "bootstrap_token_required" }, { status: 403 });
-    }
-    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; password: string };
-    let owner;
-    try {
-      owner = await auth.bootstrapOwner(body);
-    } catch (error) {
-      if (error instanceof BootstrapUnavailableError) {
-        return jsonResponse({ error: "bootstrap_unavailable", message: error.message }, { status: 409 });
-      }
-      throw error;
-    }
-    await repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });
-    return jsonResponse({ user: owner }, { status: 201 });
-  }
-
-  if (url.pathname === "/api/auth/login" && request.method === "POST") {
-    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; password: string };
-    const normalizedEmail = String(body.email ?? "").trim().toLowerCase();
-    const { ip: callerIp } = auditContextFrom(request);
-    const claimNow = nowIso();
-    const accepted = await repo.claimLoginAttempt(
-      await rateLimitKey(callerIp),
-      claimNow,
-      authThrottleSinceIso(),
-      authThrottleExpiresIso(),
-      LOGIN_IP_ATTEMPT_LIMIT
-    );
-    if (!accepted) {
-      return jsonResponse(
-        {
-          error: "too_many_attempts",
-          message: "Demasiados intentos. Espere 15 minutos e intente de nuevo."
-        },
-        { status: 429 }
-      );
-    }
-    const recentFailures = await repo.countAuditEntriesSinceForIp("LOGIN_FAILED", normalizedEmail, callerIp, authThrottleSinceIso());
-    if (recentFailures >= LOGIN_FAILED_LIMIT) {
-      // Short-circuit before authenticating so a throttled attempt costs the same as
-      // any other rejection — no PBKDF2 work, no DB read, no timing signal. Keyed on
-      // (email, caller IP) so only the abusing IP is throttled, not the victim.
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
-    let result;
-    try {
-      result = await auth.login(body.email, body.password);
-    } catch (error) {
-      await repo.createAudit({ action: "LOGIN_FAILED", entityType: "user", entityId: normalizedEmail, summary: error instanceof Error ? error.message : String(error) });
-      throw error;
-    }
-    await repo.createAudit({ actorType: "USER", actorId: result.user.id, action: "LOGIN", entityType: "user", entityId: result.user.id, summary: result.user.email });
-    return jsonResponse(result);
-  }
-
-  if (url.pathname === "/api/auth/logout" && request.method === "POST") {
-    await auth.logout(request);
-    return new Response(null, { status: 204 });
-  }
-
-  if (url.pathname === "/api/auth/password-reset/request" && request.method === "POST") {
-    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { email?: string };
-    const email = String(body.email ?? "").trim();
-    if (email) {
-      const task = processPasswordResetRequest(repo, auth, env, url, email, clientIpFrom(request))
-        .catch((error) => logWorkerError(env, "password_reset_request_failed", error));
-      if (ctx) {
-        ctx.waitUntil(task);
-      } else {
-        void task;
-      }
-    }
-    // Always report success so the endpoint cannot be used to probe which emails exist.
-    return jsonResponse({ ok: true });
-  }
-
-  if (url.pathname === "/api/auth/password-reset/confirm" && request.method === "POST") {
-    const body = (await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as { token?: string; password?: string };
-    try {
-      const resetUser = await auth.confirmPasswordReset(String(body.token ?? ""), String(body.password ?? ""));
-      await repo.createAudit({ actorType: "USER", actorId: resetUser.id, action: "PASSWORD_RESET_COMPLETED", entityType: "user", entityId: resetUser.id, summary: resetUser.email });
-      return jsonResponse({ ok: true });
-    } catch (error) {
-      if (error instanceof PasswordResetError) {
-        return jsonResponse({ error: "invalid_reset_token", message: error.message }, { status: 400 });
-      }
-      if (error instanceof PasswordPolicyError) {
-        return jsonResponse({ error: "weak_password", message: error.message }, { status: 400 });
-      }
-      throw error;
-    }
-  }
+  const authResponse = await dispatchRoutes(authRoutes, apiContext, requireRole);
+  if (authResponse) return authResponse;
 
   if (url.pathname === "/api/documents" && request.method === "GET") {
     requireRole(user, "VIEWER");
