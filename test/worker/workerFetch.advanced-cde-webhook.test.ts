@@ -954,4 +954,3 @@ describe("Wompi webhook integration", () => {
     expect(db.donationIntents.find((row) => row.id === "di_declined")?.paid_at ?? null).toBeNull();
   });
 });
-
