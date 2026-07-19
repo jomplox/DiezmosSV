@@ -1199,6 +1199,33 @@ async function handleDocumentCorrectionRetry(ctx: ApiRouteContext): Promise<Resp
   );
 }
 
+async function handleDocumentList(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse(await ctx.repo.listDteDocuments({
+    status: ctx.url.searchParams.get("status"),
+    attention: ctx.url.searchParams.get("attention") === "failures" ? "failures" : null,
+    q: ctx.url.searchParams.get("q"),
+    cursor: ctx.url.searchParams.get("cursor"),
+    limit: Number(ctx.url.searchParams.get("limit") ?? 50)
+  }));
+}
+
+async function handleDonationIntentList(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse({ intents: await ctx.repo.listRecentDonationIntents(50) });
+}
+
+function documentRouteRole(ctx: ApiRouteContext): Role {
+  const action = ctx.params[1];
+  if (action === "email" && ctx.request.method === "PATCH") return "OPERATOR";
+  if ((action === "resend" || action === "retry" || action === "invalidate") && ctx.request.method === "POST") {
+    return "OPERATOR";
+  }
+  return "VIEWER";
+}
+
+async function handleGenericDocument(ctx: ApiRouteContext): Promise<Response> {
+  return handleDocumentRoute(ctx.request, ctx.env, ctx.repo, ctx.actor!, ctx.params[0], ctx.params[1]);
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -1253,6 +1280,11 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
   }
 ];
 
+const documentListRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "GET", pattern: "/api/documents", role: "VIEWER", handler: handleDocumentList },
+  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList }
+];
+
 const wompiIssuanceRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/wompi-events/issuance-failures", role: "VIEWER", handler: handleWompiIssuanceFailures },
   { method: "POST", pattern: /^\/api\/wompi-events\/([^/]+)\/retry$/, role: "OPERATOR", handler: handleWompiIssuanceRetry }
@@ -1264,6 +1296,12 @@ const correctionRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: /^\/api\/documents\/([^/]+)\/correction-data$/, role: "OPERATOR", handler: handleDocumentCorrectionData },
   { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleDocumentCorrectionRetry }
 ];
+
+const genericDocumentRoute: Route<ApiRouteContext> = {
+  pattern: /^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/,
+  role: documentRouteRole,
+  handler: handleGenericDocument
+};
 
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
@@ -1292,21 +1330,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   const settingsResponse = await dispatchRoutes(settingsRoutes, apiContext, requireRole);
   if (settingsResponse) return settingsResponse;
 
-  if (url.pathname === "/api/documents" && request.method === "GET") {
-    requireRole(user, "VIEWER");
-    return jsonResponse(await repo.listDteDocuments({
-      status: url.searchParams.get("status"),
-      attention: url.searchParams.get("attention") === "failures" ? "failures" : null,
-      q: url.searchParams.get("q"),
-      cursor: url.searchParams.get("cursor"),
-      limit: Number(url.searchParams.get("limit") ?? 50)
-    }));
-  }
-
-  if (url.pathname === "/api/donations/intents" && request.method === "GET") {
-    requireRole(user, "VIEWER");
-    return jsonResponse({ intents: await repo.listRecentDonationIntents(50) });
-  }
+  const documentListResponse = await dispatchRoutes(documentListRoutes, apiContext, requireRole);
+  if (documentListResponse) return documentListResponse;
 
   const wompiIssuanceResponse = await dispatchRoutes(wompiIssuanceRoutes, apiContext, requireRole);
   if (wompiIssuanceResponse) return wompiIssuanceResponse;
@@ -1573,10 +1598,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   const correctionResponse = await dispatchRoutes(correctionRoutes, apiContext, requireRole);
   if (correctionResponse) return correctionResponse;
 
-  const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);
-  if (documentMatch) {
-    return handleDocumentRoute(request, env, repo, user, documentMatch[1], documentMatch[2]);
-  }
+  const genericDocumentResponse = await dispatchRoutes([genericDocumentRoute], apiContext, requireRole);
+  if (genericDocumentResponse) return genericDocumentResponse;
 
   if (url.pathname === "/api/audit" && request.method === "GET") {
     const actor = requireRole(user, "VIEWER");
@@ -2742,12 +2765,10 @@ async function handleDocumentRoute(
   request: Request,
   env: Env,
   repo: Repository,
-  user: AuthUser | null,
+  actor: AuthUser,
   documentId: string,
   action?: string
 ): Promise<Response> {
-  const mutationAction = action === "email" || action === "resend" || action === "retry" || action === "invalidate";
-  const actor = requireRole(user, mutationAction ? "OPERATOR" : "VIEWER");
   const document = await repo.getDteDocument(documentId);
   if (!document) {
     return notFound();
