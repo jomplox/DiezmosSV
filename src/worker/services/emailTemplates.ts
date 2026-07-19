@@ -45,9 +45,9 @@ export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
     type: "dteReceipt",
     label: "Envío de comprobante",
     description: "Correo que recibe el donante con su CDE en PDF y JSON.",
-    defaultSubject: "Comprobante de su donación",
+    defaultSubject: "Comprobante de su donación {{numeroControl}}",
     defaultBody:
-      "Hola {{donante}}:\n\nGracias por su donación de {{monto}}. Adjuntamos su Comprobante de Donación Electrónico {{numeroControl}} en PDF y JSON, con sello de recepción del Ministerio de Hacienda.\n\nConserve este correo para sus registros."
+      "Hola {{donante}}:\n\nGracias por su donación de {{monto}}. Adjuntamos su Comprobante de Donación Electrónico {{numeroControl}} en PDF y JSON, con Sello de Recepción del Ministerio de Hacienda.\n\nConserve este correo para sus registros."
   },
   {
     type: "dteInvalidation",
@@ -55,7 +55,7 @@ export const EMAIL_TEMPLATE_DEFINITIONS: EmailTemplateDefinition[] = [
     description: "Correo que recibe el donante cuando su CDE queda invalidado.",
     defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
     defaultBody:
-      "Hola {{donante}}:\n\nLe informamos que el Comprobante de Donación Electrónico {{numeroControl}} quedó INVALIDADO ante el Ministerio de Hacienda y dejó de tener validez fiscal. Adjuntamos la representación gráfica con la marca INVALIDADO y el JSON del documento para sus registros."
+      "Hola {{donante}}:\n\nLe informamos que el Comprobante de Donación Electrónico {{numeroControl}} quedó INVALIDADO ante el Ministerio de Hacienda y dejó de tener validez fiscal. Adjuntamos la representación gráfica con la marca INVALIDADO y el JSON del documento para sus registros.\n\nSi la iglesia le emitió un comprobante corregido, lo recibirá en un correo aparte. Si no esperaba esta invalidación, escríbanos al correo de contacto al pie de este mensaje."
   }
 ];
 

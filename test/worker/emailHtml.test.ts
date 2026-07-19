@@ -231,3 +231,43 @@ function record(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRecord {
     ...overrides
   } as DteDocumentRecord;
 }
+
+describe("email header strapline context", () => {
+  it("keeps the CDE strapline on receipt and invalidation emails", () => {
+    expect(dteEmailHtml(record(), "Cuerpo", { organizationName: "Iglesia" })).toContain("Comprobante de Donación Electrónico");
+    expect(dteEmailHtml(record({ status: "INVALIDATED" }), "Cuerpo", { organizationName: "Iglesia" })).toContain("Comprobante de Donación Electrónico");
+  });
+
+  it("labels the password reset email as panel access, not a CDE", () => {
+    const html = passwordResetEmailHtml("José", "https://example.org/?reset=tok", 45, { organizationName: "Iglesia" });
+
+    expect(html).toContain("Panel de administración");
+    expect(html).not.toContain("Comprobante de Donación Electrónico");
+  });
+
+  it("labels operational alerts as alerts, not a CDE", () => {
+    const html = operationalAlertHtml(
+      { kind: "DTE_FAILED", title: "Fallo al emitir DTE", detail: "Detalle", entityType: "dte_document", entityId: "dte_1" },
+      "https://example.org/",
+      { organizationName: "Iglesia" }
+    );
+
+    expect(html).toContain("Alerta operativa");
+    expect(html).not.toContain("Comprobante de Donación Electrónico");
+  });
+
+  it("labels the annual certificate email and frames it as an informative backup", () => {
+    const html = certificateEmailHtml({
+      organizationName: "Iglesia",
+      donorName: "María",
+      year: 2026,
+      count: 3,
+      totalLabel: "$100.00",
+      isTestEnvironment: false
+    });
+
+    expect(html).toContain("Constancia anual de donaciones");
+    expect(html).toContain("respaldo informativo");
+    expect(html).not.toContain("Comprobante de Donación Electrónico");
+  });
+});

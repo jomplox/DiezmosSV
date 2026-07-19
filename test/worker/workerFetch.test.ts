@@ -9377,7 +9377,7 @@ describe("document email resend", () => {
       headers: {
         "X-Idempotency-Key": expect.stringMatching(/^dsv-receipt-resend-v1-[a-f0-9]{64}$/)
       },
-      subject: "Comprobante de su donación",
+      subject: "Comprobante de su donación DTE-15-M001P004-000000000000009",
       text: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       html: expect.stringContaining("DTE-15-M001P004-000000000000009"),
       attachments: [
@@ -14100,7 +14100,7 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(sent[0].subject).toContain("(en trámite)");
     expect(sent[0].text).toContain("Sello de Recepción");
     // ...but never claims the deferred CDE already carries an MH reception seal.
-    expect(sent[0].text).not.toContain("con sello de recepción del Ministerio de Hacienda");
+    expect(sent[0].text).not.toContain("con Sello de Recepción del Ministerio de Hacienda");
     expect(db.emailDeliveries).toContainEqual(
       expect.objectContaining({
         document_id: record!.id,

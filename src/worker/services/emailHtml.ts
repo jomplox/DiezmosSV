@@ -37,7 +37,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
     ["Ambiente", record.environment === "01" ? "Producción" : "Pruebas"]
   ]);
   const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
-  return emailDocument(options.organizationName, brandColor, options.supportEmail, options.logoUrl, [
+  return emailDocument(options.organizationName, "Comprobante de Donación Electrónico", brandColor, options.supportEmail, options.logoUrl, [
     banner,
     paragraphs(bodyText),
     details,
@@ -70,7 +70,7 @@ export function passwordResetEmailHtml(
         </td>
       </tr>
     </table>`;
-  return emailDocument(organizationName, brandColor, options.supportEmail, options.logoUrl, [
+  return emailDocument(organizationName, "Panel de administración", brandColor, options.supportEmail, options.logoUrl, [
     paragraphs(
       `Hola ${name}:\n\nRecibimos una solicitud para restablecer su contraseña en ${organizationName}. Use el botón para crear una nueva contraseña; el enlace vence en ${expiresMinutes} minutos.`
     ),
@@ -101,7 +101,7 @@ export function operationalAlertHtml(
     ["Entidad", alert.entityType],
     ["Identificador", alert.entityId]
   ]);
-  return emailDocument(organizationName, brandColor, options.supportEmail, options.logoUrl, [
+  return emailDocument(organizationName, "Alerta operativa", brandColor, options.supportEmail, options.logoUrl, [
     banner,
     paragraphs(alert.detail),
     details,
@@ -130,11 +130,11 @@ export function certificateEmailHtml(input: CertificateEmailInput): string {
     ["Donaciones", String(input.count)],
     ["Total del año", input.totalLabel]
   ]);
-  return emailDocument(input.organizationName, input.brandColor ?? DEFAULT_BRAND_COLOR, input.supportEmail, input.logoUrl, [
+  return emailDocument(input.organizationName, "Constancia anual de donaciones", input.brandColor ?? DEFAULT_BRAND_COLOR, input.supportEmail, input.logoUrl, [
     paragraphs(
       `Estimado(a) ${input.donorName}:\n\n` +
         `Adjuntamos su constancia de donaciones correspondiente al año ${input.year}. ` +
-        `El documento resume las donaciones que usted realizó y puede utilizarlo como respaldo. ` +
+        `El documento resume las donaciones que usted realizó durante el año y puede utilizarlo como respaldo informativo. ` +
         `Los comprobantes de donación electrónicos (CDE) individuales siguen siendo sus comprobantes fiscales.`
     ),
     details,
@@ -155,6 +155,7 @@ function alertBanner(kind: string, title: string): string {
 
 function emailDocument(
   organizationName: string,
+  strapline: string,
   brandColor: string,
   supportEmail: string | undefined,
   logoUrl: string | null | undefined,
@@ -184,7 +185,7 @@ function emailDocument(
             <tr>
               <td bgcolor="${brandColor}" style="background-color:${brandColor};background-image:linear-gradient(${brandColor},${brandColor});padding:18px 28px;${headerAlign}">
                 ${logo}<span style="font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:bold;color:#ffffff;">${escapeHtml(organizationName)}</span><br />
-                <span style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#d2eae7;">Comprobante de Donación Electrónico</span>
+                <span style="font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#d2eae7;">${escapeHtml(strapline)}</span>
               </td>
             </tr>
             <tr>

@@ -105,7 +105,7 @@ describe("transitory (deferred) receipt template", () => {
     } as unknown as DteDocumentRecord;
   }
 
-  const FALSE_SELLO_CLAIM = "con sello de recepción del Ministerio de Hacienda";
+  const FALSE_SELLO_CLAIM = "con Sello de Recepción del Ministerio de Hacienda";
 
   it("frames the deferred receipt as provisional without claiming an MH sello", () => {
     const message = renderEmailTemplate(TRANSITORIO_RECEIPT_TEMPLATE, deferredRecord());
@@ -131,6 +131,19 @@ describe("email template defaults", () => {
 
     expect(invalidation?.defaultBody).toContain("ante el Ministerio de Hacienda");
     expect(invalidation?.defaultBody).not.toContain("ante MH");
+  });
+
+  it("includes the numero de control in the default receipt subject", () => {
+    const message = renderEmailTemplate(DEFAULT_EMAIL_TEMPLATES.dteReceipt, fakeRecord());
+
+    expect(message.subject).toBe("Comprobante de su donación DTE-15-0001-000000000000001");
+  });
+
+  it("tells the donor what to expect after an invalidation", () => {
+    const invalidation = EMAIL_TEMPLATE_DEFINITIONS.find((definition) => definition.type === "dteInvalidation");
+
+    expect(invalidation?.defaultBody).toContain("comprobante corregido, lo recibirá en un correo aparte");
+    expect(invalidation?.defaultBody).toContain("Si no esperaba esta invalidación");
   });
 });
 
