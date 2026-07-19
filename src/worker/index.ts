@@ -1226,6 +1226,251 @@ async function handleGenericDocument(ctx: ApiRouteContext): Promise<Response> {
   return handleDocumentRoute(ctx.request, ctx.env, ctx.repo, ctx.actor!, ctx.params[0], ctx.params[1]);
 }
 
+async function handleRetentionExport(ctx: ApiRouteContext): Promise<Response> {
+  const monthParam = ctx.url.searchParams.get("month");
+  if (monthParam && !/^\d{4}-\d{2}$/.test(monthParam)) {
+    return jsonResponse({ error: "invalid_retention_month", message: "Use el formato YYYY-MM." }, { status: 400 });
+  }
+  const lastClosedMonth = previousElSalvadorMonth(new Date());
+  if (monthParam && monthParam > lastClosedMonth) {
+    return jsonResponse(
+      { error: "invalid_retention_month", message: `Solo se pueden exportar meses ya cerrados (hasta ${lastClosedMonth}).` },
+      { status: 400 }
+    );
+  }
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "RETENTION_EXPORT_REQUESTED",
+    entityType: "retention_export",
+    entityId: monthParam ?? "previous_month",
+    summary: monthParam ? `Exportación de retención solicitada para ${monthParam}` : "Exportación de retención solicitada para el mes anterior"
+  });
+  const result = await runRetentionExport(ctx.env, new Date(), monthParam ? { month: monthParam } : {});
+  return jsonResponse({ ok: result.status !== "failed", ...result }, { status: result.status === "failed" ? 500 : 200 });
+}
+
+async function handleBackupList(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse(await listBackupMonths(ctx.env, ctx.repo, new Date()));
+}
+
+async function handleBackupVerify(ctx: ApiRouteContext): Promise<Response> {
+  const result = await verifyBackupMonth(ctx.env, ctx.repo, ctx.params[0], ctx.actor!);
+  if (!result) {
+    return notFound();
+  }
+  return jsonResponse(result);
+}
+
+async function handleBackupDownload(ctx: ApiRouteContext): Promise<Response> {
+  const month = ctx.params[0];
+  const table = ctx.url.searchParams.get("table");
+  if (!table || !/^[a-z_]+$|^manifest$/.test(table)) {
+    return jsonResponse({ error: "invalid_backup_table", message: "Indique una tabla válida o 'manifest'." }, { status: 400 });
+  }
+  const key = table === "manifest" ? retentionManifestKey(month) : retentionTableKey(month, table);
+  const object = await ctx.env.ARCHIVE.get(key);
+  if (!object) {
+    return notFound();
+  }
+  // These NDJSON snapshots carry donor PII; every access is audited with actor,
+  // month, and table so the access trail is complete.
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "RETENTION_DOWNLOADED",
+    entityType: "retention_export",
+    entityId: month,
+    summary: `Descarga de respaldo ${month}/${table}`,
+    metadata: { month, table }
+  });
+  const filename = table === "manifest" ? `retention-${month}-manifest.json` : `retention-${month}-${table}.ndjson`;
+  const contentType = table === "manifest" ? "application/json" : "application/x-ndjson";
+  return new Response(object.body, {
+    headers: {
+      "Content-Type": contentType,
+      "Content-Disposition": `attachment; filename="${filename}"`
+    }
+  });
+}
+
+async function handleBackupDownloadAll(ctx: ApiRouteContext): Promise<Response> {
+  const month = ctx.params[0];
+  let entries: Array<{ name: string; data: Uint8Array }> | null;
+  try {
+    entries = await collectBackupMonthObjects(ctx.env, month);
+  } catch (error) {
+    if (error instanceof BackupArchiveTooLargeError) {
+      return backupArchiveTooLargeResponse();
+    }
+    throw error;
+  }
+  if (!entries) {
+    return notFound();
+  }
+  // Same PII-access audit as the per-table download; table "__all__" marks the whole
+  // month was pulled in one archive.
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "RETENTION_DOWNLOADED",
+    entityType: "retention_export",
+    entityId: month,
+    summary: `Descarga completa de respaldo ${month} (${entries.length} archivo(s))`,
+    metadata: { month, table: "__all__", files: entries.length }
+  });
+  const zip = zipStored(entries);
+  return new Response(zip, {
+    headers: {
+      "Content-Type": "application/zip",
+      "Content-Disposition": `attachment; filename="respaldo-${month}.zip"`
+    }
+  });
+}
+
+async function handleF960Selection(ctx: ApiRouteContext): Promise<Response> {
+  const selection = await f960Selection(ctx.repo, ctx.url);
+  if (selection instanceof Response) return selection;
+  return jsonResponse(selection);
+}
+
+async function handleF960Csv(ctx: ApiRouteContext): Promise<Response> {
+  const selection = await f960Selection(ctx.repo, ctx.url);
+  if (selection instanceof Response) return selection;
+  await auditExport(ctx.repo, ctx.actor!, "F960_EXPORTED", selection.csvFilename, selection.rowCount);
+  return new Response(buildF960Csv(selection), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${selection.csvFilename}"`
+    }
+  });
+}
+
+async function handleF960Xlsx(ctx: ApiRouteContext): Promise<Response> {
+  const selection = await f960Selection(ctx.repo, ctx.url);
+  if (selection instanceof Response) return selection;
+  await auditExport(ctx.repo, ctx.actor!, "F960_INSPECTION_EXPORTED", selection.xlsxFilename, selection.rowCount);
+  return new Response(buildF960Xlsx(selection), {
+    headers: {
+      "Content-Type": XLSX_MIME,
+      "Content-Disposition": `attachment; filename="${selection.xlsxFilename}"`
+    }
+  });
+}
+
+async function handleContactsExport(ctx: ApiRouteContext): Promise<Response> {
+  // Bulk donor PII for CRM import: ADMIN only (deliberately NOT operator/viewer).
+  const environment = ambienteValue(ctx.url.searchParams.get("environment"));
+  if (!environment) {
+    return jsonResponse({ error: "invalid_export_environment", message: "Seleccione un ambiente válido (00 o 01)." }, { status: 400 });
+  }
+
+  // Optional [from, to] day range (YYYY-MM-DD, El Salvador local, inclusive). Both or
+  // neither; malformed/inverted → 400. Reuses the analytics range→ISO-window helper so
+  // the export honours the same El Salvador local-day semantics as the analytics view.
+  const fromParam = ctx.url.searchParams.get("from");
+  const toParam = ctx.url.searchParams.get("to");
+  let window: { startIso: string; endIso: string } | undefined;
+  if (fromParam || toParam) {
+    const isDate = (value: string | null): value is string =>
+      !!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+    if (!isDate(fromParam) || !isDate(toParam) || fromParam > toParam) {
+      return jsonResponse(
+        { error: "invalid_export_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." },
+        { status: 400 }
+      );
+    }
+    window = elSalvadorRangeWindow({ from: fromParam, to: toParam });
+  }
+
+  // Optional giftType filter (DIEZMO|OFRENDA) — which donations count toward inclusion/totals.
+  const giftTypeParam = ctx.url.searchParams.get("giftType");
+  if (giftTypeParam && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA") {
+    return jsonResponse({ error: "invalid_export_gift_type", message: "Seleccione Diezmo, Ofrenda o Todos." }, { status: 400 });
+  }
+  const giftType = giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA" ? giftTypeParam : undefined;
+
+  // Optional column whitelist; an unknown name is a 400 with the offending column named.
+  let columns;
+  try {
+    columns = resolveContactColumns(ctx.url.searchParams.get("columns"));
+  } catch (error) {
+    return jsonResponse(
+      { error: "invalid_export_columns", message: error instanceof Error ? error.message : String(error) },
+      { status: 400 }
+    );
+  }
+
+  const contacts = await aggregateDonorContacts(ctx.repo, environment, { window, giftType });
+  // Audit carries only the count + environment + applied filters — NEVER any donor PII.
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "CONTACTS_EXPORTED",
+    entityType: "export",
+    entityId: `contacts:${environment}`,
+    summary: `${contacts.length} contactos exportados (ambiente ${environment})`,
+    metadata: {
+      environment,
+      contacts: contacts.length,
+      ...(fromParam ? { from: fromParam, to: toParam } : {}),
+      ...(giftType ? { giftType } : {}),
+      // Only record a column count when a subset was actually requested, so the
+      // default full-export audit keeps its original { environment, contacts } shape.
+      ...(ctx.url.searchParams.get("columns") ? { columns: columns.length } : {})
+    }
+  });
+  return new Response(buildContactsCsv(contacts, columns), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${contactsCsvFilename(environment, contacts.length)}"`
+    }
+  });
+}
+
+async function handleAnnualCertificatePreview(ctx: ApiRouteContext): Promise<Response> {
+  const yearParam = ctx.url.searchParams.get("year");
+  const yearError = certificateYearError(yearParam, new Date());
+  if (yearError) {
+    return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
+  }
+  return jsonResponse(await buildAnnualCertificatePreview(ctx.repo, Number(yearParam), ctx.url.searchParams.get("q")));
+}
+
+async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Response> {
+  const yearParam = ctx.url.searchParams.get("year");
+  const yearError = certificateYearError(yearParam, new Date());
+  if (yearError) {
+    return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
+  }
+  const year = Number(yearParam);
+  // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
+  // an absent/empty body runs the full bulk batch as before.
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { donor?: unknown };
+  const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
+  let result;
+  try {
+    result = await sendAnnualCertificates(ctx.env, ctx.repo, year, ctx.actor!.id, donorGroupKey);
+  } catch (error) {
+    if (error instanceof SingleDonorSendError) {
+      return jsonResponse({ error: "single_donor_send_error", message: error.message }, { status: error.status });
+    }
+    throw error;
+  }
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "DONOR_CERTIFICATES_RUN",
+    entityType: "donor_certificate_run",
+    entityId: String(year),
+    summary: donorGroupKey
+      ? `Constancia ${year} enviada individualmente: ${result.sent} enviada, ${result.failed} fallida`
+      : `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
+    metadata: { ...result, ...(donorGroupKey ? { mode: "single", donorGroupKey } : {}) }
+  });
+  return jsonResponse(result);
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -1297,6 +1542,20 @@ const correctionRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleDocumentCorrectionRetry }
 ];
 
+const exportRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "POST", pattern: "/api/admin/retention-export", role: "OWNER", handler: handleRetentionExport },
+  { method: "GET", pattern: "/api/admin/backups", role: "ADMIN", handler: handleBackupList },
+  { method: "POST", pattern: /^\/api\/admin\/backups\/(\d{4}-\d{2})\/verify$/, role: "ADMIN", handler: handleBackupVerify },
+  { method: "GET", pattern: /^\/api\/admin\/backups\/(\d{4}-\d{2})\/download$/, role: "ADMIN", handler: handleBackupDownload },
+  { method: "GET", pattern: /^\/api\/admin\/backups\/(\d{4}-\d{2})\/download-all$/, role: "ADMIN", handler: handleBackupDownloadAll },
+  { method: "GET", pattern: "/api/exports/f960", role: "ADMIN", handler: handleF960Selection },
+  { method: "GET", pattern: "/api/exports/f960.csv", role: "ADMIN", handler: handleF960Csv },
+  { method: "GET", pattern: "/api/exports/f960.xlsx", role: "ADMIN", handler: handleF960Xlsx },
+  { method: "GET", pattern: "/api/exports/contacts", role: "ADMIN", handler: handleContactsExport },
+  { method: "GET", pattern: "/api/certificates/annual", role: "ADMIN", handler: handleAnnualCertificatePreview },
+  { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend }
+];
+
 const genericDocumentRoute: Route<ApiRouteContext> = {
   pattern: /^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/,
   role: documentRouteRole,
@@ -1336,264 +1595,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   const wompiIssuanceResponse = await dispatchRoutes(wompiIssuanceRoutes, apiContext, requireRole);
   if (wompiIssuanceResponse) return wompiIssuanceResponse;
 
-  if (url.pathname === "/api/admin/retention-export" && request.method === "POST") {
-    const actor = requireRole(user, "OWNER");
-    const monthParam = url.searchParams.get("month");
-    if (monthParam && !/^\d{4}-\d{2}$/.test(monthParam)) {
-      return jsonResponse({ error: "invalid_retention_month", message: "Use el formato YYYY-MM." }, { status: 400 });
-    }
-    const lastClosedMonth = previousElSalvadorMonth(new Date());
-    if (monthParam && monthParam > lastClosedMonth) {
-      return jsonResponse(
-        { error: "invalid_retention_month", message: `Solo se pueden exportar meses ya cerrados (hasta ${lastClosedMonth}).` },
-        { status: 400 }
-      );
-    }
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "RETENTION_EXPORT_REQUESTED",
-      entityType: "retention_export",
-      entityId: monthParam ?? "previous_month",
-      summary: monthParam ? `Exportación de retención solicitada para ${monthParam}` : "Exportación de retención solicitada para el mes anterior"
-    });
-    const result = await runRetentionExport(env, new Date(), monthParam ? { month: monthParam } : {});
-    return jsonResponse({ ok: result.status !== "failed", ...result }, { status: result.status === "failed" ? 500 : 200 });
-  }
-
-  if (url.pathname === "/api/admin/backups" && request.method === "GET") {
-    requireRole(user, "ADMIN");
-    return jsonResponse(await listBackupMonths(env, repo, new Date()));
-  }
-
-  const backupVerifyMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/verify$/);
-  if (backupVerifyMatch && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    const result = await verifyBackupMonth(env, repo, backupVerifyMatch[1], actor);
-    if (!result) {
-      return notFound();
-    }
-    return jsonResponse(result);
-  }
-
-  const backupDownloadMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/download$/);
-  if (backupDownloadMatch && request.method === "GET") {
-    const actor = requireRole(user, "ADMIN");
-    const month = backupDownloadMatch[1];
-    const table = url.searchParams.get("table");
-    if (!table || !/^[a-z_]+$|^manifest$/.test(table)) {
-      return jsonResponse({ error: "invalid_backup_table", message: "Indique una tabla válida o 'manifest'." }, { status: 400 });
-    }
-    const key = table === "manifest" ? retentionManifestKey(month) : retentionTableKey(month, table);
-    const object = await env.ARCHIVE.get(key);
-    if (!object) {
-      return notFound();
-    }
-    // These NDJSON snapshots carry donor PII; every access is audited with actor,
-    // month, and table so the access trail is complete.
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "RETENTION_DOWNLOADED",
-      entityType: "retention_export",
-      entityId: month,
-      summary: `Descarga de respaldo ${month}/${table}`,
-      metadata: { month, table }
-    });
-    const filename = table === "manifest" ? `retention-${month}-manifest.json` : `retention-${month}-${table}.ndjson`;
-    const contentType = table === "manifest" ? "application/json" : "application/x-ndjson";
-    return new Response(object.body, {
-      headers: {
-        "Content-Type": contentType,
-        "Content-Disposition": `attachment; filename="${filename}"`
-      }
-    });
-  }
-
-  const backupDownloadAllMatch = url.pathname.match(/^\/api\/admin\/backups\/(\d{4}-\d{2})\/download-all$/);
-  if (backupDownloadAllMatch && request.method === "GET") {
-    const actor = requireRole(user, "ADMIN");
-    const month = backupDownloadAllMatch[1];
-    let entries: Array<{ name: string; data: Uint8Array }> | null;
-    try {
-      entries = await collectBackupMonthObjects(env, month);
-    } catch (error) {
-      if (error instanceof BackupArchiveTooLargeError) {
-        return backupArchiveTooLargeResponse();
-      }
-      throw error;
-    }
-    if (!entries) {
-      return notFound();
-    }
-    // Same PII-access audit as the per-table download; table "__all__" marks the whole
-    // month was pulled in one archive.
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "RETENTION_DOWNLOADED",
-      entityType: "retention_export",
-      entityId: month,
-      summary: `Descarga completa de respaldo ${month} (${entries.length} archivo(s))`,
-      metadata: { month, table: "__all__", files: entries.length }
-    });
-    const zip = zipStored(entries);
-    return new Response(zip, {
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="respaldo-${month}.zip"`
-      }
-    });
-  }
-
-  if (url.pathname === "/api/exports/f960" && request.method === "GET") {
-    requireRole(user, "ADMIN");
-    const selection = await f960Selection(repo, url);
-    if (selection instanceof Response) return selection;
-    return jsonResponse(selection);
-  }
-
-  if (url.pathname === "/api/exports/f960.csv" && request.method === "GET") {
-    const actor = requireRole(user, "ADMIN");
-    const selection = await f960Selection(repo, url);
-    if (selection instanceof Response) return selection;
-    await auditExport(repo, actor, "F960_EXPORTED", selection.csvFilename, selection.rowCount);
-    return new Response(buildF960Csv(selection), {
-      headers: {
-        "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${selection.csvFilename}"`
-      }
-    });
-  }
-
-  if (url.pathname === "/api/exports/f960.xlsx" && request.method === "GET") {
-    const actor = requireRole(user, "ADMIN");
-    const selection = await f960Selection(repo, url);
-    if (selection instanceof Response) return selection;
-    await auditExport(repo, actor, "F960_INSPECTION_EXPORTED", selection.xlsxFilename, selection.rowCount);
-    return new Response(buildF960Xlsx(selection), {
-      headers: {
-        "Content-Type": XLSX_MIME,
-        "Content-Disposition": `attachment; filename="${selection.xlsxFilename}"`
-      }
-    });
-  }
-
-  if (url.pathname === "/api/exports/contacts" && request.method === "GET") {
-    // Bulk donor PII for CRM import: ADMIN only (deliberately NOT operator/viewer).
-    const actor = requireRole(user, "ADMIN");
-    const environment = ambienteValue(url.searchParams.get("environment"));
-    if (!environment) {
-      return jsonResponse({ error: "invalid_export_environment", message: "Seleccione un ambiente válido (00 o 01)." }, { status: 400 });
-    }
-
-    // Optional [from, to] day range (YYYY-MM-DD, El Salvador local, inclusive). Both or
-    // neither; malformed/inverted → 400. Reuses the analytics range→ISO-window helper so
-    // the export honours the same El Salvador local-day semantics as the analytics view.
-    const fromParam = url.searchParams.get("from");
-    const toParam = url.searchParams.get("to");
-    let window: { startIso: string; endIso: string } | undefined;
-    if (fromParam || toParam) {
-      const isDate = (value: string | null): value is string =>
-        !!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-      if (!isDate(fromParam) || !isDate(toParam) || fromParam > toParam) {
-        return jsonResponse(
-          { error: "invalid_export_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." },
-          { status: 400 }
-        );
-      }
-      window = elSalvadorRangeWindow({ from: fromParam, to: toParam });
-    }
-
-    // Optional giftType filter (DIEZMO|OFRENDA) — which donations count toward inclusion/totals.
-    const giftTypeParam = url.searchParams.get("giftType");
-    if (giftTypeParam && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA") {
-      return jsonResponse({ error: "invalid_export_gift_type", message: "Seleccione Diezmo, Ofrenda o Todos." }, { status: 400 });
-    }
-    const giftType = giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA" ? giftTypeParam : undefined;
-
-    // Optional column whitelist; an unknown name is a 400 with the offending column named.
-    let columns;
-    try {
-      columns = resolveContactColumns(url.searchParams.get("columns"));
-    } catch (error) {
-      return jsonResponse(
-        { error: "invalid_export_columns", message: error instanceof Error ? error.message : String(error) },
-        { status: 400 }
-      );
-    }
-
-    const contacts = await aggregateDonorContacts(repo, environment, { window, giftType });
-    // Audit carries only the count + environment + applied filters — NEVER any donor PII.
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "CONTACTS_EXPORTED",
-      entityType: "export",
-      entityId: `contacts:${environment}`,
-      summary: `${contacts.length} contactos exportados (ambiente ${environment})`,
-      metadata: {
-        environment,
-        contacts: contacts.length,
-        ...(fromParam ? { from: fromParam, to: toParam } : {}),
-        ...(giftType ? { giftType } : {}),
-        // Only record a column count when a subset was actually requested, so the
-        // default full-export audit keeps its original { environment, contacts } shape.
-        ...(url.searchParams.get("columns") ? { columns: columns.length } : {})
-      }
-    });
-    return new Response(buildContactsCsv(contacts, columns), {
-      headers: {
-        "Content-Type": "text/csv; charset=utf-8",
-        "Content-Disposition": `attachment; filename="${contactsCsvFilename(environment, contacts.length)}"`
-      }
-    });
-  }
-
-  if (url.pathname === "/api/certificates/annual" && request.method === "GET") {
-    requireRole(user, "ADMIN");
-    const yearParam = url.searchParams.get("year");
-    const yearError = certificateYearError(yearParam, new Date());
-    if (yearError) {
-      return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
-    }
-    return jsonResponse(await buildAnnualCertificatePreview(repo, Number(yearParam), url.searchParams.get("q")));
-  }
-
-  if (url.pathname === "/api/certificates/annual/send" && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    const yearParam = url.searchParams.get("year");
-    const yearError = certificateYearError(yearParam, new Date());
-    if (yearError) {
-      return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
-    }
-    const year = Number(yearParam);
-    // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
-    // an absent/empty body runs the full bulk batch as before.
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { donor?: unknown };
-    const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
-    let result;
-    try {
-      result = await sendAnnualCertificates(env, repo, year, actor.id, donorGroupKey);
-    } catch (error) {
-      if (error instanceof SingleDonorSendError) {
-        return jsonResponse({ error: "single_donor_send_error", message: error.message }, { status: error.status });
-      }
-      throw error;
-    }
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "DONOR_CERTIFICATES_RUN",
-      entityType: "donor_certificate_run",
-      entityId: String(year),
-      summary: donorGroupKey
-        ? `Constancia ${year} enviada individualmente: ${result.sent} enviada, ${result.failed} fallida`
-        : `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
-      metadata: { ...result, ...(donorGroupKey ? { mode: "single", donorGroupKey } : {}) }
-    });
-    return jsonResponse(result);
-  }
+  const exportResponse = await dispatchRoutes(exportRoutes, apiContext, requireRole);
+  if (exportResponse) return exportResponse;
 
   const correctionResponse = await dispatchRoutes(correctionRoutes, apiContext, requireRole);
   if (correctionResponse) return correctionResponse;
