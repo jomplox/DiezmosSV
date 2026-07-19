@@ -24,7 +24,9 @@ describe("document email failure notice", () => {
   });
 
   it("renders the failed delivery and its recovery action inside the warning", () => {
-    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    const appSource =
+      readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+      readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 
     expect(appSource).toContain("receiptEmailDelivery?.requiresReview");
     expect(appSource).toContain("Resultado del correo pendiente");
@@ -41,7 +43,9 @@ describe("document email failure notice", () => {
   });
 
   it("refreshes authoritative delivery state after a resend without changing selection", () => {
-    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    const appSource =
+      readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+      readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 
     expect(appSource).toContain("receiptEmailDelivery?: ReceiptEmailDeliveryState");
     expect(appSource).toContain("setSelectedReceiptEmailDelivery(detail.receiptEmailDelivery ?? null)");
@@ -50,7 +54,9 @@ describe("document email failure notice", () => {
   });
 
   it("marks accepted receipt failures in the document list and failure metric", () => {
-    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    const appSource =
+      readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+      readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 
     expect(appSource).toContain("Correo fallido");
     expect(appSource).toContain("Correo por revisar");
@@ -59,7 +65,9 @@ describe("document email failure notice", () => {
   });
 
   it("keeps ambiguous request IDs but starts a new deliberate action after confirmed non-delivery", () => {
-    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    const appSource =
+      readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+      readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 
     expect(shouldRetainResendRequestIdAfterFailure).toBeTypeOf("function");
     expect(shouldRetainResendRequestIdAfterFailure?.("NOT_SENT")).toBe(true);
