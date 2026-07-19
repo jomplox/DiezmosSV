@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const appSource =
+  readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8");
 
 describe("CRM contacts export UI contract", () => {
   it("renders the Contactos para CRM panel with the GiveButter description and active-ambiente note", () => {

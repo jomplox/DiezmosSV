@@ -2,7 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const appSource =
+  readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 const typesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/types.ts"), "utf8");
 const reconciliationRunbook = readFileSync(resolve(import.meta.dirname, "../../docs/fiscal-claim-reconciliation.md"), "utf8");
 
