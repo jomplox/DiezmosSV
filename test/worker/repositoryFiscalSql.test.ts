@@ -564,6 +564,224 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("durably claims a pre-dispatch Wompi document before quarantining its correction", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_existing_document_quarantine";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "53535353-5353-4353-8353-535353535353"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected Wompi correction claim");
+    const correction = claimed.correction;
+    await expect(repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    })).resolves.toBe("claimed");
+    const issuanceClaimId = `wompi_correction_${correction.id}`;
+    await expect(repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: issuanceClaimId,
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).resolves.toBe(true);
+    const reserved = await repository.reserveWompiDocumentIdentifiers(
+      wompiEventId,
+      "00",
+      "M001P004"
+    );
+    const document = await repository.createClaimedWompiDteDocument({
+      wompiEventId,
+      issuanceClaimId,
+      environment: "00",
+      codigoGeneracion: reserved.codigoGeneracion,
+      numeroControl: reserved.numeroControl,
+      plainJson: { identificacion: { tipoDte: "15" } },
+      donorEmail: "quarantine@example.org",
+      donorName: "Donante en cuarentena",
+      amountCents: 2500,
+      issuedAt: "2026-07-18T12:02:00.000Z"
+    });
+    if (!document) throw new Error("expected claimed Wompi document");
+
+    await expect(repository.updateDocumentSigned(
+      document.id,
+      "signed-before-correction-fence",
+      "PENDING"
+    )).resolves.toBe(true);
+    await expect(repository.claimDocumentTransmission(
+      document.id,
+      "SIGNED",
+      "signed-before-correction-fence",
+      "generic-retry-must-not-win"
+    )).resolves.toBe(false);
+
+    await expect(repository.claimWompiFiscalCorrectionDocument({
+      correctionId: correction.id,
+      processingClaimId: "stale-processing-claim",
+      issuanceAttemptId: correction.issuance_attempt_id!,
+      documentId: document.id
+    })).resolves.toBe(false);
+    await expect(repository.claimWompiFiscalCorrectionDocument({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!,
+      documentId: document.id
+    })).resolves.toBe(true);
+
+    const quarantineClaimId = `fiscal_correction_${correction.id}`;
+    expect(database.prepare(
+      `SELECT status, fiscal_operation_claim_id, fiscal_operation_kind,
+              fiscal_operation_event_id
+         FROM dte_documents WHERE id = ?`
+    ).get(document.id)).toEqual({
+      status: "SIGNED",
+      fiscal_operation_claim_id: quarantineClaimId,
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    });
+    await expect(repository.claimDocumentTransmission(
+      document.id,
+      "SIGNED",
+      "signed-before-correction-fence",
+      "generic-retry-still-blocked"
+    )).resolves.toBe(false);
+    await expect(repository.finalizeWompiFiscalCorrectionFailure(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        failureCode: "WOMPI_INTENT_QUARANTINED",
+        failureMessage: "La intención ya no coincide."
+      }
+    )).resolves.toBe(false);
+    await expect(repository.finalizeFiscalCorrection(
+      correction.id,
+      correction.processing_claim_id,
+      {
+        status: "FAILED",
+        failureCode: "WOMPI_INTENT_QUARANTINED",
+        failureMessage: "La intención ya no coincide."
+      }
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      `SELECT status, failure_code FROM fiscal_corrections WHERE id = ?`
+    ).get(correction.id)).toEqual({
+      status: "FAILED",
+      failure_code: "WOMPI_INTENT_QUARANTINED"
+    });
+    expect(database.prepare(
+      `SELECT fiscal_operation_claim_id FROM dte_documents WHERE id = ?`
+    ).get(document.id)).toEqual({ fiscal_operation_claim_id: quarantineClaimId });
+    database.close();
+  });
+
+  it("signs a Wompi correction document only under its deterministic claim and expected status", async () => {
+    const database = migratedDatabase();
+    const wompiEventId = "wompi_claimed_document_signing";
+    seedFailedWompiEvent(database, wompiEventId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimWompiFiscalCorrection(
+      wompiCorrectionClaimInput({
+        wompiEventId,
+        requestId: "54545454-5454-4454-8454-545454545454"
+      })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected Wompi correction claim");
+    const correction = claimed.correction;
+    await expect(repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id ?? undefined
+    })).resolves.toBe("claimed");
+    const issuanceClaimId = `wompi_correction_${correction.id}`;
+    await expect(repository.claimCorrectedWompiEventIssuance({
+      id: wompiEventId,
+      claimId: issuanceClaimId,
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    })).resolves.toBe(true);
+    const reserved = await repository.reserveWompiDocumentIdentifiers(
+      wompiEventId,
+      "00",
+      "M001P004"
+    );
+    const document = await repository.createClaimedWompiDteDocument({
+      wompiEventId,
+      issuanceClaimId,
+      environment: "00",
+      codigoGeneracion: reserved.codigoGeneracion,
+      numeroControl: reserved.numeroControl,
+      plainJson: { identificacion: { tipoDte: "15" } },
+      donorEmail: "claimed-signing@example.org",
+      donorName: "Donante con reclamo",
+      amountCents: 2500,
+      issuedAt: "2026-07-18T12:03:00.000Z"
+    });
+    if (!document) throw new Error("expected claimed Wompi document");
+    await expect(repository.claimWompiFiscalCorrectionDocument({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!,
+      documentId: document.id
+    })).resolves.toBe(true);
+
+    const documentClaimId = `fiscal_correction_${correction.id}`;
+    await expect(repository.updateClaimedDocumentSigned(
+      document.id,
+      "wrong-claim-jws",
+      "PENDING",
+      "wrong-claim"
+    )).resolves.toBe(false);
+    await expect(repository.updateClaimedDocumentSigned(
+      document.id,
+      "wrong-status-jws",
+      "SIGNED",
+      documentClaimId
+    )).resolves.toBe(false);
+    expect(database.prepare(
+      `SELECT status, signed_jws, fiscal_operation_claim_id,
+              fiscal_operation_kind, fiscal_operation_event_id
+         FROM dte_documents WHERE id = ?`
+    ).get(document.id)).toEqual({
+      status: "PENDING",
+      signed_jws: null,
+      fiscal_operation_claim_id: documentClaimId,
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    });
+
+    await expect(repository.updateClaimedDocumentSigned(
+      document.id,
+      "deterministic-correction-jws",
+      "PENDING",
+      documentClaimId
+    )).resolves.toBe(true);
+    await expect(repository.updateClaimedDocumentSigned(
+      document.id,
+      "stale-status-jws",
+      "PENDING",
+      documentClaimId
+    )).resolves.toBe(false);
+    expect(database.prepare(
+      `SELECT status, signed_jws, fiscal_operation_claim_id,
+              fiscal_operation_kind, fiscal_operation_event_id
+         FROM dte_documents WHERE id = ?`
+    ).get(document.id)).toEqual({
+      status: "SIGNED",
+      signed_jws: "deterministic-correction-jws",
+      fiscal_operation_claim_id: documentClaimId,
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    });
+    database.close();
+  });
+
   it("rolls back recovery token rotation until missing queued and started audits persist", async () => {
     const database = migratedDatabase();
     const wompiEventId = "wompi_audit_recovery";

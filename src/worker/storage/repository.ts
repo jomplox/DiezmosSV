@@ -1619,6 +1619,65 @@ export class Repository {
     return Number(results[0]?.meta?.changes ?? 0) === 1;
   }
 
+  async claimWompiFiscalCorrectionDocument(input: {
+    correctionId: string;
+    processingClaimId: string;
+    issuanceAttemptId: string;
+    documentId: string;
+  }): Promise<boolean> {
+    const claimId = `fiscal_correction_${input.correctionId}`;
+    const claimedAt = nowIso();
+    const row = await this.db.prepare(
+      `UPDATE dte_documents
+          SET fiscal_operation_claim_id = ?,
+              fiscal_operation_claimed_at = ?,
+              fiscal_operation_kind = 'TRANSMISSION',
+              fiscal_operation_event_id = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND status IN ('PENDING', 'SIGNED', 'FAILED', 'CONTINGENCY_PENDING')
+          AND transmission_claim_id IS NULL
+          AND (
+            fiscal_operation_claim_id IS NULL
+            OR (
+              fiscal_operation_claim_id = ?
+              AND fiscal_operation_kind = 'TRANSMISSION'
+              AND fiscal_operation_event_id IS NULL
+            )
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM fiscal_corrections
+              JOIN wompi_events
+                ON wompi_events.id = fiscal_corrections.wompi_event_id
+             WHERE fiscal_corrections.id = ?
+               AND fiscal_corrections.target_kind = 'WOMPI_EVENT'
+               AND fiscal_corrections.document_id IS NULL
+               AND fiscal_corrections.status = 'PROCESSING'
+               AND fiscal_corrections.processing_claim_id = ?
+               AND fiscal_corrections.issuance_attempt_id = ?
+               AND fiscal_corrections.mh_dispatch_started_at IS NULL
+               AND wompi_events.created_document_id = dte_documents.id
+               AND wompi_events.environment = dte_documents.environment
+               AND wompi_events.issuance_status = 'DOCUMENT_CREATED'
+               AND wompi_events.issuance_attempt_id =
+                   fiscal_corrections.issuance_attempt_id
+               AND dte_documents.wompi_event_id = wompi_events.id
+          )
+        RETURNING id`
+    ).bind(
+      claimId,
+      claimedAt,
+      claimedAt,
+      input.documentId,
+      claimId,
+      input.correctionId,
+      input.processingClaimId,
+      input.issuanceAttemptId
+    ).first<{ id: string }>();
+    return Boolean(row);
+  }
+
   async finalizeWompiFiscalCorrectionFailure(
     id: string,
     claimId: string,
@@ -3324,6 +3383,31 @@ export class Repository {
     return Boolean(updated);
   }
 
+  async updateClaimedDocumentSigned(
+    id: string,
+    signedJws: string,
+    expectedStatus: string,
+    claimId: string
+  ): Promise<boolean> {
+    const updated = await this.db.prepare(
+      `UPDATE dte_documents
+          SET signed_jws = ?, status = 'SIGNED', updated_at = ?
+        WHERE id = ?
+          AND status = ?
+          AND fiscal_operation_claim_id = ?
+          AND fiscal_operation_kind = 'TRANSMISSION'
+          AND fiscal_operation_event_id IS NULL
+        RETURNING id`
+    ).bind(
+      signedJws,
+      nowIso(),
+      id,
+      expectedStatus,
+      claimId
+    ).first<{ id: string }>();
+    return Boolean(updated);
+  }
+
   // Claim before allocating a new fiscal control sequence. A concurrent loser must
   // stop here so it cannot burn a permanent number for a DTE it will never transmit.
   async claimRejectedWompiRetry(id: string, wompiEventId: string, claimId: string): Promise<boolean> {
@@ -3390,9 +3474,18 @@ export class Repository {
              post_accept_finalized_at = NULL, updated_at = ?
          WHERE id = ? AND status = ? AND signed_jws = ?
            AND fiscal_operation_claim_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1
+               FROM fiscal_corrections
+              WHERE dte_documents.wompi_event_id IS NOT NULL
+                AND target_kind = 'WOMPI_EVENT'
+                AND wompi_event_id = dte_documents.wompi_event_id
+                AND status IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED')
+                AND ? <> 'fiscal_correction_' || fiscal_corrections.id
+           )
          RETURNING id`
       )
-      .bind(claimId, claimedAt, claimedAt, id, expectedStatus, signedJws)
+      .bind(claimId, claimedAt, claimedAt, id, expectedStatus, signedJws, claimId)
       .first<{ id: string }>();
     return Boolean(row);
   }

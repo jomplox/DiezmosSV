@@ -509,7 +509,7 @@ export class IssuancePipeline {
     assertDeploymentAllowsAmbiente(this.env, event.environment);
 
     const existing = await this.repo.getDteDocumentByWompiEvent(event.id);
-    if (existing) {
+    if (existing && isTerminalDteStatus(existing.status)) {
       try {
         return await this.finishWompiFiscalCorrection(correction, existing, ownership);
       } catch (error) {
@@ -520,6 +520,19 @@ export class IssuancePipeline {
           throw error;
         }
         return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+      }
+    }
+    if (existing) {
+      const claimed = await this.repo.claimWompiFiscalCorrectionDocument({
+        correctionId: correction.id,
+        processingClaimId: ownership.processingClaimId,
+        issuanceAttemptId: ownership.issuanceAttemptId,
+        documentId: existing.id
+      });
+      if (!claimed) {
+        throw new FiscalCorrectionBusyError(
+          "El CDE preexistente cambió antes de validar la corrección Wompi."
+        );
       }
     }
 
@@ -549,6 +562,19 @@ export class IssuancePipeline {
       );
     }
     const intent = binding.kind === "bound" ? binding.intent : null;
+    if (existing) {
+      try {
+        return await this.finishWompiFiscalCorrection(correction, existing, ownership);
+      } catch (error) {
+        if (
+          error instanceof FiscalCorrectionBusyError
+          || error instanceof FiscalCorrectionDispatchInFlightError
+        ) {
+          throw error;
+        }
+        return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+      }
+    }
     const config = getEmisorConfig(this.env);
     const correctionConfig = event.control_prefix
       ? { ...config, controlPrefix: event.control_prefix }
@@ -1200,15 +1226,48 @@ export class IssuancePipeline {
     try {
       let signedJws = record.signed_jws;
       let expectedStatus = record.status;
+      const correctionClaimId = correctionContext?.claimId ?? null;
+      const correctionOwnsClaim = Boolean(
+        correctionClaimId
+        && record.fiscal_operation_claim_id === correctionClaimId
+        && record.fiscal_operation_kind === "TRANSMISSION"
+        && record.fiscal_operation_event_id == null
+      );
       if (!signedJws) {
         assertCdeIssuerMatchesConfig(document, getEmisorConfig(this.env));
         signedJws = await signMhDocument(document, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-        if (!(await this.repo.updateDocumentSigned(record.id, signedJws, expectedStatus))) {
+        const updated = correctionOwnsClaim && correctionClaimId
+          ? await this.repo.updateClaimedDocumentSigned(
+              record.id,
+              signedJws,
+              expectedStatus,
+              correctionClaimId
+            )
+          : await this.repo.updateDocumentSigned(record.id, signedJws, expectedStatus);
+        if (!updated) {
           return (await this.repo.getDteDocument(record.id)) ?? record;
         }
         expectedStatus = "SIGNED";
+        if (correctionOwnsClaim) {
+          record = (await this.repo.getDteDocument(record.id)) ?? record;
+        }
+      } else if (
+        correctionOwnsClaim
+        && correctionClaimId
+        && expectedStatus !== "SIGNED"
+      ) {
+        if (!(await this.repo.updateClaimedDocumentSigned(
+          record.id,
+          signedJws,
+          expectedStatus,
+          correctionClaimId
+        ))) {
+          return (await this.repo.getDteDocument(record.id)) ?? record;
+        }
+        expectedStatus = "SIGNED";
+        record = (await this.repo.getDteDocument(record.id)) ?? record;
       }
-      claimId = correctionContext?.claimId ?? newId("fiscal");
+      claimId = correctionClaimId ?? newId("fiscal");
       const alreadyClaimedByCorrection = Boolean(
         correctionContext
         && record.status === "SIGNED"

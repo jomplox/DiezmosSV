@@ -1068,6 +1068,56 @@ describe("guarded fiscal correction API", () => {
         correction.mh_dispatch_started_at = null;
         return true;
       });
+    vi.spyOn(Repository.prototype, "claimWompiFiscalCorrectionDocument")
+      .mockImplementation(async (input) => {
+        const document = ownedDocument();
+        const quarantineClaimId = `fiscal_correction_${correction.id}`;
+        if (
+          input.correctionId !== correction.id
+          || input.processingClaimId !== correction.processing_claim_id
+          || input.issuanceAttemptId !== correction.issuance_attempt_id
+          || input.documentId !== document?.id
+          || correction.status !== "PROCESSING"
+          || correction.mh_dispatch_started_at !== null
+          || event.created_document_id !== document?.id
+          || event.issuance_status !== "DOCUMENT_CREATED"
+          || event.issuance_attempt_id !== correction.issuance_attempt_id
+          || !document
+          || !["PENDING", "SIGNED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status)
+          || document.transmission_claim_id !== null
+          || (
+            document.fiscal_operation_claim_id !== null
+            && (
+              document.fiscal_operation_claim_id !== quarantineClaimId
+              || document.fiscal_operation_kind !== "TRANSMISSION"
+              || document.fiscal_operation_event_id != null
+            )
+          )
+        ) {
+          return false;
+        }
+        document.fiscal_operation_claim_id = quarantineClaimId;
+        document.fiscal_operation_claimed_at = new Date().toISOString();
+        document.fiscal_operation_kind = "TRANSMISSION";
+        document.fiscal_operation_event_id = null;
+        return true;
+      });
+    vi.spyOn(Repository.prototype, "updateClaimedDocumentSigned")
+      .mockImplementation(async (id, signedJws, expectedStatus, claimId) => {
+        const document = ownedDocument();
+        if (
+          id !== document?.id
+          || expectedStatus !== document.status
+          || document.fiscal_operation_claim_id !== claimId
+          || document.fiscal_operation_kind !== "TRANSMISSION"
+          || document.fiscal_operation_event_id != null
+        ) {
+          return false;
+        }
+        document.signed_jws = signedJws;
+        document.status = "SIGNED";
+        return true;
+      });
     vi.spyOn(Repository.prototype, "finalizeWompiFiscalCorrectionFailure")
       .mockImplementation(async (id, processingClaimId, outcome) => {
         if (
@@ -2437,6 +2487,243 @@ describe("guarded fiscal correction API", () => {
     expect(db.documents).toHaveLength(0);
     expect(db.nextSequence).toBe(sequenceBefore);
     expect(transmit).not.toHaveBeenCalled();
+  });
+
+  it.each(["PENDING", "SIGNED", "FAILED", "CONTINGENCY_PENDING"] as const)(
+    "quarantines a pre-fix unbound Wompi correction before resuming its existing %s document",
+    async (documentStatus) => {
+      const db = correctionDb();
+      const payload = correctionWebhook({
+        IdExterno: "di_missing_existing_correction",
+        EnlacePago: {
+          Id: 987654,
+          IdentificadorEnlaceComercio: "di_missing_existing_correction"
+        },
+        Cliente: {
+          ...(correctionWebhook().Cliente ?? {}),
+          DocumentoIdentidad: "10000002-7"
+        }
+      });
+      const correction = correctionRecord({
+        id: `fiscal_correction_existing_${documentStatus.toLowerCase()}`,
+        wompi_event_id: `wompi_correction_existing_${documentStatus.toLowerCase()}`,
+        issuance_attempt_id: `issuance_attempt_existing_${documentStatus.toLowerCase()}`,
+        processing_claim_id: `correction_processing_existing_${documentStatus.toLowerCase()}`,
+        status: "PROCESSING",
+        processing_started_at: "2026-07-18T12:01:00.000Z",
+        mh_dispatch_started_at: null
+      });
+      const plainDocument = buildCdeDocument(payload, emisorConfig(), {
+        sequence: 83,
+        environment: "00",
+        issuedAt: new Date(payload.FechaTransaccion)
+      });
+      const identification = plainDocument.identificacion as Record<string, unknown>;
+      const document = testDocument({
+        id: `dte_correction_existing_${documentStatus.toLowerCase()}`,
+        wompi_event_id: correction.wompi_event_id,
+        status: documentStatus,
+        codigo_generacion: String(identification.codigoGeneracion),
+        numero_control: String(identification.numeroControl),
+        plain_json: JSON.stringify(plainDocument),
+        signed_jws: documentStatus === "PENDING" ? null : "signed-before-binding-guard",
+        sello_recibido: null,
+        mh_estado: null,
+        accepted_at: null,
+        post_accept_finalized_at: null,
+        fiscal_operation_claim_id: null,
+        fiscal_operation_claimed_at: null,
+        fiscal_operation_kind: null
+      });
+      const event = correctionEvent({
+        id: correction.wompi_event_id,
+        transaction_id: payload.IdTransaccion,
+        raw_body: JSON.stringify(payload),
+        processed_at: "2026-07-18T12:00:30.000Z",
+        created_document_id: document.id,
+        issuance_status: "DOCUMENT_CREATED",
+        issuance_attempt_id: correction.issuance_attempt_id,
+        control_prefix: "M001P004",
+        control_sequence: 83,
+        reserved_codigo_generacion: document.codigo_generacion,
+        reserved_numero_control: document.numero_control
+      });
+      db.wompiEvents.push(event);
+      db.documents.push(document);
+      stubQueuedCorrectionLifecycle(correction, event, db);
+      vi.spyOn(Repository.prototype, "getDonationIntent").mockResolvedValue(null);
+      const sign = vi.spyOn(crypto.subtle, "sign");
+      const transmit = vi.spyOn(MhClient.prototype, "transmitDte");
+      const eventBefore = JSON.stringify(event);
+      const documentBefore = { ...document };
+      const sequenceBefore = db.nextSequence;
+      const runtime = correctionRuntime(db);
+
+      const disposition = await consumeCorrectionMessage(
+        runtime,
+        {
+          wompiEventId: String(event.id),
+          fiscalCorrectionId: correction.id,
+          fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+          issuanceAttemptId: correction.issuance_attempt_id!
+        }
+      );
+
+      expect(disposition.ack).toHaveBeenCalledTimes(1);
+      expect(disposition.retry).not.toHaveBeenCalled();
+      expect(correction).toMatchObject({
+        status: "FAILED",
+        failure_code: "WOMPI_INTENT_QUARANTINED",
+        issuance_attempt_id: `issuance_attempt_existing_${documentStatus.toLowerCase()}`,
+        processing_claim_id: `correction_processing_existing_${documentStatus.toLowerCase()}`
+      });
+      expect(JSON.stringify(event)).toBe(eventBefore);
+      expect(document).toMatchObject({
+        ...documentBefore,
+        fiscal_operation_claim_id: `fiscal_correction_${correction.id}`,
+        fiscal_operation_claimed_at: expect.any(String),
+        fiscal_operation_kind: "TRANSMISSION",
+        fiscal_operation_event_id: null
+      });
+      expect(db.nextSequence).toBe(sequenceBefore);
+      expect(sign).not.toHaveBeenCalled();
+      expect(transmit).not.toHaveBeenCalled();
+      expectCorrectionAudits(db, correction, "FAILED");
+
+      await new IssuancePipeline(runtime).processDteDocument(document.id);
+
+      expect(transmit).not.toHaveBeenCalled();
+    }
+  );
+
+  it("preclaims, signs, and transmits a bound legacy PENDING Wompi correction exactly once", async () => {
+    const db = correctionDb();
+    const payload = correctionWebhook({
+      IdExterno: "di_bound_existing_pending",
+      EnlacePago: {
+        Id: 987654,
+        IdentificadorEnlaceComercio: "di_bound_existing_pending"
+      },
+      Cliente: {
+        ...(correctionWebhook().Cliente ?? {}),
+        DocumentoIdentidad: "10000002-7"
+      }
+    });
+    const correction = correctionRecord({
+      id: "fiscal_correction_bound_existing_pending",
+      wompi_event_id: "wompi_correction_bound_existing_pending",
+      issuance_attempt_id: "issuance_attempt_bound_existing_pending",
+      processing_claim_id: "correction_processing_bound_existing_pending",
+      status: "PROCESSING",
+      processing_started_at: "2026-07-18T12:01:00.000Z",
+      mh_dispatch_started_at: null
+    });
+    const plainDocument = buildCdeDocument(payload, emisorConfig(), {
+      sequence: 84,
+      environment: "00",
+      issuedAt: new Date(payload.FechaTransaccion)
+    });
+    const identification = plainDocument.identificacion as Record<string, unknown>;
+    const document = testDocument({
+      id: "dte_correction_bound_existing_pending",
+      wompi_event_id: correction.wompi_event_id,
+      status: "PENDING",
+      codigo_generacion: String(identification.codigoGeneracion),
+      numero_control: String(identification.numeroControl),
+      plain_json: JSON.stringify(plainDocument),
+      signed_jws: null,
+      sello_recibido: null,
+      mh_estado: null,
+      accepted_at: null,
+      post_accept_finalized_at: null,
+      fiscal_operation_claim_id: null,
+      fiscal_operation_claimed_at: null,
+      fiscal_operation_kind: null
+    });
+    const event = correctionEvent({
+      id: correction.wompi_event_id,
+      transaction_id: payload.IdTransaccion,
+      raw_body: JSON.stringify(payload),
+      processed_at: "2026-07-18T12:00:30.000Z",
+      created_document_id: document.id,
+      issuance_status: "DOCUMENT_CREATED",
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: "M001P004",
+      control_sequence: 84,
+      reserved_codigo_generacion: document.codigo_generacion,
+      reserved_numero_control: document.numero_control
+    });
+    db.donationIntents.push({
+      id: "di_bound_existing_pending",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987654
+    });
+    db.wompiEvents.push(event);
+    db.documents.push(document);
+    stubQueuedCorrectionLifecycle(correction, event, db);
+    const claimDocument = vi.mocked(
+      Repository.prototype.claimWompiFiscalCorrectionDocument
+    );
+    const signClaimedDocument = vi.mocked(
+      Repository.prototype.updateClaimedDocumentSigned
+    );
+    const runtime = correctionRuntime(db);
+    runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+    runtime.MH_CERT_PASSWORD = "cert-password";
+    const sign = vi.spyOn(crypto.subtle, "sign");
+    const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+      accepted: true,
+      estado: "PROCESADO",
+      selloRecibido: "SELLO-BOUND-EXISTING-PENDING",
+      observaciones: [],
+      raw: { estado: "PROCESADO" }
+    });
+
+    const disposition = await consumeCorrectionMessage(runtime, {
+      wompiEventId: String(event.id),
+      fiscalCorrectionId: correction.id,
+      fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id!
+    });
+
+    const documentClaimId = `fiscal_correction_${correction.id}`;
+    expect(disposition.ack).toHaveBeenCalledTimes(1);
+    expect(disposition.retry).not.toHaveBeenCalled();
+    expect(claimDocument).toHaveBeenCalledTimes(1);
+    expect(claimDocument).toHaveBeenCalledWith({
+      correctionId: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      issuanceAttemptId: correction.issuance_attempt_id,
+      documentId: document.id
+    });
+    expect(signClaimedDocument).toHaveBeenCalledTimes(1);
+    expect(signClaimedDocument).toHaveBeenCalledWith(
+      document.id,
+      expect.any(String),
+      "PENDING",
+      documentClaimId
+    );
+    expect(claimDocument.mock.invocationCallOrder[0]).toBeLessThan(
+      signClaimedDocument.mock.invocationCallOrder[0]
+    );
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(transmit).toHaveBeenCalledTimes(1);
+    expect(correction).toMatchObject({
+      status: "ACCEPTED",
+      failure_code: null,
+      failure_message: null,
+      completed_at: expect.any(String)
+    });
+    expect(document).toMatchObject({
+      status: "ACCEPTED",
+      signed_jws: expect.any(String),
+      sello_recibido: "SELLO-BOUND-EXISTING-PENDING",
+      fiscal_operation_claim_id: null,
+      fiscal_operation_claimed_at: null,
+      fiscal_operation_kind: null,
+      fiscal_operation_event_id: null
+    });
+    expectCorrectionAudits(db, correction, "ACCEPTED");
   });
 
   it("issues a corrected pre-CDE Wompi failure with its existing reservation", async () => {
