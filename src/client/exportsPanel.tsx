@@ -29,9 +29,9 @@ import {
   formatMoneyCents,
   monthLabel,
   monthStart,
-  shortCode,
-  StackedCell
+  shortCode
 } from "./App";
+import { StackedCell } from "./documentsView";
 
 export function ExportPanel({
   startDate,
