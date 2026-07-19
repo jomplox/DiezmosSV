@@ -1103,6 +1103,41 @@ const authRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/auth/password-reset/confirm", handler: handlePasswordResetConfirm }
 ];
 
+const settingsRoutes: Array<Route<ApiRouteContext>> = [
+  { pattern: "/api/credentials", role: "OWNER", handler: handleCredentials },
+  { pattern: "/api/credentials/writer-token", role: "OWNER", handler: handleCredentialWriterToken },
+  {
+    pattern: "/api/settings/emission-environment",
+    role: ({ request }) => request.method === "GET" ? "VIEWER" : request.method === "PUT" ? "OWNER" : null,
+    handler: handleEmissionEnvironment
+  },
+  {
+    pattern: "/api/settings/email-templates",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleEmailTemplates
+  },
+  {
+    pattern: "/api/settings/branding",
+    role: ({ request }) => request.method === "PUT" ? "OWNER" : null,
+    handler: handleBrandingSettings
+  },
+  {
+    pattern: "/api/settings/branding/logo",
+    role: ({ request }) => request.method === "PUT" || request.method === "DELETE" ? "OWNER" : null,
+    handler: handleAdminBrandingLogoSettings
+  },
+  {
+    pattern: "/api/settings/branding/donor-logo",
+    role: ({ request }) => request.method === "PUT" || request.method === "DELETE" ? "OWNER" : null,
+    handler: handleDonorBrandingLogoSettings
+  },
+  {
+    pattern: "/api/settings/alert-email",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleAlertEmailSetting
+  }
+];
+
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
   // every downstream repo.createAudit (route handlers reuse this same instance)
@@ -1127,6 +1162,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   if (publicResponse) return publicResponse;
   const authResponse = await dispatchRoutes(authRoutes, apiContext, requireRole);
   if (authResponse) return authResponse;
+  const settingsResponse = await dispatchRoutes(settingsRoutes, apiContext, requireRole);
+  if (settingsResponse) return settingsResponse;
 
   if (url.pathname === "/api/documents" && request.method === "GET") {
     requireRole(user, "VIEWER");
@@ -1218,38 +1255,6 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
       logWorkerError(env, "wompi_issuance_retry_failed", error);
       return wompiIssuanceOperationFailedResponse();
     }
-  }
-
-  if (url.pathname === "/api/credentials") {
-    return handleCredentialsRoute(request, env, repo, user);
-  }
-
-  if (url.pathname === "/api/credentials/writer-token") {
-    return handleCredentialWriterTokenRoute(request, env, repo, user);
-  }
-
-  if (url.pathname === "/api/settings/emission-environment") {
-    return handleEmissionEnvironmentRoute(request, env, repo, user);
-  }
-
-  if (url.pathname === "/api/settings/email-templates") {
-    return handleEmailTemplatesRoute(request, repo, user);
-  }
-
-  if (url.pathname === "/api/settings/branding") {
-    return handleBrandingRoute(request, repo, user);
-  }
-
-  if (url.pathname === "/api/settings/branding/logo") {
-    return handleBrandingLogoRoute(request, env, repo, user, ADMIN_EMAIL_LOGO_SLOT);
-  }
-
-  if (url.pathname === "/api/settings/branding/donor-logo") {
-    return handleBrandingLogoRoute(request, env, repo, user, DONOR_LOGO_SLOT);
-  }
-
-  if (url.pathname === "/api/settings/alert-email") {
-    return handleAlertEmailRoute(request, repo, user);
   }
 
   if (url.pathname === "/api/admin/retention-export" && request.method === "POST") {
@@ -1860,23 +1865,22 @@ function analyticsRange(fromParam: string | null, toParam: string | null, now: D
   return { from, to };
 }
 
-async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
-  if (request.method === "GET") {
-    requireRole(user, "VIEWER");
-    return jsonResponse({ emissionEnvironment: await emissionEnvironmentState(repo, env) });
+async function handleEmissionEnvironment(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({ emissionEnvironment: await emissionEnvironmentState(ctx.repo, ctx.env) });
   }
-  if (request.method !== "PUT") {
+  if (ctx.request.method !== "PUT") {
     return methodNotAllowed();
   }
-  const actor = requireRole(user, "OWNER");
-  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { environment?: unknown };
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { environment?: unknown };
   const environment = ambienteValue(body.environment);
   if (!environment) {
     return jsonResponse({ error: "invalid_emission_environment", message: "Seleccione Pruebas 00 o Producción 01." }, { status: 400 });
   }
-  assertDeploymentAllowsAmbiente(env, environment);
-  await repo.setSetting(EMISSION_ENVIRONMENT_SETTING, environment, actor.id);
-  await repo.createAudit({
+  assertDeploymentAllowsAmbiente(ctx.env, environment);
+  await ctx.repo.setSetting(EMISSION_ENVIRONMENT_SETTING, environment, actor.id);
+  await ctx.repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
     action: "EMISSION_ENVIRONMENT_UPDATED",
@@ -1885,24 +1889,23 @@ async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: 
     summary: environment === "01" ? "Ambiente de emisión cambiado a Producción 01" : "Ambiente de emisión cambiado a Pruebas 00",
     metadata: { environment }
   });
-  return jsonResponse({ ok: true, emissionEnvironment: await emissionEnvironmentState(repo, env) });
+  return jsonResponse({ ok: true, emissionEnvironment: await emissionEnvironmentState(ctx.repo, ctx.env) });
 }
 
-async function handleEmailTemplatesRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
-  if (request.method === "GET") {
-    requireRole(user, "OWNER");
-    const settings = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
+async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    const settings = parseEmailTemplates(await ctx.repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
     return jsonResponse({ emailTemplates: emailTemplateResponse(settings) });
   }
-  if (request.method !== "PUT") {
+  if (ctx.request.method !== "PUT") {
     return methodNotAllowed();
   }
-  const actor = requireRole(user, "OWNER");
-  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown };
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { templates?: unknown };
   try {
     const templates = normalizeEmailTemplateSettings(body.templates);
-    await repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
-    await repo.createAudit({
+    await ctx.repo.setSetting(EMAIL_TEMPLATES_SETTING_KEY, JSON.stringify(templates), actor.id);
+    await ctx.repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "EMAIL_TEMPLATES_UPDATED",
@@ -1920,22 +1923,21 @@ async function handleEmailTemplatesRoute(request: Request, repo: Repository, use
   }
 }
 
-async function handleAlertEmailRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
-  if (request.method === "GET") {
-    requireRole(user, "OWNER");
-    return jsonResponse({ alertEmail: (await repo.getSetting(ALERT_EMAIL_SETTING_KEY)) ?? "" });
+async function handleAlertEmailSetting(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({ alertEmail: (await ctx.repo.getSetting(ALERT_EMAIL_SETTING_KEY)) ?? "" });
   }
-  if (request.method !== "PUT") {
+  if (ctx.request.method !== "PUT") {
     return methodNotAllowed();
   }
-  const actor = requireRole(user, "OWNER");
-  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { alertEmail?: unknown };
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { alertEmail?: unknown };
   const alertEmail = normalizeAlertRecipients(typeof body.alertEmail === "string" ? body.alertEmail : "");
   if (alertEmail === null) {
     return jsonResponse({ error: "invalid_alert_email", message: "Ingrese correos válidos separados por coma." }, { status: 400 });
   }
-  await repo.setSetting(ALERT_EMAIL_SETTING_KEY, alertEmail, actor.id);
-  await repo.createAudit({
+  await ctx.repo.setSetting(ALERT_EMAIL_SETTING_KEY, alertEmail, actor.id);
+  await ctx.repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
     action: "ALERT_EMAIL_UPDATED",
@@ -1994,12 +1996,12 @@ async function handleBrandingLogoStream(env: Env, repo: Repository, slot: Brandi
 
 // Write branding name + color (OWNER). Both fields are required; validation errors
 // carry Spanish messages. The audit never logs anything sensitive (name/color only).
-async function handleBrandingRoute(request: Request, repo: Repository, user: AuthUser | null): Promise<Response> {
-  if (request.method !== "PUT") {
+async function handleBrandingSettings(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method !== "PUT") {
     return methodNotAllowed();
   }
-  const actor = requireRole(user, "OWNER");
-  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { displayName?: unknown; accentColor?: unknown; supportEmail?: unknown };
   let displayName: string;
   let accentColor: string;
   let supportEmail: string;
@@ -2013,10 +2015,10 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
     }
     throw error;
   }
-  await repo.setSetting(BRANDING_DISPLAY_NAME_SETTING_KEY, displayName, actor.id);
-  await repo.setSetting(BRANDING_ACCENT_COLOR_SETTING_KEY, accentColor, actor.id);
-  await repo.setSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY, supportEmail, actor.id);
-  await repo.createAudit({
+  await ctx.repo.setSetting(BRANDING_DISPLAY_NAME_SETTING_KEY, displayName, actor.id);
+  await ctx.repo.setSetting(BRANDING_ACCENT_COLOR_SETTING_KEY, accentColor, actor.id);
+  await ctx.repo.setSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY, supportEmail, actor.id);
+  await ctx.repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
     action: "BRANDING_UPDATED",
@@ -2033,12 +2035,20 @@ async function handleBrandingRoute(request: Request, repo: Repository, user: Aut
 // under BRANDING_LOGO_OBJECT_KEY; its metadata mirrors into app_settings so the public
 // reads stay a single D1 lookup. The audit records the content type and size, never
 // the bytes.
-async function handleBrandingLogoRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null, slot: BrandingLogoSlot): Promise<Response> {
-  if (request.method === "DELETE") {
-    const actor = requireRole(user, "OWNER");
-    await env.ARCHIVE.delete(slot.objectKey);
-    await repo.setSetting(slot.settingKey, "", actor.id);
-    await repo.createAudit({
+async function handleAdminBrandingLogoSettings(ctx: ApiRouteContext): Promise<Response> {
+  return handleBrandingLogoSettings(ctx, ADMIN_EMAIL_LOGO_SLOT);
+}
+
+async function handleDonorBrandingLogoSettings(ctx: ApiRouteContext): Promise<Response> {
+  return handleBrandingLogoSettings(ctx, DONOR_LOGO_SLOT);
+}
+
+async function handleBrandingLogoSettings(ctx: ApiRouteContext, slot: BrandingLogoSlot): Promise<Response> {
+  if (ctx.request.method === "DELETE") {
+    const actor = ctx.actor!;
+    await ctx.env.ARCHIVE.delete(slot.objectKey);
+    await ctx.repo.setSetting(slot.settingKey, "", actor.id);
+    await ctx.repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: slot.removedAction,
@@ -2049,20 +2059,20 @@ async function handleBrandingLogoRoute(request: Request, env: Env, repo: Reposit
     });
     return jsonResponse({ ok: true, [slot.versionField]: null });
   }
-  if (request.method !== "PUT") {
+  if (ctx.request.method !== "PUT") {
     return methodNotAllowed();
   }
-  const actor = requireRole(user, "OWNER");
+  const actor = ctx.actor!;
   let contentType: string;
   try {
-    contentType = normalizeBrandingLogoContentType(request.headers.get("Content-Type"));
+    contentType = normalizeBrandingLogoContentType(ctx.request.headers.get("Content-Type"));
   } catch (error) {
     if (error instanceof BrandingValidationError) {
       return jsonResponse({ error: "invalid_branding_logo", message: error.message }, { status: 400 });
     }
     throw error;
   }
-  const bytes = await readBodyBytes(request, BRANDING_LOGO_MAX_BYTES);
+  const bytes = await readBodyBytes(ctx.request, BRANDING_LOGO_MAX_BYTES);
   if (bytes.byteLength === 0) {
     return jsonResponse({ error: "invalid_branding_logo", message: "El archivo del logo está vacío." }, { status: 400 });
   }
@@ -2071,13 +2081,13 @@ async function handleBrandingLogoRoute(request: Request, env: Env, repo: Reposit
   }
   // crypto.randomUUID gives a cache-busting version without a wall-clock read.
   const version = crypto.randomUUID();
-  await env.ARCHIVE.put(slot.objectKey, bytes, { httpMetadata: { contentType } });
-  await repo.setSetting(
+  await ctx.env.ARCHIVE.put(slot.objectKey, bytes, { httpMetadata: { contentType } });
+  await ctx.repo.setSetting(
     slot.settingKey,
     JSON.stringify({ contentType, size: bytes.byteLength, version }),
     actor.id
   );
-  await repo.createAudit({
+  await ctx.repo.createAudit({
     actorType: "USER",
     actorId: actor.id,
     action: slot.updatedAction,
@@ -2288,27 +2298,27 @@ function advancedTemplateAmount(value: unknown): string | number {
   return "1.00";
 }
 
-async function handleCredentialsRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
-  const actor = requireRole(user, "OWNER");
-  if (request.method === "GET") {
-    return jsonResponse({ credentials: credentialStatus(env) });
+async function handleCredentials(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  if (ctx.request.method === "GET") {
+    return jsonResponse({ credentials: credentialStatus(ctx.env) });
   }
-  if (request.method !== "POST") {
+  if (ctx.request.method !== "POST") {
     return methodNotAllowed();
   }
 
-  const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as CredentialUpdateInput;
+  const input = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as CredentialUpdateInput;
   if (input.environment !== "test" && input.environment !== "production") {
     return jsonResponse({ error: "invalid_credential_environment" }, { status: 400 });
   }
-  assertDeploymentAllowsAmbiente(env, input.environment === "production" ? "01" : "00");
+  assertDeploymentAllowsAmbiente(ctx.env, input.environment === "production" ? "01" : "00");
   const patch = buildCredentialSecretPatch(input);
   if (Object.keys(patch).length === 0) {
     return jsonResponse({ error: "no_credentials_supplied" }, { status: 400 });
   }
   try {
-    const result = await patchCloudflareWorkerSecrets(env, patch);
-    await repo.createAudit({
+    const result = await patchCloudflareWorkerSecrets(ctx.env, patch);
+    await ctx.repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "CREDENTIALS_UPDATED",
@@ -2326,28 +2336,28 @@ async function handleCredentialsRoute(request: Request, env: Env, repo: Reposito
   }
 }
 
-async function handleCredentialWriterTokenRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
-  const actor = requireRole(user, "OWNER");
-  if (request.method !== "POST") {
+async function handleCredentialWriterToken(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  if (ctx.request.method !== "POST") {
     return methodNotAllowed();
   }
-  const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { token?: unknown };
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { token?: unknown };
   const token = typeof body.token === "string" ? body.token.trim() : "";
   if (!token) {
     return jsonResponse({ error: "cloudflare_token_required", message: "Ingrese el token API de Cloudflare." }, { status: 400 });
   }
   try {
-    const result = await bootstrapCloudflareWriterToken(env, token);
-    await repo.createAudit({
+    const result = await bootstrapCloudflareWriterToken(ctx.env, token);
+    await ctx.repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "CLOUDFLARE_WRITER_ENABLED",
       entityType: "credentials",
-      entityId: env.CLOUDFLARE_SCRIPT_NAME ?? "worker",
+      entityId: ctx.env.CLOUDFLARE_SCRIPT_NAME ?? "worker",
       summary: "Edición de secretos desde UI habilitada",
       metadata: { updated: result.updated }
     });
-    return jsonResponse({ ok: true, updated: result.updated, credentials: credentialStatus({ ...env, CLOUDFLARE_API_TOKEN: token }) });
+    return jsonResponse({ ok: true, updated: result.updated, credentials: credentialStatus({ ...ctx.env, CLOUDFLARE_API_TOKEN: token }) });
   } catch (error) {
     if (error instanceof CredentialWriterConfigError) {
       return jsonResponse({ error: "credential_writer_not_configured", message: error.message }, { status: 503 });
