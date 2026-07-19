@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { legacyIssuanceAttemptId, Repository } from "../../src/worker/storage/repository";
+import { sqliteD1 } from "./support/sqliteD1";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 const initMigrationPath = resolve(migrationsDirectory, "0001_init.sql");
@@ -695,72 +696,4 @@ function insertRawFiscalCorrection(
     input.wompiEventId,
     input.correctedReceptorJson ?? "{}"
   );
-}
-
-function sqliteD1(database: DatabaseSync): D1Database {
-  function prepare(query: string): D1PreparedStatement {
-    let boundValues: unknown[] = [];
-    const statement = {
-      bind(...values: unknown[]) {
-        boundValues = values;
-        return statement;
-      },
-      async first<T>() {
-        return (database.prepare(query).get(...sqliteValues(boundValues)) ?? null) as T | null;
-      },
-      async run() {
-        const result = database.prepare(query).run(...sqliteValues(boundValues));
-        return {
-          success: true,
-          meta: { changes: Number(result.changes) },
-          results: []
-        } as unknown as D1Result;
-      },
-      async all<T>() {
-        return {
-          success: true,
-          meta: {},
-          results: database.prepare(query).all(...sqliteValues(boundValues)) as T[]
-        } as unknown as D1Result<T>;
-      },
-      raw: async () => [],
-      columnNames: async () => []
-    };
-    return statement as unknown as D1PreparedStatement;
-  }
-
-  return {
-    prepare,
-    async batch<T = unknown>(statements: D1PreparedStatement[]) {
-      database.exec("BEGIN IMMEDIATE");
-      try {
-        const results: D1Result<T>[] = [];
-        for (const statement of statements) {
-          results.push(await statement.run<T>());
-        }
-        database.exec("COMMIT");
-        return results;
-      } catch (error) {
-        database.exec("ROLLBACK");
-        throw error;
-      }
-    },
-    exec: async () => ({ count: 0, duration: 0 }),
-    dump: async () => new ArrayBuffer(0)
-  } as unknown as D1Database;
-}
-
-function sqliteValues(values: unknown[]): Array<string | number | bigint | Uint8Array | null> {
-  return values.map((value) => {
-    if (
-      value === null ||
-      typeof value === "string" ||
-      typeof value === "number" ||
-      typeof value === "bigint" ||
-      value instanceof Uint8Array
-    ) {
-      return value;
-    }
-    throw new TypeError(`Unsupported SQLite bind value: ${typeof value}`);
-  });
 }

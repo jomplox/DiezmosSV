@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { utf8Bytes } from "../../../src/worker/utils/encoding";
 import type { DteDocumentRecord, Env } from "../../../src/worker/types";
 
@@ -138,28 +137,6 @@ export function wompiIssuanceFailureProjection(event: Record<string, unknown>): 
   return Object.fromEntries(
     WOMPI_ISSUANCE_FAILURE_FIELDS.map((field) => [field, event[field] ?? null])
   );
-}
-
-export function sqliteD1(database: DatabaseSync): D1Database {
-  return {
-    prepare(query: string) {
-      let boundValues: unknown[] = [];
-      const statement = {
-        bind(...values: unknown[]) {
-          boundValues = values;
-          return statement;
-        },
-        async first<T>(): Promise<T | null> {
-          const sqliteValues = boundValues.map((value) => {
-            if (typeof value === "string" || typeof value === "number") return value;
-            throw new TypeError("SQLite D1 test adapter only supports string and number binds");
-          });
-          return (database.prepare(query).get(...sqliteValues) ?? null) as T | null;
-        }
-      };
-      return statement;
-    }
-  } as unknown as D1Database;
 }
 
 export class InMemoryD1 {

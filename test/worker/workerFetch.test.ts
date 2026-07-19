@@ -32,9 +32,9 @@ import {
   authedDb,
   env,
   FakeArchiveBucket,
-  InMemoryD1,
-  sqliteD1
+  InMemoryD1
 } from "./support/inMemoryD1";
+import { sqliteD1 } from "./support/sqliteD1";
 
 const nativeCrypto = crypto;
 
