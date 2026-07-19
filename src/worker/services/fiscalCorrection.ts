@@ -145,7 +145,7 @@ export async function assertDirectCorrectionSourceTrusted(input: {
       const certificate = await parseMhCertificate(certXml);
       if (
         await verifyMhJws(input.sourceDocument.signed_jws, certXml)
-        && sameJsonValue(
+        && sameFiscalContent(
           decodeMhJwsPayload(input.sourceDocument.signed_jws),
           source
         )
@@ -166,13 +166,13 @@ function sameNit(left: unknown, right: unknown): boolean {
   return leftDigits.length > 0 && leftDigits === rightDigits;
 }
 
-function sameJsonValue(left: unknown, right: unknown): boolean {
+export function sameFiscalContent(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
   if (Array.isArray(left) || Array.isArray(right)) {
     return Array.isArray(left)
       && Array.isArray(right)
       && left.length === right.length
-      && left.every((value, index) => sameJsonValue(value, right[index]));
+      && left.every((value, index) => sameFiscalContent(value, right[index]));
   }
   if (!left || !right || typeof left !== "object" || typeof right !== "object") {
     return false;
@@ -184,7 +184,7 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return leftKeys.length === rightKeys.length
     && leftKeys.every(
       (key, index) => key === rightKeys[index]
-        && sameJsonValue(leftRecord[key], rightRecord[key])
+        && sameFiscalContent(leftRecord[key], rightRecord[key])
     );
 }
 

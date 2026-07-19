@@ -17,6 +17,31 @@ describe("ambiguous fiscal outcome visibility", () => {
     expect(appSource).toMatch(/disabled=\{fiscalOutcomePending \|\| postAcceptFinalizationPending \|\| busy === "resend"\}/);
   });
 
+  it("explains a terminal pre-dispatch correction quarantine without implying MH processed it", () => {
+    expect(typesSource).toContain("FiscalReconciliationState");
+    expect(appSource).toContain("fiscalReconciliation?: FiscalReconciliationState");
+    expect(appSource).toContain("Requiere reconciliación");
+    expect(appSource).toContain("fiscalReconciliation.failureMessage");
+    expect(appSource).toContain("No use Reintentar DTE; revise y concilie este caso.");
+    expect(appSource).toMatch(
+      /fiscalReconciliation[\s\S]*?Requiere reconciliación[\s\S]*?no se transmitió a MH/
+    );
+    expect(appSource).toMatch(
+      /fiscalReconciliation \?[\s\S]*?:[\s\S]*?MH pudo haber procesado/
+    );
+  });
+
+  it("labels and counts correction-owned nonterminal documents in the failures view", () => {
+    expect(appSource).toContain("Corrección por conciliar");
+    expect(appSource).toMatch(
+      /function isCorrectionReconciliationDocument[\s\S]*?fiscal_correction_[\s\S]*?PENDING[\s\S]*?SIGNED[\s\S]*?CONTINGENCY_PENDING/
+    );
+    expect(appSource).toContain("showCorrectionAttention={view === \"failures\"}");
+    expect(appSource).toMatch(
+      /onlyFailed\s*\?\s*documents\.length \+ preCdeFailureCount\s*:\s*\(counts\.FAILED/
+    );
+  });
+
   it("documents the three exact reconciliation outcomes and D1-compatible atomic execution", () => {
     expect(reconciliationRunbook).toContain("Outcome 1: still unknown");
     expect(reconciliationRunbook).toContain("Outcome 2: MH confirms NOT_RECEIVED");

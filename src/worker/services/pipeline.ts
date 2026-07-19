@@ -30,7 +30,8 @@ import {
 import {
   assertDirectCorrectionSourceTrusted,
   buildCorrectedDirectCandidate,
-  buildCorrectedWompiCandidate
+  buildCorrectedWompiCandidate,
+  sameFiscalContent
 } from "./fiscalCorrection";
 import type { FiscalReceptorCorrection } from "../../shared/fiscalCorrection";
 
@@ -76,6 +77,8 @@ const WOMPI_INTENT_QUARANTINED_MESSAGE =
   "El evento Wompi está en cuarentena porque no coincide con una intención lista.";
 const WOMPI_INVALID_DONOR_DUI_MESSAGE =
   "Los datos del donante contienen un DUI inválido.";
+const FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH_MESSAGE =
+  "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH.";
 
 // Estados TERMINALES de un CDE: un veredicto de MH ya sellado (ACCEPTED/REJECTED) o una
 // invalidación. Una reentrega de cola NUNCA debe re-firmar/re-transmitir un documento en
@@ -562,30 +565,29 @@ export class IssuancePipeline {
       );
     }
     const intent = binding.kind === "bound" ? binding.intent : null;
-    if (existing) {
-      try {
-        return await this.finishWompiFiscalCorrection(correction, existing, ownership);
-      } catch (error) {
-        if (
-          error instanceof FiscalCorrectionBusyError
-          || error instanceof FiscalCorrectionDispatchInFlightError
-        ) {
-          throw error;
-        }
-        return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
-      }
-    }
     const config = getEmisorConfig(this.env);
     const correctionConfig = event.control_prefix
       ? { ...config, controlPrefix: event.control_prefix }
       : config;
     let correctedReceptor: FiscalReceptorCorrection;
+    let correctedCandidate: Record<string, unknown>;
 
     try {
       correctedReceptor = JSON.parse(
         correction.corrected_receptor_json
       ) as FiscalReceptorCorrection;
-      buildCorrectedWompiCandidate({
+      if (
+        existing
+        && (
+          event.control_prefix === null
+          || event.control_sequence === null
+          || event.reserved_numero_control === null
+          || event.reserved_codigo_generacion === null
+        )
+      ) {
+        throw new Error("El CDE preexistente no tiene una reserva Wompi completa.");
+      }
+      correctedCandidate = buildCorrectedWompiCandidate({
         payload,
         intent,
         correction: correctedReceptor,
@@ -597,9 +599,46 @@ export class IssuancePipeline {
     } catch (error) {
       return this.finalizeFiscalCorrectionFailure(
         correction,
-        "FISCAL_CORRECTION_INVALID_CANDIDATE",
-        error instanceof Error ? error.message : String(error)
+        existing
+          ? "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH"
+          : "FISCAL_CORRECTION_INVALID_CANDIDATE",
+        existing
+          ? FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH_MESSAGE
+          : error instanceof Error ? error.message : String(error)
       );
+    }
+    if (existing) {
+      let persisted: unknown;
+      try {
+        persisted = JSON.parse(existing.plain_json);
+      } catch {
+        persisted = null;
+      }
+      const identifiers = extractCdeIdentifiers(correctedCandidate);
+      if (
+        event.reserved_numero_control !== existing.numero_control
+        || event.reserved_codigo_generacion !== existing.codigo_generacion
+        || identifiers.numeroControl !== existing.numero_control
+        || identifiers.codigoGeneracion !== existing.codigo_generacion
+        || !sameFiscalContent(persisted, correctedCandidate)
+      ) {
+        return this.finalizeFiscalCorrectionFailure(
+          correction,
+          "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH",
+          FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH_MESSAGE
+        );
+      }
+      try {
+        return await this.finishWompiFiscalCorrection(correction, existing, ownership);
+      } catch (error) {
+        if (
+          error instanceof FiscalCorrectionBusyError
+          || error instanceof FiscalCorrectionDispatchInFlightError
+        ) {
+          throw error;
+        }
+        return this.finalizeFiscalCorrectionProcessingError(correction, ownership, error);
+      }
     }
 
     const issuanceClaimId = `wompi_correction_${correction.id}`;

@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import wompiSample from "../../examples/wompi-webhook.sample.json";
-import { fiscalCorrectionPayload } from "../../src/shared/fiscalCorrection";
+import {
+  fiscalCorrectionPayload,
+  type FiscalReceptorCorrection
+} from "../../src/shared/fiscalCorrection";
 import { buildCdeDocument, buildDirectCdeDocument } from "../../src/worker/domain/dteBuilder";
 import { signMhDocument } from "../../src/worker/domain/signer";
 import worker from "../../src/worker/index";
@@ -15,6 +18,7 @@ import {
   RejectedWompiRetryConflictError,
   WompiIntentQuarantinedError
 } from "../../src/worker/services/pipeline";
+import { buildCorrectedWompiCandidate } from "../../src/worker/services/fiscalCorrection";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { EmailService } from "../../src/worker/services/email";
 import { MhClient, MhPreDispatchError } from "../../src/worker/services/mhClient";
@@ -925,7 +929,9 @@ describe("guarded fiscal correction API", () => {
     });
   }
 
-  function correctionReceptor(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  function correctionReceptor(
+    overrides: Partial<FiscalReceptorCorrection> = {}
+  ): FiscalReceptorCorrection {
     return {
       tipoDocumento: "13",
       numDocumento: "10000002-7",
@@ -2618,10 +2624,19 @@ describe("guarded fiscal correction API", () => {
       processing_started_at: "2026-07-18T12:01:00.000Z",
       mh_dispatch_started_at: null
     });
-    const plainDocument = buildCdeDocument(payload, emisorConfig(), {
+    const intent = {
+      id: "di_bound_existing_pending",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987654,
+      gift_type: "DIEZMO"
+    };
+    const plainDocument = buildCorrectedWompiCandidate({
+      payload,
+      intent: intent as any,
+      correction: correctionReceptor(),
+      config: emisorConfig(),
       sequence: 84,
-      environment: "00",
-      issuedAt: new Date(payload.FechaTransaccion)
+      environment: "00"
     });
     const identification = plainDocument.identificacion as Record<string, unknown>;
     const document = testDocument({
@@ -2653,11 +2668,7 @@ describe("guarded fiscal correction API", () => {
       reserved_codigo_generacion: document.codigo_generacion,
       reserved_numero_control: document.numero_control
     });
-    db.donationIntents.push({
-      id: "di_bound_existing_pending",
-      status: "LINK_CREATED",
-      wompi_id_enlace: 987654
-    });
+    db.donationIntents.push(intent);
     db.wompiEvents.push(event);
     db.documents.push(document);
     stubQueuedCorrectionLifecycle(correction, event, db);
@@ -2725,6 +2736,137 @@ describe("guarded fiscal correction API", () => {
     });
     expectCorrectionAudits(db, correction, "ACCEPTED");
   });
+
+  it.each([
+    {
+      label: "corrected receptor",
+      persistedCorrection: correctionReceptor({ nombre: "Receptor persistido distinto" }),
+      persistedGiftType: "DIEZMO",
+      currentGiftType: "DIEZMO"
+    },
+    {
+      label: "bound gift type",
+      persistedCorrection: correctionReceptor(),
+      persistedGiftType: "DIEZMO",
+      currentGiftType: "OFRENDA"
+    }
+  ] as const)(
+    "quarantines an existing PENDING Wompi correction whose $label no longer matches",
+    async ({ label, persistedCorrection, persistedGiftType, currentGiftType }) => {
+      const suffix = label.replaceAll(" ", "_");
+      const intentId = `di_mismatched_${suffix}`;
+      const db = correctionDb();
+      const payload = correctionWebhook({
+        IdExterno: intentId,
+        EnlacePago: {
+          Id: 987654,
+          IdentificadorEnlaceComercio: intentId
+        },
+        Cliente: {
+          ...(correctionWebhook().Cliente ?? {}),
+          DocumentoIdentidad: "10000002-7"
+        }
+      });
+      const correction = correctionRecord({
+        id: `fiscal_correction_mismatched_${suffix}`,
+        wompi_event_id: `wompi_correction_mismatched_${suffix}`,
+        issuance_attempt_id: `issuance_attempt_mismatched_${suffix}`,
+        processing_claim_id: `correction_processing_mismatched_${suffix}`,
+        status: "PROCESSING",
+        processing_started_at: "2026-07-18T12:01:00.000Z",
+        mh_dispatch_started_at: null
+      });
+      const currentIntent = {
+        id: intentId,
+        status: "LINK_CREATED",
+        wompi_id_enlace: 987654,
+        gift_type: currentGiftType
+      };
+      const persistedDocument = buildCorrectedWompiCandidate({
+        payload,
+        intent: {
+          ...currentIntent,
+          gift_type: persistedGiftType
+        } as any,
+        correction: persistedCorrection,
+        config: emisorConfig(),
+        sequence: 85,
+        environment: "00"
+      });
+      const identification = persistedDocument.identificacion as Record<string, unknown>;
+      const document = testDocument({
+        id: `dte_correction_mismatched_${suffix}`,
+        wompi_event_id: correction.wompi_event_id,
+        status: "PENDING",
+        codigo_generacion: String(identification.codigoGeneracion),
+        numero_control: String(identification.numeroControl),
+        plain_json: JSON.stringify(persistedDocument),
+        signed_jws: null,
+        sello_recibido: null,
+        mh_estado: null,
+        accepted_at: null,
+        post_accept_finalized_at: null,
+        fiscal_operation_claim_id: null,
+        fiscal_operation_claimed_at: null,
+        fiscal_operation_kind: null
+      });
+      const event = correctionEvent({
+        id: correction.wompi_event_id,
+        transaction_id: payload.IdTransaccion,
+        raw_body: JSON.stringify(payload),
+        processed_at: "2026-07-18T12:00:30.000Z",
+        created_document_id: document.id,
+        issuance_status: "DOCUMENT_CREATED",
+        issuance_attempt_id: correction.issuance_attempt_id,
+        control_prefix: "M001P004",
+        control_sequence: 85,
+        reserved_codigo_generacion: document.codigo_generacion,
+        reserved_numero_control: document.numero_control
+      });
+      db.donationIntents.push(currentIntent);
+      db.wompiEvents.push(event);
+      db.documents.push(document);
+      stubQueuedCorrectionLifecycle(correction, event, db);
+      const runtime = correctionRuntime(db);
+      runtime.MH_CERT_XML = await generatedCertificateXml("cert-password");
+      runtime.MH_CERT_PASSWORD = "cert-password";
+      const sign = vi.spyOn(crypto.subtle, "sign");
+      const transmit = vi.spyOn(MhClient.prototype, "transmitDte").mockResolvedValue({
+        accepted: true,
+        estado: "PROCESADO",
+        selloRecibido: "MUST-NOT-TRANSMIT",
+        observaciones: [],
+        raw: { estado: "PROCESADO" }
+      });
+
+      const disposition = await consumeCorrectionMessage(runtime, {
+        wompiEventId: String(event.id),
+        fiscalCorrectionId: correction.id,
+        fiscalCorrectionProcessingClaimId: correction.processing_claim_id,
+        issuanceAttemptId: correction.issuance_attempt_id!
+      });
+
+      expect(disposition.ack).toHaveBeenCalledTimes(1);
+      expect(disposition.retry).not.toHaveBeenCalled();
+      expect(correction).toMatchObject({
+        status: "FAILED",
+        failure_code: "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH",
+        completed_at: expect.any(String)
+      });
+      expect(document).toMatchObject({
+        status: "PENDING",
+        signed_jws: null,
+        sello_recibido: null,
+        fiscal_operation_claim_id: `fiscal_correction_${correction.id}`,
+        fiscal_operation_claimed_at: expect.any(String),
+        fiscal_operation_kind: "TRANSMISSION",
+        fiscal_operation_event_id: null
+      });
+      expect(sign).not.toHaveBeenCalled();
+      expect(transmit).not.toHaveBeenCalled();
+      expectCorrectionAudits(db, correction, "FAILED");
+    }
+  );
 
   it("issues a corrected pre-CDE Wompi failure with its existing reservation", async () => {
     const db = correctionDb();
@@ -3045,16 +3187,30 @@ describe("guarded fiscal correction API", () => {
       processing_started_at: "2026-07-18T12:01:00.000Z"
     });
     const payload = correctionWebhook({
+      IdExterno: "di_concurrent_correction",
+      EnlacePago: {
+        Id: 987655,
+        IdentificadorEnlaceComercio: "di_concurrent_correction"
+      },
       IdTransaccion: "wompi_correction_concurrent_dispatch_tx",
       Cliente: {
         ...(correctionWebhook().Cliente ?? {}),
         DocumentoIdentidad: "10000002-7"
       }
     });
-    const document = buildCdeDocument(payload, emisorConfig(), {
+    const intent = {
+      id: "di_concurrent_correction",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 987655,
+      gift_type: "DIEZMO"
+    };
+    const document = buildCorrectedWompiCandidate({
+      payload,
+      intent: intent as any,
+      correction: correctionReceptor(),
+      config: emisorConfig(),
       sequence: 62,
-      environment: "00",
-      issuedAt: new Date(payload.FechaTransaccion)
+      environment: "00"
     });
     const identifiers = (document.identificacion ?? {}) as Record<string, unknown>;
     const documentId = "dte_correction_concurrent_dispatch";
@@ -3065,8 +3221,13 @@ describe("guarded fiscal correction API", () => {
       processed_at: "2026-07-18T12:02:00.000Z",
       created_document_id: documentId,
       issuance_status: "DOCUMENT_CREATED",
-      issuance_attempt_id: correction.issuance_attempt_id
+      issuance_attempt_id: correction.issuance_attempt_id,
+      control_prefix: "M001P004",
+      control_sequence: 62,
+      reserved_codigo_generacion: String(identifiers.codigoGeneracion),
+      reserved_numero_control: String(identifiers.numeroControl)
     });
+    db.donationIntents.push(intent);
     db.wompiEvents.push(event);
     db.documents.push(testDocument({
       id: documentId,
@@ -8258,6 +8419,55 @@ describe("document detail donor-data-verified flag", () => {
         retrySafe: true,
         attemptNo: 2,
         occurredAt: "2026-07-17T17:00:02.000Z"
+      }
+    });
+  });
+
+  it("returns bounded reconciliation guidance for a document owned by a failed Wompi correction", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = {
+      id: "user_viewer",
+      email: "viewer@example.org",
+      name: "Viewer",
+      role: "VIEWER"
+    };
+    db.documents.push(testDocument({
+      id: "doc_failed_correction_detail",
+      wompi_event_id: "wompi_failed_correction_detail",
+      status: "PENDING",
+      fiscal_operation_claim_id:
+        "fiscal_correction_fiscal_correction_failed_detail",
+      fiscal_operation_claimed_at: "2026-07-18T12:05:00.000Z",
+      fiscal_operation_kind: "TRANSMISSION",
+      fiscal_operation_event_id: null
+    }));
+    const lookup = vi
+      .spyOn(Repository.prototype, "getFailedWompiFiscalCorrectionForDocument")
+      .mockResolvedValue({
+        id: "fiscal_correction_failed_detail",
+        status: "FAILED",
+        failureCode: "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH",
+        failureMessage:
+          "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH."
+      });
+
+    const response = await worker.fetch(
+      new Request(
+        "https://example.org/api/documents/doc_failed_correction_detail",
+        { headers: { Authorization: "Bearer test-token" } }
+      ),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    expect(lookup).toHaveBeenCalledWith("doc_failed_correction_detail");
+    await expect(response.json()).resolves.toMatchObject({
+      fiscalReconciliation: {
+        id: "fiscal_correction_failed_detail",
+        status: "FAILED",
+        failureCode: "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH",
+        failureMessage:
+          "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH."
       }
     });
   });

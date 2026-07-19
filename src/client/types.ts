@@ -57,6 +57,13 @@ export interface ReceiptEmailDeliveryState {
   occurredAt: string;
 }
 
+export interface FiscalReconciliationState {
+  id: string;
+  status: "FAILED";
+  failureCode: string | null;
+  failureMessage: string | null;
+}
+
 type DonationIntentStatus = "PENDING" | "LINK_CREATED" | "COMPLETED" | "EXPIRED";
 
 export interface DonationIntentListItem {

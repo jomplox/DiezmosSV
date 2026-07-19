@@ -782,6 +782,64 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("lists every nonterminal document owned by a terminal failed Wompi correction as requiring attention", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    const statuses = ["PENDING", "SIGNED", "FAILED", "CONTINGENCY_PENDING"] as const;
+    for (const [index, status] of statuses.entries()) {
+      seedFailedCorrectionOwnedDocument(database, {
+        suffix: index + 1,
+        documentStatus: status,
+        correctionStatus: "FAILED"
+      });
+    }
+    seedFailedCorrectionOwnedDocument(database, {
+      suffix: 9,
+      documentStatus: "PENDING",
+      correctionStatus: "PROCESSING"
+    });
+
+    const page = await repository.listDteDocuments({
+      attention: "failures",
+      limit: 20
+    });
+
+    expect(page.documents.map((document) => document.id).sort()).toEqual(
+      statuses.map((status, index) =>
+        `doc_failed_correction_${index + 1}_${status.toLowerCase()}`
+      ).sort()
+    );
+    database.close();
+  });
+
+  it("projects only the terminal failed Wompi correction that owns the selected document claim", async () => {
+    const database = migratedDatabase();
+    const repository = new Repository(new SqliteD1(database).database);
+    const seeded = seedFailedCorrectionOwnedDocument(database, {
+      suffix: 10,
+      documentStatus: "PENDING",
+      correctionStatus: "FAILED"
+    });
+    const processing = seedFailedCorrectionOwnedDocument(database, {
+      suffix: 11,
+      documentStatus: "SIGNED",
+      correctionStatus: "PROCESSING"
+    });
+    await expect(repository.getFailedWompiFiscalCorrectionForDocument(
+      seeded.documentId
+    )).resolves.toEqual({
+      id: seeded.correctionId,
+      status: "FAILED",
+      failureCode: "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH",
+      failureMessage:
+        "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH."
+    });
+    await expect(repository.getFailedWompiFiscalCorrectionForDocument(
+      processing.documentId
+    )).resolves.toBeNull();
+    database.close();
+  });
+
   it("rolls back recovery token rotation until missing queued and started audits persist", async () => {
     const database = migratedDatabase();
     const wompiEventId = "wompi_audit_recovery";
@@ -4462,6 +4520,83 @@ function seedFailedWompiEvent(database: DatabaseSync, id: string): void {
      ) VALUES (?, ?, '00', 'ExitosaAprobada', 2500, '{}', 'FAILED',
        'previous-attempt', 'INVALID_DUI', 'DUI inválido', ?)`
   ).run(id, `transaction_${id}`, "2026-07-18T12:00:00.000Z");
+}
+
+function seedFailedCorrectionOwnedDocument(
+  database: DatabaseSync,
+  input: {
+    suffix: number;
+    documentStatus: "PENDING" | "SIGNED" | "FAILED" | "CONTINGENCY_PENDING";
+    correctionStatus: "PROCESSING" | "FAILED";
+  }
+): { documentId: string; correctionId: string } {
+  const suffix = String(input.suffix).padStart(2, "0");
+  const statusSuffix = input.documentStatus.toLowerCase();
+  const eventId = `wompi_failed_correction_${suffix}_${statusSuffix}`;
+  const documentId = `doc_failed_correction_${input.suffix}_${statusSuffix}`;
+  const correctionId = `fiscal_correction_attention_${suffix}_${statusSuffix}`;
+  seedFailedWompiEvent(database, eventId);
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, signed_jws, sello_recibido, mh_estado,
+       mh_observaciones_json, amount_cents, issued_at,
+       fiscal_operation_claim_id, fiscal_operation_claimed_at,
+       fiscal_operation_kind, fiscal_operation_event_id, created_at, updated_at
+     ) VALUES (?, ?, '00', ?, ?, ?, '{}', ?, NULL, NULL, '[]', 2500, ?,
+               ?, ?, 'TRANSMISSION', NULL, ?, ?)`
+  ).run(
+    documentId,
+    eventId,
+    `00000000-0000-4000-8000-${suffix.padStart(12, "0")}`,
+    `DTE-15-M001P004-${suffix.padStart(15, "0")}`,
+    input.documentStatus,
+    input.documentStatus === "PENDING" ? null : `signed-${suffix}`,
+    `2026-07-18T12:${suffix}:00.000Z`,
+    `fiscal_correction_${correctionId}`,
+    `2026-07-18T12:${suffix}:01.000Z`,
+    `2026-07-18T12:${suffix}:00.000Z`,
+    `2026-07-18T12:${suffix}:01.000Z`
+  );
+  database.prepare(
+    `INSERT INTO fiscal_corrections (
+       id, request_id, request_payload_sha256, attempt_number, target_kind,
+       wompi_event_id, document_id, environment, status, before_receptor_json,
+       corrected_receptor_json, changed_fields_json, source_document_snapshot_json,
+       issuance_attempt_id, fiscal_claim_id, processing_claim_id,
+       mh_dispatch_started_at, failure_code, failure_message, created_by,
+       processing_started_at, completed_at, created_at, updated_at
+     ) VALUES (?, ?, 'attention-payload-sha', 1, 'WOMPI_EVENT', ?, NULL, '00',
+               ?, '{}', '{}', '[]', NULL, ?, NULL, ?, NULL, ?, ?, 'user_operator',
+               ?, ?, ?, ?)`
+  ).run(
+    correctionId,
+    `request_failed_correction_${suffix}_${statusSuffix}`,
+    eventId,
+    input.correctionStatus,
+    `issuance_attempt_${suffix}`,
+    `processing_claim_${suffix}`,
+    input.correctionStatus === "FAILED"
+      ? "FISCAL_CORRECTION_EXISTING_DOCUMENT_MISMATCH"
+      : null,
+    input.correctionStatus === "FAILED"
+      ? "El CDE preexistente no coincide con la corrección fiscal vigente o con la intención Wompi enlazada. Requiere reconciliación manual; no se transmitió a MH."
+      : null,
+    `2026-07-18T12:${suffix}:01.000Z`,
+    input.correctionStatus === "FAILED"
+      ? `2026-07-18T12:${suffix}:02.000Z`
+      : null,
+    `2026-07-18T12:${suffix}:00.000Z`,
+    `2026-07-18T12:${suffix}:02.000Z`
+  );
+  database.prepare(
+    `UPDATE wompi_events
+        SET created_document_id = ?,
+            issuance_status = 'DOCUMENT_CREATED',
+            issuance_attempt_id = ?
+      WHERE id = ?`
+  ).run(documentId, `issuance_attempt_${suffix}`, eventId);
+  return { documentId, correctionId };
 }
 
 async function observedWompiRetry(

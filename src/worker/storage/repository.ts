@@ -23,6 +23,13 @@ export interface ReceiptEmailDeliveryState {
   occurredAt: string;
 }
 
+export interface FailedWompiFiscalCorrectionSummary {
+  id: string;
+  status: "FAILED";
+  failureCode: string | null;
+  failureMessage: string | null;
+}
+
 interface DteDocumentCursor {
   createdAt: string;
   id: string;
@@ -2985,6 +2992,42 @@ export class Repository {
       : null;
   }
 
+  async getFailedWompiFiscalCorrectionForDocument(
+    documentId: string
+  ): Promise<FailedWompiFiscalCorrectionSummary | null> {
+    const row = await this.db.prepare(
+      `SELECT fiscal_corrections.id,
+              fiscal_corrections.status,
+              fiscal_corrections.failure_code,
+              fiscal_corrections.failure_message
+         FROM dte_documents
+         JOIN fiscal_corrections
+           ON fiscal_corrections.target_kind = 'WOMPI_EVENT'
+          AND fiscal_corrections.wompi_event_id = dte_documents.wompi_event_id
+          AND fiscal_corrections.status = 'FAILED'
+          AND dte_documents.fiscal_operation_claim_id =
+              'fiscal_correction_' || fiscal_corrections.id
+        WHERE dte_documents.id = ?
+          AND dte_documents.fiscal_operation_kind = 'TRANSMISSION'
+          AND dte_documents.fiscal_operation_event_id IS NULL
+        ORDER BY fiscal_corrections.attempt_number DESC
+        LIMIT 1`
+    ).bind(documentId).first<{
+      id: string;
+      status: "FAILED";
+      failure_code: string | null;
+      failure_message: string | null;
+    }>();
+    return row
+      ? {
+          id: row.id,
+          status: row.status,
+          failureCode: row.failure_code,
+          failureMessage: row.failure_message
+        }
+      : null;
+  }
+
   async listDteDocuments(params: {
     status?: string | null;
     attention?: "failures" | null;
@@ -3006,6 +3049,23 @@ export class Repository {
               latest_receipt.status = 'PENDING'
               AND latest_receipt.provider_dispatch_started_at IS NOT NULL
             )
+          )
+        )
+        OR (
+          dte_documents.status IN (
+            'PENDING', 'SIGNED', 'CONTINGENCY_PENDING'
+          )
+          AND dte_documents.fiscal_operation_kind = 'TRANSMISSION'
+          AND dte_documents.fiscal_operation_event_id IS NULL
+          AND EXISTS (
+            SELECT 1
+              FROM fiscal_corrections
+             WHERE fiscal_corrections.target_kind = 'WOMPI_EVENT'
+               AND fiscal_corrections.wompi_event_id =
+                   dte_documents.wompi_event_id
+               AND fiscal_corrections.status = 'FAILED'
+               AND dte_documents.fiscal_operation_claim_id =
+                   'fiscal_correction_' || fiscal_corrections.id
           )
         )
       )`);

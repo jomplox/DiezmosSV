@@ -2719,15 +2719,22 @@ async function handleDocumentRoute(
   if (!action && request.method === "GET") {
     // donorDataVerified: this CDE was produced from a completed donation-intent, so
     // the donor's data came from the validated /donar form rather than the raw webhook.
-    const [completedIntent, receiptEmailDelivery, audit] = await Promise.all([
+    const [
+      completedIntent,
+      receiptEmailDelivery,
+      fiscalReconciliation,
+      audit
+    ] = await Promise.all([
       repo.getCompletedIntentForDocument(document.id),
       repo.getLatestReceiptEmailDelivery(document.id),
+      repo.getFailedWompiFiscalCorrectionForDocument(document.id),
       listAuditForUser(repo, actor, "dte_document", document.id)
     ]);
     return jsonResponse({
       document,
       donorDataVerified: completedIntent !== null,
       receiptEmailDelivery,
+      fiscalReconciliation,
       audit
     });
   }
