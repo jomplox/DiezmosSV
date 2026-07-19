@@ -474,7 +474,7 @@ describe("donar intent body", () => {
 
   it("offers every CAT-020 country except El Salvador for the foreign residence select", () => {
     expect(DONAR_FOREIGN_COUNTRIES.length).toBeGreaterThan(100);
-    expect(DONAR_FOREIGN_COUNTRIES.some((option) => option.code === "SV")).toBe(false);
+    expect(DONAR_FOREIGN_COUNTRIES.some((option) => String(option.code) === "SV")).toBe(false);
     expect(DONAR_FOREIGN_COUNTRIES.some((option) => option.code === "US")).toBe(true);
   });
 
@@ -482,7 +482,7 @@ describe("donar intent body", () => {
     // "Otro (Para extranjeros)" is reachable only through the extranjero toggle;
     // offering it as a domestic departamento would trip the foreign-path server
     // validation without a país.
-    expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
+    expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => String(option.code) === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === "06")).toBe(true);
   });
 });

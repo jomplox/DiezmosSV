@@ -61,6 +61,7 @@ function testDocument(): DteDocument {
     issued_at: "2026-06-26T01:46:47.015Z",
     accepted_at: "2026-06-26T01:46:48.000Z",
     contingency_period_id: null,
+    transmission_deferred_at: null,
     created_at: "2026-06-26T01:46:47.015Z",
     updated_at: "2026-06-26T01:46:48.000Z"
   };

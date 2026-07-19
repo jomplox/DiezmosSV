@@ -44,7 +44,8 @@ const status: CredentialStatus = {
       ready: true,
       items: []
     }
-  }
+  },
+  certificateExpiresAt: null
 };
 
 describe("credentialSectionState", () => {

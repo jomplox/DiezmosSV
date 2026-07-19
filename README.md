@@ -341,12 +341,13 @@ Production is intentionally a separate Wrangler environment and should be used o
 UAT approval.
 
 ```bash
-# 1 - Create production resources, then copy the returned D1 id into
-#     wrangler.toml under [[env.production.d1_databases]]
-npx wrangler d1 create diezmossv-production-resource-example
-npx wrangler queues create diezmossv-production-issuance-example
-npx wrangler queues create diezmossv-production-issuance-example-dlq
-npx wrangler r2 bucket create diezmossv-production-archive-example
+# 1 - Verify the production resources exist. They were provisioned on 2026-07-05
+#     (D1 diezmossv-production-resource-example, queues diezmossv-production-issuance-example and
+#     diezmossv-production-issuance-example-dlq, R2 diezmossv-production-archive-example) and
+#     their ids are already committed in wrangler.toml under [env.production].
+npx wrangler d1 list
+npx wrangler queues list
+npx wrangler r2 bucket list
 
 # 2 - Set production secrets
 npx wrangler secret put WOMPI_API_SECRET --env production

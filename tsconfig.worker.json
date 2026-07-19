@@ -15,5 +15,5 @@
     "noUnusedParameters": true,
     "noEmit": true
   },
-  "include": ["src/worker", "test/worker"]
+  "include": ["src/worker", "test/worker", "test/scripts", "test/migrations"]
 }
