@@ -1471,6 +1471,185 @@ async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Respon
   return jsonResponse(result);
 }
 
+async function handleAudit(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  const entityType = ctx.url.searchParams.get("entityType");
+  const entityId = ctx.url.searchParams.get("entityId");
+  if (entityType && entityId) {
+    // Entity-scoped history keeps its original (uncapped-page) shape.
+    return jsonResponse({ audit: await listAuditForUser(ctx.repo, actor, entityType, entityId), nextCursor: null });
+  }
+  // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
+  // grows forever, so the old flat LIMIT 100 silently hid everything older.
+  const limitParam = Number(ctx.url.searchParams.get("limit") ?? "50");
+  const limit = Number.isFinite(limitParam) ? Math.min(Math.max(Math.trunc(limitParam), 1), 100) : 50;
+  const rawCursor = ctx.url.searchParams.get("cursor");
+  let cursor: { createdAt: string; id: string } | null = null;
+  if (rawCursor) {
+    const split = rawCursor.lastIndexOf("|");
+    if (split > 0) {
+      cursor = { createdAt: rawCursor.slice(0, split), id: rawCursor.slice(split + 1) };
+    }
+  }
+  const rows = await ctx.repo.listAuditPage(cursor, limit);
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
+  const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
+  return jsonResponse({ audit: projectAuditRows(page, actor.role), nextCursor });
+}
+
+// GET /api/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD&environment=00 — Analítica del
+// carril Wompi (solo lectura, rol VIEWER como /api/audit). Devuelve un único objeto
+// con todas las secciones. Defaults: los últimos 90 días (El Salvador local) y el
+// ambiente de emisión ACTIVO cuando no se especifica environment.
+async function handleAnalytics(ctx: ApiRouteContext): Promise<Response> {
+  const now = new Date();
+  const environment = ambienteValue(ctx.url.searchParams.get("environment")) ?? (await activeEmissionEnvironment(ctx.repo, ctx.env));
+  const range = analyticsRange(ctx.url.searchParams.get("from"), ctx.url.searchParams.get("to"), now);
+  if (!range) {
+    return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
+  }
+  try {
+    const analytics = await computeAnalytics(ctx.repo, range, environment, now, {
+      department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
+      country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
+    });
+    return jsonResponse({ analytics });
+  } catch (error) {
+    if (error instanceof AnalyticsCapacityError) {
+      return jsonResponse(
+        { error: error.code, message: error.message },
+        { status: 422 }
+      );
+    }
+    throw error;
+  }
+}
+
+// Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
+// Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
+// así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
+// emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
+// minutos la reintenta.
+async function handleContingency(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse({ contingency: await contingencyState(ctx.repo, ctx.actor!) });
+}
+
+async function handleTestDte(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  if (!deploymentEnvironmentPolicy(ctx.env).directGenerationAllowed) {
+    return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+  }
+  const input = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput & {
+    smokeRunId?: unknown;
+  };
+  const donorFields = directDonorFields(input);
+  if (donorFields instanceof Response) return donorFields;
+  const config = getEmisorConfig(ctx.env);
+  const environment = await activeEmissionEnvironment(ctx.repo, ctx.env);
+  let document: Record<string, unknown>;
+  try {
+    const sequence = await ctx.repo.nextControlSequence(environment, config.controlPrefix);
+    document = buildDirectCdeDocument({ ...input, ...donorFields }, config, { sequence, environment });
+  } catch (error) {
+    return jsonResponse({ error: "invalid_test_payload", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+  }
+  const summary = cdeDocumentSummary(document);
+  const dte = await ctx.repo.createDteDocument({
+    wompiEventId: null,
+    environment: summary.environment,
+    codigoGeneracion: summary.codigoGeneracion,
+    numeroControl: summary.numeroControl,
+    plainJson: document,
+    donorEmail: summary.donorEmail,
+    donorName: summary.donorName,
+    amountCents: summary.amountCents,
+    issuedAt: nowIso()
+  });
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "QUICK_CDE_CREATED",
+    entityType: "dte_document",
+    entityId: dte.id,
+    summary: dte.numero_control,
+    metadata: { source: "quick_direct_generation" }
+  });
+  const smokeRunId = stagingSmokeRunId(ctx.env, input.smokeRunId);
+  if (smokeRunId) {
+    await ctx.repo.createAuditIfAbsent({
+      action: "STAGING_SMOKE_RUN",
+      entityType: "dte_document",
+      entityId: dte.id,
+      summary: "CDE creado por la prueba integral de staging",
+      metadata: { runId: smokeRunId, path: "admin", source: "staging-smoke" }
+    });
+  }
+  await ctx.env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
+  return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
+}
+
+async function handleAdvancedTemplate(ctx: ApiRouteContext): Promise<Response> {
+  if (!deploymentEnvironmentPolicy(ctx.env).directGenerationAllowed) {
+    return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+  }
+  const input = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput;
+  const donorFields = templateDonorFields(input);
+  if (donorFields instanceof Response) return donorFields;
+  try {
+    const environment = await activeEmissionEnvironment(ctx.repo, ctx.env);
+    const draft = buildDirectCdeDocument(
+      { ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) },
+      getEmisorConfig(ctx.env),
+      { sequence: 1, environment, templatePreview: true }
+    );
+    return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
+  } catch (error) {
+    return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+  }
+}
+
+async function handleAdvancedDte(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  if (!deploymentEnvironmentPolicy(ctx.env).directGenerationAllowed) {
+    return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
+  }
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { draft?: unknown };
+  const config = getEmisorConfig(ctx.env);
+  const environment = await activeEmissionEnvironment(ctx.repo, ctx.env);
+  let document: Record<string, unknown>;
+  try {
+    buildAdvancedCdeDocument(body.draft, config, { sequence: 1, environment });
+    const sequence = await ctx.repo.nextControlSequence(environment, config.controlPrefix);
+    document = buildAdvancedCdeDocument(body.draft, config, { sequence, environment });
+  } catch (error) {
+    return jsonResponse({ error: "invalid_advanced_cde", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
+  }
+  const summary = cdeDocumentSummary(document);
+  const dte = await ctx.repo.createDteDocument({
+    wompiEventId: null,
+    environment: summary.environment,
+    codigoGeneracion: summary.codigoGeneracion,
+    numeroControl: summary.numeroControl,
+    plainJson: document,
+    donorEmail: summary.donorEmail,
+    donorName: summary.donorName,
+    amountCents: summary.amountCents,
+    issuedAt: nowIso()
+  });
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: actor.id,
+    action: "ADVANCED_CDE_CREATED",
+    entityType: "dte_document",
+    entityId: dte.id,
+    summary: dte.numero_control,
+    metadata: { source: "admin_advanced_direct_generation" }
+  });
+  await ctx.env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
+  return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -1556,6 +1735,15 @@ const exportRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend }
 ];
 
+const operationsRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "GET", pattern: "/api/audit", role: "VIEWER", handler: handleAudit },
+  { method: "GET", pattern: "/api/analytics", role: "VIEWER", handler: handleAnalytics },
+  { method: "GET", pattern: "/api/contingency", role: "VIEWER", handler: handleContingency },
+  { method: "POST", pattern: "/api/test/dte", role: "OPERATOR", handler: handleTestDte },
+  { method: "POST", pattern: "/api/test/dte/advanced-template", role: "OPERATOR", handler: handleAdvancedTemplate },
+  { method: "POST", pattern: "/api/test/dte/advanced", role: "OPERATOR", handler: handleAdvancedDte }
+];
+
 const genericDocumentRoute: Route<ApiRouteContext> = {
   pattern: /^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/,
   role: documentRouteRole,
@@ -1604,162 +1792,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   const genericDocumentResponse = await dispatchRoutes([genericDocumentRoute], apiContext, requireRole);
   if (genericDocumentResponse) return genericDocumentResponse;
 
-  if (url.pathname === "/api/audit" && request.method === "GET") {
-    const actor = requireRole(user, "VIEWER");
-    const entityType = url.searchParams.get("entityType");
-    const entityId = url.searchParams.get("entityId");
-    if (entityType && entityId) {
-      // Entity-scoped history keeps its original (uncapped-page) shape.
-      return jsonResponse({ audit: await listAuditForUser(repo, actor, entityType, entityId), nextCursor: null });
-    }
-    // General history pages by keyset cursor ("<created_at>|<id>"): the audit trail
-    // grows forever, so the old flat LIMIT 100 silently hid everything older.
-    const limitParam = Number(url.searchParams.get("limit") ?? "50");
-    const limit = Number.isFinite(limitParam) ? Math.min(Math.max(Math.trunc(limitParam), 1), 100) : 50;
-    const rawCursor = url.searchParams.get("cursor");
-    let cursor: { createdAt: string; id: string } | null = null;
-    if (rawCursor) {
-      const split = rawCursor.lastIndexOf("|");
-      if (split > 0) {
-        cursor = { createdAt: rawCursor.slice(0, split), id: rawCursor.slice(split + 1) };
-      }
-    }
-    const rows = await repo.listAuditPage(cursor, limit);
-    const page = rows.slice(0, limit);
-    const last = page[page.length - 1] as { created_at?: string; id?: string } | undefined;
-    const nextCursor = rows.length > limit && last?.created_at && last?.id ? `${last.created_at}|${last.id}` : null;
-    return jsonResponse({ audit: projectAuditRows(page, actor.role), nextCursor });
-  }
-
-  if (url.pathname === "/api/analytics" && request.method === "GET") {
-    return handleAnalyticsRoute(repo, env, user, url);
-  }
-
-  // Solo lectura (historial). La emisión en contingencia del CDE se eliminó: el
-  // Anexo de validaciones del evento de contingencia (campo 35) no admite el tipo 15,
-  // así que las rutas de apertura/barrido ya no existen. Ante una caída de MH la
-  // emisión queda diferida (SIGNED + transmission_deferred_at) y el cron de 15
-  // minutos la reintenta.
-  if (url.pathname === "/api/contingency" && request.method === "GET") {
-    const actor = requireRole(user, "VIEWER");
-    return jsonResponse({ contingency: await contingencyState(repo, actor) });
-  }
-
-  if (url.pathname === "/api/test/dte" && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
-      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
-    }
-    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput & {
-      smokeRunId?: unknown;
-    };
-    const donorFields = directDonorFields(input);
-    if (donorFields instanceof Response) return donorFields;
-    const config = getEmisorConfig(env);
-    const environment = await activeEmissionEnvironment(repo, env);
-    let document: Record<string, unknown>;
-    try {
-      const sequence = await repo.nextControlSequence(environment, config.controlPrefix);
-      document = buildDirectCdeDocument({ ...input, ...donorFields }, config, { sequence, environment });
-    } catch (error) {
-      return jsonResponse({ error: "invalid_test_payload", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
-    }
-    const summary = cdeDocumentSummary(document);
-    const dte = await repo.createDteDocument({
-      wompiEventId: null,
-      environment: summary.environment,
-      codigoGeneracion: summary.codigoGeneracion,
-      numeroControl: summary.numeroControl,
-      plainJson: document,
-      donorEmail: summary.donorEmail,
-      donorName: summary.donorName,
-      amountCents: summary.amountCents,
-      issuedAt: nowIso()
-    });
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "QUICK_CDE_CREATED",
-      entityType: "dte_document",
-      entityId: dte.id,
-      summary: dte.numero_control,
-      metadata: { source: "quick_direct_generation" }
-    });
-    const smokeRunId = stagingSmokeRunId(env, input.smokeRunId);
-    if (smokeRunId) {
-      await repo.createAuditIfAbsent({
-        action: "STAGING_SMOKE_RUN",
-        entityType: "dte_document",
-        entityId: dte.id,
-        summary: "CDE creado por la prueba integral de staging",
-        metadata: { runId: smokeRunId, path: "admin", source: "staging-smoke" }
-      });
-    }
-    await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
-    return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
-  }
-
-  if (url.pathname === "/api/test/dte/advanced-template" && request.method === "POST") {
-    requireRole(user, "OPERATOR");
-    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
-      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
-    }
-    const input = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as DirectCdeInput;
-    const donorFields = templateDonorFields(input);
-    if (donorFields instanceof Response) return donorFields;
-    try {
-      const environment = await activeEmissionEnvironment(repo, env);
-      const draft = buildDirectCdeDocument(
-        { ...input, ...donorFields, amount: advancedTemplateAmount(input.amount) },
-        getEmisorConfig(env),
-        { sequence: 1, environment, templatePreview: true }
-      );
-      return jsonResponse({ draft, sections: ["identificacion", "emisor", "receptor", "otrosDocumentos", "cuerpoDocumento", "resumen", "apendice"] });
-    } catch (error) {
-      return jsonResponse({ error: "invalid_advanced_template", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
-    }
-  }
-
-  if (url.pathname === "/api/test/dte/advanced" && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    if (!deploymentEnvironmentPolicy(env).directGenerationAllowed) {
-      return jsonResponse({ error: "test_generation_disabled_in_production" }, { status: 403 });
-    }
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { draft?: unknown };
-    const config = getEmisorConfig(env);
-    const environment = await activeEmissionEnvironment(repo, env);
-    let document: Record<string, unknown>;
-    try {
-      buildAdvancedCdeDocument(body.draft, config, { sequence: 1, environment });
-      const sequence = await repo.nextControlSequence(environment, config.controlPrefix);
-      document = buildAdvancedCdeDocument(body.draft, config, { sequence, environment });
-    } catch (error) {
-      return jsonResponse({ error: "invalid_advanced_cde", message: error instanceof Error ? error.message : String(error) }, { status: 400 });
-    }
-    const summary = cdeDocumentSummary(document);
-    const dte = await repo.createDteDocument({
-      wompiEventId: null,
-      environment: summary.environment,
-      codigoGeneracion: summary.codigoGeneracion,
-      numeroControl: summary.numeroControl,
-      plainJson: document,
-      donorEmail: summary.donorEmail,
-      donorName: summary.donorName,
-      amountCents: summary.amountCents,
-      issuedAt: nowIso()
-    });
-    await repo.createAudit({
-      actorType: "USER",
-      actorId: actor.id,
-      action: "ADVANCED_CDE_CREATED",
-      entityType: "dte_document",
-      entityId: dte.id,
-      summary: dte.numero_control,
-      metadata: { source: "admin_advanced_direct_generation" }
-    });
-    await env.ISSUANCE_QUEUE.send({ advancedDocumentId: dte.id });
-    return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
-  }
+  const operationsResponse = await dispatchRoutes(operationsRoutes, apiContext, requireRole);
+  if (operationsResponse) return operationsResponse;
 
   if (url.pathname === "/api/users" && request.method === "GET") {
     requireRole(user, "ADMIN");
@@ -1842,35 +1876,6 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   }
 
   return notFound();
-}
-
-// GET /api/analytics?from=YYYY-MM-DD&to=YYYY-MM-DD&environment=00 — Analítica del
-// carril Wompi (solo lectura, rol VIEWER como /api/audit). Devuelve un único objeto
-// con todas las secciones. Defaults: los últimos 90 días (El Salvador local) y el
-// ambiente de emisión ACTIVO cuando no se especifica environment.
-async function handleAnalyticsRoute(repo: Repository, env: Env, user: AuthUser | null, url: URL): Promise<Response> {
-  requireRole(user, "VIEWER");
-  const now = new Date();
-  const environment = ambienteValue(url.searchParams.get("environment")) ?? (await activeEmissionEnvironment(repo, env));
-  const range = analyticsRange(url.searchParams.get("from"), url.searchParams.get("to"), now);
-  if (!range) {
-    return jsonResponse({ error: "invalid_analytics_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." }, { status: 400 });
-  }
-  try {
-    const analytics = await computeAnalytics(repo, range, environment, now, {
-      department: (code) => findCatalogOption(CAT012_DEPARTMENTS, code)?.label ?? code,
-      country: (code) => findCatalogOption(CAT020_COUNTRIES, code)?.label ?? code
-    });
-    return jsonResponse({ analytics });
-  } catch (error) {
-    if (error instanceof AnalyticsCapacityError) {
-      return jsonResponse(
-        { error: error.code, message: error.message },
-        { status: 422 }
-      );
-    }
-    throw error;
-  }
 }
 
 // Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
