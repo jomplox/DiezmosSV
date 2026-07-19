@@ -1,3 +1,4 @@
+import { formatCents } from "../../shared/money";
 import type { DteDocumentRecord } from "../types";
 
 export const EMAIL_TEMPLATES_SETTING_KEY = "email_templates_json";
@@ -181,7 +182,7 @@ function placeholderValues(record: DteDocumentRecord): Record<string, string> {
     "{{codigoGeneracion}}": record.codigo_generacion,
     "{{donante}}": record.donor_name || "donante",
     "{{correoDonante}}": record.donor_email || "",
-    "{{monto}}": money(record.amount_cents),
+    "{{monto}}": formatCents(record.amount_cents),
     "{{ambiente}}": record.environment === "01" ? "Producción" : "Pruebas",
     "{{estado}}": statusLabel(record.status)
   };
@@ -189,10 +190,6 @@ function placeholderValues(record: DteDocumentRecord): Record<string, string> {
 
 function replacePlaceholders(value: string, placeholders: Record<string, string>): string {
   return Object.entries(placeholders).reduce((text, [token, replacement]) => text.split(token).join(replacement), value);
-}
-
-function money(amountCents: number): string {
-  return `$${(amountCents / 100).toFixed(2)}`;
 }
 
 function statusLabel(status: string): string {

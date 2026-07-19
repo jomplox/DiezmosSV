@@ -98,7 +98,7 @@ describe("visual consistency pack", () => {
 
     expect(panelBlock).toContain('<span className="status pre-cde">CDE NO CREADO</span>');
     expect(panelBlock).toContain('<strong>{item.donor_name ?? "Donante sin nombre"}</strong>');
-    expect(panelBlock).toContain('<span>${(item.amount_cents / 100).toFixed(2)}</span>');
+    expect(panelBlock).toContain('<span>{formatCents(item.amount_cents)}</span>');
     expect(panelBlock).toContain('<span>Intentos: {item.issuance_attempt_count}</span>');
     expect(panelBlock).toContain('<p>{item.issuance_error_message}</p>');
     expect(panelBlock).toContain('`Número reservado: ${item.reserved_numero_control}`');
