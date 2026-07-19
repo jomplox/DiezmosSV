@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
+import { makeDocument } from "./fixtures";
 
 describe("DTE PDF rendering", () => {
   it("uses the real comprobante de donacion fiscal layout", async () => {
@@ -355,14 +356,7 @@ describe("renderDtePdf foreign receptor", () => {
 });
 
 function testDocument(): DteDocumentRecord {
-  return {
-    id: "doc_1",
-    wompi_event_id: "wompi_1",
-    tipo_dte: "15",
-    environment: "00",
-    codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
-    numero_control: "DTE-15-M001P004-000000000000009",
-    status: "ACCEPTED",
+  return makeDocument({
     plain_json: JSON.stringify({
       identificacion: {
         version: 2,
@@ -432,19 +426,7 @@ function testDocument(): DteDocumentRecord {
         pagos: [{ codigo: "01", montoPago: 100, referencia: "STAGING" }]
       }
     }),
-    signed_jws: null,
     sello_recibido: "20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGEQ",
-    mh_estado: "PROCESADO",
-    mh_observaciones_json: "[]",
-    donor_email: "legacy-contact-2@example.com",
-    donor_name: "Example Person",
-    amount_cents: 10000,
-    issued_at: "2026-06-26T01:46:47.015Z",
-    accepted_at: "2026-06-26T01:46:48.000Z",
-    contingency_period_id: null,
-    transmission_deferred_at: null,
-    transmission_claim_id: null,
-    created_at: "2026-06-26T01:46:47.015Z",
-    updated_at: "2026-06-26T01:46:48.000Z"
-  };
+    post_accept_finalized_at: null
+  });
 }

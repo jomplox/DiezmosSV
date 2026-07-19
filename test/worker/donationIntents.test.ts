@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { validateDonorData } from "../../src/worker/services/donations";
 import { INTENT_EXPIRY_SWEEP_LIMIT, Repository } from "../../src/worker/storage/repository";
 import type { DonationIntentRecord } from "../../src/worker/types";
+import { makeIntent } from "./fixtures";
 
 const validDonorData = {
   donorDocumentType: "03",
@@ -284,32 +285,9 @@ describe("donation intents repository", () => {
 });
 
 function seedIntent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
-  return {
-    id: "di_seed",
+  return makeIntent({
     status: "PENDING",
-    amount_cents: 2550,
-    donor_name: null,
-    donor_document_type: "13",
-    donor_document: "000000000",
-    donor_email: null,
-    donor_phone: null,
-    direccion_departamento: "06",
-    direccion_municipio: "22",
-    direccion_distrito: "01",
-    direccion_complemento: "San Salvador",
-    donor_pais: null,
-    gift_type: null,
-    wompi_id_enlace: null,
-    wompi_url_enlace: null,
-    wompi_url_enlace_largo: null,
-    document_id: null,
     client_ip: "203.0.113.9",
-    datos_token_hash: null,
-    rate_limit_claim_id: null,
-    paid_at: null,
-    created_at: "2026-07-05T12:00:00.000Z",
-    updated_at: "2026-07-05T12:00:00.000Z",
-    expires_at: "2026-07-05T13:00:00.000Z",
     ...overrides
-  };
+  });
 }

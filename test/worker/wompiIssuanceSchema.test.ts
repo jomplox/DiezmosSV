@@ -1,8 +1,9 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { legacyIssuanceAttemptId, Repository } from "../../src/worker/storage/repository";
+import { applyMigrations } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
@@ -15,9 +16,7 @@ describe("Wompi issuance reservation migration", () => {
 
   beforeEach(() => {
     database = new DatabaseSync(":memory:");
-    for (const filename of readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
-      database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
-    }
+    applyMigrations(database);
     insertApprovedWompiEvent(database, "wompi_a");
     insertApprovedWompiEvent(database, "wompi_b");
   });

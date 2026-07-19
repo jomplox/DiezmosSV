@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { makeDocument } from "./fixtures";
 import {
   aggregateAnnualDonors,
   buildAnnualCertificatePreview,
@@ -327,31 +328,22 @@ function dteRecord(overrides: Partial<DteDocumentRecord>): DteDocumentRecord {
 }
 
 function accepted(overrides: Partial<DteDocumentRecord>): DteDocumentRecord {
-  return {
+  return makeDocument({
     id: "doc",
     wompi_event_id: null,
-    tipo_dte: "15",
     environment: "01",
-    codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
-    numero_control: "DTE-15-M001P004-000000000000009",
-    status: "ACCEPTED",
     plain_json: "{}",
-    signed_jws: null,
     sello_recibido: "SELLO",
-    mh_estado: "PROCESADO",
-    mh_observaciones_json: "[]",
     donor_email: "donor@example.org",
     donor_name: "Donor",
     amount_cents: 100,
     issued_at: "2025-01-01T10:00:00.000Z",
     accepted_at: "2025-01-01T10:01:00.000Z",
-    contingency_period_id: null,
-    transmission_deferred_at: null,
-    transmission_claim_id: null,
+    post_accept_finalized_at: null,
     created_at: "2025-01-01T10:00:00.000Z",
     updated_at: "2025-01-01T10:01:00.000Z",
     ...overrides
-  };
+  });
 }
 
 // Minimal D1 fake that only answers the keyset-paged ACCEPTED-in-year query.

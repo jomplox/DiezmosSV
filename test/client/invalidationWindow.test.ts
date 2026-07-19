@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { invalidationWindowInfo } from "../../src/client/invalidationWindow";
 import type { DteDocument } from "../../src/client/types";
+import { makeDocument } from "../worker/fixtures";
 
 describe("invalidation window presentation", () => {
   it("shows the remaining legal window for accepted stamped CDEs", () => {
@@ -42,26 +43,13 @@ describe("invalidation window presentation", () => {
 });
 
 function testDocument(): DteDocument {
-  return {
+  return makeDocument({
     id: "doc-1",
     wompi_event_id: "event-1",
-    tipo_dte: "15",
-    environment: "00",
-    codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
-    numero_control: "DTE-15-M001P004-000000000000009",
-    status: "ACCEPTED",
     plain_json: "{}",
-    signed_jws: null,
-    sello_recibido: "20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE",
-    mh_estado: "PROCESADO",
-    mh_observaciones_json: "[]",
     donor_email: "donante@example.org",
     donor_name: "Donante",
     amount_cents: 100,
-    issued_at: "2026-06-26T01:46:47.015Z",
-    accepted_at: "2026-06-26T01:46:48.000Z",
-    contingency_period_id: null,
-    created_at: "2026-06-26T01:46:47.015Z",
-    updated_at: "2026-06-26T01:46:48.000Z"
-  };
+    post_accept_finalized_at: null
+  });
 }

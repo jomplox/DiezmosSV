@@ -35,6 +35,7 @@ import {
   InMemoryD1
 } from "./support/inMemoryD1";
 import { sqliteD1 } from "./support/sqliteD1";
+import { makeDocument as testDocument } from "./fixtures";
 
 const nativeCrypto = crypto;
 
@@ -18508,40 +18509,6 @@ function analyticsIntentWithSerializedBytes(
   return {
     ...intent,
     donor_document: "a".repeat(serializedBytes - baseBytes)
-  };
-}
-
-function testDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRecord {
-  return {
-    id: "doc_1",
-    wompi_event_id: "wompi_1",
-    tipo_dte: "15",
-    environment: "00",
-    codigo_generacion: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4",
-    numero_control: "DTE-15-M001P004-000000000000009",
-    status: "ACCEPTED",
-    plain_json: JSON.stringify({
-      emisor: { nombre: "ExamplePerson1" },
-      receptor: { nombre: "Example Person", correo: "legacy-contact-2@example.com", telefono: "70000001", tipoDocumento: "13", numDocumento: "100000001" },
-      resumen: { valorTotal: 100 },
-      identificacion: { fecEmi: "2026-06-26", horEmi: "19:50:00" }
-    }),
-    signed_jws: null,
-    sello_recibido: "20269A41C96A1C404F2D8CFA1E1FD32DD5BBBGQE",
-    mh_estado: "PROCESADO",
-    mh_observaciones_json: "[]",
-    donor_email: "legacy-contact-2@example.com",
-    donor_name: "Example Person",
-    amount_cents: 10000,
-    issued_at: "2026-06-26T01:46:47.015Z",
-    accepted_at: "2026-06-26T01:46:48.000Z",
-    contingency_period_id: null,
-    transmission_deferred_at: null,
-    post_accept_finalized_at: "2026-06-26T01:46:49.000Z",
-    transmission_claim_id: null,
-    created_at: "2026-06-26T01:46:47.015Z",
-    updated_at: "2026-06-26T01:46:48.000Z",
-    ...overrides
   };
 }
 

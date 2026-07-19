@@ -21,7 +21,7 @@ import type {
   WompiEventRecord,
   WompiWebhook
 } from "../../src/worker/types";
-import { emisorConfig } from "./fixtures";
+import { emisorConfig, makeIntent } from "./fixtures";
 
 const valid = () => ({
   tipoDocumento: "13",
@@ -92,34 +92,20 @@ function rejectedDirectDocument(): DteDocumentRecord {
 }
 
 function donationIntent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
-  return {
+  return makeIntent({
     id: "intent_correction",
-    status: "LINK_CREATED",
     amount_cents: 1000,
-    donor_name: null,
-    donor_document_type: "13",
     donor_document: "10000002-7",
-    donor_email: null,
     donor_phone: "70001111",
-    direccion_departamento: "06",
-    direccion_municipio: "22",
-    direccion_distrito: "01",
     direccion_complemento: "Dirección original",
-    donor_pais: null,
     gift_type: "OFRENDA",
     wompi_id_enlace: 123,
-    wompi_url_enlace: null,
-    wompi_url_enlace_largo: null,
-    document_id: null,
-    client_ip: null,
-    datos_token_hash: null,
-    rate_limit_claim_id: null,
     paid_at: "2026-07-17T16:25:00.000Z",
     created_at: "2026-07-17T16:20:00.000Z",
     updated_at: "2026-07-17T16:25:00.000Z",
     expires_at: "2026-07-17T17:20:00.000Z",
     ...overrides
-  };
+  });
 }
 
 describe("fiscal receptor correction", () => {
