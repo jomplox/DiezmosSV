@@ -11,22 +11,28 @@ const lifecycleMigration = readFileSync(
 );
 
 describe("remote deploy and migration scripts", () => {
-  // The FISCAL_CUTOVER_QUIESCED acknowledgment gate protected the one-time
-  // 0020/0021 claims cutover, which is complete on staging; production will be
-  // provisioned fresh with the full migration lineage and no traffic to drain.
-  // The gate must never return: it blocked every routine deploy with a stale
-  // quiesce procedure.
-  it("keeps every remote script free of the retired cutover gate", () => {
-    for (const [name, command] of Object.entries(packageJson.scripts)) {
-      expect(command, `script ${name}`).not.toContain("assert-fiscal-cutover");
-      expect(command, `script ${name}`).not.toContain("FISCAL_CUTOVER_QUIESCED");
+  it("keeps the fiscal cutover quiescence gate before every remote migration and deploy", () => {
+    for (const script of [
+      "cf:migrate:staging",
+      "cf:deploy:staging",
+      "cf:migrate:prod",
+      "cf:deploy:prod"
+    ] as const) {
+      expect(packageJson.scripts[script], `script ${script}`).toMatch(
+        /^node scripts\/assert-fiscal-cutover\.mjs && /
+      );
     }
-    expect(existsSync(resolve(import.meta.dirname, "../../scripts/assert-fiscal-cutover.mjs"))).toBe(false);
+    expect(existsSync(resolve(import.meta.dirname, "../../scripts/assert-fiscal-cutover.mjs"))).toBe(true);
   });
 
   it("still runs the D1 preflight before every remote migration", () => {
     for (const script of ["cf:migrate:staging", "cf:migrate:prod"] as const) {
-      expect(packageJson.scripts[script]).toMatch(/^node scripts\/d1-migration-preflight\.mjs /);
+      expect(packageJson.scripts[script]).toContain(
+        "&& node scripts/d1-migration-preflight.mjs "
+      );
+      expect(packageJson.scripts[script]).toMatch(
+        /node scripts\/d1-migration-preflight\.mjs .* && wrangler d1 migrations apply /
+      );
     }
   });
 
