@@ -65,6 +65,12 @@ describe("filterPreCdeFailures", () => {
     expect(filterPreCdeFailures(items, "42.50")).toEqual([items[0]]);
   });
 
+  it("matches the grouped currency value shown in the failure card", () => {
+    const groupedAmountItem = { ...items[0], amount_cents: 123_456 };
+
+    expect(filterPreCdeFailures([groupedAmountItem], "$1,234.56")).toEqual([groupedAmountItem]);
+  });
+
   it("returns the original items for an empty query", () => {
     expect(filterPreCdeFailures(items, "")).toEqual(items);
   });
