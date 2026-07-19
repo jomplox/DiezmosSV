@@ -1,3 +1,4 @@
+import { formatCents } from "../../shared/money";
 import type { DteDocumentRecord } from "../types";
 
 // Fallback accent for an unbranded deployment (matches BRANDING_DEFAULTS.accentColor).
@@ -31,7 +32,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
     ["Donante", record.donor_name ?? "—"],
     ["Número de control", record.numero_control],
     ["Código de generación", record.codigo_generacion],
-    ["Monto", money(record.amount_cents)],
+    ["Monto", formatCents(record.amount_cents)],
     ["Fecha de emisión", elSalvadorDate(record.issued_at)],
     ["Sello de recepción", record.sello_recibido ?? "Pendiente"],
     ["Ambiente", record.environment === "01" ? "Producción" : "Pruebas"]
@@ -260,10 +261,6 @@ function note(text: string): string {
 
 function footNote(text: string): string {
   return `<p style="margin:0;font-size:12px;color:${MUTED_COLOR};">${escapeHtml(text)}</p>`;
-}
-
-function money(amountCents: number): string {
-  return `$${(amountCents / 100).toFixed(2)}`;
 }
 
 function elSalvadorDate(iso: string): string {

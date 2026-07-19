@@ -71,6 +71,7 @@ import {
 } from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
 import { isValidEmail } from "../shared/email";
+import { formatCents } from "../shared/money";
 import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
 import {
   CAT012_DEPARTMENTS,
@@ -1598,7 +1599,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                   onCorrect={(item) => openFiscalCorrection(
                     { kind: "WOMPI_EVENT", id: item.id },
                     {
-                      amountLabel: `$${(item.amount_cents / 100).toFixed(2)}`,
+                      amountLabel: formatCents(item.amount_cents),
                       environmentLabel: environmentLabel(item.environment),
                       issuerLabel: branding.displayName
                     }
@@ -1638,7 +1639,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 onCorrect={(target) => {
                   if (!selected) return;
                   void openFiscalCorrection(target, {
-                    amountLabel: `$${(selected.amount_cents / 100).toFixed(2)}`,
+                    amountLabel: formatCents(selected.amount_cents),
                     environmentLabel: environmentLabel(selected.environment),
                     issuerLabel: branding.displayName
                   });
@@ -2489,7 +2490,7 @@ function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }
                   </span>
                 </td>
                 <td>{donationGiftTypeLabel(intent.gift_type)}</td>
-                <td className="numeric">{formatMoneyCents(intent.amount_cents)}</td>
+                <td className="numeric">{formatCents(intent.amount_cents)}</td>
                 <td>{intent.document_donor_name ?? "—"}</td>
                 <td className="numeric">{formatDateTime(intent.created_at)}</td>
                 <td className="mono">{intent.numero_control ?? "—"}</td>
@@ -4577,7 +4578,7 @@ function PreCdeFailuresPanel({
                 <strong>{item.donor_name ?? "Donante sin nombre"}</strong>
                 <span>{item.donor_email ?? "Correo no disponible"}</span>
                 <div className="pre-cde-failure-meta">
-                  <span>${(item.amount_cents / 100).toFixed(2)}</span>
+                  <span>{formatCents(item.amount_cents)}</span>
                   <span>Pago recibido: {formatDateTime(item.received_at)}</span>
                   <span>Intentos: {item.issuance_attempt_count}</span>
                 </div>
@@ -4705,7 +4706,7 @@ function DocumentTable({
               </td>
               <td className="mono">{shortCode(document.codigo_generacion)}</td>
               <td><StackedCell primary={document.donor_name ?? "—"} secondary={document.donor_email ?? ""} /></td>
-              <td className="numeric">${(document.amount_cents / 100).toFixed(2)}</td>
+              <td className="numeric">{formatCents(document.amount_cents)}</td>
               <td className="mono">{document.sello_recibido ? shortCode(document.sello_recibido) : "—"}</td>
               <td className="numeric">{formatElSalvadorDate(document.created_at)}</td>
             </tr>
@@ -5566,10 +5567,6 @@ export function documentListEmptyMessage(
 function formatDateTime(value?: string | null): string {
   if (!value) return "—";
   return formatElSalvadorDateTime(value);
-}
-
-function formatMoneyCents(value: number): string {
-  return `$${(value / 100).toFixed(2)}`;
 }
 
 function currentMonthStartValue(): string {

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   analyticsRangePresets,
-  formatCentsUsd,
   formatMonthLabel,
   formatWeekLabel,
   monthlyChartModel,
@@ -12,14 +11,6 @@ import {
   type ClientAnalytics,
   type GiftTypeFilter
 } from "../../src/client/analytics";
-
-describe("formatCentsUsd", () => {
-  it("formats integer cents as USD with two decimals", () => {
-    expect(formatCentsUsd(0)).toBe("$0.00");
-    expect(formatCentsUsd(5000)).toBe("$50.00");
-    expect(formatCentsUsd(123456)).toBe("$1,234.56");
-  });
-});
 
 describe("month and week labels (usted-form Spanish, El Salvador)", () => {
   it("renders a YYYY-MM key as a Spanish month + year", () => {

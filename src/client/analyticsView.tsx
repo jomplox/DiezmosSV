@@ -1,9 +1,9 @@
 import { BarChart3, TrendingUp, Filter } from "lucide-react";
 import type { ReactNode } from "react";
+import { formatCents } from "../shared/money";
 import {
   DAY_LABELS,
   filterGiftType,
-  formatCentsUsd,
   formatMonthLabel,
   formatWeekLabel,
   funnelStages,
@@ -177,7 +177,7 @@ function GivingTrendsPanel({ analytics, giftFilter }: { analytics: ClientAnalyti
           {analytics.giving.giftSplit.length === 0 ? <Empty /> : <GiftSplitChart data={analytics.giving.giftSplit} />}
         </ChartCard>
         <ChartCard title="Recaudo semanal (US$)" summary="Total aceptado por semana.">
-          {analytics.giving.weekly.length === 0 ? <Empty /> : <WeeklyBars data={analytics.giving.weekly.map((point) => ({ key: point.key, value: point.totalCents }))} formatValue={formatCentsUsd} />}
+          {analytics.giving.weekly.length === 0 ? <Empty /> : <WeeklyBars data={analytics.giving.weekly.map((point) => ({ key: point.key, value: point.totalCents }))} formatValue={formatCents} />}
         </ChartCard>
         <ChartCard title="Top 10 donantes recurrentes" summary="Donantes con más donaciones aceptadas; solo nombre y correo.">
           {analytics.giving.topDonors.length === 0 ? (
@@ -200,7 +200,7 @@ function GivingTrendsPanel({ analytics, giftFilter }: { analytics: ClientAnalyti
                         {donor.donorEmail && <div className="analytics-donor-email">{donor.donorEmail}</div>}
                       </td>
                       <td className="numeric">{donor.count}</td>
-                      <td className="numeric">{formatCentsUsd(donor.totalCents)}</td>
+                      <td className="numeric">{formatCents(donor.totalCents)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -326,7 +326,7 @@ function DeepAnalysisPanel({ analytics }: { analytics: ClientAnalytics }) {
                         <div className="analytics-donor-name">{donor.donorName}</div>
                         {donor.donorEmail && <div className="analytics-donor-email">{donor.donorEmail}</div>}
                       </td>
-                      <td className="numeric">{formatCentsUsd(donor.totalCents)}</td>
+                      <td className="numeric">{formatCents(donor.totalCents)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -340,13 +340,13 @@ function DeepAnalysisPanel({ analytics }: { analytics: ClientAnalytics }) {
         <ChartCard title="Proyección" summary="Ritmo del mes en curso, promedio móvil de 3 meses y proyección simple.">
           <div className="analytics-stats-block">
             <p className="analytics-stat">
-              Mes en curso: <strong>{formatCentsUsd(analytics.projection.currentMonthCents)}</strong>
+              Mes en curso: <strong>{formatCents(analytics.projection.currentMonthCents)}</strong>
             </p>
             <p className="analytics-stat">
-              Promedio móvil (3 meses): <strong>{formatCentsUsd(analytics.projection.movingAverageCents)}</strong>
+              Promedio móvil (3 meses): <strong>{formatCents(analytics.projection.movingAverageCents)}</strong>
             </p>
             <p className="analytics-stat analytics-projection">
-              Proyección simple del mes: <strong>{formatCentsUsd(analytics.projection.runRateCents)}</strong>
+              Proyección simple del mes: <strong>{formatCents(analytics.projection.runRateCents)}</strong>
             </p>
             <p className="analytics-note">Proyección simple basada en el ritmo diario; no es un pronóstico.</p>
           </div>
@@ -389,7 +389,7 @@ function AreaLineChart({ model }: { model: ReturnType<typeof monthlyChartModel> 
   }));
   const linePath = coords.map((coord, index) => `${index === 0 ? "M" : "L"}${coord.x.toFixed(1)},${coord.y.toFixed(1)}`).join(" ");
   const areaPath = `${linePath} L${coords[coords.length - 1].x.toFixed(1)},${(PAD + innerH).toFixed(1)} L${coords[0].x.toFixed(1)},${(PAD + innerH).toFixed(1)} Z`;
-  const summary = `Total mensual, máximo ${formatCentsUsd(model.maxCents)}.`;
+  const summary = `Total mensual, máximo ${formatCents(model.maxCents)}.`;
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="analytics-svg" role="img" aria-label={summary}>
       <title>{summary}</title>
@@ -398,7 +398,7 @@ function AreaLineChart({ model }: { model: ReturnType<typeof monthlyChartModel> 
       <path d={linePath} className="analytics-line" fill="none" />
       {coords.map((coord) => (
         <circle key={coord.point.key} cx={coord.x} cy={coord.y} r={2.5} className="analytics-dot">
-          <title>{`${coord.point.label}: ${formatCentsUsd(coord.point.totalCents)} (${coord.point.count} donaciones)`}</title>
+          <title>{`${coord.point.label}: ${formatCents(coord.point.totalCents)} (${coord.point.count} donaciones)`}</title>
         </circle>
       ))}
       {coords.map((coord, index) =>
@@ -424,7 +424,7 @@ function YoyChart({ model }: { model: ReturnType<typeof yoyChartModel> }) {
         return `${index === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
       })
       .join(" ");
-  const summary = `Comparativo interanual; máximo ${formatCentsUsd(model.maxCents)}.`;
+  const summary = `Comparativo interanual; máximo ${formatCents(model.maxCents)}.`;
   return (
     <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="analytics-svg" role="img" aria-label={summary}>
       <title>{summary}</title>
@@ -529,10 +529,10 @@ function GiftSplitChart({ data }: { data: ClientAnalytics["giving"]["giftSplit"]
         return (
           <g key={point.key}>
             <rect x={x} y={diezmoY} width={barW} height={diezmoHeight} className="analytics-bar analytics-bar-diezmo">
-              <title>{`${formatMonthLabel(point.key)}: diezmo ${formatCentsUsd(point.diezmoCents)}`}</title>
+              <title>{`${formatMonthLabel(point.key)}: diezmo ${formatCents(point.diezmoCents)}`}</title>
             </rect>
             <rect x={x} y={ofrendaY} width={barW} height={ofrendaHeight} className="analytics-bar analytics-bar-ofrenda">
-              <title>{`${formatMonthLabel(point.key)}: ofrenda ${formatCentsUsd(point.ofrendaCents)}`}</title>
+              <title>{`${formatMonthLabel(point.key)}: ofrenda ${formatCents(point.ofrendaCents)}`}</title>
             </rect>
           </g>
         );
@@ -606,7 +606,7 @@ function GeoBucketBars({ title, buckets }: { title: string; buckets: ClientAnaly
             <span className="analytics-geo-track">
               <span className="analytics-geo-bar" style={{ width: `${max > 0 ? (bucket.totalCents / max) * 100 : 0}%` }} />
             </span>
-            <span className="analytics-geo-value">{formatCentsUsd(bucket.totalCents)}</span>
+            <span className="analytics-geo-value">{formatCents(bucket.totalCents)}</span>
           </li>
         ))}
       </ul>

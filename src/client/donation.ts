@@ -1,5 +1,6 @@
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES } from "../shared/catalogs";
 import { isValidDui } from "../shared/dui";
+import { formatCents } from "../shared/money";
 import { isValidNitFormat } from "../shared/nit";
 
 // Public donor-checkout view logic, extracted so the source-contract tests can
@@ -68,7 +69,7 @@ export const DONAR_STEP_TITLE_ENTREGA = "Su entrega";
 // validated the amount, but degrades to $0.00 rather than NaN just in case.
 export function donarAmountDisplay(amount: string): string {
   const parsed = Number.parseFloat(amount.trim());
-  return `$${(Number.isFinite(parsed) ? parsed : 0).toFixed(2)}`;
+  return formatCents(Math.round((Number.isFinite(parsed) ? parsed : 0) * 100));
 }
 
 // ── US donors → Givebutter / Friends of Misión ExampleOrganization (FMCE) ────────────

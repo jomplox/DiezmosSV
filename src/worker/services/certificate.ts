@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { formatCents } from "../../shared/money";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
 import { getEmisorConfig } from "../config";
@@ -171,8 +172,10 @@ function normalizeText(value: string | null | undefined): string | null {
   return trimmed.length ? trimmed : null;
 }
 
-function formatCents(cents: number): string {
-  return (cents / 100).toFixed(2);
+// Bare amount for the table cells: the "Monto (US$)" header already carries the unit,
+// so rows print "1,234.56" while totals use the shared "$1,234.56" display format.
+function bareCents(cents: number): string {
+  return formatCents(cents).slice(1);
 }
 
 const LOGO_BOTTOM_Y = 726;
@@ -300,14 +303,14 @@ function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFo
     y -= rowHeight;
     page.drawText(donation.dateLabel, { x: left + 6, y: y + 5, size: 8.5, font: regular, color: black });
     page.drawText(donation.numeroControl, { x: controlX, y: y + 5, size: 8.5, font: regular, color: black });
-    drawRightAligned(page, formatCents(donation.amountCents), y + 5, 8.5, regular, amountRightX, black);
+    drawRightAligned(page, bareCents(donation.amountCents), y + 5, 8.5, regular, amountRightX, black);
     page.drawLine({ start: { x: left, y: y + 2 }, end: { x: right, y: y + 2 }, thickness: 0.4, color: rgb(0.82, 0.82, 0.82) });
   }
 
   y -= rowHeight;
   page.drawRectangle({ x: left, y: y + 4, width: right - left, height: rowHeight, color: rgb(0.93, 0.95, 0.95) });
   page.drawText(`Total (${donor.count} ${donor.count === 1 ? "donación" : "donaciones"})`, { x: left + 6, y: y + 9, size: 9, font: bold, color: black });
-  drawRightAligned(page, `$${formatCents(donor.totalCents)}`, y + 9, 9.5, bold, amountRightX, black);
+  drawRightAligned(page, formatCents(donor.totalCents), y + 9, 9.5, bold, amountRightX, black);
   return y;
 }
 
@@ -414,7 +417,7 @@ export async function buildAnnualCertificatePreview(repo: Repository, year: numb
     donorCount: donors.length,
     withEmail,
     withoutEmail: donors.length - withEmail,
-    totalLabel: `$${formatCents(totalCents)}`,
+    totalLabel: formatCents(totalCents),
     matchCount: matches.length,
     truncated: matches.length > ANNUAL_PREVIEW_LIMIT,
     donors: matches.slice(0, ANNUAL_PREVIEW_LIMIT).map((donor) => ({
@@ -423,7 +426,7 @@ export async function buildAnnualCertificatePreview(repo: Repository, year: numb
       donorEmail: donor.donorEmail,
       hasEmail: Boolean(donor.donorEmail),
       count: donor.count,
-      totalLabel: `$${formatCents(donor.totalCents)}`,
+      totalLabel: formatCents(donor.totalCents),
       hasTestEnvironment: donor.hasTestEnvironment
     }))
   };
@@ -506,7 +509,7 @@ export async function sendAnnualCertificates(
     }
     try {
       const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
-      const totalLabel = `$${formatCents(donor.totalCents)}`;
+      const totalLabel = formatCents(donor.totalCents);
       await email.sendDonorCertificate({
         toEmail: donor.donorEmail,
         subject: `Constancia de donaciones ${year}`,

@@ -15,12 +15,6 @@ export type GiftTypeFilter = "todos" | "diezmo" | "ofrenda";
 
 const SPANISH_MONTHS = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
-// USD from integer cents with thousands separators, e.g. 123456 -> "$1,234.56".
-export function formatCentsUsd(cents: number): string {
-  const value = cents / 100;
-  return `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
 // "2026-07" -> "jul 2026" (usted-form Spanish month abbreviation + year).
 export function formatMonthLabel(monthKey: string): string {
   const [year, month] = monthKey.split("-").map(Number);
