@@ -81,12 +81,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 6. Apply the schema and deploy:
 
    ```bash
-   # First block all mutating Worker traffic and drain every old HTTP/queue/cron
-   # invocation exactly as documented in docs/fiscal-claim-cutover.md.
-   export FISCAL_CUTOVER_QUIESCED=1
    npm run cf:migrate:staging
    npm run cf:deploy:staging
-   unset FISCAL_CUTOVER_QUIESCED
    ```
 
    The migration command includes a mandatory read-only duplicate-link preflight. If
