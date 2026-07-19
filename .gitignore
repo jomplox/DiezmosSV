@@ -36,3 +36,4 @@ PRD_CDE_DTE_Wompi_ElSalvador*.md
 GOAL.md
 examples/**/DTE-*.json
 examples/**/DTE-*.pdf
+.claude/worktrees/
