@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { RETENTION_FOREIGN_KEY_PROTOCOL } from "../../src/worker/services/retention";
 import { Repository } from "../../src/worker/storage/repository";
 import { SqliteD1 } from "./support/sqliteD1";
+import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
@@ -4408,26 +4409,6 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 });
-
-function migratedDatabase(): DatabaseSync {
-  return migratedDatabaseThrough(null);
-}
-
-function migratedDatabaseThrough(lastMigrationPrefix: string | null): DatabaseSync {
-  const database = new DatabaseSync(":memory:");
-  database.exec("PRAGMA foreign_keys = ON");
-  for (const filename of readdirSync(migrationsDirectory).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort()) {
-    if (lastMigrationPrefix && filename.slice(0, 4) > lastMigrationPrefix) {
-      break;
-    }
-    database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
-  }
-  database.prepare(
-    `INSERT INTO users (id, email, name, role, password_hash, password_salt)
-     VALUES ('user_operator', 'operator@example.org', 'Operator', 'OPERATOR', 'hash', 'salt')`
-  ).run();
-  return database;
-}
 
 function seedAcceptedDocument(
   database: DatabaseSync,
