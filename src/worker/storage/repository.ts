@@ -3468,62 +3468,6 @@ export class Repository {
     return Boolean(updated);
   }
 
-  // Claim before allocating a new fiscal control sequence. A concurrent loser must
-  // stop here so it cannot burn a permanent number for a DTE it will never transmit.
-  async claimRejectedWompiRetry(id: string, wompiEventId: string, claimId: string): Promise<boolean> {
-    const claimedAt = nowIso();
-    const row = await this.db
-      .prepare(
-        `UPDATE dte_documents
-         SET fiscal_operation_claim_id = ?, fiscal_operation_claimed_at = ?,
-             fiscal_operation_kind = 'TRANSMISSION', fiscal_operation_event_id = NULL,
-             post_accept_finalized_at = NULL, updated_at = ?
-         WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
-           AND fiscal_operation_claim_id IS NULL
-         RETURNING id`
-      )
-      .bind(claimId, claimedAt, claimedAt, id, wompiEventId)
-      .first<{ id: string }>();
-    return Boolean(row);
-  }
-
-  // Only the claim owner may replace the rejected payload and move it to SIGNED.
-  // The claim remains attached across the fiscal POST until that owner records MH's
-  // definitive verdict (or proves dispatch never began).
-  async prepareClaimedRejectedWompiRebuild(
-    id: string,
-    wompiEventId: string,
-    claimId: string,
-    input: { codigoGeneracion: string; numeroControl: string; plainJson: Record<string, unknown>; signedJws: string | null }
-  ): Promise<boolean> {
-    const row = await this.db
-      .prepare(
-        `UPDATE dte_documents
-         SET codigo_generacion = ?, numero_control = ?, plain_json = ?, signed_jws = ?,
-             status = 'SIGNED', sello_recibido = NULL, mh_estado = NULL, mh_observaciones_json = '[]',
-             post_accept_finalized_at = NULL, updated_at = ?
-         WHERE id = ? AND wompi_event_id = ? AND status = 'REJECTED'
-           AND fiscal_operation_claim_id = ?
-         RETURNING id`
-      )
-      .bind(
-        input.codigoGeneracion,
-        input.numeroControl,
-        JSON.stringify(input.plainJson),
-        input.signedJws,
-        nowIso(),
-        id,
-        wompiEventId,
-        claimId
-      )
-      .first<{ id: string }>();
-    if (!row) {
-      return false;
-    }
-    await this.indexDteDocumentById(id);
-    return true;
-  }
-
   async claimDocumentTransmission(id: string, expectedStatus: string, signedJws: string, claimId: string): Promise<boolean> {
     const claimedAt = nowIso();
     const row = await this.db
@@ -3854,9 +3798,8 @@ export class Repository {
     return Boolean(row);
   }
 
-  // CDE con transmisión diferida (MH no disponible al emitir) y reconstrucciones
-  // Wompi que pudieron quedar SIGNED antes de transmitir: el cron de 15 minutos los
-  // recupera en orden de emisión. Lee por el índice idx_dte_documents_status.
+  // CDE con transmisión diferida (MH no disponible al emitir): el cron de 15 minutos
+  // los recupera en orden de emisión. Lee por el índice idx_dte_documents_status.
   async listDeferredTransmissionDocuments(limit = 100): Promise<DteDocumentRecord[]> {
     return this.db
       .prepare("SELECT * FROM dte_documents WHERE status = ? AND transmission_deferred_at IS NOT NULL AND fiscal_operation_claim_id IS NULL ORDER BY created_at ASC LIMIT ?")

@@ -10,7 +10,7 @@ import {
   Repository,
   type FiscalCorrectionDocumentEvidence
 } from "../storage/repository";
-import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, MhResponse, WompiWebhook } from "../types";
+import type { DonationIntentRecord, DteDocumentRecord, Env, FiscalCorrectionRecord, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
@@ -35,15 +35,6 @@ import {
 } from "./fiscalCorrection";
 import type { FiscalReceptorCorrection } from "../../shared/fiscalCorrection";
 
-// Lanzado cuando un reintento de operador pierde el CAS sobre un CDE Wompi RECHAZADO
-// (otro reintento concurrente ya lo reclamó). El handler HTTP lo traduce a un 409.
-export class RejectedWompiRetryConflictError extends Error {
-  constructor(message = "Ya hay un reintento en curso para este documento.") {
-    super(message);
-    this.name = "RejectedWompiRetryConflictError";
-  }
-}
-
 type IntentCorrelation =
   | { kind: "legacy" }
   | { kind: "ready"; intent: DonationIntentRecord }
@@ -56,15 +47,6 @@ type IntentCorrelation =
       expectedLinkId: number | null;
       payloadLinkId: number | null;
     };
-
-export class WompiIntentQuarantinedError extends Error {
-  readonly code = "wompi_intent_quarantined";
-
-  constructor() {
-    super(WOMPI_INTENT_QUARANTINED_MESSAGE);
-    this.name = "WompiIntentQuarantinedError";
-  }
-}
 
 class PostAcceptFinalizationOwnershipError extends Error {
   constructor(message: string, readonly cause?: unknown) {
@@ -1117,123 +1099,6 @@ export class IssuancePipeline {
       summary: "CDE creado por la prueba integral de staging",
       metadata: { runId, path: "webhook", source: "staging-smoke" }
     });
-  }
-
-  // A REJECTED verdict is MH's judgment on the document CONTENT: retransmitting
-  // the same signed JWS can only be rejected identically. Retrying a rejected
-  // Wompi CDE therefore rebuilds it from the original webhook (fresh
-  // codigoGeneracion and numeroControl, re-signed) before transmitting again.
-  async rebuildRejectedWompiDocument(record: DteDocumentRecord): Promise<MhResponse> {
-    if (!record.wompi_event_id) {
-      throw new Error("El documento no proviene de un evento Wompi");
-    }
-    const wompiEventId = record.wompi_event_id;
-    const event = await this.repo.getWompiEventById(wompiEventId);
-    if (!event) {
-      throw new Error(`Evento Wompi ${wompiEventId} no encontrado`);
-    }
-    assertDeploymentAllowsAmbiente(this.env, record.environment);
-    assertDeploymentAllowsAmbiente(this.env, event.environment);
-    const payload = normalizeWompiWebhook(JSON.parse(event.raw_body));
-    const config = getEmisorConfig(this.env);
-    // Re-apply the same intent correlation as processWompiEvent: without it, an
-    // operator retry would silently downgrade a rejected intent-backed CDE to the
-    // raw-webhook fallback donor data.
-    const correlation = await this.correlateIntent(payload);
-    if (correlation.kind === "quarantined") {
-      // Preserve the existing CAS-loser result for a caller holding a stale REJECTED
-      // snapshot after another retry already claimed and completed this document.
-      const current = await this.repo.getDteDocument(record.id);
-      if (!current || current.status !== "REJECTED") {
-        throw new RejectedWompiRetryConflictError();
-      }
-      await this.quarantineWompiEvent(wompiEventId, correlation);
-      throw new WompiIntentQuarantinedError();
-    }
-    const intent = correlation.kind === "ready" ? correlation.intent : null;
-    const claimId = newId("fiscal");
-    // Win ownership before allocating the new control number. A concurrent loser must
-    // not create a second fiscal identity or burn a sequence it can never transmit.
-    if (!(await this.repo.claimRejectedWompiRetry(record.id, wompiEventId, claimId))) {
-      throw new RejectedWompiRetryConflictError();
-    }
-    let fiscalCallStarted = false;
-    try {
-      const sequence = await this.repo.nextControlSequence(record.environment, config.controlPrefix);
-      const rebuilt = buildCdeDocument(payload, config, {
-        sequence,
-        environment: record.environment,
-        donorOverride: intent ? donorOverrideFromIntent(intent, payload) : undefined
-      });
-      const identifiers = extractCdeIdentifiers(rebuilt);
-      assertCdeIssuerMatchesConfig(rebuilt, config);
-      const signedJws = await signMhDocument(rebuilt, getMhCertificateXml(this.env), requireSecret(this.env, "MH_CERT_PASSWORD"));
-      if (
-        !(await this.repo.prepareClaimedRejectedWompiRebuild(record.id, wompiEventId, claimId, {
-          codigoGeneracion: identifiers.codigoGeneracion,
-          numeroControl: identifiers.numeroControl,
-          plainJson: rebuilt,
-          signedJws
-        }))
-      ) {
-        throw new RejectedWompiRetryConflictError();
-      }
-
-      let mhResult: MhResponse;
-      try {
-        fiscalCallStarted = true;
-        mhResult = await this.mh.transmitDte({
-          ambiente: record.environment,
-          version: 2,
-          tipoDte: "15",
-          codigoGeneracion: identifiers.codigoGeneracion,
-          signedJws
-        });
-      } catch (error) {
-        if (error instanceof MhPreDispatchError) {
-          // Authentication failed before the fiscal POST. The rebuilt normal CDE is
-          // safe to defer with the same identity for the scheduled retry.
-          const reason = String(error.message);
-          await this.deferTransmission(record.id, claimId, reason);
-          return { accepted: false, estado: "TRANSMISION_DIFERIDA", selloRecibido: null, observaciones: [reason], raw: { deferred: true } };
-        }
-        throw error;
-      }
-
-      const completed = await this.repo.completeDocumentTransmission(record.id, claimId, {
-        status: mhResult.accepted ? "ACCEPTED" : "REJECTED",
-        sello: mhResult.selloRecibido,
-        mhEstado: mhResult.estado,
-        observaciones: mhResult.observaciones,
-        acceptedAt: mhResult.accepted ? nowIso() : null
-      });
-      if (!completed) {
-        throw new RejectedWompiRetryConflictError();
-      }
-      const updated = (await this.repo.getDteDocument(record.id)) ?? record;
-      if (mhResult.accepted) {
-        await this.finalizeAcceptedDocument(updated, {
-          intent,
-          auditAction: "DTE_ACCEPTED",
-          auditSummary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
-          auditMetadata: mhResult.raw
-        });
-      } else {
-        await this.repo.createAudit({
-          action: "DTE_REJECTED",
-          entityType: "dte_document",
-          entityId: updated.id,
-          summary: `${updated.numero_control} ${mhResult.estado} (reconstruido)`,
-          metadata: mhResult.raw
-        });
-      }
-      return mhResult;
-    } catch (error) {
-      if (!fiscalCallStarted) {
-        await this.repo.releaseDocumentFiscalOperation(record.id, claimId);
-      }
-      throw error;
-    }
   }
 
   async processDteDocument(
