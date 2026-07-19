@@ -1,5 +1,6 @@
 import type { Ambiente, WompiWebhook } from "../types";
 import { bytesToBase64, hexFromBytes, timingSafeEqual, utf8Bytes } from "../utils/encoding";
+import { isRecord } from "../utils/guards";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -177,8 +178,4 @@ function read(record: JsonRecord, keys: string[]): unknown {
     }
   }
   return undefined;
-}
-
-function isRecord(value: unknown): value is JsonRecord {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

@@ -28,6 +28,7 @@ import type {
   FiscalCorrectionData,
   WompiWebhook
 } from "../types";
+import { onlyDigits } from "../utils/guards";
 import { generationCode, numeroControl } from "../utils/ids";
 
 const CONFIGURATION_GUIDANCE =
@@ -161,8 +162,8 @@ export async function assertDirectCorrectionSourceTrusted(input: {
 }
 
 function sameNit(left: unknown, right: unknown): boolean {
-  const leftDigits = typeof left === "string" ? left.replace(/\D/g, "") : "";
-  const rightDigits = typeof right === "string" ? right.replace(/\D/g, "") : "";
+  const leftDigits = typeof left === "string" ? onlyDigits(left) : "";
+  const rightDigits = typeof right === "string" ? onlyDigits(right) : "";
   return leftDigits.length > 0 && leftDigits === rightDigits;
 }
 

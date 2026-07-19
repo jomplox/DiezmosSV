@@ -1,5 +1,6 @@
 import { formatCents } from "../../shared/money";
 import type { DteDocumentRecord } from "../types";
+import { isRecord } from "../utils/guards";
 
 export const EMAIL_TEMPLATES_SETTING_KEY = "email_templates_json";
 
@@ -206,8 +207,4 @@ function statusLabel(status: string): string {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
