@@ -1650,6 +1650,85 @@ async function handleAdvancedDte(ctx: ApiRouteContext): Promise<Response> {
   return jsonResponse({ ok: true, documentId: dte.id, queued: true, numeroControl: dte.numero_control, codigoGeneracion: dte.codigo_generacion }, { status: 202 });
 }
 
+async function handleUserList(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse({ users: await ctx.repo.listUsers() });
+}
+
+async function handleUserCreate(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; role: Role; password: string };
+  // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
+  // creating an OWNER account and then using the OWNER-only credential routes.
+  if (body.role === "OWNER" && actor.role !== "OWNER") {
+    return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+  }
+  const created = await ctx.auth.createUser(body);
+  await ctx.repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_CREATED", entityType: "user", entityId: created.id, summary: created.email });
+  return jsonResponse({ user: created }, { status: 201 });
+}
+
+async function handleUserPassword(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  const userId = ctx.params[0];
+  // Vector inverso de escalación: restablecer la contraseña de un OWNER le daría a
+  // un ADMIN esa sesión. Solo un propietario modifica a otro propietario.
+  if (actor.role !== "OWNER" && (await ctx.repo.getUserRole(userId)) === "OWNER") {
+    return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
+  }
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { password?: unknown };
+  if (typeof body.password !== "string" || !body.password) {
+    return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
+  }
+  try {
+    await ctx.auth.resetUserPassword(userId, body.password, actor.role === "OWNER");
+  } catch (error) {
+    if (error instanceof PasswordPolicyError) {
+      return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
+    }
+    if (error instanceof UserNotFoundError) {
+      return jsonResponse({ error: "user_not_found", message: error.message }, { status: 404 });
+    }
+    if (error instanceof OwnerTargetProtectedError) {
+      return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
+    }
+    throw error;
+  }
+  await ctx.repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_PASSWORD_RESET", entityType: "user", entityId: userId, summary: "Contraseña restablecida por administrador" });
+  return jsonResponse({ ok: true });
+}
+
+async function handleUserUpdate(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  const userId = ctx.params[0];
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
+  const patch = userPatchInput(body);
+  if (patch instanceof Response) return patch;
+  // Same escalation guard as user creation: promoting an account to OWNER is
+  // reserved for OWNERs.
+  if (patch.role === "OWNER" && actor.role !== "OWNER") {
+    return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
+  }
+  // Y el vector inverso: un ADMIN tampoco modifica (desactiva, renombra, degrada) a
+  // un OWNER existente.
+  if (actor.role !== "OWNER" && (await ctx.repo.getUserRole(userId)) === "OWNER") {
+    return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
+  }
+  let updated: Record<string, unknown>;
+  try {
+    updated = await ctx.repo.updateUser(userId, patch, actor.role === "OWNER");
+  } catch (error) {
+    if (error instanceof OwnerTargetProtectedError) {
+      return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
+    }
+    if (error instanceof UserMutationConflictError) {
+      return jsonResponse({ error: "user_update_conflict", message: error.message }, { status: 409 });
+    }
+    throw error;
+  }
+  await ctx.repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userId, summary: "Usuario actualizado", metadata: patch });
+  return jsonResponse({ user: updated });
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -1744,11 +1823,31 @@ const operationsRoutes: Array<Route<ApiRouteContext>> = [
   { method: "POST", pattern: "/api/test/dte/advanced", role: "OPERATOR", handler: handleAdvancedDte }
 ];
 
+const userRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "GET", pattern: "/api/users", role: "ADMIN", handler: handleUserList },
+  { method: "POST", pattern: "/api/users", role: "ADMIN", handler: handleUserCreate },
+  { method: "POST", pattern: /^\/api\/users\/([^/]+)\/password$/, role: "ADMIN", handler: handleUserPassword },
+  { method: "PATCH", pattern: /^\/api\/users\/([^/]+)$/, role: "ADMIN", handler: handleUserUpdate }
+];
+
 const genericDocumentRoute: Route<ApiRouteContext> = {
   pattern: /^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/,
   role: documentRouteRole,
   handler: handleGenericDocument
 };
+
+const routes: Array<Route<ApiRouteContext>> = [
+  ...publicRoutes,
+  ...authRoutes,
+  ...documentListRoutes,
+  ...wompiIssuanceRoutes,
+  ...settingsRoutes,
+  ...exportRoutes,
+  ...correctionRoutes,
+  genericDocumentRoute,
+  ...operationsRoutes,
+  ...userRoutes
+];
 
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
@@ -1770,112 +1869,7 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     url,
     executionContext: ctx
   };
-  const publicResponse = await dispatchRoutes(publicRoutes, apiContext, requireRole);
-  if (publicResponse) return publicResponse;
-  const authResponse = await dispatchRoutes(authRoutes, apiContext, requireRole);
-  if (authResponse) return authResponse;
-  const settingsResponse = await dispatchRoutes(settingsRoutes, apiContext, requireRole);
-  if (settingsResponse) return settingsResponse;
-
-  const documentListResponse = await dispatchRoutes(documentListRoutes, apiContext, requireRole);
-  if (documentListResponse) return documentListResponse;
-
-  const wompiIssuanceResponse = await dispatchRoutes(wompiIssuanceRoutes, apiContext, requireRole);
-  if (wompiIssuanceResponse) return wompiIssuanceResponse;
-
-  const exportResponse = await dispatchRoutes(exportRoutes, apiContext, requireRole);
-  if (exportResponse) return exportResponse;
-
-  const correctionResponse = await dispatchRoutes(correctionRoutes, apiContext, requireRole);
-  if (correctionResponse) return correctionResponse;
-
-  const genericDocumentResponse = await dispatchRoutes([genericDocumentRoute], apiContext, requireRole);
-  if (genericDocumentResponse) return genericDocumentResponse;
-
-  const operationsResponse = await dispatchRoutes(operationsRoutes, apiContext, requireRole);
-  if (operationsResponse) return operationsResponse;
-
-  if (url.pathname === "/api/users" && request.method === "GET") {
-    requireRole(user, "ADMIN");
-    return jsonResponse({ users: await repo.listUsers() });
-  }
-
-  if (url.pathname === "/api/users" && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; role: Role; password: string };
-    // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
-    // creating an OWNER account and then using the OWNER-only credential routes.
-    if (body.role === "OWNER" && actor.role !== "OWNER") {
-      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
-    }
-    const created = await auth.createUser(body);
-    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_CREATED", entityType: "user", entityId: created.id, summary: created.email });
-    return jsonResponse({ user: created }, { status: 201 });
-  }
-
-  const passwordMatch = url.pathname.match(/^\/api\/users\/([^/]+)\/password$/);
-  if (passwordMatch && request.method === "POST") {
-    const actor = requireRole(user, "ADMIN");
-    // Vector inverso de escalación: restablecer la contraseña de un OWNER le daría a
-    // un ADMIN esa sesión. Solo un propietario modifica a otro propietario.
-    if (actor.role !== "OWNER" && (await repo.getUserRole(passwordMatch[1])) === "OWNER") {
-      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
-    }
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { password?: unknown };
-    if (typeof body.password !== "string" || !body.password) {
-      return jsonResponse({ error: "missing_user_password", message: "Ingrese nueva contraseña" }, { status: 400 });
-    }
-    try {
-      await auth.resetUserPassword(passwordMatch[1], body.password, actor.role === "OWNER");
-    } catch (error) {
-      if (error instanceof PasswordPolicyError) {
-        return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
-      }
-      if (error instanceof UserNotFoundError) {
-        return jsonResponse({ error: "user_not_found", message: error.message }, { status: 404 });
-      }
-      if (error instanceof OwnerTargetProtectedError) {
-        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
-      }
-      throw error;
-    }
-    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_PASSWORD_RESET", entityType: "user", entityId: passwordMatch[1], summary: "Contraseña restablecida por administrador" });
-    return jsonResponse({ ok: true });
-  }
-
-  const userMatch = url.pathname.match(/^\/api\/users\/([^/]+)$/);
-  if (userMatch && request.method === "PATCH") {
-    const actor = requireRole(user, "ADMIN");
-    const body = (await readJsonObject(request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { role?: unknown; disabled?: unknown; name?: unknown; email?: unknown };
-    const patch = userPatchInput(body);
-    if (patch instanceof Response) return patch;
-    // Same escalation guard as user creation: promoting an account to OWNER is
-    // reserved for OWNERs.
-    if (patch.role === "OWNER" && actor.role !== "OWNER") {
-      return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
-    }
-    // Y el vector inverso: un ADMIN tampoco modifica (desactiva, renombra, degrada) a
-    // un OWNER existente.
-    if (actor.role !== "OWNER" && (await repo.getUserRole(userMatch[1])) === "OWNER") {
-      return jsonResponse({ error: "owner_target_protected", message: "Solo un propietario puede modificar a otro propietario" }, { status: 403 });
-    }
-    let updated: Record<string, unknown>;
-    try {
-      updated = await repo.updateUser(userMatch[1], patch, actor.role === "OWNER");
-    } catch (error) {
-      if (error instanceof OwnerTargetProtectedError) {
-        return jsonResponse({ error: "owner_target_protected", message: error.message }, { status: 403 });
-      }
-      if (error instanceof UserMutationConflictError) {
-        return jsonResponse({ error: "user_update_conflict", message: error.message }, { status: 409 });
-      }
-      throw error;
-    }
-    await repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_UPDATED", entityType: "user", entityId: userMatch[1], summary: "Usuario actualizado", metadata: patch });
-    return jsonResponse({ user: updated });
-  }
-
-  return notFound();
+  return (await dispatchRoutes(routes, apiContext, requireRole)) ?? notFound();
 }
 
 // Validates and defaults the analytics date range. `from`/`to` are YYYY-MM-DD in El
