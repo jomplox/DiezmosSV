@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 const appSource =
   readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
-  readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8");
+  readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 
 describe("online donations UI contract", () => {
   it("renders the online-donations card with usted-form copy in the Exportar view", () => {

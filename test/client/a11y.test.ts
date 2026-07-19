@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
+const documentsViewSource = readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const fiscalCorrectionFocusSource = readFileSync(
   resolve(import.meta.dirname, "../../src/client/fiscalCorrectionFocus.ts"),
@@ -17,7 +18,7 @@ describe("keyboard accessibility contract", () => {
   });
 
   it("wires useDialogDismiss into the four dialogs", () => {
-    const dialogSource = appSource + credentialsPanelSource;
+    const dialogSource = appSource + credentialsPanelSource + documentsViewSource;
     const callSites = dialogSource.match(/useDialogDismiss\(dialogRef/g) ?? [];
     expect(callSites.length).toBeGreaterThanOrEqual(4);
     const occurrences = dialogSource.match(/useDialogDismiss\(/g) ?? [];

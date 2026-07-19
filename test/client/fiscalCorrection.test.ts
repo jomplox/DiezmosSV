@@ -22,10 +22,9 @@ import type {
 } from "../../src/client/types";
 import type { FiscalReceptorCorrection } from "../../src/shared/fiscalCorrection";
 
-const appSource = readFileSync(
-  resolve(import.meta.dirname, "../../src/client/App.tsx"),
-  "utf8"
-);
+const appSource =
+  readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 const dialogSource = readFileSync(
   resolve(import.meta.dirname, "../../src/client/fiscalCorrectionDialog.tsx"),
   "utf8"
