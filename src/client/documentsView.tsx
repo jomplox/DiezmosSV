@@ -23,13 +23,13 @@ import { invalidationFormValidationMessage, type InvalidationFormInput } from ".
 import { documentDisplayStatus, environmentLabel } from "./displayText";
 import { invalidationWindowInfo } from "./invalidationWindow";
 import { rejectionDetailForDocument } from "./rejectionDetail";
-import { formatCents } from "../shared/money";
 import {
   fiscalCorrectionStatusLabel,
   isCorrectablePreCdeFailure,
   isReviewRequiredPreCdeFailure
 } from "./fiscalCorrectionDialog";
 import { formatElSalvadorDate, formatElSalvadorDateTime } from "../shared/legalWindows";
+import { formatCents } from "../shared/money";
 import {
   countByStatus,
   type FiscalCorrectionTarget,
