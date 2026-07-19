@@ -2473,6 +2473,15 @@ async function handleDocumentFiscalCorrection(
     );
   }
   assertDeploymentAllowsAmbiente(env, document.environment);
+  if (
+    !document.wompi_event_id
+    && !deploymentEnvironmentPolicy(env).directGenerationAllowed
+  ) {
+    return jsonResponse(
+      { error: "document_correction_direct_generation_disabled" },
+      { status: 403 }
+    );
+  }
 
   const beforeData = effectiveDocumentCorrectionData(document);
   if (!beforeData.correctable) {

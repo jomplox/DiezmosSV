@@ -22,7 +22,11 @@ import type { DonationIntentBinding } from "./donationIntentBinding";
 import { logWorkerError } from "./observability";
 import { stagingSmokeRunIdFromTransaction } from "./stagingSmoke";
 import { MhClient, MhPreDispatchError } from "./mhClient";
-import { assertDeploymentAllowsAmbiente, EnvironmentNotAllowedError } from "./environmentPolicy";
+import {
+  assertDeploymentAllowsAmbiente,
+  deploymentEnvironmentPolicy,
+  EnvironmentNotAllowedError
+} from "./environmentPolicy";
 import {
   assertDirectCorrectionSourceTrusted,
   buildCorrectedDirectCandidate,
@@ -664,6 +668,15 @@ export class IssuancePipeline {
     ) {
       throw new FiscalCorrectionOwnershipError();
     }
+    if (
+      !current.wompi_event_id
+      && !deploymentEnvironmentPolicy(this.env).directGenerationAllowed
+    ) {
+      return this.finalizeDirectFiscalCorrectionGenerationDisabled(
+        correction,
+        ownership
+      );
+    }
     if (current.status === "SIGNED") {
       return this.finishDocumentFiscalCorrection(correction, current.id, ownership);
     }
@@ -874,6 +887,25 @@ export class IssuancePipeline {
       return latest;
     }
     throw new Error("No se pudo finalizar el fallo previo al despacho fiscal.");
+  }
+
+  private async finalizeDirectFiscalCorrectionGenerationDisabled(
+    correction: FiscalCorrectionRecord,
+    ownership: FiscalCorrectionQueueOwnership
+  ): Promise<FiscalCorrectionRecord> {
+    const finalized =
+      await this.repo.finalizeDirectFiscalCorrectionGenerationDisabled(
+        correction.id,
+        ownership.processingClaimId
+      );
+    const latest = (await this.repo.getFiscalCorrection(correction.id)) ?? correction;
+    if (finalized || TERMINAL_FISCAL_CORRECTION_STATUSES.has(latest.status)) {
+      await this.recordFiscalCorrectionAudit(latest, latest.status);
+      return latest;
+    }
+    throw new FiscalCorrectionBusyError(
+      "No se pudo retirar la corrección directa deshabilitada por la política."
+    );
   }
 
   private async finalizeFiscalCorrectionReview(

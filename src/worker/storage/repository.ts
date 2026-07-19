@@ -1251,6 +1251,203 @@ export class Repository {
     return true;
   }
 
+  async finalizeDirectFiscalCorrectionGenerationDisabled(
+    id: string,
+    processingClaimId: string
+  ): Promise<boolean> {
+    const correction = await this.getFiscalCorrection(id);
+    if (!correction) return false;
+    let source: DteDocumentRecord;
+    try {
+      source = JSON.parse(
+        correction.source_document_snapshot_json ?? ""
+      ) as DteDocumentRecord;
+    } catch {
+      return false;
+    }
+    if (
+      correction.target_kind !== "DTE_DOCUMENT"
+      || correction.wompi_event_id !== null
+      || correction.issuance_attempt_id !== null
+      || !correction.document_id
+      || !correction.fiscal_claim_id
+      || source.id !== correction.document_id
+      || source.wompi_event_id !== null
+      || source.environment !== correction.environment
+      || source.status !== "REJECTED"
+      || typeof source.codigo_generacion !== "string"
+      || typeof source.numero_control !== "string"
+      || typeof source.plain_json !== "string"
+      || typeof source.mh_observaciones_json !== "string"
+      || typeof source.amount_cents !== "number"
+      || typeof source.issued_at !== "string"
+    ) {
+      return false;
+    }
+    const completedAt = nowIso();
+    const failureCode = "FISCAL_CORRECTION_DIRECT_GENERATION_DISABLED";
+    const failureMessage =
+      "La corrección de CDE directos está deshabilitada en este despliegue.";
+    const restoreDocument = this.db.prepare(
+      `UPDATE dte_documents
+          SET codigo_generacion = ?,
+              numero_control = ?,
+              status = 'REJECTED',
+              plain_json = ?,
+              signed_jws = ?,
+              sello_recibido = ?,
+              mh_estado = ?,
+              mh_observaciones_json = ?,
+              donor_email = ?,
+              donor_name = ?,
+              amount_cents = ?,
+              issued_at = ?,
+              accepted_at = ?,
+              contingency_period_id = ?,
+              transmission_deferred_at = ?,
+              fiscal_operation_claim_id = NULL,
+              fiscal_operation_claimed_at = NULL,
+              fiscal_operation_kind = NULL,
+              fiscal_operation_event_id = NULL,
+              transmission_claim_id = NULL,
+              post_accept_finalized_at = NULL,
+              post_accept_finalization_claim_id = NULL,
+              post_accept_finalization_claimed_at = NULL,
+              post_accept_email_dispatch_started_at = NULL,
+              updated_at = ?
+        WHERE id = ?
+          AND wompi_event_id IS NULL
+          AND environment = ?
+          AND status IN ('REJECTED', 'SIGNED')
+          AND fiscal_operation_claim_id = ?
+          AND fiscal_operation_kind = 'TRANSMISSION'
+          AND fiscal_operation_event_id IS NULL
+          AND transmission_claim_id IS NULL
+          AND (
+            status = 'REJECTED'
+            OR (
+              codigo_generacion = (
+                SELECT reserved_codigo_generacion FROM fiscal_corrections
+                 WHERE id = ? AND processing_claim_id = ?
+              )
+              AND numero_control = (
+                SELECT reserved_numero_control FROM fiscal_corrections
+                 WHERE id = ? AND processing_claim_id = ?
+              )
+            )
+          )
+          AND EXISTS (
+            SELECT 1
+              FROM fiscal_corrections
+             WHERE id = ?
+               AND document_id = dte_documents.id
+               AND environment = dte_documents.environment
+               AND target_kind = 'DTE_DOCUMENT'
+               AND wompi_event_id IS NULL
+               AND issuance_attempt_id IS NULL
+               AND status = 'PROCESSING'
+               AND processing_claim_id = ?
+               AND fiscal_claim_id = dte_documents.fiscal_operation_claim_id
+               AND mh_dispatch_started_at IS NULL
+               AND source_document_snapshot_json = ?
+          )`
+    ).bind(
+      source.codigo_generacion,
+      source.numero_control,
+      source.plain_json,
+      source.signed_jws,
+      source.sello_recibido,
+      source.mh_estado,
+      source.mh_observaciones_json,
+      source.donor_email,
+      source.donor_name,
+      source.amount_cents,
+      source.issued_at,
+      source.accepted_at,
+      source.contingency_period_id,
+      source.transmission_deferred_at,
+      completedAt,
+      correction.document_id,
+      correction.environment,
+      correction.fiscal_claim_id,
+      id,
+      processingClaimId,
+      id,
+      processingClaimId,
+      id,
+      processingClaimId,
+      correction.source_document_snapshot_json
+    );
+    const correctionUpdate = this.db.prepare(
+      `UPDATE fiscal_corrections
+          SET status = 'FAILED',
+              failure_code = ?,
+              failure_message = ?,
+              completed_at = ?,
+              updated_at = ?
+        WHERE id = ?
+          AND document_id = ?
+          AND environment = ?
+          AND target_kind = 'DTE_DOCUMENT'
+          AND wompi_event_id IS NULL
+          AND issuance_attempt_id IS NULL
+          AND status = 'PROCESSING'
+          AND processing_claim_id = ?
+          AND fiscal_claim_id = ?
+          AND mh_dispatch_started_at IS NULL
+          AND source_document_snapshot_json = ?
+          AND EXISTS (
+            SELECT 1
+              FROM dte_documents
+             WHERE id = fiscal_corrections.document_id
+               AND wompi_event_id IS NULL
+               AND environment = fiscal_corrections.environment
+               AND status = 'REJECTED'
+               AND codigo_generacion = ?
+               AND numero_control = ?
+               AND plain_json = ?
+               AND fiscal_operation_claim_id IS NULL
+               AND fiscal_operation_claimed_at IS NULL
+               AND fiscal_operation_kind IS NULL
+               AND fiscal_operation_event_id IS NULL
+               AND transmission_claim_id IS NULL
+          )`
+    ).bind(
+      failureCode,
+      failureMessage,
+      completedAt,
+      completedAt,
+      id,
+      correction.document_id,
+      correction.environment,
+      processingClaimId,
+      correction.fiscal_claim_id,
+      correction.source_document_snapshot_json,
+      source.codigo_generacion,
+      source.numero_control,
+      source.plain_json
+    );
+    const auditStatements = await this.fiscalCorrectionAuditStatements(
+      correction,
+      [
+        { transition: "QUEUED", outcomeCode: "QUEUED" },
+        { transition: "STARTED", outcomeCode: "PROCESSING" },
+        { transition: "FAILED", outcomeCode: failureCode }
+      ]
+    );
+    const results = await this.db.batch([
+      restoreDocument,
+      correctionUpdate,
+      ...auditStatements
+    ]);
+    const finalized = Number(results[0]?.meta?.changes ?? 0) === 1
+      && Number(results[1]?.meta?.changes ?? 0) === 1;
+    if (finalized && correction.document_id) {
+      await this.indexDteDocumentById(correction.document_id);
+    }
+    return finalized;
+  }
+
   async finalizeFiscalCorrection(
     id: string,
     claimId: string,
