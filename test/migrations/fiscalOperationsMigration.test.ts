@@ -1,7 +1,8 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
+import { migrationFiles } from "../worker/support/migratedDatabase";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
@@ -336,12 +337,6 @@ describe("migration 0028 fiscal correction reservations", () => {
     database.close();
   });
 });
-
-function migrationFiles(): string[] {
-  return readdirSync(migrationsDirectory)
-    .filter((filename) => /^\d{4}_.+\.sql$/.test(filename))
-    .sort();
-}
 
 function migratedThroughObservedRemoteD1Boundaries(): DatabaseSync {
   const database = new DatabaseSync(":memory:");

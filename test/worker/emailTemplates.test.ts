@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { makeDocument } from "./fixtures";
 import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
@@ -11,9 +12,7 @@ import { certificateEmailHtml, dteEmailHtml, passwordResetEmailHtml } from "../.
 import type { DteDocumentRecord, Env } from "../../src/worker/types";
 
 function fakeRecord(): DteDocumentRecord {
-  return {
-    id: "doc_1",
-    status: "ACCEPTED",
+  return makeDocument({
     environment: "01",
     donor_name: "Ana",
     numero_control: "DTE-15-0001-000000000000001",
@@ -21,9 +20,8 @@ function fakeRecord(): DteDocumentRecord {
     amount_cents: 5000,
     issued_at: "2026-06-01T12:00:00.000Z",
     sello_recibido: "SELLO123",
-    transmission_deferred_at: null,
     plain_json: "{}"
-  } as unknown as DteDocumentRecord;
+  });
 }
 
 import { readFileSync as __readEmailHtmlSource } from "node:fs";

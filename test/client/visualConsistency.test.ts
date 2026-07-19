@@ -2,7 +2,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const appSource =
+  readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8") +
+  readFileSync(resolve(import.meta.dirname, "../../src/client/documentsView.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 
 describe("visual consistency pack", () => {
@@ -82,7 +85,7 @@ describe("visual consistency pack", () => {
   });
 
   it("shows an honest pre-CDE loading state before Fallos can say everything is fine", () => {
-    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nexport function Stats/)?.[0] ?? "";
 
     expect(appSource).toContain("const [preCdeFailuresLoading, setPreCdeFailuresLoading] = useState(false);");
     expect(appSource).toContain("loading={preCdeFailuresLoading}");
@@ -94,7 +97,7 @@ describe("visual consistency pack", () => {
   });
 
   it("renders exact pre-CDE evidence with guarded correction and safe retry states", () => {
-    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nexport function Stats/)?.[0] ?? "";
 
     expect(panelBlock).toContain('<span className="status pre-cde">CDE NO CREADO</span>');
     expect(panelBlock).toContain('<strong>{item.donor_name ?? "Donante sin nombre"}</strong>');
@@ -115,7 +118,7 @@ describe("visual consistency pack", () => {
   });
 
   it("renders donor email and payment-received time on pre-CDE cards", () => {
-    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nfunction Stats/)?.[0] ?? "";
+    const panelBlock = appSource.match(/function PreCdeFailuresPanel\([\s\S]*?\n}\n\nexport function Stats/)?.[0] ?? "";
 
     expect(panelBlock).toContain('<span>{item.donor_email ?? "Correo no disponible"}</span>');
     expect(panelBlock).toContain('<span>Pago recibido: {formatDateTime(item.received_at)}</span>');

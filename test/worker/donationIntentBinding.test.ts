@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resolveDonationIntentBinding } from "../../src/worker/services/donationIntentBinding";
 import type { DonationIntentRecord, WompiWebhook } from "../../src/worker/types";
+import { makeIntent } from "./fixtures";
 import type { Repository } from "../../src/worker/storage/repository";
 
 class BindingRepository {
@@ -86,32 +87,16 @@ function payload(overrides: Partial<WompiWebhook> = {}): WompiWebhook {
 }
 
 function bindingIntent(overrides: Partial<DonationIntentRecord> = {}): DonationIntentRecord {
-  return {
+  return makeIntent({
     id: "di_bound",
-    status: "LINK_CREATED",
-    amount_cents: 2550,
-    donor_name: null,
-    donor_document_type: "13",
     donor_document: "10000001-9",
-    donor_email: null,
-    donor_phone: null,
-    direccion_departamento: "06",
     direccion_municipio: "23",
     direccion_distrito: "14",
-    direccion_complemento: "San Salvador",
-    donor_pais: null,
     gift_type: "DIEZMO",
     wompi_id_enlace: 987654,
-    wompi_url_enlace: null,
-    wompi_url_enlace_largo: null,
-    document_id: null,
-    client_ip: null,
-    datos_token_hash: null,
-    rate_limit_claim_id: null,
-    paid_at: null,
     created_at: "2026-07-09T12:00:00.000Z",
     updated_at: "2026-07-09T12:00:00.000Z",
     expires_at: "2026-07-09T13:00:00.000Z",
     ...overrides
-  };
+  });
 }
