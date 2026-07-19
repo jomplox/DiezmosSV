@@ -17,6 +17,7 @@ import type {
 } from "./types";
 import { openNativeDatePicker } from "./datePicker";
 import { donationIntentStatusLabel, environmentLabel } from "./displayText";
+import { formatCents } from "../shared/money";
 import {
   addMonths,
   type AnnualCertificatePreview,
@@ -30,7 +31,6 @@ import {
   monthStart,
   shortCode
 } from "./App";
-import { formatCents } from "../shared/money";
 import { StackedCell } from "./documentsView";
 
 export function ExportPanel({
