@@ -21,6 +21,24 @@ import {
   listDteEventsByType as listDteEventsByTypeRepository
 } from "./repository/contingency";
 import {
+  countUsers as countUsersRepository,
+  createInitialOwner as createInitialOwnerRepository,
+  createPasswordResetToken as createPasswordResetTokenRepository,
+  createSessionIfCredentialsCurrent as createSessionIfCredentialsCurrentRepository,
+  createUser as createUserRepository,
+  getActivePasswordResetUser as getActivePasswordResetUserRepository,
+  getSessionUser as getSessionUserRepository,
+  getUserForLogin as getUserForLoginRepository,
+  getUserRole as getUserRoleRepository,
+  invalidatePasswordResetToken as invalidatePasswordResetTokenRepository,
+  listUsers as listUsersRepository,
+  resetPasswordWithToken as resetPasswordWithTokenRepository,
+  revokeSession as revokeSessionRepository,
+  setUserPassword as setUserPasswordRepository,
+  updateUser as updateUserRepository,
+  updateUserPasswordHashIfCurrent as updateUserPasswordHashIfCurrentRepository
+} from "./repository/identity";
+import {
   INTENT_EXPIRY_SWEEP_LIMIT as DONATION_INTENT_EXPIRY_SWEEP_LIMIT,
   applyIntentDatosWithCapability as applyIntentDatosWithCapabilityRepository,
   attachIntentLink as attachIntentLinkRepository,
@@ -112,6 +130,10 @@ import {
 
 export { legacyIssuanceAttemptId } from "./repository/wompiIssuance";
 export { INTENT_EXPIRY_SWEEP_LIMIT } from "./repository/donationIntents";
+export {
+  OwnerTargetProtectedError,
+  UserMutationConflictError
+} from "./repository/identity";
 export type {
   EmailDeliveryOutcomeClass,
   ManualEmailDeliveryClaim,
@@ -128,20 +150,6 @@ export interface FailedWompiFiscalCorrectionSummary {
 }
 
 export const RETENTION_PAGE_SIZE = 500;
-
-export class OwnerTargetProtectedError extends Error {
-  constructor() {
-    super("Solo un propietario puede modificar a otro propietario");
-    this.name = "OwnerTargetProtectedError";
-  }
-}
-
-export class UserMutationConflictError extends Error {
-  constructor() {
-    super("El usuario cambió mientras se procesaba la solicitud; vuelva a cargar e intente de nuevo");
-    this.name = "UserMutationConflictError";
-  }
-}
 
 
 interface FiscalCorrectionClaimBaseInput {
@@ -2756,56 +2764,27 @@ export class Repository {
   // Rol del usuario objetivo para los guards de gestión de usuarios (un ADMIN nunca
   // toca a un OWNER). Null cuando el usuario no existe.
   async getUserRole(id: string): Promise<string | null> {
-    const row = await this.db.prepare("SELECT role FROM users WHERE id = ?").bind(id).first<{ role: string }>();
-    return row?.role ?? null;
+    return getUserRoleRepository(this.db, id);
   }
 
   async listUsers(): Promise<Array<Record<string, unknown>>> {
-    return this.db
-      .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users ORDER BY created_at DESC LIMIT 100")
-      .all<Record<string, unknown>>()
-      .then((result) => result.results ?? []);
+    return listUsersRepository(this.db);
   }
 
   async countUsers(): Promise<number> {
-    const row = await this.db.prepare("SELECT COUNT(*) AS count FROM users").first<{ count: number }>();
-    return row?.count ?? 0;
+    return countUsersRepository(this.db);
   }
 
   async createInitialOwner(input: { email: string; name: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown> | null> {
-    const id = newId("user");
-    return this.db
-      .prepare(
-        `INSERT INTO users (id, email, name, role, password_hash, password_salt)
-         SELECT ?, ?, ?, 'OWNER', ?, ?
-          WHERE NOT EXISTS (SELECT 1 FROM users)
-         RETURNING id, email, name, role, disabled_at, created_at, updated_at`
-      )
-      .bind(id, input.email.toLowerCase(), input.name, input.passwordHash, input.passwordSalt)
-      .first<Record<string, unknown>>();
+    return createInitialOwnerRepository(this.db, input);
   }
 
   async createUser(input: { email: string; name: string; role: string; passwordHash: string; passwordSalt: string }): Promise<Record<string, unknown>> {
-    const id = newId("user");
-    await this.db
-      .prepare("INSERT INTO users (id, email, name, role, password_hash, password_salt) VALUES (?, ?, ?, ?, ?, ?)")
-      .bind(id, input.email.toLowerCase(), input.name, input.role, input.passwordHash, input.passwordSalt)
-      .run();
-    const user = await this.db
-      .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
-      .bind(id)
-      .first<Record<string, unknown>>();
-    if (!user) {
-      throw new Error("No se pudo leer el usuario creado");
-    }
-    return user;
+    return createUserRepository(this.db, input);
   }
 
   async getUserForLogin(email: string): Promise<Record<string, string> | null> {
-    return this.db
-      .prepare("SELECT id, email, name, role, password_hash, password_salt, disabled_at, auth_generation FROM users WHERE email = ?")
-      .bind(email.toLowerCase())
-      .first<Record<string, string>>();
+    return getUserForLoginRepository(this.db, email);
   }
 
   async claimDonationIntentRateLimit(
@@ -3001,104 +2980,15 @@ export class Repository {
     tokenHash: string;
     expiresAt: string;
   }): Promise<boolean> {
-    const id = newId("session");
-    const createdAt = nowIso();
-    const guard = [
-      input.userId,
-      input.expectedPasswordHash,
-      input.expectedPasswordSalt,
-      input.expectedEmail,
-      input.expectedAuthGeneration
-    ] as const;
-    const results = await this.db.batch([
-      this.db
-        .prepare(
-          `DELETE FROM sessions
-            WHERE user_id = ?
-              AND (revoked_at IS NOT NULL OR expires_at <= ?)
-              AND EXISTS (
-                SELECT 1 FROM users
-                 WHERE id = ?
-                   AND disabled_at IS NULL
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND email = ?
-                   AND auth_generation = ?
-              )`
-        )
-        .bind(input.userId, createdAt, ...guard),
-      this.db
-        .prepare(
-          `DELETE FROM sessions
-            WHERE id IN (
-              SELECT id FROM sessions
-               WHERE user_id = ?
-                 AND revoked_at IS NULL
-                 AND expires_at > ?
-               ORDER BY created_at DESC, id DESC
-               LIMIT -1 OFFSET 7
-            )
-              AND EXISTS (
-                SELECT 1 FROM users
-                 WHERE id = ?
-                   AND disabled_at IS NULL
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND email = ?
-                   AND auth_generation = ?
-              )`
-        )
-        .bind(input.userId, createdAt, ...guard),
-      this.db
-        .prepare(
-          `INSERT INTO sessions (
-             id, user_id, token_hash, expires_at, created_at
-           )
-           SELECT ?, id, ?, ?, ?
-             FROM users
-            WHERE id = ?
-              AND disabled_at IS NULL
-              AND password_hash = ?
-              AND password_salt = ?
-              AND email = ?
-              AND auth_generation = ?`
-        )
-        .bind(
-          id,
-          input.tokenHash,
-          input.expiresAt,
-          createdAt,
-          ...guard
-        )
-    ]);
-    return Number(results[2]?.meta?.changes ?? 0) === 1;
+    return createSessionIfCredentialsCurrentRepository(this.db, input);
   }
 
   async getSessionUser(tokenHash: string): Promise<Record<string, string> | null> {
-    return this.db
-      .prepare(
-        `SELECT users.id, users.email, users.name, users.role
-         FROM sessions
-         JOIN users ON users.id = sessions.user_id
-         WHERE sessions.token_hash = ?
-           AND sessions.revoked_at IS NULL
-           AND sessions.expires_at > ?
-           AND users.disabled_at IS NULL`
-      )
-      .bind(tokenHash, nowIso())
-      .first<Record<string, string>>();
+    return getSessionUserRepository(this.db, tokenHash);
   }
 
   async revokeSession(tokenHash: string): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE sessions
-            SET revoked_at = ?
-          WHERE token_hash = ?
-            AND revoked_at IS NULL`
-      )
-      .bind(nowIso(), tokenHash)
-      .run();
+    return revokeSessionRepository(this.db, tokenHash);
   }
 
   async updateUser(
@@ -3106,117 +2996,7 @@ export class Repository {
     input: { role?: string; disabled?: boolean; name?: string; email?: string },
     allowOwnerTarget = false
   ): Promise<Record<string, unknown>> {
-    const existing = await this.db.prepare("SELECT id, email, name, role, disabled_at, auth_generation FROM users WHERE id = ?").bind(id).first<Record<string, unknown>>();
-    if (!existing) {
-      throw new Error("Usuario no encontrado");
-    }
-    const changedAt = nowIso();
-    const currentEmail = String(existing.email).toLowerCase();
-    const nextEmail = String(input.email ?? existing.email).trim().toLowerCase();
-    const wasDisabled = existing.disabled_at != null && existing.disabled_at !== "";
-    const willBeDisabled = input.disabled === undefined ? wasDisabled : input.disabled;
-    const nextDisabledAt =
-      input.disabled === undefined
-        ? existing.disabled_at
-        : willBeDisabled
-          ? changedAt
-          : null;
-    const invalidatesCapabilities =
-      nextEmail !== currentEmail || willBeDisabled !== wasDisabled;
-    const observedAuthGeneration = Number(existing.auth_generation ?? 0);
-    const nextAuthGeneration = observedAuthGeneration + (invalidatesCapabilities ? 1 : 0);
-
-    const update = this.db
-      .prepare(
-        `UPDATE users
-            SET name = ?, email = ?, role = ?, disabled_at = ?, updated_at = ?,
-                auth_generation = auth_generation + ?
-          WHERE id = ?
-            AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))
-            AND email = ?
-            AND disabled_at IS ?
-            AND auth_generation = ?
-            AND name = ?
-            AND role = ?`
-      )
-      .bind(
-        input.name ?? existing.name,
-        nextEmail,
-        input.role ?? existing.role,
-        nextDisabledAt,
-        changedAt,
-        invalidatesCapabilities ? 1 : 0,
-        id,
-        allowOwnerTarget ? 1 : 0,
-        currentEmail,
-        existing.disabled_at ?? null,
-        observedAuthGeneration,
-        existing.name,
-        existing.role
-      );
-
-    if (invalidatesCapabilities) {
-      const results = await this.db.batch([
-        update,
-        this.db
-          .prepare(
-            `UPDATE sessions
-                SET revoked_at = ?
-              WHERE user_id = ?
-                AND revoked_at IS NULL
-                AND EXISTS (
-                  SELECT 1 FROM users
-                   WHERE id = ?
-                     AND email = ?
-                     AND disabled_at IS ?
-                     AND auth_generation = ?
-                )`
-          )
-          .bind(changedAt, id, id, nextEmail, nextDisabledAt, nextAuthGeneration),
-        this.db
-          .prepare(
-            `UPDATE password_reset_tokens
-                SET used_at = ?
-              WHERE user_id = ?
-                AND used_at IS NULL
-                AND EXISTS (
-                  SELECT 1 FROM users
-                   WHERE id = ?
-                     AND email = ?
-                     AND disabled_at IS ?
-                     AND auth_generation = ?
-                )`
-          )
-          .bind(changedAt, id, id, nextEmail, nextDisabledAt, nextAuthGeneration)
-      ]);
-      if (Number(results[0]?.meta?.changes ?? 0) !== 1) {
-        await this.throwUserMutationFailure(id, allowOwnerTarget);
-      }
-    } else {
-      const result = await update.run();
-      if (Number(result.meta?.changes ?? 0) !== 1) {
-        await this.throwUserMutationFailure(id, allowOwnerTarget);
-      }
-    }
-    const updated = await this.db
-      .prepare("SELECT id, email, name, role, disabled_at, created_at, updated_at FROM users WHERE id = ?")
-      .bind(id)
-      .first<Record<string, unknown>>();
-    if (!updated) {
-      throw new Error("No se pudo leer el usuario actualizado");
-    }
-    return updated;
-  }
-
-  private async throwUserMutationFailure(id: string, allowOwnerTarget: boolean): Promise<never> {
-    const currentRole = await this.getUserRole(id);
-    if (currentRole === null) {
-      throw new Error("Usuario no encontrado");
-    }
-    if (!allowOwnerTarget && currentRole === "OWNER") {
-      throw new OwnerTargetProtectedError();
-    }
-    throw new UserMutationConflictError();
+    return updateUserRepository(this.db, this, id, input, allowOwnerTarget);
   }
 
   async listStalledApprovedWompiEvents(cutoffIso: string): Promise<Array<Record<string, unknown>>> {
@@ -3396,56 +3176,24 @@ export class Repository {
     expectedPasswordHash: string,
     expectedPasswordSalt: string
   ): Promise<string | null> {
-    const id = newId("reset");
-    const created = await this.db
-      .prepare(
-        `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
-         SELECT ?, id, ?, ?
-         FROM users
-         WHERE id = ? AND disabled_at IS NULL
-           AND email = ? AND auth_generation = ?
-           AND password_hash = ? AND password_salt = ?
-         RETURNING id`
-      )
-      .bind(
-        id,
-        tokenHash,
-        expiresAt,
-        userId,
-        expectedEmail,
-        expectedAuthGeneration,
-        expectedPasswordHash,
-        expectedPasswordSalt
-      )
-      .first<{ id: string }>();
-    return created?.id ?? null;
+    return createPasswordResetTokenRepository(
+      this.db,
+      userId,
+      tokenHash,
+      expiresAt,
+      expectedEmail,
+      expectedAuthGeneration,
+      expectedPasswordHash,
+      expectedPasswordSalt
+    );
   }
 
   async invalidatePasswordResetToken(id: string): Promise<void> {
-    await this.db
-      .prepare(
-        `UPDATE password_reset_tokens
-            SET used_at = ?
-          WHERE id = ?
-            AND used_at IS NULL`
-      )
-      .bind(nowIso(), id)
-      .run();
+    return invalidatePasswordResetTokenRepository(this.db, id);
   }
 
   async getActivePasswordResetUser(tokenHash: string): Promise<Record<string, string> | null> {
-    return this.db
-      .prepare(
-        `SELECT users.id, users.email, users.name, users.role, users.id AS user_id, password_reset_tokens.id AS token_id
-         FROM password_reset_tokens
-         JOIN users ON users.id = password_reset_tokens.user_id
-         WHERE password_reset_tokens.token_hash = ?
-           AND password_reset_tokens.used_at IS NULL
-           AND password_reset_tokens.expires_at > ?
-           AND users.disabled_at IS NULL`
-      )
-      .bind(tokenHash, nowIso())
-      .first<Record<string, string>>();
+    return getActivePasswordResetUserRepository(this.db, tokenHash);
   }
 
   async resetPasswordWithToken(
@@ -3454,58 +3202,13 @@ export class Repository {
     passwordHash: string,
     passwordSalt: string
   ): Promise<boolean> {
-    const changedAt = nowIso();
-    const results = await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE users
-              SET password_hash = ?, password_salt = ?, updated_at = ?
-            WHERE id = ?
-              AND disabled_at IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM password_reset_tokens
-                 WHERE user_id = ?
-                   AND token_hash = ?
-                   AND used_at IS NULL
-                   AND expires_at > ?
-              )`
-        )
-        .bind(passwordHash, passwordSalt, changedAt, userId, userId, tokenHash, changedAt),
-      this.db
-        .prepare(
-          `UPDATE sessions
-              SET revoked_at = ?
-            WHERE user_id = ?
-              AND revoked_at IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM users
-                 WHERE id = ?
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND updated_at = ?
-              )`
-        )
-        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt),
-      this.db
-        .prepare(
-          `UPDATE password_reset_tokens
-              SET used_at = ?
-            WHERE user_id = ?
-              AND used_at IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM users
-                 WHERE id = ?
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND updated_at = ?
-              )`
-        )
-        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
-    ]);
-    return Number(results[0]?.meta?.changes ?? 0) === 1;
+    return resetPasswordWithTokenRepository(
+      this.db,
+      userId,
+      tokenHash,
+      passwordHash,
+      passwordSalt
+    );
   }
 
   async setUserPassword(
@@ -3514,54 +3217,14 @@ export class Repository {
     passwordSalt: string,
     allowOwnerTarget = false
   ): Promise<boolean> {
-    const changedAt = nowIso();
-    const results = await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE users
-              SET password_hash = ?, password_salt = ?, updated_at = ?
-            WHERE id = ?
-              AND (? = 1 OR role IN ('VIEWER','OPERATOR','ADMIN'))`
-        )
-        .bind(passwordHash, passwordSalt, changedAt, userId, allowOwnerTarget ? 1 : 0),
-      this.db
-        .prepare(
-          `UPDATE sessions
-              SET revoked_at = ?
-            WHERE user_id = ?
-              AND revoked_at IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM users
-                 WHERE id = ?
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND updated_at = ?
-              )`
-        )
-        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt),
-      this.db
-        .prepare(
-          `UPDATE password_reset_tokens
-              SET used_at = ?
-            WHERE user_id = ?
-              AND used_at IS NULL
-              AND EXISTS (
-                SELECT 1
-                  FROM users
-                 WHERE id = ?
-                   AND password_hash = ?
-                   AND password_salt = ?
-                   AND updated_at = ?
-              )`
-        )
-        .bind(changedAt, userId, userId, passwordHash, passwordSalt, changedAt)
-    ]);
-    const changed = Number(results[0]?.meta?.changes ?? 0) === 1;
-    if (!changed && !allowOwnerTarget && (await this.getUserRole(userId)) === "OWNER") {
-      throw new OwnerTargetProtectedError();
-    }
-    return changed;
+    return setUserPasswordRepository(
+      this.db,
+      this,
+      userId,
+      passwordHash,
+      passwordSalt,
+      allowOwnerTarget
+    );
   }
 
   // Opportunistic PBKDF2 rehash on successful login. Unlike setUserPassword this does
@@ -3575,15 +3238,13 @@ export class Repository {
     passwordHash: string,
     passwordSalt: string
   ): Promise<boolean> {
-    const updated = await this.db
-      .prepare(
-        `UPDATE users
-            SET password_hash = ?, password_salt = ?, updated_at = ?
-          WHERE id = ? AND password_hash = ? AND password_salt = ?
-          RETURNING id`
-      )
-      .bind(passwordHash, passwordSalt, nowIso(), userId, currentPasswordHash, currentPasswordSalt)
-      .first<{ id: string }>();
-    return Boolean(updated);
+    return updateUserPasswordHashIfCurrentRepository(
+      this.db,
+      userId,
+      currentPasswordHash,
+      currentPasswordSalt,
+      passwordHash,
+      passwordSalt
+    );
   }
 }
