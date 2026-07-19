@@ -808,6 +808,117 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
+  it("atomically restores a pre-dispatch direct document when policy retires its correction", async () => {
+    const database = migratedDatabase();
+    const documentId = "doc_policy_retired_correction";
+    seedRejectedDocument(database, documentId);
+    const repository = new Repository(new SqliteD1(database).database);
+    const claimed = await repository.claimDocumentFiscalCorrection(
+      documentCorrectionClaimInput({ documentId })
+    );
+    if (claimed.kind !== "claimed") throw new Error("expected document correction claim");
+    const correction = claimed.correction;
+    await repository.claimFiscalCorrectionProcessing({
+      id: correction.id,
+      processingClaimId: correction.processing_claim_id,
+      fiscalClaimId: correction.fiscal_claim_id ?? undefined
+    });
+    await reserveDocumentCorrectionIdentifiers(
+      database,
+      repository,
+      correction,
+      documentId,
+      "98989898-9898-4898-8898-989898989898",
+      "DTE-15-M001P004-000000000000098"
+    );
+    await repository.prepareClaimedFiscalCorrectionDocument({
+      correctionId: correction.id,
+      documentId,
+      processingClaimId: correction.processing_claim_id,
+      claimId: correction.fiscal_claim_id!,
+      codigoGeneracion: "98989898-9898-4898-8898-989898989898",
+      numeroControl: "DTE-15-M001P004-000000000000098",
+      plainJson: {
+        identificacion: {
+          tipoDte: "15",
+          codigoGeneracion: "98989898-9898-4898-8898-989898989898"
+        },
+        receptor: { nombre: "Donante pre-fix corregida" }
+      },
+      signedJws: "pre-fix-corrected-jws",
+      donorName: "Donante pre-fix corregida",
+      donorEmail: "corregida@example.org"
+    });
+
+    await expect(repository.finalizeDirectFiscalCorrectionGenerationDisabled(
+      correction.id,
+      "stale-processing-claim"
+    )).resolves.toBe(false);
+    expect(database.prepare(
+      `SELECT status, codigo_generacion, fiscal_operation_claim_id
+         FROM dte_documents WHERE id = ?`
+    ).get(documentId)).toEqual({
+      status: "SIGNED",
+      codigo_generacion: "98989898-9898-4898-8898-989898989898",
+      fiscal_operation_claim_id: correction.fiscal_claim_id
+    });
+
+    await expect(repository.finalizeDirectFiscalCorrectionGenerationDisabled(
+      correction.id,
+      correction.processing_claim_id
+    )).resolves.toBe(true);
+    expect(database.prepare(
+      `SELECT status, codigo_generacion, numero_control, plain_json, signed_jws,
+              sello_recibido, mh_estado, mh_observaciones_json, donor_name,
+              donor_email, fiscal_operation_claim_id, fiscal_operation_claimed_at,
+              fiscal_operation_kind, fiscal_operation_event_id, transmission_claim_id
+         FROM dte_documents WHERE id = ?`
+    ).get(documentId)).toEqual({
+      status: "REJECTED",
+      codigo_generacion: `generation_${documentId}`,
+      numero_control: `control_${documentId}`,
+      plain_json: "{\"identificacion\":{\"tipoDte\":\"15\"}}",
+      signed_jws: "rejected-jws",
+      sello_recibido: null,
+      mh_estado: "RECHAZADO",
+      mh_observaciones_json: "[\"Receptor inválido\"]",
+      donor_name: null,
+      donor_email: null,
+      fiscal_operation_claim_id: null,
+      fiscal_operation_claimed_at: null,
+      fiscal_operation_kind: null,
+      fiscal_operation_event_id: null,
+      transmission_claim_id: null
+    });
+    expect(database.prepare(
+      `SELECT status, failure_code, failure_message, completed_at
+         FROM fiscal_corrections WHERE id = ?`
+    ).get(correction.id)).toMatchObject({
+      status: "FAILED",
+      failure_code: "FISCAL_CORRECTION_DIRECT_GENERATION_DISABLED",
+      failure_message: "La corrección de CDE directos está deshabilitada en este despliegue.",
+      completed_at: expect.any(String)
+    });
+    expect(database.prepare(
+      `SELECT action, json_extract(metadata_json, '$.outcomeCode') AS outcome_code
+         FROM audit_logs
+        WHERE entity_type = 'fiscal_correction' AND entity_id = ?
+        ORDER BY CASE action
+          WHEN 'FISCAL_CORRECTION_QUEUED' THEN 1
+          WHEN 'FISCAL_CORRECTION_STARTED' THEN 2
+          ELSE 3
+        END`
+    ).all(correction.id)).toEqual([
+      { action: "FISCAL_CORRECTION_QUEUED", outcome_code: "QUEUED" },
+      { action: "FISCAL_CORRECTION_STARTED", outcome_code: "PROCESSING" },
+      {
+        action: "FISCAL_CORRECTION_FAILED",
+        outcome_code: "FISCAL_CORRECTION_DIRECT_GENERATION_DISABLED"
+      }
+    ]);
+    database.close();
+  });
+
   it("fences a recovered DTE worker before identifier allocation and reuses one reservation", async () => {
     const database = migratedDatabase();
     const documentId = "doc_recovery_fence";
