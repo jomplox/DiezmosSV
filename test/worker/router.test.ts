@@ -59,6 +59,7 @@ describe("dispatchRoutes", () => {
   });
 
   it("continues after a method mismatch instead of manufacturing 405", async () => {
+    const authorize = vi.fn();
     const response = await dispatchRoutes(
       [{
         method: "POST",
@@ -66,9 +67,10 @@ describe("dispatchRoutes", () => {
         handler: async () => new Response("unexpected")
       }],
       context({ method: "GET", pathname: "/api/example" }),
-      vi.fn()
+      authorize
     );
     expect(response).toBeNull();
+    expect(authorize).not.toHaveBeenCalled();
   });
 
   it("dispatches a method-agnostic route after a path match", async () => {
