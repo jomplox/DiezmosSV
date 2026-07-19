@@ -11,7 +11,7 @@ import { IssuancePipeline } from "../../src/worker/services/pipeline";
 import { buildCorrectedWompiCandidate } from "../../src/worker/services/fiscalCorrection";
 import { MhClient, MhPreDispatchError } from "../../src/worker/services/mhClient";
 import { Repository } from "../../src/worker/storage/repository";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type {
   DteDocumentRecord,
   Env,
@@ -23,13 +23,10 @@ import { authedDb, env, InMemoryD1 } from "./support/inMemoryD1";
 import { makeDocument as testDocument } from "./fixtures";
 import { emisorConfig, generatedCertificateXml } from "./support/dteFixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { sha256Hex } from "./support/workerFetchHelpers";
 import { wompiEventForReservation } from "./support/wompiEventFixtures";
 
 installWorkerFetchGlobals();
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}
 
 describe("guarded fiscal correction API", () => {
   const authorization = { Authorization: "Bearer test-token" };

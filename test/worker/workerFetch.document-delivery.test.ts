@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { EmailService } from "../../src/worker/services/email";
 import { MhClient } from "../../src/worker/services/mhClient";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { makeDocument as testDocument } from "./fixtures";
 import {
@@ -12,6 +12,7 @@ import {
 } from "./support/documentDeliveryFixtures";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { jsonResponse, sha256Hex } from "./support/workerFetchHelpers";
 
 installWorkerFetchGlobals();
 
@@ -1018,15 +1019,3 @@ describe("document retry", () => {
     expect(transmit).not.toHaveBeenCalled();
   });
 });
-
-
-function jsonResponse(body: unknown, init: ResponseInit = {}): Response {
-  return new Response(JSON.stringify(body), {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init.headers ?? {}) }
-  });
-}
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}

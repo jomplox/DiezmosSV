@@ -2,9 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { AuthService } from "../../src/worker/services/auth";
 import { Repository } from "../../src/worker/storage/repository";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
+import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { sha256Hex } from "./support/workerFetchHelpers";
 import { fetchAndWaitUntil } from "./support/workerFetchRequests";
 import { seededUserLifecycleDb } from "./support/userFixtures";
 
@@ -616,7 +617,3 @@ describe("password reset", () => {
     expect(db.resetTokens[0].used_at).toBeNull();
   });
 });
-
-async function sha256Hex(bytes: Uint8Array): Promise<string> {
-  return hexFromBytes(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-}

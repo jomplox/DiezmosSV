@@ -2,7 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { EnvironmentNotAllowedError } from "../../src/worker/services/environmentPolicy";
 import { IssuancePipeline } from "../../src/worker/services/pipeline";
-import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 import { TEST_RESEND_REQUEST_ID } from "./support/documentDeliveryFixtures";
 import {
   advancedCdeDraft,
@@ -11,15 +10,9 @@ import {
 } from "./support/dteFixtures";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { signWompiBody } from "./support/workerFetchHelpers";
 
 installWorkerFetchGlobals();
-
-async function signWompiBody(body: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", utf8Bytes(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, utf8Bytes(body)));
-  return hexFromBytes(digest);
-}
-
 
 describe("advanced CDE generation", () => {
   it.each([
