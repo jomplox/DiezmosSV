@@ -66,7 +66,9 @@ Current shape: 46 top-level describes. Measured domain map (line ranges at base)
 - exports (F960, contacts): 10763–11168
 - annual certificates: 11168–11525
 - advanced CDE + Wompi webhook: 11525–12459
-- intent correlation + deferred transmission: 12459–14724 (dedupe the twin `seedIntentRow`/`seedWompiEvent` builders — `:12467` vs `:13948` — into a parametrized pair when splitting)
+- intent correlation + deferred transmission: 12459–14724 (keep the twin
+  `seedIntentRow`/`seedWompiEvent` pairs separate: their row shapes and default
+  IDs differ)
 - audit/alerts/queue/transmission claim: 14724–15468
 - dead-letter sweep + cron + cert expiry: 15468–16395
 - admin settings: 16395–17185
