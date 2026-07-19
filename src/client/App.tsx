@@ -35,7 +35,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type FormEvent, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, CredentialStatusItem, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
 import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, BRANDING_LOGO_ACCEPT, BRANDING_LOGO_MAX_BYTES, brandingDonorLogoSrc, brandingFieldError, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
@@ -327,6 +327,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [donorVerifiedDocId, setDonorVerifiedDocId] = useState<string | null>(null);
   const [selectedDocumentAudit, setSelectedDocumentAudit] = useState<AuditRow[]>([]);
   const [selectedReceiptEmailDelivery, setSelectedReceiptEmailDelivery] = useState<ReceiptEmailDeliveryState | null>(null);
+  const [selectedFiscalReconciliation, setSelectedFiscalReconciliation] =
+    useState<FiscalReconciliationState | null>(null);
   const [selectedDocumentDetailVersion, setSelectedDocumentDetailVersion] = useState(0);
   const [selectedFiscalCorrectionData, setSelectedFiscalCorrectionData] = useState<FiscalCorrectionData | null>(null);
   const [fiscalCorrectionTarget, setFiscalCorrectionTarget] = useState<FiscalCorrectionTarget | null>(null);
@@ -507,22 +509,26 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setDonorVerifiedDocId(null);
       setSelectedDocumentAudit([]);
       setSelectedReceiptEmailDelivery(null);
+      setSelectedFiscalReconciliation(null);
       setSelectedFiscalCorrectionData(null);
       return;
     }
     setDonorVerifiedDocId(null);
     setSelectedDocumentAudit([]);
     setSelectedReceiptEmailDelivery(null);
+    setSelectedFiscalReconciliation(null);
     let cancelled = false;
     void accountApi<{
       donorDataVerified?: boolean;
       receiptEmailDelivery?: ReceiptEmailDeliveryState | null;
+      fiscalReconciliation?: FiscalReconciliationState | null;
       audit?: AuditRow[];
     }>(`/api/documents/${documentId}`)
       .then((detail) => {
         if (!cancelled) {
           setDonorVerifiedDocId(detail.donorDataVerified ? documentId : null);
           setSelectedReceiptEmailDelivery(detail.receiptEmailDelivery ?? null);
+          setSelectedFiscalReconciliation(detail.fiscalReconciliation ?? null);
           setSelectedDocumentAudit(Array.isArray(detail.audit) ? detail.audit : []);
         }
       })
@@ -530,6 +536,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         if (!cancelled && !(error instanceof StaleAccountStateError)) {
           setDonorVerifiedDocId(null);
           setSelectedReceiptEmailDelivery(null);
+          setSelectedFiscalReconciliation(null);
           setSelectedDocumentAudit([]);
         }
       });
@@ -1598,7 +1605,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 />
               )}
               <Stats documents={documents} onlyFailed={view === "failures"} preCdeFailureCount={visiblePreCdeFailures.length} />
-              <DocumentTable documents={documents} selectedId={selected?.id} onSelect={setSelectedId} />
+              <DocumentTable
+                documents={documents}
+                selectedId={selected?.id}
+                showCorrectionAttention={view === "failures"}
+                onSelect={setSelectedId}
+              />
               <DocumentListFooter
                 count={documents.length}
                 hasMore={documentsHasMore}
@@ -1615,6 +1627,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 selected={selected}
                 audit={selectedDocumentAudit}
                 receiptEmailDelivery={selectedReceiptEmailDelivery}
+                fiscalReconciliation={selectedFiscalReconciliation}
                 fiscalCorrectionData={selectedFiscalCorrectionData}
                 donorDataVerified={selected?.id === donorVerifiedDocId}
                 busy={busy}
@@ -4613,7 +4626,9 @@ function Stats({
         document.receipt_email_requires_review === 1
       )
   ).length;
-  const failureAttentionCount = (counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + receiptAttentionCount + preCdeFailureCount;
+  const failureAttentionCount = onlyFailed
+    ? documents.length + preCdeFailureCount
+    : (counts.FAILED ?? 0) + (counts.REJECTED ?? 0) + receiptAttentionCount + preCdeFailureCount;
   const fallidos = <Metric label="Fallos y rechazos" value={failureAttentionCount} tone="bad" />;
   if (onlyFailed) {
     return (
@@ -4645,7 +4660,17 @@ function Metric({ label, value, tone }: { label: string; value: number; tone: "o
   );
 }
 
-function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocument[]; selectedId?: string; onSelect: (id: string) => void }) {
+function DocumentTable({
+  documents,
+  selectedId,
+  showCorrectionAttention = false,
+  onSelect
+}: {
+  documents: DteDocument[];
+  selectedId?: string;
+  showCorrectionAttention?: boolean;
+  onSelect: (id: string) => void;
+}) {
   return (
     <div className="table-scroll">
       <table>
@@ -4671,6 +4696,9 @@ function DocumentTable({ documents, selectedId, onSelect }: { documents: DteDocu
                         ? "Correo por revisar"
                         : "Correo fallido"}
                     </span>
+                  )}
+                  {showCorrectionAttention && isCorrectionReconciliationDocument(document) && (
+                    <span className="receipt-email-failure">Corrección por conciliar</span>
                   )}
                 </span>
               </td>
@@ -4726,6 +4754,7 @@ function DetailPanel({
   selected,
   audit,
   receiptEmailDelivery,
+  fiscalReconciliation,
   fiscalCorrectionData,
   donorDataVerified,
   busy,
@@ -4745,6 +4774,7 @@ function DetailPanel({
   selected?: DteDocument;
   audit: AuditRow[];
   receiptEmailDelivery?: ReceiptEmailDeliveryState | null;
+  fiscalReconciliation?: FiscalReconciliationState | null;
   fiscalCorrectionData?: FiscalCorrectionData | null;
   donorDataVerified?: boolean;
   busy: string;
@@ -4794,8 +4824,23 @@ function DetailPanel({
         <div className="legal-box warning" role="alert">
           <AlertTriangle size={17} />
           <div>
-            <strong>Resultado fiscal pendiente de conciliación</strong>
-            <span>MH pudo haber procesado la operación. Los reintentos e invalidaciones permanecen bloqueados.</span>
+            <strong>
+              {fiscalReconciliation
+                ? "Requiere reconciliación"
+                : "Resultado fiscal pendiente de conciliación"}
+            </strong>
+            <span>
+              {fiscalReconciliation
+                ? fiscalReconciliation.failureMessage
+                  ?? "La corrección se detuvo antes del envío; no se transmitió a MH."
+                : "MH pudo haber procesado la operación. Los reintentos e invalidaciones permanecen bloqueados."}
+            </span>
+            {fiscalReconciliation && (
+              <span>No use Reintentar DTE; revise y concilie este caso.</span>
+            )}
+            {fiscalReconciliation?.failureCode && (
+              <small>Código: {fiscalReconciliation.failureCode}</small>
+            )}
             {selected.fiscal_operation_kind && (
               <small>Operación: {selected.fiscal_operation_kind === "INVALIDATION" ? "Invalidación" : "Transmisión"}</small>
             )}
@@ -5400,6 +5445,18 @@ function isRetryableDocument(document: Pick<DteDocument, "status" | "transmissio
     return false;
   }
   return ["SIGNED", "FAILED", "CONTINGENCY_PENDING"].includes(document.status);
+}
+
+function isCorrectionReconciliationDocument(
+  document: Pick<DteDocument, "status" | "fiscal_operation_claim_id">
+): boolean {
+  const isCorrectionOwned =
+    document.fiscal_operation_claim_id?.startsWith("fiscal_correction_") === true;
+  return isCorrectionOwned && (
+    document.status === "PENDING"
+    || document.status === "SIGNED"
+    || document.status === "CONTINGENCY_PENDING"
+  );
 }
 
 function fiscalCorrectionTargetKey(target: FiscalCorrectionTarget): string {

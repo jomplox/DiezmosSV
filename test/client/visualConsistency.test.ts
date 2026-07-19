@@ -45,7 +45,7 @@ describe("visual consistency pack", () => {
   it("keeps pre-CDE failures above and separate from legal DTE rows", () => {
     const panelRenderIndex = appSource.indexOf("<PreCdeFailuresPanel");
     const statsRenderIndex = appSource.indexOf("<Stats documents={documents}");
-    const tableRenderIndex = appSource.indexOf("<DocumentTable documents={documents}");
+    const tableRenderIndex = appSource.indexOf("<DocumentTable");
 
     expect(appSource).toContain("isPreCdeRetryInFlight");
     expect(panelRenderIndex).toBeGreaterThan(-1);
