@@ -2085,4 +2085,3 @@ describe("deferred transmission when MH is unavailable", () => {
     expect(body.documents.map((document) => document.id)).toEqual(["doc_deferred_list"]);
   });
 });
-
