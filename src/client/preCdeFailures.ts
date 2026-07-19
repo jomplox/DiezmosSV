@@ -1,4 +1,5 @@
 import type { WompiIssuanceFailureItem } from "./types";
+import { formatCents } from "../shared/money";
 
 export function createLatestRequestGate() {
   let generation = 0;
@@ -38,6 +39,7 @@ export function filterPreCdeFailures(
       item.reserved_numero_control ?? "",
       item.issuance_error_code ?? "",
       item.issuance_error_message ?? "",
+      formatCents(item.amount_cents),
       (item.amount_cents / 100).toFixed(2)
     ].some((value) => value.toLowerCase().includes(normalizedQuery))
   );
