@@ -1242,7 +1242,7 @@ export async function finalizeDirectFiscalCorrectionGenerationDisabled(
     source.numero_control,
     source.plain_json
   );
-  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext, 
+  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext,
     correction,
     [
       { transition: "QUEUED", outcomeCode: "QUEUED" },
@@ -1398,7 +1398,7 @@ export async function finalizeFiscalCorrection(
           document!.signedJws,
           document!.documentClaimId
         );
-  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext, 
+  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext,
     correction,
     [
       { transition: "QUEUED", outcomeCode: "QUEUED" },
@@ -1511,7 +1511,7 @@ export async function finalizeWompiFiscalCorrectionFailure(
   const completedAt = nowIso();
   const failureCode = outcome.failureCode ?? "FISCAL_CORRECTION_FAILED";
   const failureMessage = outcome.failureMessage ?? "La corrección fiscal falló antes de crear el CDE.";
-  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext, 
+  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext,
     correction,
     [
       { transition: "QUEUED", outcomeCode: "QUEUED" },
@@ -1673,7 +1673,7 @@ export async function recoverFiscalCorrectionProcessingClaim(
   const correction = await host.getFiscalCorrection(input.id);
   if (!correction) return null;
   const recoveredAt = nowIso();
-  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext, 
+  const auditStatements = await fiscalCorrectionAuditStatements(db, auditContext,
     correction,
     [
       { transition: "QUEUED", outcomeCode: "QUEUED" },
