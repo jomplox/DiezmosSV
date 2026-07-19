@@ -16,7 +16,6 @@ interface DteDocumentCursor {
 
 export interface DteDocumentHost {
   getDteDocument(id: string): Promise<DteDocumentRecord | null>;
-  markWompiDocumentCreated(wompiEventId: string, documentId: string): Promise<void>;
   indexDteDocumentById(id: string): Promise<void>;
   indexDteDocument(record: DteDocumentRecord): Promise<void>;
 }
