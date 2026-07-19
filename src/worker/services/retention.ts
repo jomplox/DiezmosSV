@@ -9,11 +9,11 @@ import {
   type RetentionTable
 } from "../storage/repository";
 import type { Env } from "../types";
+import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
 import { hexFromBytes, utf8Bytes } from "../utils/encoding";
 import { sendOperationalAlert } from "./alerts";
 import { logWorkerError } from "./observability";
 
-const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
 export interface RetentionExportResult {

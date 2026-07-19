@@ -1,5 +1,6 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { formatDocument } from "../../shared/documentFormat";
+import { EL_SALVADOR_TIME_ZONE, formatElSalvadorDate } from "../../shared/legalWindows";
 import { formatCents } from "../../shared/money";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
@@ -14,7 +15,6 @@ const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
 const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
 const DONOR_CERTIFICATE_ENTITY_TYPE = "donor_certificate";
 
-const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
 interface CertificateDonation {
@@ -81,18 +81,6 @@ function elSalvadorYear(date: Date): number {
   return Number(parts.find((part) => part.type === "year")?.value ?? 0);
 }
 
-// dd/mm/yyyy in El Salvador local time for a stored ISO instant.
-function elSalvadorDateLabel(iso: string): string {
-  const parts = new Intl.DateTimeFormat("es-SV", {
-    timeZone: EL_SALVADOR_TIME_ZONE,
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  }).formatToParts(new Date(iso));
-  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${value("day")}/${value("month")}/${value("year")}`;
-}
-
 // Aggregate ACCEPTED donations for a calendar year into one summary per donor,
 // grouped by email (fallback: name). Totals accumulate in integer cents to avoid
 // float drift. Documents are read in keyset-paged chunks so a busy year never
@@ -113,7 +101,7 @@ export async function aggregateAnnualDonors(repo: Repository, year: number): Pro
       const existing = groups.get(groupKey);
       const donation: CertificateDonation = {
         issuedAt: row.issued_at,
-        dateLabel: elSalvadorDateLabel(row.issued_at),
+        dateLabel: formatElSalvadorDate(row.issued_at),
         numeroControl: row.numero_control,
         amountCents: row.amount_cents
       };
@@ -470,7 +458,7 @@ export async function sendAnnualCertificates(
     supportEmail: branding.supportEmail,
     logoUrl: branding.logoUrl
   });
-  const issuedOnLabel = elSalvadorDateLabel(new Date().toISOString());
+  const issuedOnLabel = formatElSalvadorDate(new Date().toISOString());
   const result: AnnualCertificateSendResult = { year, sent: 0, skipped: 0, failed: 0 };
   const single = typeof donorGroupKey === "string";
 

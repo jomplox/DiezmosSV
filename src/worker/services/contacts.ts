@@ -1,8 +1,7 @@
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../../shared/catalogs";
+import { elSalvadorDateOnly } from "../../shared/legalWindows";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
 import type { Ambiente, DonationGiftType } from "../types";
-
-const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 
 // Departamento label shown when the intent used the foreign-donor path (00
 // "Otro (Para extranjeros)"): a CRM contact reads better as "Extranjero" than as
@@ -254,18 +253,6 @@ function preferredGiftLabel(diezmoCount: number, ofrendaCount: number): string {
     return "";
   }
   return diezmoCount > ofrendaCount ? "Diezmo" : "Ofrenda";
-}
-
-// YYYY-MM-DD in El Salvador local time (fixed UTC-6, no DST) for a stored ISO instant.
-function elSalvadorDateOnly(iso: string): string {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone: EL_SALVADOR_TIME_ZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit"
-  }).formatToParts(new Date(iso));
-  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
-  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function normalizeText(value: string | null | undefined): string | null {

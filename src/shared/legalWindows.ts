@@ -1,4 +1,4 @@
-const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
+export const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
 interface LocalDateParts {
@@ -58,6 +58,18 @@ export function formatElSalvadorDate(iso: string): string {
   }).formatToParts(new Date(iso));
   const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
   return `${value("day")}/${value("month")}/${value("year")}`;
+}
+
+// YYYY-MM-DD del instante en hora local de El Salvador (UTC-6, sin horario de verano).
+export function elSalvadorDateOnly(iso: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: EL_SALVADOR_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date(iso));
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${value("year")}-${value("month")}-${value("day")}`;
 }
 
 function endOfElSalvadorDayIso(date: LocalDateParts): string {
