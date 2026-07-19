@@ -6,6 +6,7 @@ import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } fro
 import type { ContactSourceRow } from "../services/contacts";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { redactSensitiveAuditRows } from "./shared";
+import { getSetting, setSetting } from "./repository/settings";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -294,19 +295,11 @@ export class Repository {
   ) {}
 
   async getSetting(key: string): Promise<string | null> {
-    const row = await this.db.prepare("SELECT value FROM app_settings WHERE key = ?").bind(key).first<{ value: string }>();
-    return row?.value ?? null;
+    return getSetting(this.db, key);
   }
 
   async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
-    await this.db
-      .prepare(
-        `INSERT INTO app_settings (key, value, updated_by, updated_at)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_by = excluded.updated_by, updated_at = excluded.updated_at`
-      )
-      .bind(key, value, updatedBy ?? null, nowIso())
-      .run();
+    return setSetting(this.db, key, value, updatedBy);
   }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
