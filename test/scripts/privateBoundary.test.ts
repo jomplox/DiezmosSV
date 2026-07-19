@@ -1,7 +1,7 @@
 import { copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const checker = resolve(import.meta.dirname, "../../scripts/check-private-boundary.mjs");
@@ -90,6 +90,6 @@ function fixture(files: Record<string, string>): string {
   return cwd;
 }
 
-function run(cwd: string): ReturnType<typeof spawnSync> {
+function run(cwd: string): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [checker], { cwd, encoding: "utf8" });
 }

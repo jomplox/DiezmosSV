@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 const smokeScript = resolve(import.meta.dirname, "../../scripts/staging-smoke.mjs");
@@ -135,8 +135,8 @@ describe("staging smoke supported routes", () => {
   });
 });
 
-function runSmoke(envFile: string, args: string[]): ReturnType<typeof spawnSync> {
-  const env = { ...process.env, DIEZMOSSV_ENV_FILE: envFile };
+function runSmoke(envFile: string, args: string[]): SpawnSyncReturns<string> {
+  const env: NodeJS.ProcessEnv = { ...process.env, DIEZMOSSV_ENV_FILE: envFile };
   for (const key of [
     "STAGING_URL",
     "STAGING_EMAIL",
