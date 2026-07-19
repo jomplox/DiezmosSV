@@ -1,12 +1,33 @@
 import type { Ambiente, ContingencyBatchLineRecord, ContingencyBatchRecord, DonationGiftType, DonationIntentDocumentType, DonationIntentListItem, DonationIntentRecord, DteDocumentRecord, FiscalCorrectionRecord, FiscalCorrectionStatus, WompiDocumentIdentifiers, WompiEventRecord, WompiIssuanceFailureItem, WompiIssuanceRetrySnapshot, WompiPaymentLink, WompiWebhook } from "../types";
 import { nowIso } from "../utils/dates";
-import { generationCode, newId, normalizeControlPrefix, numeroControl } from "../utils/ids";
-import { amountCents, donorName } from "../domain/wompi";
+import { newId, normalizeControlPrefix } from "../utils/ids";
 import { normalizeAuditIp, serializeAuditContext, type AuditRequestContext } from "../services/requestContext";
 import type { ContactSourceRow } from "../services/contacts";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { redactSensitiveAuditRows } from "./shared";
 import { getSetting, setSetting } from "./repository/settings";
+import {
+  claimCorrectedWompiEventIssuance as claimCorrectedWompiEventIssuanceRepository,
+  claimInitialWompiIssuanceAttempt as claimInitialWompiIssuanceAttemptRepository,
+  claimStalledWompiIssuanceAttempt as claimStalledWompiIssuanceAttemptRepository,
+  claimWompiEventIssuance as claimWompiEventIssuanceRepository,
+  claimWompiIssuanceRetry as claimWompiIssuanceRetryRepository,
+  createWompiAttemptAudit as createWompiAttemptAuditRepository,
+  getWompiEventById as getWompiEventByIdRepository,
+  getWompiEventByTransaction as getWompiEventByTransactionRepository,
+  getWompiIssuanceFailureById as getWompiIssuanceFailureByIdRepository,
+  getWompiIssuanceRetrySnapshotById as getWompiIssuanceRetrySnapshotByIdRepository,
+  insertWompiEvent as insertWompiEventRepository,
+  listWompiIssuanceFailures as listWompiIssuanceFailuresRepository,
+  markWompiIssuanceDeadLettered as markWompiIssuanceDeadLetteredRepository,
+  markWompiIssuanceIgnored as markWompiIssuanceIgnoredRepository,
+  markWompiIssuanceProcessing as markWompiIssuanceProcessingRepository,
+  recordWompiIssuanceFailure as recordWompiIssuanceFailureRepository,
+  releaseWompiEventIssuance as releaseWompiEventIssuanceRepository,
+  reserveWompiDocumentIdentifiers as reserveWompiDocumentIdentifiersRepository
+} from "./repository/wompiIssuance";
+
+export { legacyIssuanceAttemptId } from "./repository/wompiIssuance";
 
 export interface DteDocumentListPage {
   documents: DteDocumentRecord[];
@@ -59,7 +80,6 @@ export class UserMutationConflictError extends Error {
 // by the next tick.
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
 const POST_ACCEPT_FINALIZATION_STALE_MS = 15 * 60 * 1000;
-const WOMPI_ISSUANCE_CLAIM_STALE_MS = 15 * 60 * 1000;
 const POST_ACCEPT_FINALIZATION_CLAIMABLE_PREDICATE = `(
   post_accept_finalization_claim_id IS NULL
   OR (
@@ -232,19 +252,6 @@ async function manualEmailDeliveryIdempotencyKey(
   return `dsv-receipt-resend-v1-${digest}`;
 }
 
-const ISSUANCE_RETRIES_EXHAUSTED_CODE = "ISSUANCE_RETRIES_EXHAUSTED";
-const ISSUANCE_RETRIES_EXHAUSTED_MESSAGE =
-  "El mensaje de emisión agotó sus reintentos antes de crear el CDE.";
-
-export function legacyIssuanceAttemptId(wompiEventId: string): string {
-  return `legacy:${wompiEventId}`;
-}
-
-const WOMPI_ISSUANCE_FAILURE_COLUMNS = `id, environment, amount_cents, donor_name, donor_email,
-  received_at, processed_at, issuance_status, issuance_attempt_count, issuance_error_code,
-  issuance_error_message, issuance_last_attempt_at, issuance_failed_at,
-  issuance_dead_lettered_at, reserved_numero_control`;
-
 export const RETENTION_WINDOWED_TABLES = ["dte_documents", "fiscal_corrections", "donation_intents", "dte_events", "email_deliveries", "audit_logs"] as const;
 export type RetentionTable = (typeof RETENTION_WINDOWED_TABLES)[number];
 
@@ -303,42 +310,15 @@ export class Repository {
   }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
-    const existing = await this.getWompiEventByTransaction(payload.IdTransaccion);
-    if (existing) {
-      return { record: existing, inserted: false };
-    }
-    const id = newId("wompi");
-    await this.db
-      .prepare(
-        `INSERT INTO wompi_events (
-          id, transaction_id, environment, result, amount_cents, donor_email, donor_name, raw_body, headers_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .bind(
-        id,
-        payload.IdTransaccion,
-        environment,
-        payload.ResultadoTransaccion,
-        amountCents(payload),
-        payload.Cliente?.EMail ?? null,
-        donorName(payload),
-        rawBody,
-        JSON.stringify(headers)
-      )
-      .run();
-    const record = await this.getWompiEventById(id);
-    if (!record) {
-      throw new Error("No se pudo leer el evento Wompi creado");
-    }
-    return { record, inserted: true };
+    return insertWompiEventRepository(this.db, this, payload, rawBody, headers, environment);
   }
 
   async getWompiEventById(id: string): Promise<WompiEventRecord | null> {
-    return this.db.prepare("SELECT * FROM wompi_events WHERE id = ?").bind(id).first<WompiEventRecord>();
+    return getWompiEventByIdRepository(this.db, id);
   }
 
   async getWompiEventByTransaction(transactionId: string): Promise<WompiEventRecord | null> {
-    return this.db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
+    return getWompiEventByTransactionRepository(this.db, transactionId);
   }
 
   async claimWompiFiscalCorrection(
@@ -1920,22 +1900,7 @@ export class Repository {
   }
 
   async claimWompiEventIssuance(id: string, claimId: string): Promise<boolean> {
-    const claimedAt = nowIso();
-    const staleBefore = new Date(Date.now() - WOMPI_ISSUANCE_CLAIM_STALE_MS).toISOString();
-    const row = await this.db
-      .prepare(
-        `UPDATE wompi_events
-            SET issuance_claim_id = ?, issuance_claimed_at = ?
-          WHERE id = ? AND processed_at IS NULL AND created_document_id IS NULL
-            AND (
-              issuance_claim_id IS NULL
-              OR issuance_claimed_at < ?
-            )
-          RETURNING id`
-      )
-      .bind(claimId, claimedAt, id, staleBefore)
-      .first<{ id: string }>();
-    return Boolean(row);
+    return claimWompiEventIssuanceRepository(this.db, id, claimId);
   }
 
   async claimCorrectedWompiEventIssuance(input: {
@@ -1945,109 +1910,29 @@ export class Repository {
     processingClaimId: string;
     issuanceAttemptId: string;
   }): Promise<boolean> {
-    const claimedAt = nowIso();
-    const row = await this.db
-      .prepare(
-        `UPDATE wompi_events
-            SET issuance_claim_id = ?, issuance_claimed_at = ?
-          WHERE id = ?
-            AND processed_at IS NULL
-            AND created_document_id IS NULL
-            AND issuance_attempt_id = ?
-            AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
-            AND (issuance_claim_id IS NULL OR issuance_claim_id = ?)
-            AND EXISTS (
-              SELECT 1 FROM fiscal_corrections
-               WHERE id = ?
-                 AND target_kind = 'WOMPI_EVENT'
-                 AND wompi_event_id = wompi_events.id
-                 AND status = 'PROCESSING'
-                 AND processing_claim_id = ?
-                 AND issuance_attempt_id = wompi_events.issuance_attempt_id
-            )
-          RETURNING id`
-      )
-      .bind(
-        input.claimId,
-        claimedAt,
-        input.id,
-        input.issuanceAttemptId,
-        input.claimId,
-        input.correctionId,
-        input.processingClaimId
-      )
-      .first<{ id: string }>();
-    return Boolean(row);
+    return claimCorrectedWompiEventIssuanceRepository(this.db, input);
   }
 
   async releaseWompiEventIssuance(id: string, claimId: string): Promise<boolean> {
-    const row = await this.db
-      .prepare(
-        `UPDATE wompi_events
-            SET issuance_claim_id = NULL, issuance_claimed_at = NULL
-          WHERE id = ? AND processed_at IS NULL AND created_document_id IS NULL
-            AND issuance_claim_id = ?
-          RETURNING id`
-      )
-      .bind(id, claimId)
-      .first<{ id: string }>();
-    return Boolean(row);
+    return releaseWompiEventIssuanceRepository(this.db, id, claimId);
   }
 
   async listWompiIssuanceFailures(limit = 100): Promise<WompiIssuanceFailureItem[]> {
-    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 100);
-    const rows = await this.db
-      .prepare(
-        `SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}
-         FROM wompi_events
-         WHERE created_document_id IS NULL
-           AND issuance_error_message IS NOT NULL
-           AND issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')
-         ORDER BY issuance_failed_at DESC, id DESC
-         LIMIT ?`
-      )
-      .bind(safeLimit)
-      .all<WompiIssuanceFailureItem>();
-    return rows.results ?? [];
+    return listWompiIssuanceFailuresRepository(this.db, limit);
   }
 
   async getWompiIssuanceFailureById(wompiEventId: string): Promise<WompiIssuanceFailureItem | null> {
-    return this.db
-      .prepare(`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS} FROM wompi_events WHERE id = ?`)
-      .bind(wompiEventId)
-      .first<WompiIssuanceFailureItem>();
+    return getWompiIssuanceFailureByIdRepository(this.db, wompiEventId);
   }
 
   async getWompiIssuanceRetrySnapshotById(
     wompiEventId: string
   ): Promise<WompiIssuanceRetrySnapshot | null> {
-    return this.db
-      .prepare(
-        `SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}, issuance_attempt_id, issuance_claim_id
-           FROM wompi_events
-          WHERE id = ?`
-      )
-      .bind(wompiEventId)
-      .first<WompiIssuanceRetrySnapshot>();
+    return getWompiIssuanceRetrySnapshotByIdRepository(this.db, wompiEventId);
   }
 
   async claimInitialWompiIssuanceAttempt(wompiEventId: string): Promise<string | null> {
-    const attemptId = newId("issuance_attempt");
-    const queuedAt = nowIso();
-    const result = await this.db
-      .prepare(
-        `UPDATE wompi_events
-         SET issuance_status = 'RETRY_QUEUED',
-             issuance_attempt_id = ?,
-             issuance_last_attempt_at = ?
-         WHERE id = ?
-           AND created_document_id IS NULL
-           AND issuance_attempt_id IS NULL
-           AND issuance_status IS NULL`
-      )
-      .bind(attemptId, queuedAt, wompiEventId)
-      .run();
-    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+    return claimInitialWompiIssuanceAttemptRepository(this.db, wompiEventId);
   }
 
   async claimWompiIssuanceRetry(
@@ -2055,80 +1940,13 @@ export class Repository {
     actorId: string,
     observed: WompiIssuanceRetrySnapshot
   ): Promise<string | null> {
-    const attemptId = newId("issuance_attempt");
-    const retryQueuedAt = nowIso();
-    const actorIp = normalizeAuditIp(this.auditContext?.ip ?? null);
-    const actorContext = serializeAuditContext(this.auditContext?.context);
-    const results = await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE wompi_events
-           SET processed_at = NULL,
-               issuance_status = 'RETRY_QUEUED',
-               issuance_attempt_id = ?,
-               issuance_last_attempt_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_claim_id IS NULL
-             AND issuance_status IS ?
-             AND processed_at IS ?
-             AND issuance_attempt_id IS ?
-             AND issuance_claim_id IS ?
-             AND issuance_error_code IS ?
-             AND issuance_error_message IS ?
-             AND (
-               issuance_status IN ('FAILED', 'DEAD_LETTERED')
-               OR (
-                 issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
-                 AND processed_at IS NOT NULL
-               )
-             )
-             AND NOT EXISTS (
-               SELECT 1 FROM fiscal_corrections AS blocking_correction
-                WHERE blocking_correction.target_kind = 'WOMPI_EVENT'
-                  AND blocking_correction.wompi_event_id = wompi_events.id
-                  AND blocking_correction.status IN (
-                    'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
-                  )
-             )`
-        )
-        .bind(
-          attemptId,
-          retryQueuedAt,
-          wompiEventId,
-          observed.issuance_status,
-          observed.processed_at,
-          observed.issuance_attempt_id,
-          observed.issuance_claim_id,
-          observed.issuance_error_code,
-          observed.issuance_error_message
-        ),
-      this.db
-        .prepare(
-          `INSERT INTO audit_logs (
-             id, actor_type, actor_id, action, entity_type, entity_id,
-             summary, metadata_json, actor_ip, actor_context
-           )
-           SELECT ?, 'USER', ?, 'WOMPI_ISSUANCE_RETRY_QUEUED',
-                  'wompi_event', id, ?, ?, ?, ?
-           FROM wompi_events
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_status = 'RETRY_QUEUED'
-             AND issuance_attempt_id = ?`
-        )
-        .bind(
-          newId("audit"),
-          actorId,
-          "Reintento de creación de CDE en cola",
-          JSON.stringify({ attemptId }),
-          actorIp,
-          actorContext,
-          wompiEventId,
-          attemptId
-        )
-    ]);
-    return Number(results[0]?.meta?.changes ?? 0) === 1 ? attemptId : null;
+    return claimWompiIssuanceRetryRepository(
+      this.db,
+      this.auditContext,
+      wompiEventId,
+      actorId,
+      observed
+    );
   }
 
   async claimStalledWompiIssuanceAttempt(
@@ -2136,59 +1954,12 @@ export class Repository {
     currentAttemptId: string | null,
     staleBefore: string
   ): Promise<string | null> {
-    const attemptId = newId("issuance_attempt");
-    const queuedAt = nowIso();
-    // Runnable retry work always has processed_at NULL. A non-null value is terminal
-    // evidence that only an explicit operator retry or guarded correction may clear.
-    const statement = currentAttemptId
-      ? this.db.prepare(
-          `UPDATE wompi_events
-           SET issuance_status = 'RETRY_QUEUED',
-               issuance_attempt_id = ?,
-               issuance_last_attempt_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_attempt_id = ?
-             AND processed_at IS NULL
-             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING')
-             AND COALESCE(issuance_last_attempt_at, received_at) < ?
-             AND NOT EXISTS (
-               SELECT 1
-                 FROM fiscal_corrections
-                WHERE target_kind = 'WOMPI_EVENT'
-                  AND wompi_event_id = wompi_events.id
-                  AND (
-                    status IN ('QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED')
-                    OR (
-                      issuance_attempt_id IS NOT NULL
-                      AND issuance_attempt_id = wompi_events.issuance_attempt_id
-                    )
-                  )
-             )`
-        ).bind(attemptId, queuedAt, wompiEventId, currentAttemptId, staleBefore)
-      : this.db.prepare(
-          `UPDATE wompi_events
-           SET issuance_status = 'RETRY_QUEUED',
-               issuance_attempt_id = ?,
-               issuance_last_attempt_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_attempt_id IS NULL
-             AND processed_at IS NULL
-             AND issuance_status IS NULL
-             AND COALESCE(issuance_last_attempt_at, received_at) < ?
-             AND NOT EXISTS (
-               SELECT 1
-                 FROM fiscal_corrections
-                WHERE target_kind = 'WOMPI_EVENT'
-                  AND wompi_event_id = wompi_events.id
-                  AND status IN (
-                    'QUEUED', 'PROCESSING', 'REVIEW_REQUIRED', 'ACCEPTED'
-                  )
-             )`
-        ).bind(attemptId, queuedAt, wompiEventId, staleBefore);
-    const result = await statement.run();
-    return Number(result.meta?.changes ?? 0) === 1 ? attemptId : null;
+    return claimStalledWompiIssuanceAttemptRepository(
+      this.db,
+      wompiEventId,
+      currentAttemptId,
+      staleBefore
+    );
   }
 
   async createWompiAttemptAudit(input: {
@@ -2198,28 +1969,7 @@ export class Repository {
     summary: string;
     metadata?: unknown;
   }): Promise<boolean> {
-    const result = await this.db
-      .prepare(
-        `INSERT INTO audit_logs (
-           id, actor_type, actor_id, action, entity_type, entity_id,
-           summary, metadata_json, actor_ip, actor_context
-         )
-         SELECT ?, 'SYSTEM', NULL, ?, 'wompi_event', id, ?, ?, NULL, NULL
-         FROM wompi_events
-         WHERE id = ?
-           AND created_document_id IS NULL
-           AND issuance_attempt_id = ?`
-      )
-      .bind(
-        newId("audit"),
-        input.action,
-        input.summary,
-        JSON.stringify(input.metadata ?? {}),
-        input.wompiEventId,
-        input.attemptId
-      )
-      .run();
-    return Number(result.meta?.changes ?? 0) === 1;
+    return createWompiAttemptAuditRepository(this.db, input);
   }
 
   async reserveWompiDocumentIdentifiers(
@@ -2227,44 +1977,13 @@ export class Repository {
     environment: Ambiente,
     controlPrefix: string
   ): Promise<WompiDocumentIdentifiers> {
-    const normalizedPrefix = normalizeControlPrefix(controlPrefix);
-
-    const event = await this.getWompiEventById(wompiEventId);
-    if (!event) {
-      throw new Error("No se encontró el evento Wompi para reservar identificadores");
-    }
-    if (event.environment !== environment) {
-      throw new Error("El ambiente del evento Wompi no coincide con la reserva");
-    }
-
-    const existing = wompiDocumentIdentifiersForPrefix(event, normalizedPrefix);
-    if (existing) {
-      return existing;
-    }
-
-    await this.db
-      .prepare(
-        `UPDATE wompi_events
-         SET control_prefix = ?, reserved_codigo_generacion = ?
-         WHERE id = ?
-           AND environment = ?
-           AND control_prefix IS NULL
-           AND control_sequence IS NULL
-           AND reserved_numero_control IS NULL
-           AND reserved_codigo_generacion IS NULL`
-      )
-      .bind(normalizedPrefix, generationCode(), wompiEventId, environment)
-      .run();
-
-    const reservedEvent = await this.getWompiEventById(wompiEventId);
-    if (!reservedEvent || reservedEvent.environment !== environment) {
-      throw new Error("No se pudo leer la reserva de identificadores Wompi");
-    }
-    const reserved = wompiDocumentIdentifiersForPrefix(reservedEvent, normalizedPrefix);
-    if (!reserved) {
-      throw new Error("No se pudo reservar los identificadores del documento Wompi");
-    }
-    return reserved;
+    return reserveWompiDocumentIdentifiersRepository(
+      this.db,
+      this,
+      wompiEventId,
+      environment,
+      controlPrefix
+    );
   }
 
   async markWompiIssuanceProcessing(
@@ -2272,29 +1991,12 @@ export class Repository {
     attemptId: string,
     legacyMessage = false
   ): Promise<boolean> {
-    const attemptedAt = nowIso();
-    const statement = legacyMessage
-      ? this.db.prepare(
-          `UPDATE wompi_events
-           SET issuance_status = 'PROCESSING',
-               issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
-               issuance_last_attempt_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND (issuance_attempt_id IS NULL OR issuance_attempt_id = ?)
-             AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
-           RETURNING id`
-        ).bind(attemptId, attemptedAt, wompiEventId, attemptId)
-      : this.db.prepare(
-          `UPDATE wompi_events
-           SET issuance_status = 'PROCESSING', issuance_last_attempt_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_attempt_id = ?
-             AND issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED')
-           RETURNING id`
-        ).bind(attemptedAt, wompiEventId, attemptId);
-    return (await statement.first<{ id: string }>()) !== null;
+    return markWompiIssuanceProcessingRepository(
+      this.db,
+      wompiEventId,
+      attemptId,
+      legacyMessage
+    );
   }
 
   async recordWompiIssuanceFailure(
@@ -2302,55 +2004,12 @@ export class Repository {
     attemptId: string,
     evidence: { code: string; message: string }
   ): Promise<boolean> {
-    const failedAt = nowIso();
-    const results = await this.db.batch([
-      this.db
-        .prepare(
-          `UPDATE wompi_events
-           SET issuance_status = 'FAILED',
-               issuance_attempt_count = issuance_attempt_count + 1,
-               issuance_error_code = ?,
-               issuance_error_message = ?,
-               issuance_last_attempt_at = ?,
-               issuance_failed_at = ?
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_attempt_id = ?
-             AND issuance_status = 'PROCESSING'`
-        )
-        .bind(
-          evidence.code,
-          evidence.message,
-          failedAt,
-          failedAt,
-          wompiEventId,
-          attemptId
-        ),
-      this.db
-        .prepare(
-          `INSERT INTO audit_logs (
-             id, actor_type, actor_id, action, entity_type, entity_id,
-             summary, metadata_json, actor_ip, actor_context
-           )
-           SELECT ?, 'SYSTEM', NULL, 'WOMPI_ISSUANCE_FAILED',
-                  'wompi_event', id, ?, ?, NULL, NULL
-           FROM wompi_events
-           WHERE id = ?
-             AND created_document_id IS NULL
-             AND issuance_failed_at = ?
-             AND issuance_attempt_id = ?
-             AND issuance_status = 'FAILED'`
-        )
-        .bind(
-          newId("audit"),
-          evidence.message,
-          JSON.stringify({ code: evidence.code }),
-          wompiEventId,
-          failedAt,
-          attemptId
-        )
-    ]);
-    return Number(results[0]?.meta?.changes ?? 0) === 1;
+    return recordWompiIssuanceFailureRepository(
+      this.db,
+      wompiEventId,
+      attemptId,
+      evidence
+    );
   }
 
   async markWompiIssuanceDeadLettered(
@@ -2358,53 +2017,16 @@ export class Repository {
     attemptId: string,
     legacyMessage = false
   ): Promise<boolean> {
-    const deadLetteredAt = nowIso();
-    const attemptPredicate = legacyMessage
-      ? "(issuance_attempt_id IS NULL OR issuance_attempt_id = ?)"
-      : "issuance_attempt_id = ?";
-    const row = await this.db
-      .prepare(
-        `UPDATE wompi_events
-         SET issuance_status = 'DEAD_LETTERED',
-             issuance_attempt_id = COALESCE(issuance_attempt_id, ?),
-             issuance_error_code = CASE
-               WHEN issuance_error_message IS NULL THEN ?
-               ELSE COALESCE(issuance_error_code, ?)
-             END,
-             issuance_error_message = COALESCE(issuance_error_message, ?),
-             issuance_dead_lettered_at = ?,
-             processed_at = COALESCE(processed_at, ?)
-         WHERE id = ?
-           AND created_document_id IS NULL
-           AND ${attemptPredicate}
-           AND (issuance_status IS NULL OR issuance_status IN ('RETRY_QUEUED', 'PROCESSING', 'FAILED'))
-         RETURNING id`
-      )
-      .bind(
-        attemptId,
-        ISSUANCE_RETRIES_EXHAUSTED_CODE,
-        ISSUANCE_RETRIES_EXHAUSTED_CODE,
-        ISSUANCE_RETRIES_EXHAUSTED_MESSAGE,
-        deadLetteredAt,
-        deadLetteredAt,
-        wompiEventId,
-        attemptId
-      )
-      .first<{ id: string }>();
-    return row !== null;
+    return markWompiIssuanceDeadLetteredRepository(
+      this.db,
+      wompiEventId,
+      attemptId,
+      legacyMessage
+    );
   }
 
   async markWompiIssuanceIgnored(wompiEventId: string): Promise<void> {
-    const processedAt = nowIso();
-    await this.db
-      .prepare(
-        `UPDATE wompi_events
-         SET issuance_status = 'IGNORED',
-             processed_at = COALESCE(processed_at, ?)
-         WHERE id = ? AND created_document_id IS NULL`
-      )
-      .bind(processedAt, wompiEventId)
-      .run();
+    return markWompiIssuanceIgnoredRepository(this.db, wompiEventId);
   }
 
   async createDonationIntent(input: {
@@ -5653,51 +5275,6 @@ export class Repository {
       .first<{ id: string }>();
     return Boolean(updated);
   }
-}
-
-function wompiDocumentIdentifiers(event: WompiEventRecord): WompiDocumentIdentifiers | null {
-  const reservation = [
-    event.control_prefix,
-    event.control_sequence,
-    event.reserved_numero_control,
-    event.reserved_codigo_generacion
-  ];
-  if (reservation.every((value) => value === null)) {
-    return null;
-  }
-  if (reservation.some((value) => value === null)) {
-    throw new Error("El evento Wompi contiene una reserva parcial de identificadores");
-  }
-
-  const sequence = event.control_sequence as number;
-  const prefix = event.control_prefix as string;
-  const expectedNumeroControl = numeroControl(prefix, sequence);
-  if (event.reserved_numero_control !== expectedNumeroControl) {
-    throw new Error("La reserva Wompi contiene un número de control inconsistente");
-  }
-
-  return {
-    sequence,
-    numeroControl: expectedNumeroControl,
-    codigoGeneracion: event.reserved_codigo_generacion as string
-  };
-}
-
-function wompiDocumentIdentifiersForPrefix(
-  event: WompiEventRecord,
-  requestedPrefix: string
-): WompiDocumentIdentifiers | null {
-  const identifiers = wompiDocumentIdentifiers(event);
-  if (!identifiers) {
-    return null;
-  }
-  if (
-    event.control_prefix !== requestedPrefix ||
-    identifiers.numeroControl !== numeroControl(requestedPrefix, identifiers.sequence)
-  ) {
-    throw new Error("El prefijo de control solicitado no coincide con la reserva Wompi existente");
-  }
-  return identifiers;
 }
 
 function normalizeDocumentListLimit(value: number | undefined): number {
