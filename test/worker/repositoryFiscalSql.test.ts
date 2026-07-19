@@ -1,9 +1,10 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { DatabaseSync, type SQLInputValue, type StatementSync } from "node:sqlite";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { RETENTION_FOREIGN_KEY_PROTOCOL } from "../../src/worker/services/retention";
 import { Repository } from "../../src/worker/storage/repository";
+import { SqliteD1 } from "./support/sqliteD1";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
@@ -4407,62 +4408,6 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 });
-
-class SqliteD1 {
-  constructor(private readonly sqlite: DatabaseSync) {}
-
-  readonly statements: SqliteStatement[] = [];
-
-  readonly database = {
-    prepare: (sql: string) => {
-      const statement = new SqliteStatement(this.sqlite, sql);
-      this.statements.push(statement);
-      return statement;
-    },
-    batch: async (statements: SqliteStatement[]) => {
-      this.sqlite.exec("BEGIN IMMEDIATE");
-      try {
-        const results = statements.map((statement) => statement.runSync());
-        this.sqlite.exec("COMMIT");
-        return results;
-      } catch (error) {
-        this.sqlite.exec("ROLLBACK");
-        throw error;
-      }
-    }
-  } as unknown as D1Database;
-}
-
-class SqliteStatement {
-  args: SQLInputValue[] = [];
-  private readonly statement: StatementSync;
-
-  constructor(database: DatabaseSync, readonly sql: string) {
-    this.statement = database.prepare(sql);
-  }
-
-  bind(...args: unknown[]): this {
-    this.args = args as SQLInputValue[];
-    return this;
-  }
-
-  async first<T>(): Promise<T | null> {
-    return (this.statement.get(...this.args) ?? null) as T | null;
-  }
-
-  async all<T>(): Promise<{ results: T[] }> {
-    return { results: this.statement.all(...this.args) as T[] };
-  }
-
-  async run(): Promise<D1Result> {
-    return this.runSync() as unknown as D1Result;
-  }
-
-  runSync(): { success: true; meta: { changes: number }; results: never[] } {
-    const result = this.statement.run(...this.args);
-    return { success: true, meta: { changes: Number(result.changes) }, results: [] };
-  }
-}
 
 function migratedDatabase(): DatabaseSync {
   return migratedDatabaseThrough(null);
