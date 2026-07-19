@@ -1,4 +1,5 @@
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { formatDocument } from "../../shared/documentFormat";
 import { formatCents } from "../../shared/money";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
@@ -344,14 +345,6 @@ function drawCentered(page: PDFPage, text: string, y: number, size: number, font
 
 function drawRightAligned(page: PDFPage, text: string, y: number, size: number, font: PDFFont, rightX: number, color = rgb(0, 0, 0)): void {
   page.drawText(text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
-}
-
-function formatDocument(value: string | null | undefined): string {
-  const digits = (value ?? "").replace(/\D/g, "");
-  if (digits.length === 14) {
-    return `${digits.slice(0, 4)}-${digits.slice(4, 10)}-${digits.slice(10, 13)}-${digits.slice(13)}`;
-  }
-  return value ?? "";
 }
 
 interface AnnualCertificatePreviewDonor {
