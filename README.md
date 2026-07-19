@@ -309,11 +309,9 @@ npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-pro
 npx wrangler secret put EMAIL_FROM --env staging
 npx wrangler secret put EMISOR_CONFIG_JSON --env staging
 
-# 4 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
-export FISCAL_CUTOVER_QUIESCED=1
+# 4 - Migrate and deploy
 npm run cf:migrate:staging
 npm run cf:deploy:staging
-unset FISCAL_CUTOVER_QUIESCED
 
 # 5 - Run the deployed edge smoke test
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
@@ -365,11 +363,9 @@ npx wrangler secret put EMAIL_API_KEY --env production   # optional alternative-
 npx wrangler secret put EMAIL_FROM --env production
 npx wrangler secret put EMISOR_CONFIG_JSON --env production
 
-# 3 - Quiesce all mutating Worker traffic per docs/fiscal-claim-cutover.md, then migrate and deploy
-export FISCAL_CUTOVER_QUIESCED=1
+# 3 - Migrate and deploy
 npm run cf:migrate:prod
 npm run cf:deploy:prod
-unset FISCAL_CUTOVER_QUIESCED
 ```
 
 Do one controlled low-value production issuance with live monitoring before enabling normal volume.
@@ -717,9 +713,9 @@ Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 - Every MH-facing transmission or invalidation is guarded by a durable **fiscal operation claim** —
   one owner per legal submission, acquired atomically before the call. Ambiguous outcomes freeze the
   document for evidence-first reconciliation instead of authorizing a second submission
-  ([`docs/fiscal-claim-reconciliation.md`](./docs/fiscal-claim-reconciliation.md)). This is why the
-  deploy steps require the quiesced `FISCAL_CUTOVER_QUIESCED=1` window
-  ([`docs/fiscal-claim-cutover.md`](./docs/fiscal-claim-cutover.md)).
+  ([`docs/fiscal-claim-reconciliation.md`](./docs/fiscal-claim-reconciliation.md)). The one-time
+  quiesced cutover that introduced the claim model is preserved as a historical record in
+  [`docs/fiscal-claim-cutover.md`](./docs/fiscal-claim-cutover.md).
 - Invalidation is a **signed event**, not a database flag, and the donor is emailed a branded notice
   once MH accepts it.
 - CDE invalidation is only allowed through the **tenth business day of the month following the

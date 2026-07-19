@@ -1,5 +1,10 @@
 # Fiscal claim migration cutover
 
+> **Historical record — cutover completed.** This one-time procedure was executed when
+> migrations 0020/0021 introduced the claim model; the claim-aware Worker has been live since.
+> The `FISCAL_CUTOVER_QUIESCED` deploy gate that enforced it has been retired: routine
+> `cf:migrate:*` / `cf:deploy:*` runs need no quiesce window.
+
 Migrations `0020_fiscal_operation_claims.sql` and `0021_security_lifecycle_guards.sql`, together with their claim/finalization-aware Worker, must be introduced in one quiesced maintenance window. An old Worker isolate does not understand the new ownership state and can otherwise submit a second fiscal operation or bypass lifecycle-generation guards.
 
 This repository does not perform the cutover. The deployment operator must complete these steps in order for staging and, after approval, production:
