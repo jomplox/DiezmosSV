@@ -12,6 +12,7 @@ import {
   isCat026DonationTypeCode
 } from "../shared/catalogs";
 import { assertValidDui, isDuiDocumentType } from "../shared/dui";
+import { EMAIL_PATTERN } from "../shared/email";
 
 export function isMockMode(env: Env): boolean {
   // Explicit opt-in: external services are only mocked when MOCK_EXTERNAL_SERVICES
@@ -63,7 +64,7 @@ function validateEmisorConfig(value: unknown): asserts value is EmisorConfig {
 
   requiredText(config.telefono, "emisor.telefono", 8, 30);
   const correo = requiredText(config.correo, "emisor.correo", 6, 100);
-  assertPattern("emisor.correo", correo, /^[^\s@]+@[^\s@]+\.[^\s@]+$/, "debe tener formato de correo valido");
+  assertPattern("emisor.correo", correo, EMAIL_PATTERN, "debe tener formato de correo valido");
   optionalText(config.codEstable, "emisor.codEstable", 4, 4);
   requiredText(config.codEstableMH, "emisor.codEstableMH", 4, 4);
   optionalText(config.codPuntoVenta, "emisor.codPuntoVenta", 1, 15);

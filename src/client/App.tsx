@@ -70,6 +70,7 @@ import {
   type FiscalCorrectionSubmitResponse
 } from "./fiscalCorrectionDialog";
 import { PASSWORD_POLICY_REQUIREMENTS, passwordPolicyFailures, passwordPolicySatisfied } from "../shared/passwordPolicy";
+import { isValidEmail } from "../shared/email";
 import type { FiscalReceptorCorrection } from "../shared/fiscalCorrection";
 import {
   CAT012_DEPARTMENTS,
@@ -5469,10 +5470,6 @@ function emptyFiscalCorrectionProtectedContext(): FiscalCorrectionProtectedConte
     environmentLabel: "—",
     issuerLabel: "—"
   };
-}
-
-function isValidEmail(value: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 function passwordPolicyMessage(password: string): string {

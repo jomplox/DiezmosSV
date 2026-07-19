@@ -66,6 +66,7 @@ import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBac
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
+import { isValidEmail } from "../shared/email";
 import { formatElSalvadorDate } from "../shared/legalWindows";
 import {
   FiscalCorrectionValidationError,
@@ -2202,7 +2203,7 @@ function normalizeEmail(value: unknown): string | null {
     return null;
   }
   const email = value.trim();
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+  return isValidEmail(email) ? email : null;
 }
 
 function normalizeResendRequestId(value: unknown): string | null {
