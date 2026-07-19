@@ -1,5 +1,6 @@
 import type { Ambiente, DonationGiftType, DteDocumentRecord, EmisorConfig, WompiWebhook } from "../types";
 import { mhDateTime } from "../utils/dates";
+import { isRecord } from "../utils/guards";
 import { generationCode, numeroControl } from "../utils/ids";
 import {
   isCat008DistrictCode,
@@ -567,10 +568,6 @@ function cleanNullable(value: string | null | undefined): string | null {
 
 function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function ambienteValue(value: unknown): Ambiente | null {

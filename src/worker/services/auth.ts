@@ -1,7 +1,7 @@
 import { Repository } from "../storage/repository";
 import type { Env } from "../types";
 import { addDays } from "../utils/dates";
-import { base64UrlFromBytes, hexFromBytes, timingSafeEqual, utf8Bytes } from "../utils/encoding";
+import { base64UrlFromBytes, hexFromBytes, sha256Hex as sha256HexBytes, timingSafeEqual, utf8Bytes } from "../utils/encoding";
 import { passwordPolicyError } from "../../shared/passwordPolicy";
 
 export type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
@@ -117,7 +117,7 @@ export class AuthService {
       expectedPasswordSalt,
       expectedEmail: row.email,
       expectedAuthGeneration: Number(row.auth_generation ?? 0),
-      tokenHash: await sha256Hex(token),
+      tokenHash: await sha256HexBytes(utf8Bytes(token)),
       expiresAt
     });
     if (!created) {
@@ -135,7 +135,7 @@ export class AuthService {
     const expiresAt = new Date(Date.now() + PASSWORD_RESET_TTL_MINUTES * 60_000).toISOString();
     const tokenId = await this.repo.createPasswordResetToken(
       row.id,
-      await sha256Hex(token),
+      await sha256HexBytes(utf8Bytes(token)),
       expiresAt,
       row.email,
       Number(row.auth_generation ?? 0),
@@ -150,7 +150,7 @@ export class AuthService {
 
   async confirmPasswordReset(token: string, password: string): Promise<AuthUser> {
     const trimmed = token.trim();
-    const tokenHash = trimmed ? await sha256Hex(trimmed) : "";
+    const tokenHash = trimmed ? await sha256HexBytes(utf8Bytes(trimmed)) : "";
     const row = tokenHash ? await this.repo.getActivePasswordResetUser(tokenHash) : null;
     if (!row) {
       throw new PasswordResetError("El enlace de restablecimiento no es válido o ya expiró. Solicite uno nuevo.");
@@ -168,7 +168,7 @@ export class AuthService {
     if (!header?.startsWith("Bearer ")) {
       return null;
     }
-    const tokenHash = await sha256Hex(header.slice("Bearer ".length).trim());
+    const tokenHash = await sha256HexBytes(utf8Bytes(header.slice("Bearer ".length).trim()));
     const row = await this.repo.getSessionUser(tokenHash);
     return row ? publicUser(row) : null;
   }
@@ -179,7 +179,7 @@ export class AuthService {
     if (!token) {
       throw new AuthError("Debe iniciar sesión", 401);
     }
-    await this.repo.revokeSession(await sha256Hex(token));
+    await this.repo.revokeSession(await sha256HexBytes(utf8Bytes(token)));
   }
 }
 
@@ -272,11 +272,6 @@ async function verifyPassword(password: string, salt: string, storedHash: string
     }
   }
   return { valid: false, needsRehash: false };
-}
-
-async function sha256Hex(value: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", utf8Bytes(value));
-  return hexFromBytes(new Uint8Array(digest));
 }
 
 function publicUser(row: Record<string, unknown>): AuthUser {

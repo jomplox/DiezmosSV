@@ -1,4 +1,5 @@
 import type { DteDocumentRecord } from "../types";
+import { onlyDigits } from "../utils/guards";
 
 interface F960Document {
   identificacion?: {
@@ -127,7 +128,7 @@ export function buildF960Xlsx(selection: F960Selection): Uint8Array {
 function toF960Row(record: DteDocumentRecord): F960Row {
   const document = JSON.parse(record.plain_json) as F960Document;
   const donorDocument = clean(document.receptor?.numDocumento) ?? "";
-  const donorDigits = donorDocument.replace(/\D/g, "");
+  const donorDigits = onlyDigits(donorDocument);
   const donorNit = isNit(document.receptor?.tipoDocumento, donorDigits) ? donorDigits : "";
   const donorDui = donorNit ? "" : donorDigits || donorDocument;
   const issueDate = clean(document.identificacion?.fecEmi) ?? record.issued_at.slice(0, 10);

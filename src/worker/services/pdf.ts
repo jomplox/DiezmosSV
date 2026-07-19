@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import { formatDocument } from "../../shared/documentFormat";
+import { onlyDigits } from "../utils/guards";
 import type { DteDocumentRecord } from "../types";
 
 export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v3";
@@ -475,10 +476,6 @@ function formatQuantity(value: number): string {
 function formatNrc(value: string | null | undefined): string {
   const digits = onlyDigits(value);
   return digits.length === 7 ? `${digits.slice(0, 6)}-${digits.slice(6)}` : value ?? "";
-}
-
-function onlyDigits(value: string | null | undefined): string {
-  return (value ?? "").replace(/\D/g, "");
 }
 
 

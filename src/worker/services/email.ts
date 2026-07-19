@@ -1,6 +1,7 @@
 import { isMockMode } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
+import { isRecord } from "../utils/guards";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
 import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
@@ -571,10 +572,6 @@ function deliveryIdFromProvider(providerResponse: unknown): string | null {
     PROVIDER_DELIVERY_ID_DIGEST_PATTERN.test(providerResponse.messageId)
     ? providerResponse.messageId
     : null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
 function providerAcceptanceId(value: unknown): string | null {

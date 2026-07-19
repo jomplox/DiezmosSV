@@ -92,6 +92,7 @@ import {
 import type { Ambiente, DteDocumentRecord, Env, IssuanceMessage, MhResponse, WompiWebhook } from "./types";
 import { addHours, cdeInvalidationDeadline, isWithinDeadline, nowIso } from "./utils/dates";
 import { sha256Hex, timingSafeEqual, utf8Bytes } from "./utils/encoding";
+import { isRecord, normalizeUuidV4 } from "./utils/guards";
 import { newId } from "./utils/ids";
 import {
   InvalidJsonBodyError,
@@ -2157,10 +2158,6 @@ function contingencyPeriodView(period: Record<string, unknown>): Record<string, 
   };
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function mhRejectionMessage(result: MhResponse): string {
   const raw = isRecord(result.raw) ? result.raw : {};
   const code = typeof raw.codigoMsg === "string" ? raw.codigoMsg : "";
@@ -2199,13 +2196,7 @@ function normalizeEmail(value: unknown): string | null {
 }
 
 function normalizeResendRequestId(value: unknown): string | null {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const requestId = value.trim().toLowerCase();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
-    ? requestId
-    : null;
+  return normalizeUuidV4(value);
 }
 
 function donorEmailField(input: DirectCdeInput): { donorEmail?: string } | Response {
@@ -2595,11 +2586,7 @@ async function readFiscalCorrectionRequest(
 }
 
 function normalizeCorrectionRequestId(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const requestId = value.trim().toLowerCase();
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(requestId)
-    ? requestId
-    : null;
+  return normalizeUuidV4(value);
 }
 
 async function fiscalCorrectionRequestDigest(

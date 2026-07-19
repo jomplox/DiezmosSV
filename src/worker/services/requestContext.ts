@@ -4,6 +4,8 @@
 // be undefined (local dev, unusual edge conditions), so all fields are optional and
 // undefineds are dropped before the context is persisted.
 
+import { isRecord } from "../utils/guards";
+
 // The subset of IncomingRequestCfProperties we surface in the audit trail. These are
 // plan-included (bot-management scores are enterprise-only and deliberately omitted).
 const AUDIT_CONTEXT_MAX_BYTES = 4096;
@@ -56,9 +58,6 @@ type CfLike = Partial<{
   tlsVersion: unknown;
 }>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function boundedString(
   value: unknown,
