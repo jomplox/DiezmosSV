@@ -1,6 +1,6 @@
 export { cdeInvalidationDeadline, isWithinDeadline } from "../../shared/legalWindows";
 
-const EL_SALVADOR_TIME_ZONE = "America/El_Salvador";
+import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
 
 export function nowIso(): string {
   return new Date().toISOString();

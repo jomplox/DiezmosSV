@@ -1,3 +1,4 @@
+import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
 import { formatCents } from "../../shared/money";
 import type { DteDocumentRecord } from "../types";
 
@@ -264,7 +265,7 @@ function footNote(text: string): string {
 }
 
 function elSalvadorDate(iso: string): string {
-  return new Intl.DateTimeFormat("es-SV", { dateStyle: "long", timeZone: "America/El_Salvador" }).format(new Date(iso));
+  return new Intl.DateTimeFormat("es-SV", { dateStyle: "long", timeZone: EL_SALVADOR_TIME_ZONE }).format(new Date(iso));
 }
 
 function escapeHtml(value: string): string {

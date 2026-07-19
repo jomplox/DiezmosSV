@@ -67,7 +67,7 @@ import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import { isValidEmail } from "../shared/email";
-import { formatElSalvadorDate } from "../shared/legalWindows";
+import { elSalvadorDateOnly, formatElSalvadorDate } from "../shared/legalWindows";
 import {
   FiscalCorrectionValidationError,
   fiscalCorrectionChangedFields,
@@ -1801,9 +1801,9 @@ const MAX_ANALYTICS_RANGE_DAYS = 366;
 
 function analyticsRange(fromParam: string | null, toParam: string | null, now: Date): AnalyticsRange | null {
   const isDate = (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
-  const todayLocal = elSalvadorDateOnly(now);
+  const todayLocal = elSalvadorDateOnly(now.toISOString());
   const to = toParam ?? todayLocal;
-  const from = fromParam ?? elSalvadorDateOnly(new Date(now.getTime() - 89 * 86_400_000));
+  const from = fromParam ?? elSalvadorDateOnly(new Date(now.getTime() - 89 * 86_400_000).toISOString());
   if (!isDate(from) || !isDate(to) || from > to) {
     return null;
   }
@@ -1814,14 +1814,6 @@ function analyticsRange(fromParam: string | null, toParam: string | null, now: D
     return null;
   }
   return { from, to };
-}
-
-// YYYY-MM-DD of an instant in El Salvador local time (fixed UTC-6).
-function elSalvadorDateOnly(date: Date): string {
-  const local = new Date(date.getTime() - 6 * 3_600_000);
-  const month = local.getUTCMonth() + 1;
-  const day = local.getUTCDate();
-  return `${local.getUTCFullYear()}-${month < 10 ? "0" : ""}${month}-${day < 10 ? "0" : ""}${day}`;
 }
 
 async function handleEmissionEnvironmentRoute(request: Request, env: Env, repo: Repository, user: AuthUser | null): Promise<Response> {
