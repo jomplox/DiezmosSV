@@ -105,8 +105,8 @@ rtk git commit -m "refactor: split worker fetch infrastructure tests"
 
 **Moves:**
 - `Wompi document identifier reservation` — 7 tests
-- `Wompi issuance failure recovery API` — 9 tests after the merged dead-path deletion
-- Domain total: 16 tests
+- `Wompi issuance failure recovery API` — 14 tests in the exact execution base
+- Domain total: 21 tests
 
 - [ ] **Step 1: Move both descriptions verbatim**
 
@@ -114,7 +114,7 @@ Register global hooks. Move `wompiEventForReservation` into `support/wompiEventF
 
 - [ ] **Step 2: Verify**
 
-Run the new file (16/16), aggregate workerFetch tests (513/513), and full gates (1,480/2).
+Run the new file (21/21), aggregate workerFetch tests (513/513), and full gates (1,480/2).
 
 - [ ] **Step 3: Commit**
 
@@ -397,7 +397,9 @@ rtk git commit -m "refactor: split annual certificate route tests"
 
 - [ ] **Step 1: Move both descriptions verbatim**
 
-Register hooks. Import `wompiSample` only here and reuse shared DTE fixtures without changing defaults.
+Register hooks. Reuse shared DTE fixtures without changing defaults. Keep
+`wompiSample` with its live consumers; neither moved description uses it in the
+exact execution base.
 
 - [ ] **Step 2: Verify**
 
@@ -417,9 +419,9 @@ rtk git commit -m "refactor: split advanced CDE and Wompi webhook tests"
 - Modify: `test/worker/workerFetch.test.ts`
 
 **Moves:**
-- `donation intent correlation` — 39
-- `deferred transmission when MH is unavailable` — 15
-- Domain total: 54 tests
+- `donation intent correlation` — 35
+- `deferred transmission when MH is unavailable` — 14
+- Domain total: 49 tests
 
 - [ ] **Step 1: Move both descriptions verbatim**
 
@@ -427,7 +429,7 @@ Register hooks. Keep both local `seedIntentRow`/`seedWompiEvent` pairs separate:
 
 - [ ] **Step 2: Verify**
 
-Run the new file (54/54), aggregate (513/513), and full gates (1,480/2).
+Run the new file (49/49), aggregate (513/513), and full gates (1,480/2).
 
 - [ ] **Step 3: Commit**
 
