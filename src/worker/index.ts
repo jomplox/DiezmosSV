@@ -1084,6 +1084,121 @@ async function handlePasswordResetConfirm(ctx: ApiRouteContext): Promise<Respons
   }
 }
 
+async function handleWompiIssuanceFailures(ctx: ApiRouteContext): Promise<Response> {
+  try {
+    const failures = await ctx.repo.listWompiIssuanceFailures(100);
+    const projected = await Promise.all(failures.map(async (failure) => {
+      if (!requiresFiscalReceptorCorrection(
+        failure.issuance_error_code,
+        failure.issuance_error_message ?? ""
+      )) {
+        return { ...failure, correction_available: null };
+      }
+      const correctionData = await effectiveWompiCorrectionData(ctx.repo, failure.id);
+      return {
+        ...failure,
+        correction_available: correctionData?.correctable === true
+      };
+    }));
+    return jsonResponse({ failures: projected });
+  } catch (error) {
+    logWorkerError(ctx.env, "wompi_issuance_failure_list_failed", error);
+    return wompiIssuanceOperationFailedResponse();
+  }
+}
+
+async function handleWompiIssuanceRetry(ctx: ApiRouteContext): Promise<Response> {
+  const actor = ctx.actor!;
+  const wompiEventId = ctx.params[0];
+  try {
+    const current = await ctx.repo.getWompiIssuanceRetrySnapshotById(wompiEventId);
+    if (!current) {
+      return notFound();
+    }
+    if (requiresFiscalReceptorCorrection(
+      current.issuance_error_code,
+      current.issuance_error_message ?? ""
+    )) {
+      return wompiCorrectionRequiredResponse();
+    }
+    const attemptId = await ctx.repo.claimWompiIssuanceRetry(
+      wompiEventId,
+      actor.id,
+      current
+    );
+    if (!attemptId) {
+      const latest = await ctx.repo.getWompiIssuanceFailureById(wompiEventId);
+      if (!latest) {
+        return notFound();
+      }
+      if (requiresFiscalReceptorCorrection(
+        latest.issuance_error_code,
+        latest.issuance_error_message ?? ""
+      )) {
+        return wompiCorrectionRequiredResponse();
+      }
+      const failure = { ...latest, correction_available: null };
+      if (latest.issuance_status === "RETRY_QUEUED" || latest.issuance_status === "PROCESSING") {
+        return jsonResponse({ queued: false, failure });
+      }
+      return jsonResponse(
+        {
+          error: "wompi_issuance_retry_not_available",
+          message: "El evento Wompi ya no está disponible para reintento.",
+          failure
+        },
+        { status: 409 }
+      );
+    }
+    await ctx.env.ISSUANCE_QUEUE.send({ wompiEventId, issuanceAttemptId: attemptId });
+    return jsonResponse({ ok: true, queued: true }, { status: 202 });
+  } catch (error) {
+    logWorkerError(ctx.env, "wompi_issuance_retry_failed", error);
+    return wompiIssuanceOperationFailedResponse();
+  }
+}
+
+async function handleWompiCorrectionData(ctx: ApiRouteContext): Promise<Response> {
+  const data = await effectiveWompiCorrectionData(ctx.repo, ctx.params[0]);
+  if (!data) return notFound();
+  data.activeCorrection = await ctx.repo.getActiveFiscalCorrectionForTarget(
+    "WOMPI_EVENT",
+    ctx.params[0]
+  );
+  return jsonResponse(data);
+}
+
+async function handleWompiCorrectionRetry(ctx: ApiRouteContext): Promise<Response> {
+  return handleWompiFiscalCorrection(
+    ctx.request,
+    ctx.env,
+    ctx.repo,
+    ctx.actor!,
+    ctx.params[0]
+  );
+}
+
+async function handleDocumentCorrectionData(ctx: ApiRouteContext): Promise<Response> {
+  const document = await ctx.repo.getDteDocument(ctx.params[0]);
+  if (!document) return notFound();
+  const data = effectiveDocumentCorrectionData(document);
+  data.activeCorrection = await ctx.repo.getActiveFiscalCorrectionForTarget(
+    "DTE_DOCUMENT",
+    document.id
+  );
+  return jsonResponse(data);
+}
+
+async function handleDocumentCorrectionRetry(ctx: ApiRouteContext): Promise<Response> {
+  return handleDocumentFiscalCorrection(
+    ctx.request,
+    ctx.env,
+    ctx.repo,
+    ctx.actor!,
+    ctx.params[0]
+  );
+}
+
 const publicRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/health", handler: handleHealth },
   { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
@@ -1138,6 +1253,18 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
   }
 ];
 
+const wompiIssuanceRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "GET", pattern: "/api/wompi-events/issuance-failures", role: "VIEWER", handler: handleWompiIssuanceFailures },
+  { method: "POST", pattern: /^\/api\/wompi-events\/([^/]+)\/retry$/, role: "OPERATOR", handler: handleWompiIssuanceRetry }
+];
+
+const correctionRoutes: Array<Route<ApiRouteContext>> = [
+  { method: "GET", pattern: /^\/api\/wompi-events\/([^/]+)\/correction-data$/, role: "OPERATOR", handler: handleWompiCorrectionData },
+  { method: "POST", pattern: /^\/api\/wompi-events\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleWompiCorrectionRetry },
+  { method: "GET", pattern: /^\/api\/documents\/([^/]+)\/correction-data$/, role: "OPERATOR", handler: handleDocumentCorrectionData },
+  { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleDocumentCorrectionRetry }
+];
+
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
   // every downstream repo.createAudit (route handlers reuse this same instance)
@@ -1181,81 +1308,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     return jsonResponse({ intents: await repo.listRecentDonationIntents(50) });
   }
 
-  if (url.pathname === "/api/wompi-events/issuance-failures" && request.method === "GET") {
-    requireRole(user, "VIEWER");
-    try {
-      const failures = await repo.listWompiIssuanceFailures(100);
-      const projected = await Promise.all(failures.map(async (failure) => {
-        if (!requiresFiscalReceptorCorrection(
-          failure.issuance_error_code,
-          failure.issuance_error_message ?? ""
-        )) {
-          return { ...failure, correction_available: null };
-        }
-        const correctionData = await effectiveWompiCorrectionData(repo, failure.id);
-        return {
-          ...failure,
-          correction_available: correctionData?.correctable === true
-        };
-      }));
-      return jsonResponse({ failures: projected });
-    } catch (error) {
-      logWorkerError(env, "wompi_issuance_failure_list_failed", error);
-      return wompiIssuanceOperationFailedResponse();
-    }
-  }
-
-  const wompiIssuanceRetryMatch = url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/retry$/);
-  if (wompiIssuanceRetryMatch && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    const wompiEventId = wompiIssuanceRetryMatch[1];
-    try {
-      const current = await repo.getWompiIssuanceRetrySnapshotById(wompiEventId);
-      if (!current) {
-        return notFound();
-      }
-      if (requiresFiscalReceptorCorrection(
-        current.issuance_error_code,
-        current.issuance_error_message ?? ""
-      )) {
-        return wompiCorrectionRequiredResponse();
-      }
-      const attemptId = await repo.claimWompiIssuanceRetry(
-        wompiEventId,
-        actor.id,
-        current
-      );
-      if (!attemptId) {
-        const latest = await repo.getWompiIssuanceFailureById(wompiEventId);
-        if (!latest) {
-          return notFound();
-        }
-        if (requiresFiscalReceptorCorrection(
-          latest.issuance_error_code,
-          latest.issuance_error_message ?? ""
-        )) {
-          return wompiCorrectionRequiredResponse();
-        }
-        const failure = { ...latest, correction_available: null };
-        if (latest.issuance_status === "RETRY_QUEUED" || latest.issuance_status === "PROCESSING") {
-          return jsonResponse({ queued: false, failure });
-        }
-        return jsonResponse(
-          {
-            error: "wompi_issuance_retry_not_available",
-            message: "El evento Wompi ya no está disponible para reintento.",
-            failure
-          },
-          { status: 409 }
-        );
-      }
-      await env.ISSUANCE_QUEUE.send({ wompiEventId, issuanceAttemptId: attemptId });
-      return jsonResponse({ ok: true, queued: true }, { status: 202 });
-    } catch (error) {
-      logWorkerError(env, "wompi_issuance_retry_failed", error);
-      return wompiIssuanceOperationFailedResponse();
-    }
-  }
+  const wompiIssuanceResponse = await dispatchRoutes(wompiIssuanceRoutes, apiContext, requireRole);
+  if (wompiIssuanceResponse) return wompiIssuanceResponse;
 
   if (url.pathname === "/api/admin/retention-export" && request.method === "POST") {
     const actor = requireRole(user, "OWNER");
@@ -1516,58 +1570,8 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
     return jsonResponse(result);
   }
 
-  const wompiCorrectionDataMatch =
-    url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/correction-data$/);
-  if (wompiCorrectionDataMatch && request.method === "GET") {
-    requireRole(user, "OPERATOR");
-    const data = await effectiveWompiCorrectionData(repo, wompiCorrectionDataMatch[1]);
-    if (!data) return notFound();
-    data.activeCorrection = await repo.getActiveFiscalCorrectionForTarget(
-      "WOMPI_EVENT",
-      wompiCorrectionDataMatch[1]
-    );
-    return jsonResponse(data);
-  }
-
-  const wompiCorrectRetryMatch =
-    url.pathname.match(/^\/api\/wompi-events\/([^/]+)\/correct-and-retry$/);
-  if (wompiCorrectRetryMatch && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    return handleWompiFiscalCorrection(
-      request,
-      env,
-      repo,
-      actor,
-      wompiCorrectRetryMatch[1]
-    );
-  }
-
-  const documentCorrectionDataMatch =
-    url.pathname.match(/^\/api\/documents\/([^/]+)\/correction-data$/);
-  if (documentCorrectionDataMatch && request.method === "GET") {
-    requireRole(user, "OPERATOR");
-    const document = await repo.getDteDocument(documentCorrectionDataMatch[1]);
-    if (!document) return notFound();
-    const data = effectiveDocumentCorrectionData(document);
-    data.activeCorrection = await repo.getActiveFiscalCorrectionForTarget(
-      "DTE_DOCUMENT",
-      document.id
-    );
-    return jsonResponse(data);
-  }
-
-  const documentCorrectRetryMatch =
-    url.pathname.match(/^\/api\/documents\/([^/]+)\/correct-and-retry$/);
-  if (documentCorrectRetryMatch && request.method === "POST") {
-    const actor = requireRole(user, "OPERATOR");
-    return handleDocumentFiscalCorrection(
-      request,
-      env,
-      repo,
-      actor,
-      documentCorrectRetryMatch[1]
-    );
-  }
+  const correctionResponse = await dispatchRoutes(correctionRoutes, apiContext, requireRole);
+  if (correctionResponse) return correctionResponse;
 
   const documentMatch = url.pathname.match(/^\/api\/documents\/([^/]+)(?:\/([^/]+))?$/);
   if (documentMatch) {
