@@ -1734,11 +1734,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           <section className="single-panel">
             {can(user, "ADMIN") ? (
               <>
-                <UserCreateForm input={newUser} busy={busy === "create-user"} onChange={setNewUser} onSubmit={createUser} />
+                <UserCreateForm input={newUser} currentUser={user} busy={busy === "create-user"} onChange={setNewUser} onSubmit={createUser} />
                 <UserTable users={users} selectedId={selectedUserId} onSelect={openUserSettings} />
                 {selectedUser && (
                   <UserSettingsModal
                     user={selectedUser}
+                    currentUser={user}
                     input={userSettings}
                     busy={busy}
                     onChange={setUserSettings}
@@ -5250,8 +5251,22 @@ function UserTable({ users, selectedId, onSelect }: { users: User[]; selectedId:
   );
 }
 
+// Roles asignables desde la pantalla de usuarios. Solo un OWNER puede otorgar el
+// rol OWNER: los ADMIN (y una sesión ausente) no deben ver esa opción.
+const ASSIGNABLE_ROLES: Array<{ value: Role; label: string }> = [
+  { value: "VIEWER", label: roleLabel("VIEWER") },
+  { value: "OPERATOR", label: roleLabel("OPERATOR") },
+  { value: "ADMIN", label: roleLabel("ADMIN") },
+  { value: "OWNER", label: roleLabel("OWNER") }
+];
+
+export function roleOptionsFor(actor: { role: Role } | null): Array<{ value: Role; label: string }> {
+  return actor?.role === "OWNER" ? ASSIGNABLE_ROLES : ASSIGNABLE_ROLES.filter((option) => option.value !== "OWNER");
+}
+
 function UserSettingsModal({
   user,
+  currentUser,
   input,
   busy,
   onChange,
@@ -5260,6 +5275,7 @@ function UserSettingsModal({
   onResetPassword
 }: {
   user: User;
+  currentUser: User | null;
   input: UserSettingsInput;
   busy: string;
   onChange: (input: UserSettingsInput | ((current: UserSettingsInput) => UserSettingsInput)) => void;
@@ -5300,10 +5316,9 @@ function UserSettingsModal({
               <RoleHelpTooltip />
             </div>
             <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })}>
-	              <option value="VIEWER">{roleLabel("VIEWER")}</option>
-	              <option value="OPERATOR">{roleLabel("OPERATOR")}</option>
-	              <option value="ADMIN">{roleLabel("ADMIN")}</option>
-	              <option value="OWNER">{roleLabel("OWNER")}</option>
+              {roleOptionsFor(currentUser).map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
             </select>
           </div>
           <label className="checkbox-line">
@@ -5381,11 +5396,13 @@ function RoleHelpTooltip() {
 
 function UserCreateForm({
   input,
+  currentUser,
   busy,
   onChange,
   onSubmit
 }: {
   input: CreateUserInput;
+  currentUser: User | null;
   busy: boolean;
   onChange: (input: CreateUserInput) => void;
   onSubmit: () => Promise<void>;
@@ -5396,10 +5413,9 @@ function UserCreateForm({
       <input value={input.email} onChange={(event) => onChange({ ...input, email: event.target.value })} placeholder="Correo" aria-label="Correo" type="email" />
       <div className="role-create-field">
         <select value={input.role} onChange={(event) => onChange({ ...input, role: event.target.value as Role })} aria-label="Rol">
-	          <option value="VIEWER">{roleLabel("VIEWER")}</option>
-	          <option value="OPERATOR">{roleLabel("OPERATOR")}</option>
-	          <option value="ADMIN">{roleLabel("ADMIN")}</option>
-	          <option value="OWNER">{roleLabel("OWNER")}</option>
+          {roleOptionsFor(currentUser).map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
         </select>
         <RoleHelpTooltip />
       </div>
