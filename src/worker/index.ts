@@ -104,6 +104,7 @@ import {
   readJsonObject,
   RequestBodyTooLargeError
 } from "./utils/http";
+import { dispatchRoutes, type Route, type RoutableContext } from "./routes/router";
 
 const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
@@ -832,6 +833,159 @@ async function processPasswordResetRequest(
   }
 }
 
+interface ApiRouteContext extends RoutableContext {
+  env: Env;
+  repo: Repository;
+  auth: AuthService;
+  url: URL;
+  executionContext?: ExecutionContext;
+}
+
+async function handleHealth(ctx: ApiRouteContext): Promise<Response> {
+  return jsonResponse({ ok: true, appEnv: ctx.env.APP_ENV ?? "unknown", now: nowIso() });
+}
+
+async function handleBootstrapStatus(ctx: ApiRouteContext): Promise<Response> {
+  const hasNoUsers = (await ctx.repo.countUsers()) === 0;
+  return jsonResponse({ bootstrapAvailable: isBootstrapOwnerTokenConfigured(ctx.env) && hasNoUsers });
+}
+
+// Public branding read: the login screen needs the display name, accent color, and
+// logo version BEFORE any session exists, so these two routes are unauthenticated.
+async function handlePublicBranding(ctx: ApiRouteContext): Promise<Response> {
+  return handlePublicBrandingRoute(ctx.repo);
+}
+
+async function handleAdminBrandingLogo(ctx: ApiRouteContext): Promise<Response> {
+  return handleBrandingLogoStream(ctx.env, ctx.repo, ADMIN_EMAIL_LOGO_SLOT);
+}
+
+async function handleDonorBrandingLogo(ctx: ApiRouteContext): Promise<Response> {
+  return handleBrandingLogoStream(ctx.env, ctx.repo, DONOR_LOGO_SLOT);
+}
+
+// Public donor checkout: unauthenticated, runs before any role check. A body with
+// only { amount, giftType } is a DRAFT create (the wizard mints the Wompi link in the
+// background on Paso 1→2); a body carrying donor data is a full create (the fallback
+// when no usable premint draft exists). Both mint the link identically.
+async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  assertDeploymentCanCollectPayments(ctx.env);
+  const clientIp = clientIpFrom(ctx.request);
+  let body: Record<string, unknown>;
+  try {
+    body = await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return donationBodyTooLargeResponse();
+    }
+    throw error;
+  }
+  const draft = isDraftIntentBody(body);
+  let input;
+  try {
+    input = draft ? validateDraftIntentInput(body) : validateIntentInput(body);
+  } catch (error) {
+    if (error instanceof IntentValidationError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  const claimNow = nowIso();
+  const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
+    await rateLimitKey(clientIp),
+    clientIp,
+    claimNow,
+    intentThrottleSinceIso(),
+    intentThrottleExpiresIso(),
+    INTENT_THROTTLE_LIMIT
+  );
+  if (!rateLimitClaimId) {
+    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  }
+  try {
+    const created = draft
+      ? await createDraftDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
+      : await createDonationIntent(ctx.env, ctx.repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
+    return jsonResponse(created, { status: 201 });
+  } catch (error) {
+    if (error instanceof IntentLinkError) {
+      // Intent stays PENDING and expires harmlessly on the cron sweep.
+      return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
+    }
+    throw error;
+  }
+}
+
+// Public datos completion: attaches the donor's fiscal data to a minted draft with a
+// fast D1-only call (no Wompi). Its dedicated per-IP budget counts every attempt,
+// including malformed bodies and failed capability guesses.
+async function handleDonationIntentDatos(ctx: ApiRouteContext): Promise<Response> {
+  const clientIp = clientIpFrom(ctx.request);
+  const claimNow = nowIso();
+  const rateLimitClaimId = await ctx.repo.claimDonationDatosRateLimit(
+    await rateLimitKey(clientIp),
+    claimNow,
+    intentThrottleSinceIso(),
+    intentThrottleExpiresIso(),
+    INTENT_THROTTLE_LIMIT
+  );
+  if (!rateLimitClaimId) {
+    return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
+  }
+  let data;
+  try {
+    const body = await readJsonObject(ctx.request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
+    data = validateDatosInput(body);
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return donationBodyTooLargeResponse();
+    }
+    if (error instanceof IntentValidationError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+  try {
+    const completed = await applyIntentDatos(
+      ctx.repo,
+      ctx.params[0],
+      ctx.request.headers.get("X-Donation-Datos-Token") ?? "",
+      data
+    );
+    return jsonResponse(completed);
+  } catch (error) {
+    if (error instanceof IntentDatosError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
+    }
+    throw error;
+  }
+}
+
+async function handleDonationIntentStatus(ctx: ApiRouteContext): Promise<Response> {
+  const intent = await ctx.repo.getDonationIntent(ctx.params[0]);
+  if (!intent) {
+    // Enumeration-safe: unknown ids get the same shape a foreign id would.
+    return jsonResponse({ error: "intent_not_found" }, { status: 404 });
+  }
+  // status stays for backward compatibility (COMPLETED = CDE accepted by MH). paid
+  // reflects the payment marker (paid_at), so the donor's wizard can show "thanks" the
+  // moment Wompi confirms the payment, without waiting on MH acceptance.
+  return jsonResponse({ status: intent.status, paid: intent.paid_at != null });
+}
+
+const publicRoutes: Array<Route<ApiRouteContext>> = [
+  { pattern: "/api/health", handler: handleHealth },
+  { method: "GET", pattern: "/api/auth/bootstrap-status", handler: handleBootstrapStatus },
+  { method: "GET", pattern: "/api/branding", handler: handlePublicBranding },
+  { method: "GET", pattern: "/api/branding/logo", handler: handleAdminBrandingLogo },
+  { method: "GET", pattern: "/api/branding/donor-logo", handler: handleDonorBrandingLogo },
+  { method: "POST", pattern: "/api/donations/intent", handler: handleCreateDonationIntent },
+  { method: "POST", pattern: /^\/api\/donations\/intent\/([^/]+)\/datos$/, handler: handleDonationIntentDatos },
+  { method: "GET", pattern: /^\/api\/donations\/intent\/([^/]+)\/status$/, handler: handleDonationIntentStatus }
+];
+
 async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionContext): Promise<Response> {
   // Build the actor context ONCE per request and inject it into the Repository, so
   // every downstream repo.createAudit (route handlers reuse this same instance)
@@ -840,141 +994,20 @@ async function handleApi(request: Request, env: Env, url: URL, ctx?: ExecutionCo
   const auth = new AuthService(env);
   const user = await auth.authenticate(request);
 
-  if (url.pathname === "/api/health") {
-    return jsonResponse({ ok: true, appEnv: env.APP_ENV ?? "unknown", now: nowIso() });
-  }
-
-  if (url.pathname === "/api/auth/bootstrap-status" && request.method === "GET") {
-    const hasNoUsers = (await repo.countUsers()) === 0;
-    return jsonResponse({ bootstrapAvailable: isBootstrapOwnerTokenConfigured(env) && hasNoUsers });
-  }
-
-  // Public branding read: the login screen needs the display name, accent color, and
-  // logo version BEFORE any session exists, so these two routes are unauthenticated.
-  if (url.pathname === "/api/branding" && request.method === "GET") {
-    return handlePublicBrandingRoute(repo);
-  }
-
-  if (url.pathname === "/api/branding/logo" && request.method === "GET") {
-    return handleBrandingLogoStream(env, repo, ADMIN_EMAIL_LOGO_SLOT);
-  }
-
-  if (url.pathname === "/api/branding/donor-logo" && request.method === "GET") {
-    return handleBrandingLogoStream(env, repo, DONOR_LOGO_SLOT);
-  }
-
-  // Public donor checkout: unauthenticated, runs before any role check. A body with
-  // only { amount, giftType } is a DRAFT create (the wizard mints the Wompi link in the
-  // background on Paso 1→2); a body carrying donor data is a full create (the fallback
-  // when no usable premint draft exists). Both mint the link identically.
-  if (url.pathname === "/api/donations/intent" && request.method === "POST") {
-    const rejected = rejectUnsafePublicDonationMutation(request, url);
-    if (rejected) return rejected;
-    assertDeploymentCanCollectPayments(env);
-    const clientIp = clientIpFrom(request);
-    let body: Record<string, unknown>;
-    try {
-      body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
-    } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
-        return donationBodyTooLargeResponse();
-      }
-      throw error;
-    }
-    const draft = isDraftIntentBody(body);
-    let input;
-    try {
-      input = draft ? validateDraftIntentInput(body) : validateIntentInput(body);
-    } catch (error) {
-      if (error instanceof IntentValidationError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
-      }
-      throw error;
-    }
-    const claimNow = nowIso();
-    const rateLimitClaimId = await repo.claimDonationIntentRateLimit(
-      await rateLimitKey(clientIp),
-      clientIp,
-      claimNow,
-      intentThrottleSinceIso(),
-      intentThrottleExpiresIso(),
-      INTENT_THROTTLE_LIMIT
-    );
-    if (!rateLimitClaimId) {
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
-    try {
-      const created = draft
-        ? await createDraftDonationIntent(env, repo, input as ReturnType<typeof validateDraftIntentInput>, clientIp, rateLimitClaimId)
-        : await createDonationIntent(env, repo, input as ReturnType<typeof validateIntentInput>, clientIp, rateLimitClaimId);
-      return jsonResponse(created, { status: 201 });
-    } catch (error) {
-      if (error instanceof IntentLinkError) {
-        // Intent stays PENDING and expires harmlessly on the cron sweep.
-        return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
-      }
-      throw error;
-    }
-  }
-
-  // Public datos completion: attaches the donor's fiscal data to a minted draft with a
-  // fast D1-only call (no Wompi). Its dedicated per-IP budget counts every attempt,
-  // including malformed bodies and failed capability guesses.
-  const intentDatosMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/datos$/);
-  if (intentDatosMatch && request.method === "POST") {
-    const clientIp = clientIpFrom(request);
-    const claimNow = nowIso();
-    const rateLimitClaimId = await repo.claimDonationDatosRateLimit(
-      await rateLimitKey(clientIp),
-      claimNow,
-      intentThrottleSinceIso(),
-      intentThrottleExpiresIso(),
-      INTENT_THROTTLE_LIMIT
-    );
-    if (!rateLimitClaimId) {
-      return jsonResponse({ error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." }, { status: 429 });
-    }
-    let data;
-    try {
-      const body = await readJsonObject(request, { limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" });
-      data = validateDatosInput(body);
-    } catch (error) {
-      if (error instanceof RequestBodyTooLargeError) {
-        return donationBodyTooLargeResponse();
-      }
-      if (error instanceof IntentValidationError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
-      }
-      throw error;
-    }
-    try {
-      const completed = await applyIntentDatos(
-        repo,
-        intentDatosMatch[1],
-        request.headers.get("X-Donation-Datos-Token") ?? "",
-        data
-      );
-      return jsonResponse(completed);
-    } catch (error) {
-      if (error instanceof IntentDatosError) {
-        return jsonResponse({ error: error.code, message: error.message }, { status: error.httpStatus });
-      }
-      throw error;
-    }
-  }
-
-  const intentStatusMatch = url.pathname.match(/^\/api\/donations\/intent\/([^/]+)\/status$/);
-  if (intentStatusMatch && request.method === "GET") {
-    const intent = await repo.getDonationIntent(intentStatusMatch[1]);
-    if (!intent) {
-      // Enumeration-safe: unknown ids get the same shape a foreign id would.
-      return jsonResponse({ error: "intent_not_found" }, { status: 404 });
-    }
-    // status stays for backward compatibility (COMPLETED = CDE accepted by MH). paid
-    // reflects the payment marker (paid_at), so the donor's wizard can show "thanks" the
-    // moment Wompi confirms the payment, without waiting on MH acceptance.
-    return jsonResponse({ status: intent.status, paid: intent.paid_at != null });
-  }
+  const apiContext: ApiRouteContext = {
+    request,
+    pathname: url.pathname,
+    user,
+    actor: null,
+    params: [],
+    env,
+    repo,
+    auth,
+    url,
+    executionContext: ctx
+  };
+  const publicResponse = await dispatchRoutes(publicRoutes, apiContext, requireRole);
+  if (publicResponse) return publicResponse;
 
   if (url.pathname === "/api/auth/bootstrap-owner" && request.method === "POST") {
     if (!isBootstrapOwnerTokenConfigured(env)) {
