@@ -13,6 +13,7 @@ import {
 
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
 const indexSource = readFileSync(resolve(import.meta.dirname, "../../index.html"), "utf8");
 const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
@@ -197,10 +198,10 @@ describe("BrandingEditor edits the support email (source contract)", () => {
   it("offers a 'Correo de soporte' input saved through the branding PUT", () => {
     // The Marca form gains a support-email field alongside name + color; it is sent to
     // /api/settings/branding and explained as the contact shown on donor pages + emails.
-    expect(appSource).toContain("Correo de soporte");
-    expect(appSource).toContain("supportEmail");
+    expect(credentialsPanelSource).toContain("Correo de soporte");
+    expect(credentialsPanelSource).toContain("supportEmail");
     // Validation runs through the shared brandingFieldError helper before the round-trip.
-    expect(appSource).toContain("brandingFieldError(");
+    expect(credentialsPanelSource).toContain("brandingFieldError(");
   });
 });
 
@@ -217,26 +218,26 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
   it("shows a captioned preview block with both channel mocks", () => {
     // A "Vista previa" block below the logo controls with two side-by-side miniature
     // mocks, each with a Spanish caption describing where the branding will show.
-    expect(appSource).toContain("Vista previa");
-    expect(appSource).toContain("branding-preview");
-    expect(appSource).toContain("Así se verá en los correos");
-    expect(appSource).toContain("Así se verá en la página de donación");
+    expect(credentialsPanelSource).toContain("Vista previa");
+    expect(credentialsPanelSource).toContain("branding-preview");
+    expect(credentialsPanelSource).toContain("Así se verá en los correos");
+    expect(credentialsPanelSource).toContain("Así se verá en la página de donación");
     // Labeled channels: an email chrome mock and a donor landing card mock.
-    expect(appSource).toContain("Correo");
-    expect(appSource).toContain("Página de donación");
+    expect(credentialsPanelSource).toContain("Correo");
+    expect(credentialsPanelSource).toContain("Página de donación");
   });
 
   it("explains that email clients can adjust the preview in dark mode", () => {
-    expect(appSource).toContain("Vista aproximada.");
-    expect(appSource).toContain("modo oscuro");
+    expect(credentialsPanelSource).toContain("Vista aproximada.");
+    expect(credentialsPanelSource).toContain("modo oscuro");
   });
 
   it("drives the preview from the editor's unsaved draft values", () => {
     // The email header mock tints with the draft accent color (colorForPicker) and shows
     // the draft display name; the footer shows the draft support email. The logo comes
     // from the draft admin/email preview object URL or the current admin/email logo src.
-    const previewStart = appSource.indexOf("branding-preview");
-    const previewRegion = appSource.slice(previewStart, previewStart + 3000);
+    const previewStart = credentialsPanelSource.indexOf("branding-preview");
+    const previewRegion = credentialsPanelSource.slice(previewStart, previewStart + 3000);
     expect(previewRegion).toContain("colorForPicker");
     expect(previewRegion).toContain("displayName");
     expect(previewRegion).toContain("supportEmail");
@@ -248,9 +249,9 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
   it("keeps the donor-page mock monochrome (never tinted with the accent)", () => {
     // The donor landing is monochrome by design: its mock must not paint the accent
     // color onto the card. Only the email mock's header carries the accent.
-    const donorMockStart = appSource.indexOf("branding-preview-donor");
+    const donorMockStart = credentialsPanelSource.indexOf("branding-preview-donor");
     expect(donorMockStart).toBeGreaterThan(-1);
-    const donorMock = appSource.slice(donorMockStart, donorMockStart + 700);
+    const donorMock = credentialsPanelSource.slice(donorMockStart, donorMockStart + 700);
     expect(donorMock).not.toContain("colorForPicker");
     expect(donorMock).toContain("Diezmos y Ofrendas");
   });
@@ -258,10 +259,10 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
 
 describe("Marca supports separate admin/email and donor logos (source contract)", () => {
   it("offers independent upload controls for the admin/email logo and donor logo", () => {
-    expect(appSource).toContain("Logo de administración y correos");
-    expect(appSource).toContain("Logo para donantes");
-    expect(appSource).toContain("/api/settings/branding/logo");
-    expect(appSource).toContain("/api/settings/branding/donor-logo");
+    expect(credentialsPanelSource).toContain("Logo de administración y correos");
+    expect(credentialsPanelSource).toContain("Logo para donantes");
+    expect(credentialsPanelSource).toContain("/api/settings/branding/logo");
+    expect(credentialsPanelSource).toContain("/api/settings/branding/donor-logo");
   });
 
   it("uses the donor logo on white authentication surfaces", () => {
@@ -273,14 +274,14 @@ describe("Marca supports separate admin/email and donor logos (source contract)"
   });
 
   it("keeps email preview tied to the admin logo and donor preview tied to the donor logo", () => {
-    const emailMockStart = appSource.indexOf("branding-preview-email");
-    const emailMock = appSource.slice(emailMockStart, emailMockStart + 1200);
+    const emailMockStart = credentialsPanelSource.indexOf("branding-preview-email");
+    const emailMock = credentialsPanelSource.slice(emailMockStart, emailMockStart + 1200);
     expect(emailMock).toContain("previewUrl");
     expect(emailMock).toContain("currentLogoSrc");
     expect(emailMock).not.toContain("currentDonorLogoSrc");
 
-    const donorMockStart = appSource.indexOf("branding-preview-donor");
-    const donorMock = appSource.slice(donorMockStart, donorMockStart + 1000);
+    const donorMockStart = credentialsPanelSource.indexOf("branding-preview-donor");
+    const donorMock = credentialsPanelSource.slice(donorMockStart, donorMockStart + 1000);
     expect(donorMock).toContain("donorPreviewUrl");
     expect(donorMock).toContain("currentDonorLogoSrc");
     expect(donorMock).not.toContain("colorForPicker");
@@ -328,7 +329,7 @@ describe("BrandingEditor preview styles are namespaced and theme-driven (source 
   it("the donor-page preview mark follows the draft name, not a hardcoded default", () => {
     // Without a logo, the donor mock's placeholder mark must show the DRAFT organization
     // name (like the email mock) so both previews stay consistent while editing.
-    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
-    expect(appSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
+    const panelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
+    expect(panelSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
   });
 });
