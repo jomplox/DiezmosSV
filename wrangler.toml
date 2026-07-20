@@ -125,12 +125,7 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 # secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
 [env.production]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
-# Custom domain pending: donations.example.invalid already has a manually-created proxied A
-# record in the example.com zone, and the custom-domains API refuses to claim a
-# hostname with an existing record (headless wrangler cannot answer the override
-# prompt). Delete that DNS record in the dashboard, then uncomment this line and
-# redeploy; workers_dev can be flipped off afterwards if desired.
-# routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
+routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
 workers_dev = true
 
 [env.production.observability]
