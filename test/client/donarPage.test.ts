@@ -24,6 +24,7 @@ import {
   DONAR_WIDGET_DELAYED_MESSAGE,
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
@@ -982,19 +983,23 @@ describe("donar wizard source contract", () => {
     expect(originCheck).toBeGreaterThan(-1);
     expect(donarSource).toContain("clampEmbedHeight(");
     // Wompi's own "close" message (their post-payment "Cerrar" AND their back arrow
-    // share it) must NOT blindly return to Paso 2: after a successful payment that
-    // would be wrong. The handler does a one-shot status fetch first — paid/COMPLETED
-    // → thanks, otherwise the existing back-to-Paso-2 behavior.
+    // share it) must NOT return to Paso 2 when the webhook is still catching up.
+    // Preserve the intent, show a neutral verifying state, and let the existing poll
+    // observe paid/COMPLETED. The page's own Atrás control remains the explicit exit.
     expect(donarSource).toContain('"close"');
     const closeBranch = donarSource.indexOf('payload?.message === "close"');
     expect(closeBranch).toBeGreaterThan(-1);
     const closeBlock = donarSource.slice(closeBranch, closeBranch + 1100);
-    // One-shot status fetch for the current intent inside the close branch (the intent
-    // is captured as activeIntent so the deferred fetch keeps a narrowed reference).
+    // An immediate status fetch can still finish the handoff without waiting for the
+    // next poll, but a stale unpaid response or transient failure must keep polling.
     expect(closeBlock).toContain(`${"$"}{DONAR_INTENT_PATH}/${"$"}{activeIntent.intentId}/status`);
-    // Both outcomes present: thanks on paid/COMPLETED, else back to Paso 2.
+    expect(closeBlock).toContain('setHandoff("verifying")');
     expect(closeBlock).toContain('setStage("thanks")');
-    expect(closeBlock).toContain("setStep(2)");
+    expect(closeBlock).not.toContain("setIntent(null)");
+    expect(closeBlock).not.toContain('setStage("form")');
+    expect(closeBlock).not.toContain("setStep(2)");
+    expect(donarSource).toContain('handoff === "verifying"');
+    expect(DONAR_WIDGET_VERIFYING_MESSAGE).toBe("Verificando su entrega…");
     // The CSS fallback height remains until the first message arrives; height
     // transitions are disabled under prefers-reduced-motion.
     expect(stylesSource).toContain(".donar-embed");

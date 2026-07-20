@@ -228,6 +228,7 @@ export const DONAR_FALLBACK_MESSAGE =
 // donor-facing string: these are diezmos y ofrendas — an ENTREGA, never a "pago"
 // (Wompi is still named where it builds trust in the secure card step).
 export const DONAR_WIDGET_LOADING_MESSAGE = "Preparando su entrega segura…";
+export const DONAR_WIDGET_VERIFYING_MESSAGE = "Verificando su entrega…";
 export const DONAR_WIDGET_DELAYED_MESSAGE =
   "Esto está tardando más de lo esperado. Puede continuar su entrega en la página segura de Wompi:";
 export const DONAR_WIDGET_FALLBACK_CTA = "Continuar en Wompi";

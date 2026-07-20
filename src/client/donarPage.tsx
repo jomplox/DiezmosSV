@@ -40,6 +40,7 @@ import {
   DONAR_WIDGET_DELAYED_MESSAGE,
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ENGLISH_NOTICE,
   GIVEBUTTER_FALLBACK_CTA,
@@ -443,7 +444,7 @@ export function DonarPage() {
   // (spinner), "ready" once it has, "delayed" when the render budget elapses first
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
   // still flips to "ready").
-  const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed">("loading");
+  const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed" | "verifying">("loading");
   // Height reported by Wompi's checkout via sizeUpdate; null keeps the CSS fallback
   // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
   // the inner scrollbar disappears — the page is the only scroller.
@@ -634,8 +635,8 @@ export function DonarPage() {
   // modal widget consumes: { message: "sizeUpdate", height } as the content grows
   // (their widget renders it as height + 35), and { message: "close" } when the donor
   // taps the checkout's back arrow OR its post-payment "Cerrar". Origin-checked strictly;
-  // anything unparseable is ignored. "close" does a one-shot status check: paid/COMPLETED
-  // → thanks, otherwise it walks back to Paso 2 (same as our own Atrás from the embed).
+  // anything unparseable is ignored. "close" starts a neutral verification state and
+  // preserves the intent so a delayed webhook can still move the donor to thanks.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
@@ -659,25 +660,20 @@ export function DonarPage() {
       }
       if (payload?.message === "close") {
         // Wompi posts { message: "close" } from BOTH its back arrow AND its post-payment
-        // "Cerrar" button. Returning straight to Paso 2 is right for the back arrow but
-        // wrong after a successful payment. So do a one-shot status check first: if the
-        // intent is already paid (or COMPLETED), go to thanks; otherwise fall back to the
-        // existing back-to-Paso-2 behavior. A fetch failure is treated as not-paid.
+        // "Cerrar" button. Never infer "unpaid" from an early response or a transient
+        // fetch failure: hide the checkout, retain the intent, and let the status poll
+        // observe Wompi's webhook. The page's own Atrás remains the explicit way back.
+        setHandoff("verifying");
         const statusPath = `${DONAR_INTENT_PATH}/${activeIntent.intentId}/status`;
         void donarApi<{ status: string; paid: boolean }>(statusPath)
           .then((result) => {
             if (result.paid || result.status === "COMPLETED") {
               setStage("thanks");
-            } else {
-              setIntent(null);
-              setStage("form");
-              setStep(2);
             }
           })
           .catch(() => {
-            setIntent(null);
-            setStage("form");
-            setStep(2);
+            // Keep polling: one failed read must not reopen the form and invite a
+            // duplicate donation after Wompi has already accepted the card.
           });
       }
     }
@@ -686,7 +682,10 @@ export function DonarPage() {
   }, [stage, intent]);
 
   // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
-  // Stop after ~3 minutes with a neutral closing message.
+  // Stop after ~3 minutes with a neutral closing message. Entering the post-close
+  // verification state restarts that window so a slow checkout never shortens the
+  // webhook grace period.
+  const verifyingWompiClose = handoff === "verifying";
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
@@ -721,7 +720,7 @@ export function DonarPage() {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [stage, intent]);
+  }, [stage, intent, verifyingWompiClose]);
 
   // Paso 1 → Paso 2. The SV door gates on gift type + amount; the US door (no
   // gift type) gates on the amount alone.
@@ -824,6 +823,7 @@ export function DonarPage() {
         });
       }
       abandonDraftIntent();
+      setHandoff("loading");
       setIntent(created);
       setStage("widget");
       setStep(3);
@@ -1304,31 +1304,40 @@ export function DonarPage() {
             {stage === "widget" && intent && (
               <div className="donar-handoff">
                 <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
-                {handoff === "loading" && (
+                {handoff === "verifying" ? (
                   <div className="donar-widget-loading" role="status">
                     <span className="donar-spinner" aria-hidden="true" />
-                    {DONAR_WIDGET_LOADING_MESSAGE}
+                    {DONAR_WIDGET_VERIFYING_MESSAGE}
                   </div>
+                ) : (
+                  <>
+                    {handoff === "loading" && (
+                      <div className="donar-widget-loading" role="status">
+                        <span className="donar-spinner" aria-hidden="true" />
+                        {DONAR_WIDGET_LOADING_MESSAGE}
+                      </div>
+                    )}
+                    {handoff === "delayed" && (
+                      <div className="donar-widget-delayed">
+                        <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
+                        <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
+                          {DONAR_WIDGET_FALLBACK_CTA}
+                        </a>
+                      </div>
+                    )}
+                    <iframe
+                      className="donar-embed"
+                      src={widgetUrlFrom(intent.urlEnlaceLargo)}
+                      title="Entrega segura con Wompi"
+                      style={embedHeight ? { height: embedHeight } : undefined}
+                      scrolling={embedHeight ? "no" : undefined}
+                      onLoad={() => setHandoff("ready")}
+                    />
+                    <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
+                      ¿No se muestra el formulario? Continúe aquí
+                    </button>
+                  </>
                 )}
-                {handoff === "delayed" && (
-                  <div className="donar-widget-delayed">
-                    <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
-                    <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
-                      {DONAR_WIDGET_FALLBACK_CTA}
-                    </a>
-                  </div>
-                )}
-                <iframe
-                  className="donar-embed"
-                  src={widgetUrlFrom(intent.urlEnlaceLargo)}
-                  title="Entrega segura con Wompi"
-                  style={embedHeight ? { height: embedHeight } : undefined}
-                  scrolling={embedHeight ? "no" : undefined}
-                  onLoad={() => setHandoff("ready")}
-                />
-                <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
-                  ¿No se muestra el formulario? Continúe aquí
-                </button>
               </div>
             )}
 

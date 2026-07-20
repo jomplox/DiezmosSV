@@ -259,6 +259,52 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(page.url()).toContain("/donar");
 });
 
+test("keeps checking the same intent when Wompi closes before its webhook is visible", async ({ page }) => {
+  let paymentConfirmed = false;
+  let statusChecks = 0;
+  await page.route("**/api/donations/intent/*/status", (route) => {
+    statusChecks += 1;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: paymentConfirmed ? "COMPLETED" : "LINK_CREATED",
+        paid: paymentConfirmed
+      })
+    });
+  });
+
+  await page.goto("/donar?ruta=sv");
+  await page.getByLabel("Monto").fill(DONOR.amount);
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByLabel("Número de documento").fill(DONOR.dui);
+  await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
+  await page.getByLabel("Municipio").selectOption({ index: 1 });
+  await page.getByLabel("Distrito").selectOption({ index: 1 });
+  await page.getByLabel("Dirección").fill("San Salvador, El Salvador");
+  await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
+  await expect(page.locator("iframe.donar-embed")).toBeVisible({ timeout: 15_000 });
+
+  statusChecks = 0;
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new MessageEvent("message", {
+        origin: "https://pagos.wompi.sv",
+        data: JSON.stringify({ message: "close" })
+      })
+    );
+  });
+
+  await expect.poll(() => statusChecks).toBeGreaterThan(0);
+  await expect(page.getByText("Verificando su entrega…")).toBeVisible();
+  await expect(page.getByLabel("Número de documento")).toHaveCount(0);
+
+  paymentConfirmed = true;
+  await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toBeVisible({
+    timeout: 10_000
+  });
+});
+
 test("Paso 2 reports every invalid field at once and clears each error as it is fixed", async ({ page }) => {
   await page.goto("/donar?ruta=sv");
   await page.getByLabel("Monto").fill(DONOR.amount);
