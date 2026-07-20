@@ -125,6 +125,7 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 # secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
 [env.production]
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
 
 [env.production.observability]
 enabled = true
@@ -142,7 +143,7 @@ allowed_sender_addresses = ["legacy-contact-4@example.com"]
 
 [env.production.vars]
 APP_ENV = "production"
-APP_ORIGIN = "https://worker.example.invalid"
+APP_ORIGIN = "https://donations.example.invalid"
 MOCK_EXTERNAL_SERVICES = "false"
 CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-resource-example"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
