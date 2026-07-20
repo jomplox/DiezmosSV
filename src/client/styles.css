@@ -3918,11 +3918,11 @@ pre {
 }
 
 .donar-spinner {
-  width: 18px;
-  height: 18px;
+  width: 24px;
+  height: 24px;
   flex: none;
   border-radius: 50%;
-  border: 2px solid #d9d9d9;
+  border: 3px solid #d9d9d9;
   border-top-color: #000000;
   animation: donar-spin 800ms linear infinite;
 }

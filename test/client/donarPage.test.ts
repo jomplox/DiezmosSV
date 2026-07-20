@@ -932,6 +932,12 @@ describe("donar wizard source contract", () => {
     // Spinner is announced to assistive tech and styled monochrome in CSS.
     expect(donarSource).toContain('role="status"');
     expect(stylesSource).toContain(".donar-spinner");
+    const spinnerRule = stylesSource.match(/\.donar-spinner\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(spinnerRule).toContain("width: 24px;");
+    expect(spinnerRule).toContain("height: 24px;");
+    expect(spinnerRule).toContain("border: 3px solid #d9d9d9;");
+    expect(spinnerRule).toContain("border-top-color: #000000;");
+    expect(spinnerRule).toContain("animation: donar-spin 800ms linear infinite;");
     // Reduced-motion users get a static indicator, not a spinning ring.
     const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
     expect(reducedMotion).toBeGreaterThan(-1);

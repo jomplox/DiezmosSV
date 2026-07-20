@@ -311,6 +311,11 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
 
   await expect.poll(() => statusChecks).toBeGreaterThan(0);
   await expect(page.getByText("Verificando su entrega…")).toBeVisible();
+  const verifyingSpinner = page.locator(".donar-widget-loading .donar-spinner");
+  await expect(verifyingSpinner).toBeVisible();
+  await expect(verifyingSpinner).toHaveCSS("width", "24px");
+  await expect(verifyingSpinner).toHaveCSS("height", "24px");
+  await expect(verifyingSpinner).toHaveCSS("border-top-width", "3px");
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
 
   paymentConfirmed = true;
