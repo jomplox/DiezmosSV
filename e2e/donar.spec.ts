@@ -255,6 +255,20 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible({ timeout: 15_000 });
   await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
+  for (const { reportedHeight, renderedHeight } of [
+    { reportedHeight: 430, renderedHeight: 465 },
+    { reportedHeight: 710, renderedHeight: 745 }
+  ]) {
+    await page.evaluate((height) => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: "https://pagos.wompi.sv",
+          data: JSON.stringify({ message: "sizeUpdate", height })
+        })
+      );
+    }, reportedHeight);
+    await expect(embed).toHaveCSS("height", `${renderedHeight}px`);
+  }
   await expect(page.getByRole("button", { name: "¿No se muestra el formulario? Continúe aquí" })).toBeVisible();
   expect(page.url()).toContain("/donar");
 });
