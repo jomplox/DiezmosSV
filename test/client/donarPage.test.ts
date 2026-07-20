@@ -983,8 +983,8 @@ describe("donar wizard source contract", () => {
     expect(originCheck).toBeGreaterThan(-1);
     expect(donarSource).toContain("clampEmbedHeight(");
     const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
-    expect(embedRule).toContain("transition: height 120ms cubic-bezier(0.2, 0, 0, 1);");
-    expect(embedRule).not.toContain("transition: height 200ms ease;");
+    expect(embedRule).toContain("transition: none;");
+    expect(embedRule).not.toContain("transition: height 120ms cubic-bezier(0.2, 0, 0, 1);");
     // Wompi's own "close" message (their post-payment "Cerrar" AND their back arrow
     // share it) must NOT return to Paso 2 when the webhook is still catching up.
     // Preserve the intent, show a neutral verifying state, and let the existing poll

@@ -3900,7 +3900,7 @@ pre {
 .donar-embed {
   width: 100%;
   height: min(78vh, 820px);
-  transition: height 120ms cubic-bezier(0.2, 0, 0, 1);
+  transition: none;
   border: 1px solid #e5e5e5;
   border-radius: 12px;
   background: #ffffff;
