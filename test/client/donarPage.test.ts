@@ -982,6 +982,9 @@ describe("donar wizard source contract", () => {
     const originCheck = donarSource.lastIndexOf("event.origin !== DONAR_WOMPI_CHECKOUT_ORIGIN", listener);
     expect(originCheck).toBeGreaterThan(-1);
     expect(donarSource).toContain("clampEmbedHeight(");
+    const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
+    expect(embedRule).toContain("transition: height 120ms cubic-bezier(0.2, 0, 0, 1);");
+    expect(embedRule).not.toContain("transition: height 200ms ease;");
     // Wompi's own "close" message (their post-payment "Cerrar" AND their back arrow
     // share it) must NOT return to Paso 2 when the webhook is still catching up.
     // Preserve the intent, show a neutral verifying state, and let the existing poll
@@ -1004,7 +1007,8 @@ describe("donar wizard source contract", () => {
     // transitions are disabled under prefers-reduced-motion.
     expect(stylesSource).toContain(".donar-embed");
     const reducedMotion = stylesSource.indexOf("prefers-reduced-motion");
-    expect(stylesSource.slice(reducedMotion)).toContain(".donar-embed");
+    expect(reducedMotion).toBeGreaterThan(-1);
+    expect(stylesSource.slice(reducedMotion)).toMatch(/\.donar-embed\s*\{\s*transition:\s*none;/);
   });
 
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
