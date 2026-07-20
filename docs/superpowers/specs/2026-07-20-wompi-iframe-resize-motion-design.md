@@ -1,4 +1,4 @@
-# Wompi Iframe Resize Motion Design
+# Wompi Iframe Instant Resize Design
 
 **Date:** 2026-07-20
 
@@ -7,7 +7,8 @@
 ## Objective
 
 Make the embedded Wompi form's two step-to-step height changes feel quick and
-crisp while preserving the existing automatic sizing and payment reliability.
+crisp without leaving fields or buttons moving beneath the donor's pointer,
+while preserving the existing automatic sizing and payment reliability.
 
 ## Current behavior and cause
 
@@ -17,36 +18,39 @@ Wompi's 35-pixel allowance, clamps the result, and applies the exact height to
 the iframe.
 
 Across the embedded form flow, Wompi reports height changes at the two observed
-step transitions. The iframe currently applies a generic `200ms ease`
-transition to every accepted update, so both movements have a slow tail and the
-repeated resize motion feels awkward. The message handling itself is behaving
-correctly.
+step transitions. The first refinement shortened the iframe transition from
+`200ms ease` to `120ms cubic-bezier(0.2, 0, 0, 1)`. Live staging use showed that
+even this shorter interpolation leaves the form moving beneath the donor's
+pointer, making the donor chase the next field or button. The message handling
+and final heights are correct; the remaining delay comes entirely from the CSS
+height transition.
 
 ## Considered approaches
 
-### 1. Short CSS-only transition — selected
+### 1. Instant CSS-only height updates — selected
 
 Change only the iframe's height transition to:
 
 ```css
-transition: height 120ms cubic-bezier(0.2, 0, 0, 1);
+transition: none;
 ```
 
 Every Wompi update remains authoritative and reaches its exact target height.
-The shorter duration and fast-starting ease-out curve make each movement settle
-promptly without adding timing logic to the integration.
+The iframe jumps directly to that height instead of interpolating toward it, so
+the next field or button does not continue moving after Wompi changes steps.
+The trade-off is a visible but immediate layout jump.
 
-### 2. Adaptive duration in JavaScript
+### 2. Fixed iframe height
 
-Choose a duration from the height difference and pass it to CSS. This could
-fine-tune large and small changes independently, but it adds state and branching
-for a transition that has only two observed changes.
+Keep the iframe at the largest observed height so its outer dimensions never
+change. This removes movement but creates unnecessary blank space and can
+reintroduce awkward inner scrolling or clipping on smaller viewports.
 
-### 3. Coalesce consecutive height messages
+### 3. Ultra-short transition
 
-Buffer or debounce Wompi's updates so the page animates fewer movements. This
-was rejected because it would delay or discard authoritative third-party sizing
-messages and could leave the iframe temporarily at a stale height.
+Reduce the transition to roughly `40–60ms`. This would be faster than the
+current rule, but the form would still move beneath the donor's pointer and
+would not fully address the observed usability problem.
 
 ## Reliability and accessibility contract
 
@@ -59,8 +63,8 @@ The change is presentation-only. It must not alter:
 - iframe loading, close verification, intent polling, or payment state;
 - the final height reported by each accepted `sizeUpdate`.
 
-The existing `prefers-reduced-motion: reduce` rule continues disabling the
-height transition entirely.
+The existing `prefers-reduced-motion: reduce` rule remains unchanged and
+continues declaring `transition: none`.
 
 ## Implementation boundary
 
@@ -68,9 +72,9 @@ Production code changes only in `src/client/styles.css`. No React state,
 message handler, iframe attributes, Worker route, API, database, or payment
 logic changes.
 
-`test/client/donarPage.test.ts` will pin the selected duration and easing curve
-as part of the donor-page style contract. The existing origin, clamp,
-reduced-motion, and Wompi-close regression coverage remains in force.
+`test/client/donarPage.test.ts` will pin `transition: none` as the donor-page
+style contract and reject the superseded animated rule. The existing origin,
+clamp, reduced-motion, and Wompi-close regression coverage remains in force.
 
 The donor Playwright suite will exercise two sequential trusted `sizeUpdate`
 messages and verify that the iframe reaches each exact final height. The test
@@ -93,7 +97,7 @@ payment or create avoidable donor records.
 
 ## Non-goals
 
-- Hiding or combining Wompi's two internal form transitions.
+- Animating, hiding, or combining Wompi's two internal form transitions.
 - Replacing Wompi's height messages with guessed fixed sizes.
 - Changing the iframe border, card layout, copy, loading states, or fallback
   link.
