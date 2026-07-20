@@ -74,4 +74,3 @@ Verification must include:
 - Wrangler binding freshness;
 - private-boundary check;
 - clean Git diff and independent review.
-
