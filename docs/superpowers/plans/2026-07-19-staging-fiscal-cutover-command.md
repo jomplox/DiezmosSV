@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Preserve PR #94's fiscal-cutover acknowledgment while moving it off routine staging commands and onto one explicit `cf:cutover:staging` workflow.
+**Goal:** Preserve PR #94's fiscal-cutover acknowledgment for production while moving it off routine staging commands and onto one explicit `cf:cutover:staging` workflow.
 
-**Architecture:** Keep the assertion CLI and its tests from PR #94. Restore the four generic remote commands to their pre-PR behavior, add one staging-only wrapper that runs the guard before migration and deployment, and align the historical cutover document with the staging development state.
+**Architecture:** Keep the assertion CLI and its tests from PR #94. Restore only the staging generic remote commands to their pre-PR behavior, add one staging wrapper that runs the guard before migration and deployment, keep production migration and deployment guarded until the approved production cutover is complete, and align the historical cutover document with the staging development state.
 
 **Tech Stack:** Node.js 22+, npm scripts, TypeScript 7, Vitest 4, Wrangler 4.
 
@@ -14,7 +14,7 @@
 - Do not push, deploy, or perform production/go-live work.
 - Do not modify Worker, client, database, routing, repository, or WorkerFetch behavior.
 - `FISCAL_CUTOVER_QUIESCED` must be exactly `1` for the explicit cutover command.
-- Routine `cf:migrate:*` and `cf:deploy:*` commands must not require the cutover acknowledgment.
+- Routine staging `cf:migrate:staging` and `cf:deploy:staging` commands must not require the cutover acknowledgment; production `cf:migrate:prod` and `cf:deploy:prod` must remain guarded until production completes the approved cutover.
 - The D1 preflight must remain before every remote migration.
 - Preserve the original PR #94 commit in branch history.
 
@@ -38,18 +38,21 @@
 In `test/scripts/deployScripts.test.ts`, replace the first two tests inside `describe("remote deploy and migration scripts", ...)` with:
 
 ```ts
-  it("keeps routine remote scripts free of the one-time cutover guard", () => {
-    for (const script of [
-      "cf:migrate:staging",
-      "cf:deploy:staging",
-      "cf:migrate:prod",
-      "cf:deploy:prod"
-    ] as const) {
+  it("keeps routine staging scripts free of the one-time cutover guard", () => {
+    for (const script of ["cf:migrate:staging", "cf:deploy:staging"] as const) {
       expect(packageJson.scripts[script], `script ${script}`).not.toContain(
         "assert-fiscal-cutover"
       );
       expect(packageJson.scripts[script], `script ${script}`).not.toContain(
         "FISCAL_CUTOVER_QUIESCED"
+      );
+    }
+  });
+
+  it("keeps production migration and deployment guarded", () => {
+    for (const script of ["cf:migrate:prod", "cf:deploy:prod"] as const) {
+      expect(packageJson.scripts[script], `script ${script}`).toMatch(
+        /^node scripts\/assert-fiscal-cutover\.mjs && /
       );
     }
   });
@@ -93,8 +96,8 @@ In `package.json`, make the remote command block exactly:
     "cf:deploy:staging": "npm run build && wrangler deploy --env staging --keep-vars",
     "cf:cutover:staging": "node scripts/assert-fiscal-cutover.mjs && npm run cf:migrate:staging && npm run cf:deploy:staging",
     "cf:tail:staging": "wrangler tail --env staging",
-    "cf:migrate:prod": "node scripts/d1-migration-preflight.mjs --database diezmossv-production-resource-example --env production && wrangler d1 migrations apply diezmossv-production-resource-example --env production --remote",
-    "cf:deploy:prod": "npm run build && wrangler deploy --env production --keep-vars",
+    "cf:migrate:prod": "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --database diezmossv-production-resource-example --env production && wrangler d1 migrations apply diezmossv-production-resource-example --env production --remote",
+    "cf:deploy:prod": "node scripts/assert-fiscal-cutover.mjs && npm run build && wrangler deploy --env production --keep-vars",
     "cf:tail:prod": "wrangler tail --env production",
 ```
 
@@ -116,13 +119,13 @@ Replace the opening record and operator-introduction paragraphs in `docs/fiscal-
 
 Migrations `0020_fiscal_operation_claims.sql` and `0021_security_lifecycle_guards.sql`, together with their claim/finalization-aware Worker, must be introduced in one quiesced maintenance window. An old Worker isolate does not understand the new ownership state and can otherwise submit a second fiscal operation or bypass lifecycle-generation guards.
 
-The acknowledgment command does not prove quiescence. Before running `cf:cutover:staging`, the deployment operator must complete these steps in order:
+The acknowledgment command does not prove quiescence. Before running `cf:cutover:staging` or the guarded production migration/deployment commands, the deployment operator must complete these steps in order:
 ```
 
 In step 5, replace the separate migration/deployment instruction with:
 
 ```md
-5. In the same shell, acknowledge the drained state with `export FISCAL_CUTOVER_QUIESCED=1`, then run `npm run cf:cutover:staging`.
+5. In the same shell, acknowledge the drained state with `export FISCAL_CUTOVER_QUIESCED=1`, then run `npm run cf:cutover:staging` for staging or the environment's guarded `cf:migrate:prod` command and immediately its guarded `cf:deploy:prod` command for production.
 ```
 
 Keep the remaining drain, backup, schema-verification, and re-enable steps unchanged.

@@ -11,18 +11,21 @@ const lifecycleMigration = readFileSync(
 );
 
 describe("remote deploy and migration scripts", () => {
-  it("keeps routine remote scripts free of the one-time cutover guard", () => {
-    for (const script of [
-      "cf:migrate:staging",
-      "cf:deploy:staging",
-      "cf:migrate:prod",
-      "cf:deploy:prod"
-    ] as const) {
+  it("keeps routine staging scripts free of the one-time cutover guard", () => {
+    for (const script of ["cf:migrate:staging", "cf:deploy:staging"] as const) {
       expect(packageJson.scripts[script], `script ${script}`).not.toContain(
         "assert-fiscal-cutover"
       );
       expect(packageJson.scripts[script], `script ${script}`).not.toContain(
         "FISCAL_CUTOVER_QUIESCED"
+      );
+    }
+  });
+
+  it("keeps production migration and deployment guarded", () => {
+    for (const script of ["cf:migrate:prod", "cf:deploy:prod"] as const) {
+      expect(packageJson.scripts[script], `script ${script}`).toMatch(
+        /^node scripts\/assert-fiscal-cutover\.mjs && /
       );
     }
   });
@@ -39,7 +42,7 @@ describe("remote deploy and migration scripts", () => {
   it("still runs the D1 preflight before every remote migration", () => {
     for (const script of ["cf:migrate:staging", "cf:migrate:prod"] as const) {
       expect(packageJson.scripts[script]).toMatch(
-        /^node scripts\/d1-migration-preflight\.mjs .* && wrangler d1 migrations apply /
+        /^(node scripts\/assert-fiscal-cutover\.mjs && )?node scripts\/d1-migration-preflight\.mjs .* && wrangler d1 migrations apply /
       );
     }
   });
