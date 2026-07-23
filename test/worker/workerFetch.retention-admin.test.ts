@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { previousElSalvadorMonth } from "../../src/worker/services/retention";
+import { elSalvadorMonth } from "../../src/worker/services/retention";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import type { Env } from "../../src/worker/types";
 import { env, FakeArchiveBucket, InMemoryD1 } from "./support/inMemoryD1";
@@ -59,9 +59,9 @@ describe("manual retention export endpoint", () => {
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     const archive = new FakeArchiveBucket();
     // The month currently open in El Salvador local time — same helper the
-    // handler itself will use to compute "the previous closed month" — so
-    // this test targets "now"'s own month regardless of when it runs.
-    const currentMonth = previousElSalvadorMonth(new Date(Date.now() + 31 * 24 * 60 * 60 * 1000));
+    // handler itself uses — so this test targets "now"'s own month regardless
+    // of when it runs.
+    const currentMonth = elSalvadorMonth(new Date());
 
     const response = await worker.fetch(
       new Request(`https://example.org/api/admin/retention-export?month=${currentMonth}`, {
@@ -150,7 +150,7 @@ describe("admin backups panel", () => {
     expect(byMonth.get("2026-04")?.exportedAt).toBe("2026-04-28T09:00:00.000Z");
     expect(byMonth.get("2026-05")).toMatchObject({ status: "faltante" });
     // The current (still-open) El Salvador month appears only as en_curso.
-    const currentMonth = previousElSalvadorMonth(new Date(Date.now() + 40 * 24 * 60 * 60 * 1000));
+    const currentMonth = elSalvadorMonth(new Date());
     expect(byMonth.get(currentMonth)?.status).toBe("en_curso");
   });
 
