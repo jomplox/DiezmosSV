@@ -1,11 +1,13 @@
-import { getEmisorConfig, isMockMode, requireSecret } from "../config";
+import { isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
-import type { DonationGiftType, DonationIntentRecord, Env, WompiPaymentLink } from "../types";
+import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
 
 const TOKEN_URL = "https://id.wompi.sv/connect/token";
 const ENLACE_PAGO_URL = "https://api.wompi.sv/EnlacePago";
 const LINK_VALIDITY_HOURS = 1;
+// Shown to the donor on Wompi's hosted sheet; mirrors the /donar brand title.
+const PRODUCT_NAME = "Diezmos y Ofrendas";
 // Deactivation vigencia window: fully in the past yet >=5 minutes wide (Wompi's
 // minimum). OFFSET pushes fechaFin safely before now; SPAN is the window width.
 const PAST_VIGENCIA_OFFSET_MINUTES = 60;
@@ -69,7 +71,7 @@ export class WompiApiService {
     const body = {
       identificadorEnlaceComercio: intent.id,
       monto: centsToAmount(intent.amount_cents),
-      nombreProducto: this.productName(intent.gift_type),
+      nombreProducto: this.productName(),
       limitesDeUso: {
         cantidadMaximaPagosExitosos: 1
       },
@@ -116,9 +118,9 @@ export class WompiApiService {
       idEnlace: intent.wompi_id_enlace,
       identificadorEnlaceComercio: intent.id,
       monto: centsToAmount(intent.amount_cents),
-      // Mirror the create nombreProducto (derived from the same intent's gift_type):
-      // the PUT replaces the whole object, so a mismatch would rename the link.
-      nombreProducto: this.productName(intent.gift_type),
+      // Mirror the create nombreProducto: the PUT replaces the whole object, so a
+      // mismatch would rename the link.
+      nombreProducto: this.productName(),
       vigencia: {
         // Fully in the past (both ends before now) so Wompi marks the link unusable,
         // yet the span is >=5 minutes so it passes the minimum-vigencia validation.
@@ -137,18 +139,13 @@ export class WompiApiService {
     }
   }
 
-  // The donor sees this on Wompi's hosted payment sheet. A gift_type intent names the
-  // aportación ("Diezmo — <iglesia>" / "Ofrenda — <iglesia>"); legacy/US intents keep
-  // the neutral "Donación <iglesia>".
-  private productName(giftType: DonationGiftType | null): string {
-    const name = displayName(this.env);
-    if (giftType === "DIEZMO") {
-      return `Diezmo — ${name}`;
-    }
-    if (giftType === "OFRENDA") {
-      return `Ofrenda — ${name}`;
-    }
-    return `Donación ${name}`;
+  // The donor sees this on Wompi's hosted sheet, so it reads as the ministry the
+  // entrega belongs to — the same brand title the /donar wizard carries — not as a
+  // product being bought. Links are minted per donation, so there is nothing to
+  // disambiguate here: the diezmo/ofrenda distinction rides the intent's gift_type
+  // onto the CDE apéndice, and the legal cuerpoDocumento.descripcion stays "DONACIÓN".
+  private productName(): string {
+    return PRODUCT_NAME;
   }
 
   // Cards-only forma de pago. The permitir/permite prefixes are intentionally
@@ -278,12 +275,6 @@ export class WompiApiService {
 // through cents keeps floating-point noise out (e.g. 2550 -> 25.5, not 25.4999).
 function centsToAmount(cents: number): number {
   return Math.round(cents) / 100;
-}
-
-function displayName(env: Env): string {
-  const config = getEmisorConfig(env);
-  const name = config.nombreComercial?.trim() || config.nombre.trim();
-  return name;
 }
 
 // Deterministic positive integer derived from the intent id, so mock links carry

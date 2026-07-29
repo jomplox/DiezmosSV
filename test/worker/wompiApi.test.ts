@@ -103,7 +103,7 @@ describe("Wompi API service", () => {
     expect(body).toMatchObject({
       identificadorEnlaceComercio: "di_test",
       monto: 25.5,
-      nombreProducto: "Donación Iglesia Demo",
+      nombreProducto: "Diezmos y Ofrendas",
       limitesDeUso: { cantidadMaximaPagosExitosos: 1 },
       // Cards only: no puntoAgricola, cuotas, bitcoin, quickpay, or nequi.
       formaPago: CARDS_ONLY_FORMA_PAGO,
@@ -120,44 +120,24 @@ describe("Wompi API service", () => {
     expect(new Date(body.vigencia.fechaFin).getTime() - new Date(body.vigencia.fechaInicio).getTime()).toBe(60 * 60 * 1000);
   });
 
-  it("names the link Diezmo — <iglesia> when the intent is a diezmo", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
-    vi.stubGlobal("fetch", fetchMock);
+  // The donor sees this on Wompi's hosted sheet. Links are minted per donation, so the
+  // name carries the ministry brand rather than the gift type — diezmo vs ofrenda rides
+  // the intent's gift_type onto the CDE apéndice, not the link.
+  it.each([["DIEZMO"], ["OFRENDA"], [null]])(
+    "names every link with the ministry brand (gift_type %s)",
+    async (giftType) => {
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+        .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
+      vi.stubGlobal("fetch", fetchMock);
 
-    await new WompiApiService(realEnv()).createPaymentLink(intent({ gift_type: "DIEZMO" }));
+      await new WompiApiService(realEnv()).createPaymentLink(intent({ gift_type: giftType as "DIEZMO" | "OFRENDA" | null }));
 
-    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { nombreProducto: string };
-    expect(body.nombreProducto).toBe("Diezmo — Iglesia Demo");
-  });
-
-  it("names the link Ofrenda — <iglesia> when the intent is an ofrenda", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await new WompiApiService(realEnv()).createPaymentLink(intent({ gift_type: "OFRENDA" }));
-
-    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { nombreProducto: string };
-    expect(body.nombreProducto).toBe("Ofrenda — Iglesia Demo");
-  });
-
-  it("keeps the neutral Donación <iglesia> name when the intent has no gift type", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
-      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
-    vi.stubGlobal("fetch", fetchMock);
-
-    await new WompiApiService(realEnv()).createPaymentLink(intent({ gift_type: null }));
-
-    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { nombreProducto: string };
-    expect(body.nombreProducto).toBe("Donación Iglesia Demo");
-  });
+      const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { nombreProducto: string };
+      expect(body.nombreProducto).toBe("Diezmos y Ofrendas");
+    }
+  );
 
   it("returns a deterministic mock link without any fetch in mock mode", async () => {
     const fetchMock = vi.fn();
@@ -236,7 +216,7 @@ describe("Wompi API service", () => {
       idEnlace: 555,
       identificadorEnlaceComercio: "di_test",
       monto: 25.5,
-      nombreProducto: "Donación Iglesia Demo",
+      nombreProducto: "Diezmos y Ofrendas",
       formaPago: CARDS_ONLY_FORMA_PAGO,
       configuracion: {
         urlRedirect: "https://app.example.org/donar/gracias",
@@ -253,7 +233,7 @@ describe("Wompi API service", () => {
     expect(end - start).toBeGreaterThanOrEqual(5 * 60 * 1000);
   });
 
-  it("mirrors the gift-type nombreProducto on deactivation (PUT replaces the whole object)", async () => {
+  it("mirrors the nombreProducto on deactivation (PUT replaces the whole object)", async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
@@ -264,7 +244,7 @@ describe("Wompi API service", () => {
 
     const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as { nombreProducto: string };
     // Must equal what create sent for the same intent, or the PUT would rename the link.
-    expect(body.nombreProducto).toBe("Ofrenda — Iglesia Demo");
+    expect(body.nombreProducto).toBe("Diezmos y Ofrendas");
   });
 
   it("does not call fetch when deactivating in mock mode", async () => {

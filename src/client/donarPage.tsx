@@ -93,7 +93,7 @@ import { formatNit, isValidNitFormat } from "../shared/nit";
 // Layout: a 3-step wizard in Givebutter's structural language — one concern per
 // screen inside a soft-shadowed 16px card — skinned in Elim's monochrome Gotham.
 // SV door:  Paso 1 monto (segmented Diezmo|Ofrenda + hero amount input),
-//           Paso 2 datos (documento + dirección), Paso 3 pago (Wompi handoff).
+//           Paso 2 datos (documento + geografía), Paso 3 entrega (Wompi handoff).
 // US door:  Paso 1 monto (segmented Única|Mensual + the same hero input),
 //           Paso 2 the embedded Givebutter giving form.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1079,7 +1079,7 @@ export function DonarPage() {
         {step === 2 && !usDonation && (
           <form className="donar-form donar-step" onSubmit={continueToPago}>
             <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
-            <p className="donar-note">Su nombre, correo, teléfono y dirección se ingresan al pagar con Wompi.</p>
+            <p className="donar-note">Su nombre, correo, teléfono y dirección se ingresan al completar su entrega con Wompi.</p>
 
             <div className="donar-doc-row">
               <label>
