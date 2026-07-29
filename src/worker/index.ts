@@ -1212,6 +1212,21 @@ async function handleDocumentCorrectionRetry(ctx: ApiRouteContext): Promise<Resp
   );
 }
 
+// Re-issue a CDE that MH rejected for a reason unrelated to the receptor (a bad
+// certificate, a misconfigured emisor) once that configuration has been fixed. Same
+// pipeline, claims and fresh-identifier allocation as a correction — see
+// handleDocumentFiscalCorrection for why the two modes refuse each other's failures.
+async function handleDocumentReissue(ctx: ApiRouteContext): Promise<Response> {
+  return handleDocumentFiscalCorrection(
+    ctx.request,
+    ctx.env,
+    ctx.repo,
+    ctx.actor!,
+    ctx.params[0],
+    "reissue"
+  );
+}
+
 async function handleDocumentList(ctx: ApiRouteContext): Promise<Response> {
   return jsonResponse(await ctx.repo.listDteDocuments({
     status: ctx.url.searchParams.get("status"),
@@ -1810,7 +1825,8 @@ const correctionRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: /^\/api\/wompi-events\/([^/]+)\/correction-data$/, role: "OPERATOR", handler: handleWompiCorrectionData },
   { method: "POST", pattern: /^\/api\/wompi-events\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleWompiCorrectionRetry },
   { method: "GET", pattern: /^\/api\/documents\/([^/]+)\/correction-data$/, role: "OPERATOR", handler: handleDocumentCorrectionData },
-  { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleDocumentCorrectionRetry }
+  { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/correct-and-retry$/, role: "OPERATOR", handler: handleDocumentCorrectionRetry },
+  { method: "POST", pattern: /^\/api\/documents\/([^/]+)\/reissue$/, role: "OPERATOR", handler: handleDocumentReissue }
 ];
 
 const exportRoutes: Array<Route<ApiRouteContext>> = [
@@ -2417,7 +2433,16 @@ async function handleWompiFiscalCorrection(
 ): Promise<Response> {
   const parsed = await readFiscalCorrectionRequest(request);
   if (parsed instanceof Response) return parsed;
-  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(parsed.receptor);
+  // The Wompi path always parses in "correct" mode, which rejects a body without a
+  // receptor — this narrows the optional the reissue mode introduced.
+  const correctedReceptor = parsed.receptor;
+  if (!correctedReceptor) {
+    return jsonResponse(
+      { error: "invalid_correction", message: "receptor debe ser un objeto." },
+      { status: 400 }
+    );
+  }
+  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(correctedReceptor);
 
   const event = await repo.getWompiEventById(wompiEventId);
   if (!event) return notFound();
@@ -2468,7 +2493,7 @@ async function handleWompiFiscalCorrection(
   }
   const changedFields = fiscalCorrectionChangedFields(
     beforeData.receptor,
-    parsed.receptor
+    correctedReceptor
   );
   if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
 
@@ -2476,7 +2501,7 @@ async function handleWompiFiscalCorrection(
   buildCorrectedWompiCandidate({
     payload,
     intent: binding.kind === "bound" ? binding.intent : null,
-    correction: parsed.receptor,
+    correction: correctedReceptor,
     config,
     environment: event.environment,
     sequence: event.control_sequence ?? 1,
@@ -2489,7 +2514,7 @@ async function handleWompiFiscalCorrection(
     requestPayloadSha256,
     environment: event.environment,
     beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
-    correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
+    correctedReceptorJson: fiscalCorrectionPayload(correctedReceptor),
     changedFieldsJson: JSON.stringify(changedFields),
     createdBy: actor.id
   });
@@ -2518,19 +2543,44 @@ async function handleWompiFiscalCorrection(
   return queuedFiscalCorrectionResponse(claim.correction.id);
 }
 
+// mode "correct": the donor's data caused the rejection, so the operator edits the
+// receptor and at least one field must change.
+// mode "reissue": the rejection had nothing to do with the receptor (a bad certificate,
+// a misconfigured emisor). Nothing to edit — the SAME receptor is re-issued once the
+// configuration is fixed. The two are mutually exclusive by design: each refuses the
+// other's failures, so a data problem can never be "retried" into another rejection and
+// a config problem can never be worked around by rewriting a donor's fiscal address.
+// Everything downstream is shared: idempotency, the fiscal claim, the ambiente policy,
+// the trusted-source check, and the fresh codigoGeneracion/numeroControl allocation.
 async function handleDocumentFiscalCorrection(
   request: Request,
   env: Env,
   repo: Repository,
   actor: AuthUser,
-  documentId: string
+  documentId: string,
+  mode: "correct" | "reissue" = "correct"
 ): Promise<Response> {
-  const parsed = await readFiscalCorrectionRequest(request);
+  const parsed = await readFiscalCorrectionRequest(request, mode);
   if (parsed instanceof Response) return parsed;
-  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(parsed.receptor);
 
   const document = await repo.getDteDocument(documentId);
   if (!document) return notFound();
+  // A reissue carries no receptor: it re-uses the document's own, so the payload it is
+  // idempotent over can only be derived once the document is loaded.
+  let effectiveReceptor: FiscalReceptorCorrection;
+  if (mode === "reissue") {
+    try {
+      effectiveReceptor = effectiveDocumentCorrectionData(document).receptor;
+    } catch {
+      return fiscalCorrectionConflict(
+        "reissue_source_unreadable",
+        "El JSON original del CDE no pudo leerse para reemitirlo."
+      );
+    }
+  } else {
+    effectiveReceptor = parsed.receptor!;
+  }
+  const requestPayloadSha256 = await fiscalCorrectionRequestDigest(effectiveReceptor);
   const existing = await existingFiscalCorrectionResponse(
     repo,
     parsed.requestId,
@@ -2563,14 +2613,28 @@ async function handleDocumentFiscalCorrection(
   }
 
   const beforeData = effectiveDocumentCorrectionData(document);
-  if (!beforeData.correctable) {
+  // The two modes guard each other. A receptor-correctable failure must NOT be reissued
+  // unchanged — MH would reject it again and consume another control number doing so —
+  // and a configuration failure must NOT be "corrected", because rewriting a donor's
+  // fiscal address would not fix the signature and would falsify the document.
+  if (mode === "reissue") {
+    if (beforeData.correctable) {
+      return fiscalCorrectionConflict(
+        "reissue_not_applicable",
+        "El rechazo señala datos del receptor: corrija los datos en vez de reemitir."
+      );
+    }
+  } else if (!beforeData.correctable) {
     return fiscalCorrectionNotAllowedResponse(beforeData.guidance);
   }
   const changedFields = fiscalCorrectionChangedFields(
     beforeData.receptor,
-    parsed.receptor
+    effectiveReceptor
   );
-  if (changedFields.length === 0) return unchangedFiscalCorrectionResponse();
+  // A reissue changes nothing by definition; only a correction must actually differ.
+  if (mode === "correct" && changedFields.length === 0) {
+    return unchangedFiscalCorrectionResponse();
+  }
 
   const config = getEmisorConfig(env);
   try {
@@ -2586,7 +2650,7 @@ async function handleDocumentFiscalCorrection(
   }
   buildCorrectedDirectCandidate({
     sourceDocument: document,
-    correction: parsed.receptor,
+    correction: effectiveReceptor,
     config,
     sequence: 1
   });
@@ -2597,7 +2661,7 @@ async function handleDocumentFiscalCorrection(
     requestPayloadSha256,
     environment: document.environment,
     beforeReceptorJson: fiscalCorrectionPayload(beforeData.receptor),
-    correctedReceptorJson: fiscalCorrectionPayload(parsed.receptor),
+    correctedReceptorJson: fiscalCorrectionPayload(effectiveReceptor),
     changedFieldsJson: JSON.stringify(changedFields),
     createdBy: actor.id
   });
@@ -2627,10 +2691,13 @@ async function handleDocumentFiscalCorrection(
 }
 
 async function readFiscalCorrectionRequest(
-  request: Request
+  request: Request,
+  mode: "correct" | "reissue" = "correct"
 ): Promise<{
   requestId: string;
-  receptor: FiscalReceptorCorrection;
+  // Absent in "reissue": the receptor is taken from the document being re-issued, so a
+  // caller cannot smuggle receptor edits in through this endpoint.
+  receptor?: FiscalReceptorCorrection;
 } | Response> {
   const body = await readJsonObject(request, {
     limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
@@ -2654,6 +2721,20 @@ async function readFiscalCorrectionRequest(
       },
       { status: 400 }
     );
+  }
+  if (mode === "reissue") {
+    // Nothing to validate beyond the request id: a reissue must not carry a receptor,
+    // and accepting one would let it become an unaudited correction.
+    if (body.receptor !== undefined) {
+      return jsonResponse(
+        {
+          error: "protected_field",
+          message: "Una reemisión no acepta datos del receptor."
+        },
+        { status: 400 }
+      );
+    }
+    return { requestId };
   }
   if (!isRecord(body.receptor)) {
     return jsonResponse(

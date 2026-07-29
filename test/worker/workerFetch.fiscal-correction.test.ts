@@ -704,6 +704,109 @@ describe("guarded fiscal correction API", () => {
     };
   }
 
+  // ── Reissue after a CONFIGURATION fix ────────────────────────────────────
+  // MH can reject for reasons that have nothing to do with the donor's data —
+  // codigoMsg 802 "Firma no válida" (a bad certificate) being the case that
+  // prompted this. The correction dialog deliberately refuses those: correctable
+  // is false and it shows CONFIGURATION_GUIDANCE. That left no operator path at
+  // all to re-issue once the configuration WAS fixed, so a paid donation stayed
+  // stranded. Reissue fills exactly that gap and nothing else.
+  describe("reissue after configuration fix", () => {
+    // A rejection MH gave no receptor observations for: purely a config failure.
+    function configRejectedDocument(overrides: Partial<DteDocumentRecord> = {}): DteDocumentRecord {
+      return rejectedCorrectionDocument({
+        mh_estado: "RECHAZADO",
+        mh_observaciones_json: "[]",
+        ...overrides
+      });
+    }
+
+    it("re-issues a config-rejected document without requiring any data change", async () => {
+      const db = correctionDb();
+      const document = configRejectedDocument();
+      vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+      vi.spyOn(Repository.prototype, "claimDocumentFiscalCorrection").mockResolvedValue({
+        kind: "claimed",
+        correction: correctionRecord({
+          id: "fiscal_correction_reissue",
+          target_kind: "DTE_DOCUMENT",
+          wompi_event_id: null,
+          document_id: document.id,
+          issuance_attempt_id: null,
+          fiscal_claim_id: "fiscal_claim_reissue"
+        })
+      });
+      const queued: IssuanceMessage[] = [];
+      const runtime = correctionRuntime(db, {
+        send: async (message: IssuanceMessage) => { queued.push(message); }
+      } as unknown as Queue<IssuanceMessage>);
+
+      const response = await worker.fetch(
+        correctionRequest(`/api/documents/${document.id}/reissue`, {
+          correctionRequestId: "11111111-1111-4111-8111-111111111111"
+        }),
+        runtime
+      );
+
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, queued: true });
+      // Goes through the SAME pipeline as a correction, so it inherits the fresh
+      // codigoGeneracion/numeroControl allocation and the re-sign.
+      expect(queued).toHaveLength(1);
+      expect(queued[0]).toMatchObject({ advancedDocumentId: document.id });
+      expect(queued[0].fiscalCorrectionId).toEqual(expect.any(String));
+    });
+
+    // The two paths are mutually exclusive on purpose: if the donor's data really
+    // was at fault, reissuing it unchanged would just be rejected again, and would
+    // quietly consume another control number doing so.
+    it("refuses a receptor-correctable rejection and points at correct-and-retry", async () => {
+      const db = correctionDb();
+      const document = configRejectedDocument({
+        mh_observaciones_json: JSON.stringify([
+          "Campo #/receptor/direccion contiene un valor inválido"
+        ])
+      });
+      vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+
+      const response = await worker.fetch(
+        correctionRequest(`/api/documents/${document.id}/reissue`, {
+          correctionRequestId: "70000003-2222-4222-8222-700000032222"
+        }),
+        correctionRuntime(db)
+      );
+
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "reissue_not_applicable" });
+    });
+
+    it("refuses to reissue a document that is not REJECTED", async () => {
+      const db = correctionDb();
+      const document = configRejectedDocument({ status: "ACCEPTED", sello_recibido: "SELLO" });
+      vi.spyOn(Repository.prototype, "getDteDocument").mockResolvedValue(document);
+
+      const response = await worker.fetch(
+        correctionRequest(`/api/documents/${document.id}/reissue`, {
+          correctionRequestId: "33333333-3333-4333-8333-333333333333"
+        }),
+        correctionRuntime(db)
+      );
+
+      expect(response.status).toBe(409);
+    });
+
+    it("requires OPERATOR", async () => {
+      const db = correctionDb("VIEWER");
+      const response = await worker.fetch(
+        correctionRequest("/api/documents/doc_rejected_correction/reissue", {
+          correctionRequestId: "44444444-4444-4444-8444-444444444444"
+        }),
+        correctionRuntime(db)
+      );
+      expect(response.status).toBe(403);
+    });
+  });
+
   function correctionRuntime(
     db: InMemoryD1,
     queue?: Queue<IssuanceMessage>

@@ -904,6 +904,63 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setFiscalCorrectionError("");
   }
 
+  // Re-issue a rejected CDE untouched after a CONFIGURATION fix (a replaced certificate,
+  // a corrected emisor). Only reachable for document targets whose failure is not
+  // receptor-correctable; the server enforces the same rule and refuses otherwise.
+  async function reissueFiscalDocument() {
+    const target = fiscalCorrectionTarget;
+    if (!target || target.kind === "WOMPI_EVENT" || !fiscalCorrectionData || busy) return;
+    const targetKey = fiscalCorrectionTargetKey(target);
+    const submission = fiscalCorrectionSubmissionForTarget(
+      fiscalCorrectionSubmissions.current,
+      targetKey,
+      fiscalCorrectionData.receptor
+    );
+    setFiscalCorrectionError("");
+    setBusy("fiscal-correction-submit");
+    let accepted = false;
+    let acceptedMessage = "";
+    try {
+      // No receptor in the body: the server re-uses the document's own, so this cannot
+      // become an unaudited correction.
+      const result = await accountApi<FiscalCorrectionSubmitResponse>(
+        `/api/documents/${target.id}/reissue`,
+        { method: "POST", body: { correctionRequestId: submission.correctionRequestId } }
+      );
+      fiscalCorrectionSubmissions.current.delete(targetKey);
+      accepted = true;
+      acceptedMessage = fiscalCorrectionSubmissionMessage(result);
+    } catch (error) {
+      if (isApiError(error)) {
+        fiscalCorrectionSubmissions.current.delete(targetKey);
+        if (error.details.error === "fiscal_correction_queue_failed") {
+          accepted = true;
+          acceptedMessage = "La reemisión quedó guardada y se reintentará automáticamente.";
+        } else {
+          setFiscalCorrectionError(error.message);
+          if (error.status === 401) handleApiFailure(error);
+        }
+      } else if (!(error instanceof StaleAccountStateError)) {
+        setFiscalCorrectionError(
+          "No se pudo confirmar la respuesta. Revise su conexión y vuelva a intentarlo; se conservará la misma solicitud."
+        );
+      }
+    } finally {
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) {
+        setBusy("");
+      }
+    }
+    if (!accepted) return;
+    closeFiscalCorrection();
+    setToast(acceptedMessage);
+    try {
+      await refresh();
+      setSelectedDocumentDetailVersion((current) => current + 1);
+    } catch {
+      // The reissue is queued regardless; a failed refresh must not look like failure.
+    }
+  }
+
   async function submitFiscalCorrection(receptor: FiscalReceptorCorrection) {
     const target = fiscalCorrectionTarget;
     if (!target || !fiscalCorrectionData || busy) return;
@@ -1914,6 +1971,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           error={fiscalCorrectionError}
           onCancel={closeFiscalCorrection}
           onSubmit={submitFiscalCorrection}
+          onReissue={
+            fiscalCorrectionTarget.kind === "WOMPI_EVENT" ? undefined : reissueFiscalDocument
+          }
         />
       )}
       <div className="toast-region" role="status" aria-live="polite">
