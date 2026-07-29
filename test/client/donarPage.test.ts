@@ -376,6 +376,18 @@ describe("donar step labels", () => {
     // compact header was tried and rolled back as a visual regression.
     expect(donarSource).not.toContain("donar-compact-head");
   });
+
+  // Doctrinal guard, not a style preference: a diezmo or ofrenda is voluntary and
+  // given expecting nothing in return, so the donor is never "paying" and never a
+  // customer buying something. Transactional verbs must not reach donor-facing copy.
+  // MH catalog labels (CAT-017 "forma de pago", "Cuentas por pagar del receptor") and
+  // Wompi API field names (EnlacePago, formaPago) are external vocabulary and exempt —
+  // neither appears in this file. See AGENTS.md → Donor-facing language.
+  it("keeps transactional vocabulary out of the donor wizard copy", () => {
+    for (const forbidden of ["al pagar", "Pagar", "su pago", "Su pago", "el pago", "comprar", "compra"]) {
+      expect(donarSource).not.toContain(forbidden);
+    }
+  });
 });
 
 describe("donar frequent countries", () => {
@@ -791,7 +803,10 @@ describe("donar wizard source contract", () => {
     // must not render those fields — and must tell the donor what comes next.
     expect(donarSource).not.toContain("Nombre completo");
     expect(donarSource).not.toContain("Correo electrónico");
-    expect(donarSource).toContain("Su nombre, correo, teléfono y dirección se ingresan al pagar con Wompi.");
+    // "entrega", never "pagar": a diezmo is a voluntary gift given expecting nothing
+    // in return, not a purchase. See AGENTS.md → Donor-facing language.
+    expect(donarSource).toContain("Su nombre, correo, teléfono y dirección se ingresan al completar su entrega con Wompi.");
+    expect(donarSource).not.toContain("al pagar con Wompi");
   });
 
   it("wires cascading municipio/distrito selects to the department-scoped catalog helpers", () => {
