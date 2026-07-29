@@ -1008,6 +1008,12 @@ async function handleBootstrapOwner(ctx: ApiRouteContext): Promise<Response> {
     if (error instanceof BootstrapUnavailableError) {
       return jsonResponse({ error: "bootstrap_unavailable", message: error.message }, { status: 409 });
     }
+    // The operator's likeliest mistake here is a password that misses one policy rule.
+    // Re-throwing turned that into an opaque 500 with nothing to act on; mirror the
+    // mapping the user-create and password-reset routes already use.
+    if (error instanceof PasswordPolicyError) {
+      return jsonResponse({ error: "weak_password", message: error.message }, { status: 400 });
+    }
     throw error;
   }
   await ctx.repo.createAudit({ action: "OWNER_BOOTSTRAPPED", entityType: "user", entityId: owner.id, summary: owner.email });

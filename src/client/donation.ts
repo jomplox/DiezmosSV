@@ -1,3 +1,4 @@
+import { CHECKOUT_WINDOW_MS } from "../shared/checkout";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES } from "../shared/catalogs";
 import { isValidDui } from "../shared/dui";
 import { formatCents } from "../shared/money";
@@ -21,7 +22,9 @@ export function donarDatosPath(intentId: string): string {
 // ~3 minutes with a neutral closing message (covers slow MH, deferred
 // transmission while MH is down, and abandoned checkouts — never implies failure).
 export const DONAR_POLL_INTERVAL_MS = 5_000;
-export const DONAR_POLL_TIMEOUT_MS = 180_000;
+// Matches the window the Worker sets on the Wompi link, so the page never gives up
+// while Wompi still has the donor mid-challenge. See src/shared/checkout.ts.
+export const DONAR_POLL_TIMEOUT_MS = CHECKOUT_WINDOW_MS;
 // If the embedded checkout iframe has not loaded within this window, surface the
 // hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;

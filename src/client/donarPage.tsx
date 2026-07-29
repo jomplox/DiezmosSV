@@ -1276,40 +1276,42 @@ export function DonarPage() {
             {stage === "widget" && intent && (
               <div className="donar-handoff">
                 <p className="donar-intro">Complete su entrega de forma segura con Wompi. Al finalizar, verá aquí la confirmación.</p>
-                {handoff === "verifying" ? (
+                {/* The iframe stays mounted for the WHOLE widget stage. Wompi posts
+                    { message: "close" } both when the donor backs out and when it hands
+                    off to the bank's 3DS challenge — and that challenge renders inside
+                    this very iframe. Unmounting it on "verifying" killed the challenge
+                    mid-flight: no charge, no CDE. The spinner sits above it instead. */}
+                {handoff === "verifying" && (
                   <div className="donar-widget-loading" role="status">
                     <span className="donar-spinner" aria-hidden="true" />
                     {DONAR_WIDGET_VERIFYING_MESSAGE}
                   </div>
-                ) : (
-                  <>
-                    {handoff === "loading" && (
-                      <div className="donar-widget-loading" role="status">
-                        <span className="donar-spinner" aria-hidden="true" />
-                        {DONAR_WIDGET_LOADING_MESSAGE}
-                      </div>
-                    )}
-                    {handoff === "delayed" && (
-                      <div className="donar-widget-delayed">
-                        <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
-                        <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
-                          {DONAR_WIDGET_FALLBACK_CTA}
-                        </a>
-                      </div>
-                    )}
-                    <iframe
-                      className="donar-embed"
-                      src={widgetUrlFrom(intent.urlEnlaceLargo)}
-                      title="Entrega segura con Wompi"
-                      style={embedHeight ? { height: embedHeight } : undefined}
-                      scrolling={embedHeight ? "no" : undefined}
-                      onLoad={() => setHandoff("ready")}
-                    />
-                    <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
-                      ¿No se muestra el formulario? Continúe aquí
-                    </button>
-                  </>
                 )}
+                {handoff === "loading" && (
+                  <div className="donar-widget-loading" role="status">
+                    <span className="donar-spinner" aria-hidden="true" />
+                    {DONAR_WIDGET_LOADING_MESSAGE}
+                  </div>
+                )}
+                {handoff === "delayed" && (
+                  <div className="donar-widget-delayed">
+                    <p>{DONAR_WIDGET_DELAYED_MESSAGE}</p>
+                    <a className="primary donar-widget-fallback" href={intent.urlEnlace}>
+                      {DONAR_WIDGET_FALLBACK_CTA}
+                    </a>
+                  </div>
+                )}
+                <iframe
+                  className="donar-embed"
+                  src={widgetUrlFrom(intent.urlEnlaceLargo)}
+                  title="Entrega segura con Wompi"
+                  style={embedHeight ? { height: embedHeight } : undefined}
+                  scrolling={embedHeight ? "no" : undefined}
+                  onLoad={() => setHandoff("ready")}
+                />
+                <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
+                  ¿No se muestra el formulario? Continúe aquí
+                </button>
               </div>
             )}
 

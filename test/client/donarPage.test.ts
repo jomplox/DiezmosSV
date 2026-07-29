@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { CHECKOUT_WINDOW_MINUTES, CHECKOUT_WINDOW_MS } from "../../src/shared/checkout";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -631,10 +632,14 @@ describe("donar widget handoff", () => {
     );
   });
 
-  it("polls the public intent status endpoint every ~5s and stops after ~3 minutes", () => {
+  // The poll must outlast Wompi's checkout, not the other way round: it previously gave
+  // up at 3 minutes while Wompi kept the attempt interface open, so a donor still doing
+  // the mandatory production 3DS challenge was dropped onto the neutral closing message.
+  it("polls every ~5s for exactly as long as Wompi keeps the checkout open", () => {
     expect(DONAR_INTENT_PATH).toBe("/api/donations/intent");
     expect(DONAR_POLL_INTERVAL_MS).toBe(5_000);
-    expect(DONAR_POLL_TIMEOUT_MS).toBe(180_000);
+    expect(DONAR_POLL_TIMEOUT_MS).toBe(CHECKOUT_WINDOW_MS);
+    expect(DONAR_POLL_TIMEOUT_MS).toBe(CHECKOUT_WINDOW_MINUTES * 60_000);
     // Script/widget-render fallback timeout is short.
     expect(DONAR_SCRIPT_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
   });
@@ -698,6 +703,21 @@ describe("donar thank-you page", () => {
 });
 
 describe("donar wizard source contract", () => {
+  // PRODUCTION BLOCKER regression guard. Wompi posts { message: "close" } for BOTH its
+  // back arrow AND the hand-off to the bank's 3DS challenge. Test-mode Wompi has no
+  // challenge, so "close" only ever arrived after the donor finished and unmounting the
+  // iframe looked correct. In production 3DS is mandatory: the challenge renders INSIDE
+  // this iframe, so replacing it with a spinner destroys the challenge mid-flight — the
+  // donor is never charged and no CDE is ever issued. The iframe must stay mounted for
+  // the whole "widget" stage; the verifying spinner may sit beside it, never instead.
+  it("keeps the Wompi iframe mounted while verifying (the 3DS challenge lives in it)", () => {
+    expect(donarSource).not.toContain('handoff === "verifying" ? (');
+    // Exactly one Wompi checkout iframe (donar-embed; the other is the US Givebutter
+    // frame), rendered unconditionally within the widget stage rather than behind a
+    // handoff ternary.
+    expect(donarSource.match(/className="donar-embed"/g) ?? []).toHaveLength(1);
+  });
+
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {
     // Religious framing: the heading names the aportación. The SV lane reuses the
     // chooser's globe + official flag artwork; the US lane keeps its inline SVG
