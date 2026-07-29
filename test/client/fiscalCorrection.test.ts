@@ -51,6 +51,38 @@ const domesticReceptor: FiscalReceptorCorrection = {
   complemento: "Colonia Centro"
 };
 
+// A CONFIGURATION-caused rejection (bad certificate, misconfigured emisor) has no
+// receptor data to fix: correctable is false, the correction submit stays disabled, and
+// before this there was no way at all to re-issue once the configuration was repaired —
+// a paid donation just stayed stranded. The dialog now offers a reissue instead.
+describe("reissue affordance for configuration failures", () => {
+  const configFailure: FiscalCorrectionData = {
+    receptor: domesticReceptor,
+    targetStatus: "REJECTED",
+    failureReason: "Firma no válida",
+    correctable: false,
+    guidance: "Revise Configuración y la evidencia técnica antes de volver a intentar.",
+    activeCorrection: null
+  };
+
+  it("offers a reissue when the failure is not receptor-correctable", () => {
+    const html = renderDialog(configFailure, { onReissue: vi.fn(async () => undefined) });
+    expect(html).toContain("Reemitir sin cambios");
+    // The guidance still explains WHY the fields are not the answer.
+    expect(html).toContain("Revise Configuración");
+  });
+
+  it("does not offer a reissue when the receptor data is what MH rejected", () => {
+    const html = renderDialog(data(), { onReissue: vi.fn(async () => undefined) });
+    expect(html).not.toContain("Reemitir sin cambios");
+  });
+
+  it("does not offer a reissue when the caller supplies no handler", () => {
+    const html = renderDialog(configFailure);
+    expect(html).not.toContain("Reemitir sin cambios");
+  });
+});
+
 function data(
   receptor: FiscalReceptorCorrection = domesticReceptor,
   activeCorrection: FiscalCorrectionData["activeCorrection"] = null
@@ -70,9 +102,11 @@ function renderDialog(
   options: {
     initialDraft?: FiscalReceptorCorrection;
     retryingSubmittedPayload?: boolean;
+    onReissue?: () => Promise<void>;
   } = {}
 ): string {
   return renderToStaticMarkup(createElement(FiscalCorrectionDialog, {
+    onReissue: options.onReissue,
     open: true,
     data: value,
     initialDraft: options.initialDraft,

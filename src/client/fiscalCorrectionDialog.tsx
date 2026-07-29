@@ -180,7 +180,8 @@ export function FiscalCorrectionDialog({
   busy,
   error,
   onCancel,
-  onSubmit
+  onSubmit,
+  onReissue
 }: {
   open: boolean;
   data: FiscalCorrectionData | null;
@@ -191,6 +192,11 @@ export function FiscalCorrectionDialog({
   error: string;
   onCancel: () => void;
   onSubmit: (value: FiscalReceptorCorrection) => Promise<void>;
+  // Offered ONLY when the rejection was not about the receptor (correctable === false):
+  // the fields cannot fix a bad certificate, so the operator repairs the configuration
+  // and re-issues the document untouched. Absent for receptor failures, where editing
+  // the data is the correct remedy.
+  onReissue?: () => Promise<void>;
 }) {
   const [form, setForm] = useState<FiscalReceptorCorrection>(
     () => initialDraft ?? data?.receptor ?? emptyCorrection()
@@ -554,6 +560,16 @@ export function FiscalCorrectionDialog({
             <button type="button" onClick={onCancel} disabled={busy}>
               Cancelar
             </button>
+            {onReissue && !data.correctable && (
+              <button
+                type="button"
+                className="primary"
+                disabled={busy || activeStatus !== null}
+                onClick={() => { void onReissue(); }}
+              >
+                Reemitir sin cambios
+              </button>
+            )}
             <button type="submit" className="primary" disabled={!canSubmit}>
               Guardar y reintentar
             </button>
