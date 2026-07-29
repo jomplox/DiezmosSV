@@ -48,7 +48,7 @@ export interface IntentDatosInput {
   direccionDepartamento: string;
   direccionMunicipio: string;
   direccionDistrito: string;
-  direccionComplemento: string;
+  direccionComplemento: string | null;
   donorPais: string | null;
 }
 
@@ -229,21 +229,31 @@ export async function completeIntentForPostAcceptOwner(
 // COMPLETED stays reserved for MH acceptance of the CDE. The `paid_at IS NULL` guard
 // makes it idempotent — a webhook replay never moves the timestamp, and an unknown or
 // already-paid intent simply matches nothing (no-op, no error).
+// donorPhone/direccionComplemento carry the contact data Wompi's hosted sheet collected:
+// /donar stopped asking for either once Wompi began forcing them, so the webhook is the
+// only source and the contacts/CRM export still reads both columns off this row. COALESCE
+// means a value the donor or an admin did supply is never overwritten; the caller passes
+// already-normalized values so this stays free of Wompi payload semantics.
 export async function markIntentPaid(
   db: D1Database,
   id: string,
-  expectedLinkId: number
+  expectedLinkId: number,
+  donorPhone: string | null = null,
+  direccionComplemento: string | null = null
 ): Promise<void> {
   await db
     .prepare(
       `UPDATE donation_intents
-            SET paid_at = ?, updated_at = ?
+            SET paid_at = ?,
+                updated_at = ?,
+                donor_phone = COALESCE(donor_phone, ?),
+                direccion_complemento = COALESCE(direccion_complemento, ?)
           WHERE id = ?
             AND wompi_id_enlace = ?
             AND status IN ('LINK_CREATED', 'EXPIRED')
             AND paid_at IS NULL`
     )
-    .bind(nowIso(), nowIso(), id, expectedLinkId)
+    .bind(nowIso(), nowIso(), donorPhone, direccionComplemento, id, expectedLinkId)
     .run();
 }
 

@@ -6,12 +6,14 @@ import {
   buildCdeDocument,
   buildDirectCdeDocument,
   buildInvalidacionEvent,
-  cdeEmisorFromConfig
+  cdeEmisorFromConfig,
+  RECEPTOR_ADDRESS_FALLBACK,
+  resolveDonorComplemento
 } from "../../src/worker/domain/dteBuilder";
 import type { DteDocumentRecord, EmisorConfig, WompiWebhook } from "../../src/worker/types";
 import { emisorConfig } from "./fixtures";
 
-const FALLBACK_COMPLEMENTO = "No proporcionada por el donante";
+const FALLBACK_COMPLEMENTO = RECEPTOR_ADDRESS_FALLBACK;
 
 describe("DTE builders", () => {
   it("builds a schema-valid CDE from the Wompi webhook sample", () => {
@@ -609,5 +611,37 @@ describe("DTE builders", () => {
     expect(event.emisor.codPuntoVentaMH).toBe("P004");
     expect(event.identificacion.fecEmi).toBe(original.identificacion.fecEmi);
     expect(event.documento.fecEmi).toBe(original.identificacion.fecEmi);
+  });
+});
+
+// Wompi's production sheet forces the donor's address, so /donar stopped asking for it.
+// The complemento is resolved ONCE here and reused by both the CDE receptor and the
+// donation_intents backfill, so the fiscal document and the CRM export never disagree.
+describe("resolveDonorComplemento", () => {
+  const withDireccion = (Direccion: string | undefined): WompiWebhook =>
+    ({ ...wompiSample, Cliente: { ...wompiSample.Cliente, Direccion } }) as WompiWebhook;
+
+  it("prefers the complemento the donor typed on the intent", () => {
+    expect(resolveDonorComplemento("Calle Donante 123", withDireccion("Av. Wompi 456"))).toBe("Calle Donante 123");
+  });
+
+  it("falls back to the Wompi address when the intent carries none", () => {
+    expect(resolveDonorComplemento(null, withDireccion("Av. Wompi 456"))).toBe("Av. Wompi 456");
+  });
+
+  it("falls back to the constant when neither source has an address", () => {
+    expect(resolveDonorComplemento(null, withDireccion(undefined))).toBe(RECEPTOR_ADDRESS_FALLBACK);
+  });
+
+  it("treats a whitespace-only Wompi address as absent", () => {
+    expect(resolveDonorComplemento(null, withDireccion("   "))).toBe(RECEPTOR_ADDRESS_FALLBACK);
+  });
+
+  // MH's fe-cd-v2 caps direccion.complemento at 200. Our form used to enforce that;
+  // now the value comes from Wompi, whose hosted-link Direccion has no documented cap.
+  it("clamps an oversize Wompi address to MH's 200-character limit", () => {
+    const resolved = resolveDonorComplemento(null, withDireccion("A".repeat(250)));
+    expect(resolved).toHaveLength(200);
+    expect(resolved).toBe("A".repeat(200));
   });
 });

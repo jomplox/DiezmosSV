@@ -289,13 +289,11 @@ export interface DonationFormInput {
   donorDocumentType: DonorDocumentType;
   donorDocument: string;
   donorName: string;
-  donorPhone: string;
   foreignResident: boolean;
   pais: string;
   departamento: string;
   municipio: string;
   distrito: string;
-  complemento: string;
 }
 
 export function isDonarPath(pathname: string): boolean {
@@ -336,8 +334,7 @@ export type DonationField =
   | "pais"
   | "departamento"
   | "municipio"
-  | "distrito"
-  | "complemento";
+  | "distrito";
 
 export type DonationFieldErrors = Partial<Record<DonationField, string>>;
 
@@ -349,8 +346,7 @@ export const DONATION_STEP2_FIELD_ORDER: readonly DonationField[] = [
   "pais",
   "departamento",
   "municipio",
-  "distrito",
-  "complemento"
+  "distrito"
 ];
 
 export function firstDonationFieldError(
@@ -432,14 +428,6 @@ export function donationStep2FieldErrors(input: DonationFormInput): DonationFiel
       errors.distrito = "Seleccione un distrito.";
     }
   }
-  if (!input.complemento.trim()) {
-    errors.complemento = "Ingrese su dirección.";
-  } else if (input.complemento.trim().length > 200) {
-    // MH's fe-cd-v2 schema caps direccion.complemento at 200 characters; mirror the
-    // server cap so the donor hears it before paying, not at CDE build time.
-    errors.complemento = "La dirección no debe exceder 200 caracteres.";
-  }
-
   return errors;
 }
 
@@ -456,13 +444,11 @@ const DONATION_FIELD_ERROR_CLEARERS: Record<keyof DonationFormInput, readonly Do
   donorDocumentType: ["donorDocument", "donorName"],
   donorDocument: ["donorDocument"],
   donorName: ["donorName"],
-  donorPhone: [],
   foreignResident: ["pais", "departamento", "municipio", "distrito"],
   pais: ["pais"],
   departamento: ["departamento"],
   municipio: ["municipio"],
-  distrito: ["distrito"],
-  complemento: ["complemento"]
+  distrito: ["distrito"]
 };
 
 export function clearDonationFieldErrors(
@@ -512,12 +498,10 @@ export function donationIntentBody(form: DonationFormInput): Record<string, unkn
     donorDocumentType: form.donorDocumentType,
     donorDocument: form.donorDocument.trim(),
     donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,
-    donorPhone: form.donorPhone.trim() || undefined,
     departamento: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.departamento,
     municipio: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.municipio,
     distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
-    pais: form.foreignResident ? form.pais : undefined,
-    complemento: form.complemento.trim()
+    pais: form.foreignResident ? form.pais : undefined
   };
 }
 
@@ -539,12 +523,10 @@ export function donationDatosBody(form: DonationFormInput): Record<string, unkno
     donorDocumentType: form.donorDocumentType,
     donorDocument: form.donorDocument.trim(),
     donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,
-    donorPhone: form.donorPhone.trim() || undefined,
     departamento: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.departamento,
     municipio: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.municipio,
     distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
-    pais: form.foreignResident ? form.pais : undefined,
-    complemento: form.complemento.trim()
+    pais: form.foreignResident ? form.pais : undefined
   };
 }
 

@@ -421,12 +421,23 @@ describe("donation intents", () => {
     await expect(response.json()).resolves.toMatchObject({ error: "invalid_distrito" });
   });
 
-  it("rejects a missing complemento", async () => {
+  // /donar stopped collecting the address once Wompi's production sheet began forcing
+  // it, so an intent without one is now the NORMAL case — the street address arrives on
+  // the payment webhook and is resolved into the CDE at issuance.
+  it("accepts an intent with no complemento and stores it as null", async () => {
     const db = new InMemoryD1();
-    const response = await worker.fetch(intentRequest(validIntentBody({ complemento: "" })), env(db));
+    const response = await worker.fetch(intentRequest(validIntentBody({ complemento: undefined })), env(db));
 
-    expect(response.status).toBe(400);
-    await expect(response.json()).resolves.toMatchObject({ error: "invalid_complemento" });
+    expect(response.status).toBe(201);
+    expect(db.donationIntents[0].direccion_complemento).toBeNull();
+  });
+
+  it("accepts an intent with no donorPhone and stores it as null", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(intentRequest(validIntentBody({ donorPhone: undefined })), env(db));
+
+    expect(response.status).toBe(201);
+    expect(db.donationIntents[0].donor_phone).toBeNull();
   });
 
   it("rejects a complemento longer than the MH schema's 200-char cap", async () => {
@@ -914,6 +925,25 @@ describe("donation intents", () => {
       expect(intent.status).toBe("LINK_CREATED");
       expect(intent.wompi_id_enlace).toBe(123456);
       expect(intent.datos_token_hash).toBeNull();
+    });
+
+    // The shape /donar actually submits now: no teléfono, no dirección. Both are
+    // forced on Wompi's sheet and arrive on the payment webhook instead.
+    it("completes a draft from datos that carries no phone or address", async () => {
+      const db = new InMemoryD1();
+      await seedDraft(db);
+      const { donorPhone: _p, complemento: _c, ...datosWithoutContact } = validDatos;
+
+      const response = await worker.fetch(datosRequest("di_draft_1", datosWithoutContact), env(db));
+
+      expect(response.status).toBe(200);
+      const intent = db.donationIntents.find((row) => row.id === "di_draft_1")!;
+      expect(intent.donor_document).toBe("10000001-9");
+      expect(intent.direccion_departamento).toBe("06");
+      // Left NULL for the webhook backfill to fill from Wompi's collected values.
+      expect(intent.donor_phone).toBeNull();
+      expect(intent.direccion_complemento).toBeNull();
+      expect(intent.status).toBe("LINK_CREATED");
     });
 
     it("rejects an oversized public datos body with 413 before mutating the draft", async () => {

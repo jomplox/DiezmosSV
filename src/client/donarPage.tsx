@@ -220,13 +220,11 @@ const emptyDonationForm: DonationFormInput = {
   donorDocumentType: "13",
   donorDocument: "",
   donorName: "",
-  donorPhone: "",
   foreignResident: false,
   pais: "",
   departamento: "",
   municipio: "",
-  distrito: "",
-  complemento: ""
+  distrito: ""
 };
 
 type DonarStage = "form" | "widget" | "thanks" | "closed";
@@ -1081,7 +1079,7 @@ export function DonarPage() {
         {step === 2 && !usDonation && (
           <form className="donar-form donar-step" onSubmit={continueToPago}>
             <p className="donar-intro">Complete sus datos para generar su comprobante de donación (CDE).</p>
-            <p className="donar-note">Su nombre y correo se ingresan al pagar con Wompi.</p>
+            <p className="donar-note">Su nombre, correo, teléfono y dirección se ingresan al pagar con Wompi.</p>
 
             <div className="donar-doc-row">
               <label>
@@ -1141,17 +1139,6 @@ export function DonarPage() {
                 <DonarFieldError field="donorName" errors={fieldErrors} />
               </label>
             )}
-
-            <label>
-              <span>Teléfono (opcional)</span>
-              <input
-                value={form.donorPhone}
-                onChange={(event) => update({ donorPhone: event.target.value })}
-                placeholder="0000-0000"
-                aria-label="Teléfono (opcional)"
-                type="tel"
-              />
-            </label>
 
             {/* The extranjero toggle + geography only belong to the SV/mundo door.
                 The EE. UU. door (usDonation) never reaches this step's fields. */}
@@ -1227,21 +1214,6 @@ export function DonarPage() {
                 </label>
               </div>
             )}
-
-            <label>
-              <span>Dirección</span>
-              <textarea
-                id={donarFieldDomId("complemento")}
-                value={form.complemento}
-                onChange={(event) => update({ complemento: event.target.value })}
-                placeholder={form.foreignResident ? "Dirección completa en su país de residencia" : "Dirección completa"}
-                aria-label="Dirección"
-                aria-invalid={fieldErrors.complemento ? true : undefined}
-                aria-describedby={donarFieldErrorRef("complemento", fieldErrors)}
-                maxLength={200}
-              />
-              <DonarFieldError field="complemento" errors={fieldErrors} />
-            </label>
 
             {error && (
               <p className="error donar-error" role="alert">

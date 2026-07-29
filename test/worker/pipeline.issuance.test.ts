@@ -237,6 +237,74 @@ describe("IssuancePipeline.processWompiEvent acceptance", () => {
     });
   });
 
+  // /donar stopped asking for the address once Wompi's production sheet began forcing
+  // it, so a correlated intent now arrives with direccion_complemento NULL and the
+  // street address rides in on the webhook instead.
+  it("takes the receptor complemento from the Wompi webhook when the intent carries none", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db, { direccion_complemento: null });
+    const eventId = seedEvent(db, unitWebhook({
+      cliente: { ...(unitWebhook().cliente as Record<string, unknown>), Direccion: "Av. Wompi 456, San Salvador" }
+    }));
+    const runtime = await pipelineRuntime(db, []);
+    stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-ADDR", observaciones: [] }));
+
+    const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+
+    // The donor's catalog geography still comes from the intent; only the free-text
+    // complemento falls back to Wompi. Never null — MH rejects that with codigoMsg 096.
+    expect(JSON.parse(String(record!.plain_json)).receptor.direccion).toEqual({
+      departamento: INTENT_ADDRESS.departamento,
+      municipio: INTENT_ADDRESS.municipio,
+      distrito: INTENT_ADDRESS.distrito,
+      complemento: "Av. Wompi 456, San Salvador"
+    });
+  });
+
+  it("falls back to the not-provided constant when neither the intent nor Wompi has an address", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db, { direccion_complemento: null });
+    const eventId = seedEvent(db, unitWebhook());
+    const runtime = await pipelineRuntime(db, []);
+    stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-NOADDR", observaciones: [] }));
+
+    const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+
+    expect(JSON.parse(String(record!.plain_json)).receptor.direccion.complemento)
+      .toBe("No proporcionada por el donante");
+  });
+
+  // Regression guard. MH forbids a direccion object for a non-domiciled receptor, so a
+  // foreign donor's address survives ONLY via the DireccionExtranjera apéndice — which
+  // interpolates the complemento straight into a string. A null reaching that line would
+  // print the literal "Estados Unidos: null" onto a legally-binding fiscal document.
+  it("never prints a null address into the foreign-donor apéndice", async () => {
+    const db = new InMemoryD1();
+    seedIntent(db, {
+      direccion_departamento: "00",
+      direccion_municipio: "00",
+      direccion_distrito: "00",
+      direccion_complemento: null,
+      donor_pais: "US",
+      donor_document_type: "03",
+      donor_document: "AB-123456"
+    });
+    const eventId = seedEvent(db, unitWebhook({
+      cliente: { ...(unitWebhook().cliente as Record<string, unknown>), Direccion: "742 Evergreen Terrace, Springfield" }
+    }));
+    const runtime = await pipelineRuntime(db, []);
+    stubMhFetch(() => jsonResponse({ estado: "PROCESADO", selloRecibido: "SELLO-FOREIGN", observaciones: [] }));
+
+    const record = await new IssuancePipeline(runtime).processWompiEvent(eventId);
+    const document = JSON.parse(String(record!.plain_json));
+
+    expect(document.receptor.direccion).toBeNull();
+    const foreign = (document.apendice as Array<{ campo: string; valor: string }>)
+      .find((entry) => entry.campo === "DireccionExtranjera");
+    expect(foreign?.valor).toBe("Estados Unidos: 742 Evergreen Terrace, Springfield");
+    expect(foreign?.valor).not.toContain("null");
+  });
+
   it("returns the terminal document on queue redelivery without a second MH dispatch or email", async () => {
     const db = new InMemoryD1();
     seedIntent(db);

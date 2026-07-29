@@ -228,6 +228,9 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await expect(page.getByLabel("Tipo de documento")).toBeFocused();
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
+  // Wompi's hosted sheet forces both, so /donar must not ask a second time.
+  await expect(page.getByLabel("Dirección")).toHaveCount(0);
+  await expect(page.getByLabel("Teléfono (opcional)")).toHaveCount(0);
 
   // Default document type is DUI (13).
   await page.getByLabel("Número de documento").fill(DONOR.dui);
@@ -236,7 +239,6 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
   await page.getByLabel("Municipio").selectOption({ index: 1 });
   await page.getByLabel("Distrito").selectOption({ index: 1 });
-  await page.getByLabel("Dirección").fill("San Salvador, El Salvador");
 
   // Entering Paso 3 creates the payment intent.
   // The submit names the donor's own gift (entrega framing — never "pago").
@@ -295,7 +297,6 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   await page.getByLabel("Departamento").selectOption({ label: "San Salvador" });
   await page.getByLabel("Municipio").selectOption({ index: 1 });
   await page.getByLabel("Distrito").selectOption({ index: 1 });
-  await page.getByLabel("Dirección").fill("San Salvador, El Salvador");
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
   await expect(page.locator("iframe.donar-embed")).toBeVisible({ timeout: 15_000 });
 
@@ -336,7 +337,8 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
   await expect(page.getByText("Seleccione un departamento.")).toBeVisible();
   await expect(page.getByText("Seleccione un municipio.")).toBeVisible();
   await expect(page.getByText("Seleccione un distrito.")).toBeVisible();
-  await expect(page.getByText("Ingrese su dirección.")).toBeVisible();
+  // No dirección error: the field is gone — Wompi's sheet collects the address.
+  await expect(page.getByText("Ingrese su dirección.")).toHaveCount(0);
 
   // Focus moved to the first invalid control, and it is marked for AT.
   const documento = page.getByLabel("Número de documento");
@@ -378,7 +380,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // The extranjero mechanics and SV fields are skipped entirely.
   await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
-  await expect(page.getByLabel("Dirección")).toHaveCount(0);
+  await expect(page.getByLabel("Departamento")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continuar con su/ })).toHaveCount(0);
 
   // A quick-amount chip fills the hero input. The US door's anchors bridge toward

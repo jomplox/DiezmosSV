@@ -849,6 +849,92 @@ describe("Wompi webhook integration", () => {
     expect(db.donationIntents.find((row) => row.id === "di_replay")?.paid_at).toBe("2026-07-04T12:30:00.000Z");
   });
 
+  // /donar no longer asks for phone or address (Wompi's sheet forces both), so the
+  // webhook is the only source. Backfilling them onto the intent row is what keeps the
+  // contacts/CRM export whole — it reads donation_intents.donor_phone and
+  // .direccion_complemento directly.
+  it("backfills donor phone and address from the webhook onto the paid intent", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_backfill",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      donor_phone: null,
+      direccion_complemento: null,
+      wompi_id_enlace: 987654,
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z"
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_backfill_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_backfill",
+      EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_backfill" },
+      Cliente: { Celular: "70009999", Direccion: "Av. Wompi 456, San Salvador" }
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(db.donationIntents.find((row) => row.id === "di_backfill")).toMatchObject({
+      donor_phone: "70009999",
+      direccion_complemento: "Av. Wompi 456, San Salvador"
+    });
+  });
+
+  it("never overwrites a donor-supplied phone or address on backfill", async () => {
+    const db = new InMemoryD1();
+    const secret = "wompi-secret";
+    db.donationIntents.push({
+      id: "di_keep",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      donor_phone: "22221111",
+      direccion_complemento: "Calle Donante 123",
+      wompi_id_enlace: 987654,
+      expires_at: "2026-07-04T13:00:00.000Z",
+      created_at: "2026-07-04T12:00:00.000Z"
+    });
+    const rawBody = JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: "wompi_keep_tx_1",
+      ResultadoTransaccion: "ExitosaAprobada",
+      EsProductiva: false,
+      IdExterno: "di_keep",
+      EnlacePago: { Id: 987654, IdentificadorEnlaceComercio: "di_keep" },
+      Cliente: { Celular: "70009999", Direccion: "Av. Wompi 456" }
+    });
+
+    await worker.fetch(
+      new Request("https://example.org/webhooks/wompi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", wompi_hash: await signWompiBody(rawBody, secret) },
+        body: rawBody
+      }),
+      env(db, { WOMPI_API_SECRET: secret })
+    );
+
+    expect(db.donationIntents.find((row) => row.id === "di_keep")).toMatchObject({
+      donor_phone: "22221111",
+      direccion_complemento: "Calle Donante 123"
+    });
+  });
+
   it("leaves non-intent (legacy static-link) webhooks unaffected — no intent, no error", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];

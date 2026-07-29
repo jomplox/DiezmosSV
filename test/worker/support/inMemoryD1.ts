@@ -1649,7 +1649,9 @@ export class Statement {
       intent.direccion_departamento = String(direccionDepartamento);
       intent.direccion_municipio = String(direccionMunicipio);
       intent.direccion_distrito = String(direccionDistrito);
-      intent.direccion_complemento = String(direccionComplemento);
+      // Nullable since /donar stopped collecting the address (Wompi forces it), so
+      // model it like the other nullable columns instead of stringifying null.
+      intent.direccion_complemento = direccionComplemento == null ? null : String(direccionComplemento);
       intent.donor_pais = donorPais == null ? null : String(donorPais);
       intent.datos_token_hash = null;
       intent.updated_at = String(updatedAt);
@@ -3133,7 +3135,8 @@ export class Statement {
       }
     }
     if (this.sql.includes("UPDATE donation_intents") && this.sql.includes("SET paid_at = ?")) {
-      const [paidAt, updatedAt, id, expectedLinkId] = this.args;
+      // markIntentPaid also backfills the contact data only Wompi's sheet collects.
+      const [paidAt, updatedAt, donorPhone, direccionComplemento, id, expectedLinkId] = this.args;
       const intent = this.db.donationIntents.find((row) => row.id === id);
       if (
         intent &&
@@ -3143,6 +3146,10 @@ export class Statement {
       ) {
         intent.paid_at = paidAt == null ? null : String(paidAt);
         intent.updated_at = String(updatedAt);
+        // COALESCE(column, ?): the bound value only lands when the column is still empty.
+        intent.donor_phone = intent.donor_phone ?? (donorPhone == null ? null : String(donorPhone));
+        intent.direccion_complemento =
+          intent.direccion_complemento ?? (direccionComplemento == null ? null : String(direccionComplemento));
       }
     }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {

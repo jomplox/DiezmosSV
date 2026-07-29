@@ -74,7 +74,7 @@ export interface ValidatedDonorData {
   direccionDepartamento: string;
   direccionMunicipio: string;
   direccionDistrito: string;
-  direccionComplemento: string;
+  direccionComplemento: string | null;
   donorPais: string | null;
 }
 
@@ -214,9 +214,13 @@ export function validateDonorData(body: Record<string, unknown>): ValidatedDonor
     throw new IntentValidationError("invalid_distrito", "Seleccione un distrito válido para el departamento.");
   }
 
-  const direccionComplemento = requireString(body.complemento);
-  if (!direccionComplemento || direccionComplemento.length > MAX_COMPLEMENTO) {
-    throw new IntentValidationError("invalid_complemento", "Ingrese la dirección (máximo 200 caracteres).");
+  // Optional: Wompi's hosted sheet forces the donor's address, so /donar stopped asking
+  // and a domestic intent normally arrives without one — the CDE resolves it from the
+  // payment webhook instead. Still capped when present, because an oversize value would
+  // pass here, take the donor's payment, and only then fail fe-cd-v2 at CDE build time.
+  const direccionComplemento = requireString(body.complemento) || null;
+  if (direccionComplemento && direccionComplemento.length > MAX_COMPLEMENTO) {
+    throw new IntentValidationError("invalid_complemento", "La dirección no debe exceder 200 caracteres.");
   }
 
   // Foreign path: the 00 departamento ("Otro (Para extranjeros)") requires a real
