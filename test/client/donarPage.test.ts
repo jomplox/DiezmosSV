@@ -85,6 +85,7 @@ import {
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
+const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
 
 describe("donar page routing", () => {
   it("recognizes the public donation routes (with and without trailing slash)", () => {
@@ -699,6 +700,38 @@ describe("donar thank-you page", () => {
     expect(graciasBlock).toContain('verification === "verified"');
     expect(graciasBlock).not.toContain("display.monto");
     expect(graciasBlock).not.toContain("<DonarThankYou monto=");
+  });
+});
+
+describe("donor cold-load paints once", () => {
+  // The donor route hides #root until data-donor-ready. That gate waited only on
+  // document.fonts.ready, so branding-dependent content still swapped in AFTER the
+  // page was visible: the built-in default vector was replaced by the church's donor
+  // logo (a real network image), and the support line changed. Two visible reflows
+  // on every cold load. The gate must also wait for branding to settle.
+  it("waits for branding, not just fonts, before revealing the donor page", () => {
+    expect(mainSource).toContain("document.fonts.ready");
+    expect(mainSource).toContain("donorBrandingSettled");
+  });
+
+  // A hung /api/branding must never leave the page invisible: donarApi has no timeout,
+  // so the reveal carries its own budget and fires regardless.
+  it("reveals within a bounded budget even if branding never settles", () => {
+    expect(mainSource).toContain("DONOR_REVEAL_BUDGET_MS");
+  });
+
+  // /donar/gracias renders no branded logo and never signals branding, so gating it on
+  // the branding promise would leave the post-payment thank-you blank for the whole
+  // budget. Only the wizard path waits.
+  it("does not make the thank-you page wait on branding it never fetches", () => {
+    expect(mainSource).toContain("isDonarPath(window.location.pathname)");
+  });
+
+  // Swapping in an <img> that has not been fetched yet paints an empty box and then
+  // reflows when it arrives. Decode before committing it to state.
+  it("decodes the branded donor logo before swapping it in", () => {
+    expect(donarSource).toContain("decode()");
+    expect(donarSource).toContain("markDonorBrandingSettled");
   });
 });
 

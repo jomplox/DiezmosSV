@@ -1,8 +1,15 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
+import { isDonarPath } from "./donation";
+import { donorBrandingSettled } from "./donorReady";
 import { readPasswordResetLocation } from "./passwordReset";
 import "./styles.css";
+
+// Ceiling on how long the donor page stays invisible waiting for branding. donarApi has
+// no timeout, so a hung /api/branding must not strand the donor on a blank screen: past
+// this budget we reveal and accept the (rare) branded swap rather than show nothing.
+const DONOR_REVEAL_BUDGET_MS = 1_500;
 
 const resetLocation = readPasswordResetLocation(window.location.search, window.location.hash);
 const initialResetToken = resetLocation.token;
@@ -24,7 +31,22 @@ function BootstrappedApp() {
 
     let cancelled = false;
     let revealFrame: number | null = null;
-    void document.fonts.ready.then(() => {
+    let budgetTimer: number | null = null;
+
+    // Reveal only once the page is in its FINAL form: fonts loaded (no text reflow) and
+    // branding settled (no logo/support-line swap). Waiting on fonts alone still let the
+    // branded logo pop in after the donor could already see the page.
+    //
+    // ONLY the wizard waits on branding — it is the only donor route that fetches it.
+    // /donar/gracias renders no branded logo and never signals, so gating it here would
+    // leave the post-payment thank-you blank for the whole budget.
+    const budget = new Promise<void>((resolve) => {
+      budgetTimer = window.setTimeout(resolve, DONOR_REVEAL_BUDGET_MS);
+    });
+    const brandingGate = isDonarPath(window.location.pathname)
+      ? Promise.race([donorBrandingSettled, budget])
+      : Promise.resolve();
+    void Promise.all([document.fonts.ready, brandingGate]).then(() => {
       if (cancelled) {
         return;
       }
@@ -37,6 +59,9 @@ function BootstrappedApp() {
       cancelled = true;
       if (revealFrame !== null) {
         window.cancelAnimationFrame(revealFrame);
+      }
+      if (budgetTimer !== null) {
+        window.clearTimeout(budgetTimer);
       }
     };
   }, []);

@@ -1,3 +1,4 @@
+import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
 import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
 import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
@@ -538,15 +539,30 @@ export function DonarPage() {
   useEffect(() => {
     let cancelled = false;
     void donarApi<unknown>("/api/branding")
-      .then((data) => {
+      .then(async (data) => {
         if (cancelled) return;
         const branding = parseBrandingResponse(data);
         const src = brandingDonorLogoSrc(branding.donorLogoVersion);
+        // Decode BEFORE committing to state. Swapping the built-in vector for an <img>
+        // that has not been fetched yet paints an empty box and reflows when it lands;
+        // decoding first means the swap is a single already-painted frame. A decode
+        // failure just falls through and keeps the vector.
+        if (src) {
+          const image = new Image();
+          image.src = src;
+          await image.decode().catch(() => {});
+          if (cancelled) return;
+        }
         setBrandingLogo(src ? { src, name: branding.displayName } : null);
         setSupportEmail(branding.supportEmail);
       })
       .catch(() => {
         // Keep the built-in default vector.
+      })
+      .finally(() => {
+        // Success, failure, or a malformed payload — the branded form is now final, so
+        // the cold-load reveal in main.tsx can stop waiting on us.
+        markDonorBrandingSettled();
       });
     return () => {
       cancelled = true;
