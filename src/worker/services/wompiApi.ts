@@ -1,3 +1,4 @@
+import { CHECKOUT_WINDOW_MINUTES } from "../../shared/checkout";
 import { isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
@@ -174,6 +175,7 @@ export class WompiApiService {
     esMontoEditable: false;
     esCantidadEditable: false;
     notificarTransaccionCliente: false;
+    duracionInterfazIntentoMinutos: number;
   } {
     const origin = requireSecret(this.env, "APP_ORIGIN");
     return {
@@ -182,7 +184,10 @@ export class WompiApiService {
       esMontoEditable: false,
       esCantidadEditable: false,
       // We send the donor their CDE email ourselves; Wompi must not email them.
-      notificarTransaccionCliente: false
+      notificarTransaccionCliente: false,
+      // Set explicitly rather than inheriting Wompi's undocumented default: production
+      // 3DS makes the bank challenge mandatory, and /donar polls for exactly this long.
+      duracionInterfazIntentoMinutos: CHECKOUT_WINDOW_MINUTES
     };
   }
 

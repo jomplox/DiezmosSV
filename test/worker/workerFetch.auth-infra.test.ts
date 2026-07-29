@@ -1224,9 +1224,27 @@ describe("credential-current session issuance", () => {
     expect(db.sessions).toHaveLength(8);
     expect(db.maxCommittedSessionRows).toBe(8);
   });
+
+  // A policy violation is the donor-facing operator's most likely mistake at bootstrap.
+  // It must say WHICH rule failed; re-throwing turns it into an opaque 500 and the
+  // operator has no way to know the password was the problem.
+  it("rejects a weak bootstrap password with 400 and the policy reason", async () => {
+    const db = new InMemoryD1();
+    const response = await worker.fetch(
+      bootstrapRequest({ token: VALID_BOOTSTRAP_TOKEN, password: "short" }),
+      env(db, { BOOTSTRAP_OWNER_TOKEN: VALID_BOOTSTRAP_TOKEN })
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("weak_password");
+    expect(body.message).toContain("10 caracteres");
+    // The failed attempt must not leave a half-created owner behind.
+    expect(db.users).toHaveLength(0);
+  });
 });
 
-function bootstrapRequest(options: { token?: string } = {}, clientIp?: string): Request {
+function bootstrapRequest(options: { token?: string; password?: string } = {}, clientIp?: string): Request {
   const headers = new Headers({ "Content-Type": "application/json" });
   if (options.token) {
     headers.set("X-Bootstrap-Owner-Token", options.token);
@@ -1240,7 +1258,7 @@ function bootstrapRequest(options: { token?: string } = {}, clientIp?: string): 
     body: JSON.stringify({
       email: "legacy-contact-3@example.com",
       name: "Example Person",
-      password: "Long-enough1!"
+      password: options.password ?? "Long-enough1!"
     })
   });
 }

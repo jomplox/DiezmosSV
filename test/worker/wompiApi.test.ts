@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WompiApiError, WompiApiService } from "../../src/worker/services/wompiApi";
+import { CHECKOUT_WINDOW_MINUTES, WOMPI_INTERFAZ_MAX_MINUTES, WOMPI_INTERFAZ_MIN_MINUTES } from "../../src/shared/checkout";
 import type { DonationIntentRecord, Env } from "../../src/worker/types";
 
 afterEach(() => {
@@ -97,7 +98,7 @@ describe("Wompi API service", () => {
       nombreProducto: string;
       limitesDeUso: { cantidadMaximaPagosExitosos: number };
       formaPago: Record<string, boolean>;
-      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean };
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean; duracionInterfazIntentoMinutos: number };
       vigencia: { fechaInicio: string; fechaFin: string };
     };
     expect(body).toMatchObject({
@@ -138,6 +139,34 @@ describe("Wompi API service", () => {
       expect(body.nombreProducto).toBe("Diezmos y Ofrendas");
     }
   );
+
+  // Production 3DS makes the bank challenge mandatory and a donor may wait on an SMS
+  // OTP or switch to a banking app. Wompi's own EnlaceConfiguracion allows a 10-60
+  // minute attempt interface; we set it explicitly rather than inheriting an
+  // undocumented default, and it must fit inside the link's own vigencia — an
+  // interface that outlives its link would strand the donor mid-challenge.
+  it("gives the donor Wompi's full attempt window, bounded by the link vigencia", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await new WompiApiService(realEnv()).createPaymentLink(intent());
+
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as {
+      configuracion: { duracionInterfazIntentoMinutos: number };
+      vigencia: { fechaInicio: string; fechaFin: string };
+    };
+    const minutes = body.configuracion.duracionInterfazIntentoMinutos;
+    expect(minutes).toBe(CHECKOUT_WINDOW_MINUTES);
+    // Wompi's documented bounds for this field.
+    expect(minutes).toBeGreaterThanOrEqual(WOMPI_INTERFAZ_MIN_MINUTES);
+    expect(minutes).toBeLessThanOrEqual(WOMPI_INTERFAZ_MAX_MINUTES);
+    // Never longer than the link it belongs to.
+    const vigenciaMs = new Date(body.vigencia.fechaFin).getTime() - new Date(body.vigencia.fechaInicio).getTime();
+    expect(minutes * 60_000).toBeLessThanOrEqual(vigenciaMs);
+  });
 
   it("returns a deterministic mock link without any fetch in mock mode", async () => {
     const fetchMock = vi.fn();
@@ -207,7 +236,7 @@ describe("Wompi API service", () => {
       monto: number;
       nombreProducto: string;
       formaPago: Record<string, boolean>;
-      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean };
+      configuracion: { urlRedirect: string; urlWebhook: string; esMontoEditable: boolean; esCantidadEditable: boolean; notificarTransaccionCliente: boolean; duracionInterfazIntentoMinutos: number };
       vigencia: { fechaInicio: string; fechaFin: string };
     };
     // Full body: PUT replaces the whole object, so formaPago and configuracion
