@@ -264,7 +264,7 @@ export interface DonationIntentRecord {
   direccion_departamento: string;
   direccion_municipio: string;
   direccion_distrito: string;
-  direccion_complemento: string;
+  direccion_complemento: string | null;
   // Foreign-donor path: CAT-020 country (never "SV") when the direccion carries the
   // 00/00/00 "Otro (Para extranjeros)" geography; null for domestic intents.
   donor_pais: string | null;

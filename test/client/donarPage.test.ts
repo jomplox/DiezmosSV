@@ -135,17 +135,33 @@ describe("donar form validation", () => {
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
-    donorPhone: "",
     foreignResident: false,
     pais: "",
     departamento: "06",
     municipio: "23",
-    distrito: "14",
-    complemento: "San Salvador, El Salvador"
+    distrito: "14"
   };
 
   it("accepts a fully valid DUI donation", () => {
     expect(donationFormValidationMessage(base)).toBe("");
+  });
+
+  // Wompi's production sheet forces the donor's address and phone, so /donar stopped
+  // asking for either: the form must validate without them, and the intent body must
+  // not carry them at all.
+  it("validates without an address or phone — Wompi collects both", () => {
+    // base no longer carries an address or phone at all — DonationFormInput dropped
+    // both, so this is the real shape /donar submits.
+    expect(donationFormValidationMessage(base)).toBe("");
+    expect(donationStep2ValidationMessage(base)).toBe("");
+    expect(donationStep2FieldErrors(base)).toEqual({});
+  });
+
+  it("omits address and phone from the intent and datos bodies", () => {
+    expect(donationIntentBody(base)).not.toHaveProperty("complemento");
+    expect(donationIntentBody(base)).not.toHaveProperty("donorPhone");
+    expect(donationDatosBody(base)).not.toHaveProperty("complemento");
+    expect(donationDatosBody(base)).not.toHaveProperty("donorPhone");
   });
 
   it("requires the donor to choose diezmo or ofrenda first", () => {
@@ -179,21 +195,12 @@ describe("donar form validation", () => {
     }
   });
 
-  it("caps the dirección at the MH schema's 200-character complemento limit", () => {
-    // fe-cd-v2 caps receptor direccion.complemento at 200; a longer address would
-    // take the donor's payment and then fail schema validation at CDE build time.
-    expect(donationFormValidationMessage({ ...base, complemento: "x".repeat(200) })).toBe("");
-    expect(donationFormValidationMessage({ ...base, complemento: "x".repeat(201) })).toBe(
-      "La dirección no debe exceder 200 caracteres."
-    );
-  });
-
   it("requires a país instead of the departamento/municipio/distrito on the foreign path", () => {
-    const foreign = { ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "", complemento: "742 Evergreen Terrace, Springfield" };
+    const foreign = { ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" };
     expect(donationFormValidationMessage(foreign)).toBe("");
     expect(donationFormValidationMessage({ ...foreign, pais: "" })).toBe("Seleccione su país de residencia.");
-    // The dirección (complemento) is still required — it carries the foreign address.
-    expect(donationFormValidationMessage({ ...foreign, complemento: "  " })).toBe("Ingrese su dirección.");
+    // The foreign street address rides in on the Wompi webhook and reaches the CDE
+    // through the DireccionExtranjera apéndice — /donar no longer asks for it.
   });
 
   it("requires an amount of at least $1", () => {
@@ -208,12 +215,11 @@ describe("donar form validation", () => {
     expect(donationFormValidationMessage({ ...base, donorDocumentType: "37", donorDocument: "PASAPORTE-123" })).toBe("");
   });
 
-  it("requires the document and the address fields (name/email are collected on Wompi)", () => {
+  it("requires the document and the geography (name/email/dirección are collected on Wompi)", () => {
     expect(donationFormValidationMessage({ ...base, donorDocumentType: "37", donorDocument: "  " })).toBe("Ingrese su documento.");
     expect(donationFormValidationMessage({ ...base, departamento: "" })).toBe("Seleccione un departamento.");
     expect(donationFormValidationMessage({ ...base, municipio: "" })).toBe("Seleccione un municipio.");
     expect(donationFormValidationMessage({ ...base, distrito: "" })).toBe("Seleccione un distrito.");
-    expect(donationFormValidationMessage({ ...base, complemento: "  " })).toBe("Ingrese su dirección.");
   });
 
   describe("per-step split (wizard)", () => {
@@ -232,13 +238,12 @@ describe("donar form validation", () => {
       expect(donationAmountValidationMessage("125.00")).toBe("");
     });
 
-    it("step 2 validates identity + address and ignores the step-1 fields", () => {
+    it("step 2 validates identity + geography and ignores the step-1 fields", () => {
       // Amount/giftType are already locked by Paso 1: garbage there must not block Paso 2.
       const step2Valid = { ...base, amount: "", giftType: "" as const };
       expect(donationStep2ValidationMessage(step2Valid)).toBe("");
       expect(donationStep2ValidationMessage({ ...step2Valid, donorDocument: "04182769-0" })).toBe("Revise el número de DUI.");
       expect(donationStep2ValidationMessage({ ...step2Valid, departamento: "" })).toBe("Seleccione un departamento.");
-      expect(donationStep2ValidationMessage({ ...step2Valid, complemento: " " })).toBe("Ingrese su dirección.");
     });
 
     it("the full validator is exactly step 1 then step 2 (messages and order unchanged)", () => {
@@ -248,7 +253,6 @@ describe("donar form validation", () => {
         { ...base, amount: "0" },
         { ...base, donorDocument: "04182769-0" },
         { ...base, departamento: "" },
-        { ...base, complemento: "  " },
         { ...base, foreignResident: true, pais: "", departamento: "", municipio: "", distrito: "" }
       ];
       for (const sample of samples) {
@@ -280,13 +284,11 @@ describe("donar per-field validation", () => {
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
-    donorPhone: "",
     foreignResident: false,
     pais: "",
     departamento: "06",
     municipio: "23",
     distrito: "01",
-    complemento: "San Salvador"
   };
 
   it("returns EVERY invalid field at once (no one-error-at-a-time whack-a-mole)", () => {
@@ -295,15 +297,13 @@ describe("donar per-field validation", () => {
       donorDocument: "04182769-0",
       departamento: "",
       municipio: "",
-      distrito: "",
-      complemento: " "
+      distrito: ""
     });
     expect(errors).toEqual({
       donorDocument: "Revise el número de DUI.",
       departamento: "Seleccione un departamento.",
       municipio: "Seleccione un municipio.",
-      distrito: "Seleccione un distrito.",
-      complemento: "Ingrese su dirección."
+      distrito: "Seleccione un distrito."
     });
   });
 
@@ -342,26 +342,22 @@ describe("donar per-field validation", () => {
   it("editing a field clears its own error — and only errors that edit can affect", () => {
     const errors = {
       donorDocument: "Revise el número de DUI.",
-      departamento: "Seleccione un departamento.",
-      complemento: "Ingrese su dirección."
+      departamento: "Seleccione un departamento."
     };
     // Typing in the document clears only the document message.
     expect(clearDonationFieldErrors(errors, ["donorDocument"])).toEqual({
-      departamento: "Seleccione un departamento.",
-      complemento: "Ingrese su dirección."
+      departamento: "Seleccione un departamento."
     });
     // Switching the document TYPE re-scopes document + razón rules.
     expect(clearDonationFieldErrors({ ...errors, donorName: "Ingrese la razón social." }, ["donorDocumentType"])).toEqual({
-      departamento: "Seleccione un departamento.",
-      complemento: "Ingrese su dirección."
+      departamento: "Seleccione un departamento."
     });
     // Toggling extranjero swaps which geography fields exist.
     expect(clearDonationFieldErrors(errors, ["foreignResident"])).toEqual({
-      donorDocument: "Revise el número de DUI.",
-      complemento: "Ingrese su dirección."
+      donorDocument: "Revise el número de DUI."
     });
     // Untouched-field edits return the same object (no pointless re-renders).
-    expect(clearDonationFieldErrors(errors, ["donorPhone"])).toBe(errors);
+    expect(clearDonationFieldErrors(errors, ["donorName"])).toBe(errors);
   });
 
   it("the legacy single-message validators reduce the field maps in the pinned order", () => {
@@ -428,13 +424,11 @@ describe("donar intent body", () => {
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
-    donorPhone: "",
     foreignResident: false,
     pais: "",
     departamento: "06",
     municipio: "23",
-    distrito: "14",
-    complemento: "San Salvador"
+    distrito: "14"
   };
 
   it("sends the donor-chosen geography and omits pais/donorName on the domestic path", () => {
@@ -444,12 +438,10 @@ describe("donar intent body", () => {
       donorDocumentType: "13",
       donorDocument: "10000001-9",
       donorName: undefined,
-      donorPhone: undefined,
       departamento: "06",
       municipio: "23",
       distrito: "14",
       pais: undefined,
-      complemento: "San Salvador"
     });
   });
 
@@ -465,12 +457,11 @@ describe("donar intent body", () => {
   });
 
   it("sends the 00/00/00 geography plus the CAT-020 país on the foreign path", () => {
-    const body = donationIntentBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "", complemento: "742 Evergreen Terrace" });
+    const body = donationIntentBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" });
     expect(body.departamento).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
     expect(body.municipio).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
     expect(body.distrito).toBe(DONAR_FOREIGN_GEOGRAPHY_CODE);
     expect(body.pais).toBe("US");
-    expect(body.complemento).toBe("742 Evergreen Terrace");
   });
 
   it("offers every CAT-020 country except El Salvador for the foreign residence select", () => {
@@ -495,13 +486,11 @@ describe("donar premint (background draft + datos completion)", () => {
     donorDocumentType: "13" as const,
     donorDocument: "10000001-9",
     donorName: "",
-    donorPhone: "70001122",
     foreignResident: false,
     pais: "",
     departamento: "06",
     municipio: "23",
-    distrito: "14",
-    complemento: "San Salvador"
+    distrito: "14"
   };
 
   it("the draft body carries only the trimmed amount + gift type (no donor data)", () => {
@@ -524,11 +513,9 @@ describe("donar premint (background draft + datos completion)", () => {
     expect(body).toMatchObject({
       donorDocumentType: "13",
       donorDocument: "10000001-9",
-      donorPhone: "70001122",
-      departamento: "06",
+        departamento: "06",
       municipio: "23",
       distrito: "14",
-      complemento: "San Salvador"
     });
   });
 
@@ -708,12 +695,14 @@ describe("donar wizard source contract", () => {
     expect(donarSource).not.toContain("🇸🇻");
     expect(donarSource).not.toContain("Entregue su diezmo u ofrenda");
     expect(donarSource).toContain("Tipo de documento");
-    expect(donarSource).toContain("Teléfono (opcional)");
     expect(donarSource).toContain("Departamento");
     expect(donarSource).toContain("Municipio");
     expect(donarSource).toContain("Distrito");
-    expect(donarSource).toContain("Dirección");
     expect(donarSource).toContain("Monto");
+    // Dirección and Teléfono are NOT here: Wompi's hosted sheet forces both, so asking
+    // again would make the donor type the same address twice.
+    expect(donarSource).not.toContain("<span>Dirección</span>");
+    expect(donarSource).not.toContain("Teléfono (opcional)");
   });
 
   it("renders Diezmo|Ofrenda as a segmented radiogroup of real radio inputs", () => {
@@ -802,7 +791,7 @@ describe("donar wizard source contract", () => {
     // must not render those fields — and must tell the donor what comes next.
     expect(donarSource).not.toContain("Nombre completo");
     expect(donarSource).not.toContain("Correo electrónico");
-    expect(donarSource).toContain("Su nombre y correo se ingresan al pagar con Wompi.");
+    expect(donarSource).toContain("Su nombre, correo, teléfono y dirección se ingresan al pagar con Wompi.");
   });
 
   it("wires cascading municipio/distrito selects to the department-scoped catalog helpers", () => {

@@ -1,5 +1,5 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "../config";
-import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary } from "../domain/dteBuilder";
+import { assertCdeIssuerMatchesConfig, buildCdeDocument, cdeDocumentSummary, resolveDonorComplemento } from "../domain/dteBuilder";
 import type { IntentDonorOverride } from "../domain/dteBuilder";
 import { DocumentSchemaValidationError, validateCde } from "../domain/schema";
 import { signMhDocument } from "../domain/signer";
@@ -1810,9 +1810,10 @@ export class IssuancePipeline {
 }
 
 // Merge the correlated intent with the payment webhook into the CDE receptor:
-// identity (tipoDocumento/numDocumento) and the catalog-coded direccion come from the
-// intent (validated on the /donar form); correo comes from the WEBHOOK, because the
-// donor types it on Wompi's hosted sheet. nombre prefers the intent's donor_name —
+// identity (tipoDocumento/numDocumento) and the catalog-coded departamento/municipio/
+// distrito come from the intent (validated on the /donar form); correo and the free-text
+// complemento come from the WEBHOOK, because the donor types them on Wompi's hosted
+// sheet. nombre prefers the intent's donor_name —
 // the razón social, set only for NIT/empresa donors — else the webhook cardholder
 // name. telefono prefers the intent's phone, else the webhook Celular. A foreign
 // intent (donor_pais set) additionally marks the receptor as non-domiciled in its
@@ -1829,7 +1830,9 @@ function donorOverrideFromIntent(intent: DonationIntentRecord, payload: WompiWeb
       departamento: intent.direccion_departamento,
       municipio: intent.direccion_municipio,
       distrito: intent.direccion_distrito,
-      complemento: intent.direccion_complemento
+      // Resolved (never null) so the builder and its foreign-address apéndice — which
+      // interpolates this straight into a string — can stay string-typed.
+      complemento: resolveDonorComplemento(intent.direccion_complemento, payload)
     },
     ...(intent.donor_pais ? { codPais: intent.donor_pais, codDomiciliado: 2 as const } : {}),
     // Diezmo/Ofrenda rides through here so the "TipoAportacion" apéndice line

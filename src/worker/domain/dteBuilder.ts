@@ -458,14 +458,38 @@ export function buildInvalidacionEvent(
 // (codigoMsg 096: "Campo #/receptor/direccion contiene un valor inválido"),
 // so a donor without an address gets the emisor's geography with an explicit
 // "not provided" complemento instead of null.
-const RECEPTOR_ADDRESS_FALLBACK = "No proporcionada por el donante";
+export const RECEPTOR_ADDRESS_FALLBACK = "No proporcionada por el donante";
+
+// fe-cd-v2 caps receptor.direccion.complemento at 200 characters.
+export const MAX_RECEPTOR_COMPLEMENTO = 200;
+
+// The single source of truth for "what address does this donor get on the CDE".
+// Wompi's production sheet forces the donor's address, so /donar stopped asking for
+// it and the value now arrives on the webhook. Resolution order:
+//   intent (still set for legacy/admin-supplied rows) -> Wompi Cliente.Direccion -> fallback
+// Both the CDE receptor and the donation_intents backfill call this, so the fiscal
+// document and the CRM export can never carry different addresses. Clamped because the
+// value is no longer bounded by our own form validation.
+export function resolveDonorComplemento(intentComplemento: string | null, payload: WompiWebhook): string {
+  const resolved = cleanNullable(intentComplemento) ?? webhookDonorComplemento(payload) ?? RECEPTOR_ADDRESS_FALLBACK;
+  return resolved.slice(0, MAX_RECEPTOR_COMPLEMENTO);
+}
+
+// The clamped street address Wompi collected, or null when the donor left it blank.
+// The donation_intents backfill uses THIS rather than resolveDonorComplemento: the CDE
+// needs a non-null string (MH codigoMsg 096), but persisting the "not provided"
+// sentinel would make the contacts/CRM export read it as a real address.
+export function webhookDonorComplemento(payload: WompiWebhook): string | null {
+  const raw = cleanNullable(payload.Cliente?.Direccion);
+  return raw ? raw.slice(0, MAX_RECEPTOR_COMPLEMENTO) : null;
+}
 
 function donorAddress(payload: WompiWebhook, config: EmisorConfig): EmisorConfig["direccion"] {
   return {
     departamento: config.direccion.departamento,
     municipio: config.direccion.municipio,
     distrito: config.direccion.distrito,
-    complemento: cleanNullable(payload.Cliente?.Direccion) ?? RECEPTOR_ADDRESS_FALLBACK
+    complemento: resolveDonorComplemento(null, payload)
   };
 }
 

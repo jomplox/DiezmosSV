@@ -1,5 +1,5 @@
 import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
-import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
+import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, webhookDonorComplemento, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
@@ -772,7 +772,14 @@ async function markIntentPaidFromWebhook(env: Env, repo: Repository, payload: Wo
     if (binding.kind !== "bound" || binding.intent.wompi_id_enlace === null) {
       return;
     }
-    await repo.markIntentPaid(binding.intent.id, binding.intent.wompi_id_enlace);
+    // Wompi's sheet is now the only source for phone and address, so persist both here
+    // (normalized on this side of the boundary — the repository stays payload-agnostic).
+    await repo.markIntentPaid(
+      binding.intent.id,
+      binding.intent.wompi_id_enlace,
+      payload.Cliente?.Celular?.trim() || null,
+      webhookDonorComplemento(payload)
+    );
   } catch (error) {
     logWorkerError(env, "mark_intent_paid_from_webhook_failed", error);
   }

@@ -635,8 +635,13 @@ export class Repository {
     return completeIntentForPostAcceptOwnerRepository(this.db, id, documentId, claimId);
   }
 
-  async markIntentPaid(id: string, expectedLinkId: number): Promise<void> {
-    return markIntentPaidRepository(this.db, id, expectedLinkId);
+  async markIntentPaid(
+    id: string,
+    expectedLinkId: number,
+    donorPhone: string | null = null,
+    direccionComplemento: string | null = null
+  ): Promise<void> {
+    return markIntentPaidRepository(this.db, id, expectedLinkId, donorPhone, direccionComplemento);
   }
 
   async listIntentsExpiringBefore(
