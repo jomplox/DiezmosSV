@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildDonorExportQuery,
   buildDonorExplorerQuery,
   maskDocumentNumber,
   type DonorExplorerFilters
@@ -58,6 +59,27 @@ describe("donor explorer query", () => {
 
     expect(result.params).toBeNull();
     expect(result.error).toContain(expectedMessage);
+  });
+
+  it("builds a full-result CSV query from the visible filters without page controls", () => {
+    const result = buildDonorExportQuery({
+      filters: filters({
+        documentType: "13",
+        documentValue: " 0123-4567 ",
+        name: " Ana ",
+        email: " ANA@EXAMPLE.ORG ",
+        minAmount: "25.50",
+        maxAmount: "100",
+        giftType: "DIEZMO",
+        source: "WOMPI"
+      }),
+      environment: "00"
+    });
+
+    expect(result.error).toBeNull();
+    expect(result.params?.toString()).toBe(
+      "environment=00&documentType=13&documentValue=0123-4567&name=Ana&email=ANA%40EXAMPLE.ORG&minTotalCents=2550&maxTotalCents=10000&giftType=DIEZMO&source=WOMPI"
+    );
   });
 });
 

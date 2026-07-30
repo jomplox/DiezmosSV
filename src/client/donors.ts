@@ -44,6 +44,11 @@ interface BuildDonorExplorerQueryInput {
   offset: number;
 }
 
+interface BuildDonorExportQueryInput {
+  filters: DonorExplorerFilters;
+  environment: "00" | "01";
+}
+
 interface DonorExplorerQueryResult {
   params: URLSearchParams | null;
   error: string | null;
@@ -103,6 +108,19 @@ export function buildDonorExplorerQuery(
   params.set("limit", String(input.limit));
   params.set("offset", String(input.offset));
   return { params, error: null };
+}
+
+export function buildDonorExportQuery(
+  input: BuildDonorExportQueryInput
+): DonorExplorerQueryResult {
+  const result = buildDonorExplorerQuery({
+    ...input,
+    limit: 1,
+    offset: 0
+  });
+  result.params?.delete("limit");
+  result.params?.delete("offset");
+  return result;
 }
 
 export function maskDocumentNumber(value: string): string {

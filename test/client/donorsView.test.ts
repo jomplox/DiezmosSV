@@ -8,6 +8,7 @@ describe("DonorsView", () => {
     const html = renderToStaticMarkup(
       createElement(DonorsView, {
         environment: "00",
+        downloadingCsv: false,
         loadPage: async () => ({
           donors: [],
           total: 0,
@@ -15,6 +16,7 @@ describe("DonorsView", () => {
           offset: 0,
           hasMore: false
         }),
+        onDownloadCsv: async () => undefined,
         onError: () => undefined
       })
     );
@@ -39,6 +41,28 @@ describe("DonorsView", () => {
     }
     expect(html).toContain("Solo se incluyen CDE aceptados del ambiente de pruebas.");
     expect(html).toContain("Limpiar filtros");
+    expect(html).toContain("Descargar CSV");
     expect(html).toContain("Actualizar");
+  });
+
+  it("shows disabled progress feedback while the donor CSV is being prepared", () => {
+    const html = renderToStaticMarkup(
+      createElement(DonorsView, {
+        environment: "00",
+        downloadingCsv: true,
+        loadPage: async () => ({
+          donors: [],
+          total: 0,
+          limit: 25,
+          offset: 0,
+          hasMore: false
+        }),
+        onDownloadCsv: async () => undefined,
+        onError: () => undefined
+      })
+    );
+
+    expect(html).toContain("Preparando CSV");
+    expect(html).toContain("disabled");
   });
 });

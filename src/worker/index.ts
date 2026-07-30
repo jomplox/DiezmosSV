@@ -64,6 +64,7 @@ import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertific
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
+import { buildDonorExplorerCsv, donorExplorerCsvFilename } from "./services/donorExport";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -1476,66 +1477,158 @@ async function handleDonationIntentList(ctx: ApiRouteContext): Promise<Response>
   return jsonResponse({ intents: await ctx.repo.listRecentDonationIntents(50) });
 }
 
-async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
-  const environment = ambienteValue(ctx.url.searchParams.get("environment"));
+type DonorFilterValues = Omit<
+  Parameters<Repository["listDonors"]>[0],
+  "limit" | "offset"
+>;
+
+type DonorFilterParseResult =
+  | { ok: true; filters: DonorFilterValues }
+  | { ok: false; response: Response };
+
+function parseNonNegativeIntegerParam(
+  params: URLSearchParams,
+  name: string,
+  fallback: number
+): number | null {
+  const value = params.get(name);
+  if (value === null) return fallback;
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function parseDonorFilterValues(url: URL): DonorFilterParseResult {
+  const environment = ambienteValue(url.searchParams.get("environment"));
   if (!environment) {
-    return jsonResponse(
-      { error: "invalid_donor_environment", message: "Seleccione un ambiente válido (00 o 01)." },
-      { status: 400 }
-    );
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "invalid_donor_environment", message: "Seleccione un ambiente válido (00 o 01)." },
+        { status: 400 }
+      )
+    };
   }
-  const documentType = ctx.url.searchParams.get("documentType")?.trim() ?? "";
-  const giftTypeParam = ctx.url.searchParams.get("giftType");
-  const sourceParam = ctx.url.searchParams.get("source");
-  const parseNonNegativeInteger = (name: string, fallback: number): number | null => {
-    const value = ctx.url.searchParams.get(name);
-    if (value === null) return fallback;
-    if (!/^\d+$/.test(value)) return null;
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) ? parsed : null;
-  };
-  const minTotalCents = ctx.url.searchParams.has("minTotalCents")
-    ? parseNonNegativeInteger("minTotalCents", 0)
+  const documentType = url.searchParams.get("documentType")?.trim() ?? "";
+  const giftTypeParam = url.searchParams.get("giftType");
+  const sourceParam = url.searchParams.get("source");
+  const minTotalCents = url.searchParams.has("minTotalCents")
+    ? parseNonNegativeIntegerParam(url.searchParams, "minTotalCents", 0)
     : undefined;
-  const maxTotalCents = ctx.url.searchParams.has("maxTotalCents")
-    ? parseNonNegativeInteger("maxTotalCents", 0)
+  const maxTotalCents = url.searchParams.has("maxTotalCents")
+    ? parseNonNegativeIntegerParam(url.searchParams, "maxTotalCents", 0)
     : undefined;
-  const limit = parseNonNegativeInteger("limit", 25);
-  const offset = parseNonNegativeInteger("offset", 0);
   const invalid =
     (documentType !== "" && !findCatalogOption(CAT022_DOCUMENT_TYPES, documentType))
     || (giftTypeParam !== null && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA")
     || (sourceParam !== null && sourceParam !== "WOMPI" && sourceParam !== "MANUAL")
     || minTotalCents === null
     || maxTotalCents === null
-    || (minTotalCents !== undefined && maxTotalCents !== undefined && minTotalCents > maxTotalCents)
-    || limit === null
-    || limit < 1
-    || limit > 100
-    || offset === null;
+    || (minTotalCents !== undefined && maxTotalCents !== undefined && minTotalCents > maxTotalCents);
   if (invalid) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "invalid_donor_filters", message: "Revise los filtros del explorador de donantes." },
+        { status: 400 }
+      )
+    };
+  }
+
+  return {
+    ok: true,
+    filters: {
+      environment,
+      documentType: documentType || undefined,
+      documentValue: url.searchParams.get("documentValue")?.trim() || undefined,
+      name: url.searchParams.get("name")?.trim() || undefined,
+      email: url.searchParams.get("email")?.trim() || undefined,
+      minTotalCents,
+      maxTotalCents,
+      giftType: giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA"
+        ? giftTypeParam
+        : undefined,
+      source: sourceParam === "WOMPI" || sourceParam === "MANUAL"
+        ? sourceParam
+        : undefined
+    }
+  };
+}
+
+async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
+  const parsed = parseDonorFilterValues(ctx.url);
+  if (!parsed.ok) return parsed.response;
+  const limit = parseNonNegativeIntegerParam(ctx.url.searchParams, "limit", 25);
+  const offset = parseNonNegativeIntegerParam(ctx.url.searchParams, "offset", 0);
+  if (limit === null || limit < 1 || limit > 100 || offset === null) {
     return jsonResponse(
       { error: "invalid_donor_filters", message: "Revise los filtros del explorador de donantes." },
       { status: 400 }
     );
   }
   return jsonResponse(await ctx.repo.listDonors({
-    environment,
-    documentType: documentType || undefined,
-    documentValue: ctx.url.searchParams.get("documentValue") ?? undefined,
-    name: ctx.url.searchParams.get("name") ?? undefined,
-    email: ctx.url.searchParams.get("email") ?? undefined,
-    minTotalCents,
-    maxTotalCents,
-    giftType: giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA"
-      ? giftTypeParam
-      : undefined,
-    source: sourceParam === "WOMPI" || sourceParam === "MANUAL"
-      ? sourceParam
-      : undefined,
+    ...parsed.filters,
     limit,
     offset
   }));
+}
+
+async function handleDonorExport(ctx: ApiRouteContext): Promise<Response> {
+  const parsed = parseDonorFilterValues(ctx.url);
+  if (!parsed.ok) return parsed.response;
+
+  const donors = [];
+  let offset = 0;
+  for (;;) {
+    const page = await ctx.repo.listDonors({
+      ...parsed.filters,
+      limit: 100,
+      offset
+    });
+    donors.push(...page.donors);
+    if (!page.hasMore || page.donors.length === 0) break;
+    offset += page.donors.length;
+  }
+
+  const filterMetadata: Record<string, string | number | boolean> = {
+    ...(parsed.filters.documentType ? { documentType: parsed.filters.documentType } : {}),
+    ...(parsed.filters.documentValue ? { hasDocumentValue: true } : {}),
+    ...(parsed.filters.name ? { hasName: true } : {}),
+    ...(parsed.filters.email ? { hasEmail: true } : {}),
+    ...(parsed.filters.minTotalCents !== undefined
+      ? { minTotalCents: parsed.filters.minTotalCents }
+      : {}),
+    ...(parsed.filters.maxTotalCents !== undefined
+      ? { maxTotalCents: parsed.filters.maxTotalCents }
+      : {}),
+    ...(parsed.filters.giftType ? { giftType: parsed.filters.giftType } : {}),
+    ...(parsed.filters.source ? { source: parsed.filters.source } : {})
+  };
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "DONORS_EXPORTED",
+    entityType: "export",
+    entityId: `donors:${parsed.filters.environment}`,
+    summary: donors.length === 1
+      ? `1 donante exportado (ambiente ${parsed.filters.environment})`
+      : `${donors.length} donantes exportados (ambiente ${parsed.filters.environment})`,
+    metadata: {
+      environment: parsed.filters.environment,
+      donors: donors.length,
+      filters: filterMetadata
+    }
+  });
+
+  return new Response(buildDonorExplorerCsv(donors), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${donorExplorerCsvFilename(
+        parsed.filters.environment,
+        donors.length
+      )}"`
+    }
+  });
 }
 
 function documentRouteRole(ctx: ApiRouteContext): Role {
@@ -2147,6 +2240,7 @@ const exportRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/exports/f960.csv", role: "ADMIN", handler: handleF960Csv },
   { method: "GET", pattern: "/api/exports/f960.xlsx", role: "ADMIN", handler: handleF960Xlsx },
   { method: "GET", pattern: "/api/exports/contacts", role: "ADMIN", handler: handleContactsExport },
+  { method: "GET", pattern: "/api/exports/donors.csv", role: "ADMIN", handler: handleDonorExport },
   { method: "GET", pattern: "/api/certificates/annual", role: "ADMIN", handler: handleAnnualCertificatePreview },
   { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend }
 ];

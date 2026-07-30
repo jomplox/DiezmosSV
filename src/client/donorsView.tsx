@@ -1,6 +1,7 @@
 import {
   CalendarDays,
   CircleDollarSign,
+  Download,
   HeartHandshake,
   IdCard,
   ListChecks,
@@ -21,6 +22,7 @@ import {
 import { formatElSalvadorDateTime } from "../shared/legalWindows";
 import { formatCents } from "../shared/money";
 import {
+  buildDonorExportQuery,
   buildDonorExplorerQuery,
   maskDocumentNumber,
   type DonorExplorerFilters,
@@ -42,8 +44,10 @@ const EMPTY_FILTERS: DonorExplorerFilters = {
 };
 
 interface DonorsViewProps {
+  downloadingCsv: boolean;
   environment: "00" | "01";
   loadPage: (params: URLSearchParams) => Promise<DonorExplorerPage>;
+  onDownloadCsv: (params: URLSearchParams) => Promise<void>;
   onError: (error: unknown) => void;
 }
 
@@ -136,6 +140,18 @@ export function DonorsView(props: DonorsViewProps) {
     setPageIndex(0);
     setFilterError("");
     setRefreshVersion((current) => current + 1);
+  }
+
+  function downloadCsv() {
+    const query = buildDonorExportQuery({
+      filters: applied,
+      environment: props.environment
+    });
+    if (!query.params) {
+      setFilterError(query.error ?? "Revise los filtros.");
+      return;
+    }
+    void props.onDownloadCsv(query.params);
   }
 
   function selectWithKeyboard(event: KeyboardEvent<HTMLTableRowElement>, key: string) {
@@ -259,6 +275,15 @@ export function DonorsView(props: DonorsViewProps) {
           {filterError && <p className="donor-filter-error" role="alert">{filterError}</p>}
           <button type="button" className="donor-clear-button" onClick={clearFilters}>
             Limpiar filtros
+          </button>
+          <button
+            type="button"
+            className="donor-export-button"
+            disabled={props.downloadingCsv || loading || !page || page.total === 0}
+            onClick={downloadCsv}
+          >
+            <Download size={16} />
+            {props.downloadingCsv ? "Preparando CSV" : "Descargar CSV"}
           </button>
           <button type="submit" className="primary">
             <RefreshCw size={16} className={loading ? "spin" : ""} />

@@ -70,6 +70,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   CONTINGENCY_OPEN_REUSED: "Periodo histórico reutilizado",
   CONTINGENCY_OPENED: "Periodo histórico abierto",
   CONTACTS_EXPORTED: "Exportación de contactos",
+  DONORS_EXPORTED: "Exportación de donantes",
   CREDENTIALS_UPDATED: "Credenciales actualizadas",
   DTE_ACCEPTED: "DTE aceptado",
   DTE_CONTINGENCY_PENDING: "DTE histórico sin sello",
