@@ -5,6 +5,7 @@ import type { CredentialStatus } from "../../src/client/types";
 import { certificateExpiryStatus, credentialSectionState, credentialSettingsSections } from "../../src/client/credentialSettings";
 
 const credentialsPanelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
+const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 
 const status: CredentialStatus = {
   target: {
@@ -199,6 +200,61 @@ describe("Correo provider destination authority (source contract)", () => {
     expect(credentialsPanelSource).toContain("Administrado por el despliegue");
     expect(credentialsPanelSource).not.toContain("input.emailApiUrl");
     expect(credentialsPanelSource).not.toContain("EMAIL_API_URL");
+  });
+
+  test("offers independently saved visible sender and Reply-To fields in the Correo settings section", () => {
+    expect(credentialsPanelSource).toContain("Nombre visible del remitente");
+    expect(credentialsPanelSource).toContain("Correo para recibir respuestas (Reply-To)");
+    expect(credentialsPanelSource).toContain('value={emailReplyToDraft}');
+    expect(credentialsPanelSource).toContain('type="email"');
+    expect(credentialsPanelSource).toContain("Déjelo vacío para que las respuestas lleguen al correo remitente activo.");
+    expect(credentialsPanelSource).toContain("Guardar remitente");
+    expect(credentialsPanelSource).toContain("onEmailSenderSubmit");
+    expect(credentialsPanelSource).toContain("Dirección activa:");
+    expect(credentialsPanelSource).toContain("maxLength={80}");
+  });
+
+  test("saves the visible sender instead of the surrounding secrets form when Enter is pressed", () => {
+    const senderField = credentialsPanelSource.slice(
+      credentialsPanelSource.indexOf('value={emailSenderDraft}'),
+      credentialsPanelSource.indexOf('placeholder="Nombre que verán los destinatarios"') + 80
+    );
+
+    expect(senderField).toContain("onKeyDown");
+    expect(senderField).toContain('event.key === "Enter"');
+    expect(senderField).toContain("event.preventDefault()");
+    expect(senderField).toContain("onEmailSenderSubmit()");
+  });
+
+  test("submits the Reply-To draft with the visible sender identity", () => {
+    const updateEmailSender = appSource.slice(
+      appSource.indexOf("async function updateEmailSender()"),
+      appSource.indexOf("async function bootstrapCredentialWriter")
+    );
+
+    expect(updateEmailSender).toContain("senderName: emailSenderDraft");
+    expect(updateEmailSender).toContain("replyToAddress: emailReplyToDraft");
+    expect(updateEmailSender).toContain("applyEmailSender(result.emailSender)");
+  });
+
+  test("refreshes the sender identity after EMAIL_FROM credentials are saved", () => {
+    const updateCredentials = appSource.slice(
+      appSource.indexOf("async function updateCredentials()"),
+      appSource.indexOf("async function updateEmissionEnvironment")
+    );
+
+    expect(updateCredentials).toContain('accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")');
+    expect(updateCredentials).toContain("applyEmailSender(emailSenderResult.emailSender)");
+  });
+
+  test("refreshes the sender fallback after branding text is saved", () => {
+    const brandingSaveHandler = appSource.slice(
+      appSource.indexOf("onBrandingSave={(next) =>"),
+      appSource.indexOf("onBootstrapWriter=", appSource.indexOf("onBrandingSave={(next) =>"))
+    );
+
+    expect(brandingSaveHandler).toContain('accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")');
+    expect(brandingSaveHandler).toContain("applyEmailSender(emailSenderResult.emailSender)");
   });
 });
 

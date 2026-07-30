@@ -164,6 +164,142 @@ describe("credential administration", () => {
   });
 });
 
+describe("Wompi notification settings", () => {
+  it("lets owners configure normalized notification targets for newly generated links", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const putResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          emailsNotificacion: " TESORERIA@EXAMPLE.ORG, avisos@example.org ",
+          telefonosNotificacion: " 7000-0000, +503 7123 4567 ",
+          notificarTransaccionCliente: true
+        })
+      }),
+      env(db)
+    );
+
+    expect(putResponse.status).toBe(200);
+    await expect(putResponse.json()).resolves.toMatchObject({
+      ok: true,
+      wompiNotifications: {
+        emailsNotificacion: "tesoreria@example.org,avisos@example.org",
+        telefonosNotificacion: "70000000,+50371234567",
+        notificarTransaccionCliente: true
+      }
+    });
+    expect(db.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "wompi_notification_emails",
+        value: "tesoreria@example.org,avisos@example.org",
+        updated_by: "user_owner"
+      }),
+      expect.objectContaining({
+        key: "wompi_notification_phones",
+        value: "70000000,+50371234567",
+        updated_by: "user_owner"
+      }),
+      expect.objectContaining({
+        key: "wompi_notify_donor_email",
+        value: "true",
+        updated_by: "user_owner"
+      })
+    ]));
+    const audit = db.audits.find((row) => row.action === "WOMPI_NOTIFICATIONS_UPDATED");
+    expect(audit).toMatchObject({
+      entity_type: "app_setting",
+      entity_id: "wompi_notifications",
+      summary: "Notificaciones de Wompi actualizadas"
+    });
+    expect(JSON.stringify(audit)).not.toContain("tesoreria@example.org");
+    expect(JSON.stringify(audit)).not.toContain("70000000");
+
+    const getResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      wompiNotifications: {
+        emailsNotificacion: "tesoreria@example.org,avisos@example.org",
+        telefonosNotificacion: "70000000,+50371234567",
+        notificarTransaccionCliente: true
+      }
+    });
+  });
+
+  it.each([
+    [
+      "a malformed email list",
+      {
+        emailsNotificacion: "tesoreria@example.org,correo-invalido",
+        telefonosNotificacion: "",
+        notificarTransaccionCliente: false
+      }
+    ],
+    [
+      "a malformed phone list",
+      {
+        emailsNotificacion: "",
+        telefonosNotificacion: "7000-ABCD",
+        notificarTransaccionCliente: false
+      }
+    ],
+    [
+      "a non-boolean donor notification flag",
+      {
+        emailsNotificacion: "",
+        telefonosNotificacion: "",
+        notificarTransaccionCliente: "true"
+      }
+    ]
+  ])("rejects %s without changing settings", async (_description, body) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_wompi_notifications"
+    });
+    expect(db.settings).toHaveLength(0);
+  });
+
+  it("keeps Wompi notification settings owner-only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
 describe("email template settings", () => {
   it("lets owners edit subject and body templates for each email type", async () => {
     const db = new InMemoryD1();
@@ -238,6 +374,234 @@ describe("email template settings", () => {
         }
       }
     });
+  });
+});
+
+describe("email sender setting", () => {
+  it("lets owners customize and read back the visible sender name and Reply-To address", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const putResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          senderName: "  Fundación Misión ExampleOrganization  ",
+          replyToAddress: "  LEGACY-CONTACT-7@EXAMPLE.COM  "
+        })
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(putResponse.status).toBe(200);
+    await expect(putResponse.json()).resolves.toMatchObject({
+      ok: true,
+      emailSender: {
+        senderName: "Fundación Misión ExampleOrganization",
+        senderAddress: "legacy-contact-4@example.com",
+        replyToAddress: "legacy-contact-7@example.com"
+      }
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_sender_name",
+      value: "Fundación Misión ExampleOrganization",
+      updated_by: "user_owner"
+    }));
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_reply_to",
+      value: "legacy-contact-7@example.com",
+      updated_by: "user_owner"
+    }));
+    const senderAudit = db.audits.find((row) => row.action === "EMAIL_SENDER_UPDATED");
+    expect(senderAudit).toMatchObject({
+      action: "EMAIL_SENDER_UPDATED",
+      entity_type: "app_setting",
+      entity_id: "email_sender_identity"
+    });
+    expect(JSON.parse(String(senderAudit?.metadata_json))).toEqual({
+      senderName: "Fundación Misión ExampleOrganization",
+      replyToConfigured: true
+    });
+
+    const getResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      emailSender: {
+        senderName: "Fundación Misión ExampleOrganization",
+        senderAddress: "legacy-contact-4@example.com",
+        replyToAddress: "legacy-contact-7@example.com"
+      }
+    });
+  });
+
+  it("allows an owner to clear Reply-To so replies use the active sender address", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push(
+      { key: "email_sender_name", value: "ExamplePerson5" },
+      { key: "email_reply_to", value: "legacy-contact-7@example.com" }
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          senderName: "ExamplePerson5",
+          replyToAddress: "   "
+        })
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailSender: {
+        senderName: "ExamplePerson5",
+        senderAddress: "legacy-contact-4@example.com",
+        replyToAddress: ""
+      }
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_reply_to",
+      value: ""
+    }));
+  });
+
+  it("preserves Reply-To when an older client updates only the visible sender name", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.settings.push({ key: "email_reply_to", value: "legacy-contact-7@example.com" });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ senderName: "ExamplePerson5" })
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      emailSender: {
+        senderName: "ExamplePerson5",
+        replyToAddress: "legacy-contact-7@example.com"
+      }
+    });
+    expect(db.settings).toContainEqual(expect.objectContaining({
+      key: "email_reply_to",
+      value: "legacy-contact-7@example.com"
+    }));
+  });
+
+  it.each([
+    ["an empty name", "   "],
+    ["a C0 control character", "Iglesia\r\nBcc: attacker@example.org"],
+    ["a leading C0 control character", "\tIglesia"],
+    ["a trailing C0 control character", "Iglesia\r"],
+    ["a C1 control character", "Iglesia\u0085Bcc: attacker@example.org"],
+    ["a name longer than 80 characters", "A".repeat(81)]
+  ])("rejects %s in the visible sender name", async (_description, senderName) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ senderName })
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_email_sender"
+    });
+    expect(db.settings).toHaveLength(0);
+  });
+
+  it.each([
+    ["an invalid address", "not-an-email"],
+    ["multiple addresses", "one@example.org, two@example.org"],
+    ["a header injection attempt", "replies@example.org\r\nBcc: attacker@example.org"],
+    ["an address longer than 254 characters", `${"a".repeat(243)}@example.org`],
+    ["a non-string value", ["replies@example.org"]]
+  ])("rejects %s in Reply-To", async (_description, replyToAddress) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          senderName: "ExamplePerson5",
+          replyToAddress
+        })
+      }),
+      env(db, { EMAIL_FROM: "legacy-contact-4@example.com" })
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_email_sender"
+    });
+    expect(db.settings).toHaveLength(0);
+  });
+
+  it("uses the branding fallback and keeps the endpoint owner-only", async () => {
+    const db = new InMemoryD1();
+    db.settings.push({ key: "branding_display_name", value: "Iglesia Central" });
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const ownerResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { EMAIL_FROM: "  legacy-contact-4@example.com  " })
+    );
+
+    await expect(ownerResponse.json()).resolves.toMatchObject({
+      emailSender: {
+        senderName: "Iglesia Central",
+        senderAddress: "legacy-contact-4@example.com",
+        replyToAddress: ""
+      }
+    });
+
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const adminResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/email-sender", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(adminResponse.status).toBe(403);
   });
 });
 
