@@ -69,6 +69,7 @@ export function CredentialsPanel({
   emailTemplateDraft,
   emailSender,
   emailSenderDraft,
+  emailReplyToDraft,
   alertEmailDraft,
   branding,
   token,
@@ -84,6 +85,7 @@ export function CredentialsPanel({
   onEmailTemplateChange,
   onEmailTemplateSubmit,
   onEmailSenderChange,
+  onEmailReplyToChange,
   onEmailSenderSubmit,
   onEmissionEnvironmentChange,
   onAlertEmailChange,
@@ -99,6 +101,7 @@ export function CredentialsPanel({
   emailTemplateDraft: Record<string, EmailTemplateValue>;
   emailSender: EmailSenderState | null;
   emailSenderDraft: string;
+  emailReplyToDraft: string;
   alertEmailDraft: string;
   branding: Branding;
   token: string;
@@ -114,6 +117,7 @@ export function CredentialsPanel({
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
   onEmailTemplateSubmit: () => Promise<void>;
   onEmailSenderChange: (value: string) => void;
+  onEmailReplyToChange: (value: string) => void;
   onEmailSenderSubmit: () => Promise<void>;
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onAlertEmailChange: (value: string) => void;
@@ -463,7 +467,7 @@ export function CredentialsPanel({
                     </label>
                     <div className="credential-field-block span-2">
                       <div className="credential-section-title">
-                        <h3>Remitente visible</h3>
+                        <h3>Remitente visible y respuestas</h3>
                       </div>
                       <label>
                         <span className="plain-field-label">Nombre visible del remitente</span>
@@ -480,6 +484,23 @@ export function CredentialsPanel({
                           maxLength={80}
                         />
                         <small>Dirección activa: {emailSender?.senderAddress || "Sin correo remitente configurado"}</small>
+                      </label>
+                      <label>
+                        <span className="plain-field-label">Correo para recibir respuestas (Reply-To)</span>
+                        <input
+                          value={emailReplyToDraft}
+                          onChange={(event) => onEmailReplyToChange(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void onEmailSenderSubmit();
+                            }
+                          }}
+                          placeholder="respuestas@example.org"
+                          type="email"
+                          maxLength={254}
+                        />
+                        <small>Déjelo vacío para que las respuestas lleguen al correo remitente activo.</small>
                       </label>
                       <button
                         className="primary"

@@ -202,8 +202,12 @@ describe("Correo provider destination authority (source contract)", () => {
     expect(credentialsPanelSource).not.toContain("EMAIL_API_URL");
   });
 
-  test("offers an independently saved visible sender name in the Correo settings section", () => {
+  test("offers independently saved visible sender and Reply-To fields in the Correo settings section", () => {
     expect(credentialsPanelSource).toContain("Nombre visible del remitente");
+    expect(credentialsPanelSource).toContain("Correo para recibir respuestas (Reply-To)");
+    expect(credentialsPanelSource).toContain('value={emailReplyToDraft}');
+    expect(credentialsPanelSource).toContain('type="email"');
+    expect(credentialsPanelSource).toContain("Déjelo vacío para que las respuestas lleguen al correo remitente activo.");
     expect(credentialsPanelSource).toContain("Guardar remitente");
     expect(credentialsPanelSource).toContain("onEmailSenderSubmit");
     expect(credentialsPanelSource).toContain("Dirección activa:");
@@ -220,6 +224,17 @@ describe("Correo provider destination authority (source contract)", () => {
     expect(senderField).toContain('event.key === "Enter"');
     expect(senderField).toContain("event.preventDefault()");
     expect(senderField).toContain("onEmailSenderSubmit()");
+  });
+
+  test("submits the Reply-To draft with the visible sender identity", () => {
+    const updateEmailSender = appSource.slice(
+      appSource.indexOf("async function updateEmailSender()"),
+      appSource.indexOf("async function bootstrapCredentialWriter")
+    );
+
+    expect(updateEmailSender).toContain("senderName: emailSenderDraft");
+    expect(updateEmailSender).toContain("replyToAddress: emailReplyToDraft");
+    expect(updateEmailSender).toContain("applyEmailSender(result.emailSender)");
   });
 
   test("refreshes the sender identity after EMAIL_FROM credentials are saved", () => {

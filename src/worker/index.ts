@@ -22,7 +22,14 @@ import {
   validateIntentInput
 } from "./services/donations";
 import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./services/email";
-import { EMAIL_SENDER_NAME_SETTING_KEY, EmailSenderValidationError, normalizeEmailSenderName } from "./services/emailSender";
+import {
+  EMAIL_REPLY_TO_SETTING_KEY,
+  EMAIL_SENDER_NAME_SETTING_KEY,
+  EmailSenderValidationError,
+  normalizeEmailReplyToAddress,
+  normalizeEmailSenderName,
+  resolveEmailReplyToAddress
+} from "./services/emailSender";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
@@ -2209,11 +2216,13 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
 async function emailSenderState(ctx: Pick<ApiRouteContext, "env" | "repo">): Promise<{
   senderName: string;
   senderAddress: string;
+  replyToAddress: string;
 }> {
   const branding = await loadEmailBranding(ctx.repo, ctx.env);
   return {
     senderName: branding.senderName,
-    senderAddress: ctx.env.EMAIL_FROM?.trim() ?? ""
+    senderAddress: ctx.env.EMAIL_FROM?.trim() ?? "",
+    replyToAddress: branding.replyToAddress ?? ""
   };
 }
 
@@ -2228,18 +2237,25 @@ async function handleEmailSender(ctx: ApiRouteContext): Promise<Response> {
   const body = (await readJsonObject(ctx.request, {
     limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
     malformed: "empty-object"
-  })) as { senderName?: unknown };
+  })) as { senderName?: unknown; replyToAddress?: unknown };
   try {
     const senderName = normalizeEmailSenderName(body.senderName);
+    const updatesReplyTo = Object.prototype.hasOwnProperty.call(body, "replyToAddress");
+    const replyToAddress = updatesReplyTo
+      ? normalizeEmailReplyToAddress(body.replyToAddress)
+      : resolveEmailReplyToAddress(await ctx.repo.getSetting(EMAIL_REPLY_TO_SETTING_KEY)) ?? "";
     await ctx.repo.setSetting(EMAIL_SENDER_NAME_SETTING_KEY, senderName, actor.id);
+    if (updatesReplyTo) {
+      await ctx.repo.setSetting(EMAIL_REPLY_TO_SETTING_KEY, replyToAddress, actor.id);
+    }
     await ctx.repo.createAudit({
       actorType: "USER",
       actorId: actor.id,
       action: "EMAIL_SENDER_UPDATED",
       entityType: "app_setting",
-      entityId: EMAIL_SENDER_NAME_SETTING_KEY,
-      summary: "Remitente visible de correo actualizado",
-      metadata: { senderName }
+      entityId: "email_sender_identity",
+      summary: "Identidad de correo actualizada",
+      metadata: { senderName, replyToConfigured: Boolean(replyToAddress) }
     });
     return jsonResponse({ ok: true, emailSender: await emailSenderState(ctx) });
   } catch (error) {

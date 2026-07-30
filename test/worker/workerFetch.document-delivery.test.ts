@@ -75,6 +75,24 @@ describe("document email resend", () => {
     expect(JSON.stringify(resendAudit)).not.toContain("legacy-contact-2@example.com");
   });
 
+  it("applies the stored Reply-To address to a real document email dispatch", async () => {
+    const db = emailResendDb();
+    db.settings.push({ key: "email_reply_to", value: "legacy-contact-7@example.com" });
+    const send = vi.fn(async () => ({ messageId: "cf-manual-resend-reply-to" }));
+    const runtime = env(db, {
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "legacy-contact-6@example.com",
+      EMAIL: { send } as SendEmail
+    });
+
+    const response = await resendDocument(runtime);
+
+    expect(response.status).toBe(200);
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      replyTo: "legacy-contact-7@example.com"
+    }));
+  });
+
   it("reports an in-progress duplicate while the first resend owns the provider call", async () => {
     const db = emailResendDb();
     let releaseProvider!: () => void;

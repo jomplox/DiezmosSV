@@ -1,6 +1,10 @@
+import { isValidEmail } from "../../shared/email";
+
 export const EMAIL_SENDER_NAME_SETTING_KEY = "email_sender_name";
+export const EMAIL_REPLY_TO_SETTING_KEY = "email_reply_to";
 
 const EMAIL_SENDER_NAME_MAX_LENGTH = 80;
+const EMAIL_REPLY_TO_MAX_LENGTH = 254;
 const EMAIL_SENDER_NAME_CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/u;
 const DEFAULT_EMAIL_SENDER_NAME = "ExamplePerson1";
 
@@ -33,4 +37,33 @@ export function resolveEmailSenderName(value: unknown, organizationName: unknown
     }
   }
   return DEFAULT_EMAIL_SENDER_NAME;
+}
+
+export function normalizeEmailReplyToAddress(value: unknown): string {
+  if (typeof value !== "string") {
+    throw new EmailSenderValidationError("Ingrese un correo válido para recibir respuestas.");
+  }
+  const replyToAddress = value.trim().toLowerCase();
+  if (!replyToAddress) {
+    return "";
+  }
+  if (replyToAddress.length > EMAIL_REPLY_TO_MAX_LENGTH) {
+    throw new EmailSenderValidationError(
+      `El correo para recibir respuestas no puede superar los ${EMAIL_REPLY_TO_MAX_LENGTH} caracteres.`
+    );
+  }
+  if (!isValidEmail(replyToAddress)) {
+    throw new EmailSenderValidationError("Ingrese un correo válido para recibir respuestas.");
+  }
+  return replyToAddress;
+}
+
+// An invalid value left by an older release must not block delivery. Omitting Reply-To
+// makes email clients reply to the authenticated sender address instead.
+export function resolveEmailReplyToAddress(value: unknown): string | null {
+  try {
+    return normalizeEmailReplyToAddress(value) || null;
+  } catch {
+    return null;
+  }
 }

@@ -231,6 +231,7 @@ export interface EmailTemplateSettings {
 export interface EmailSenderState {
   senderName: string;
   senderAddress: string;
+  replyToAddress: string;
 }
 
 export interface AlertEmailState {

@@ -7,7 +7,9 @@
 
 import { EMAIL_PATTERN } from "../../shared/email";
 import {
+  EMAIL_REPLY_TO_SETTING_KEY,
   EMAIL_SENDER_NAME_SETTING_KEY,
+  resolveEmailReplyToAddress,
   resolveEmailSenderName
 } from "./emailSender";
 
@@ -134,13 +136,14 @@ export async function loadEmailBranding(
     getSetting(key: string): Promise<string | null>;
   },
   env: BrandingOriginEnv
-): Promise<{ organizationName: string; brandColor: string; supportEmail: string; senderName: string; logoUrl: string | null }> {
-  const [displayName, accentColor, supportEmail, logoRaw, senderName] = await Promise.all([
+): Promise<{ organizationName: string; brandColor: string; supportEmail: string; senderName: string; replyToAddress: string | null; logoUrl: string | null }> {
+  const [displayName, accentColor, supportEmail, logoRaw, senderName, replyToAddress] = await Promise.all([
     settings.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
     settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
     settings.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY),
     settings.getSetting(BRANDING_LOGO_SETTING_KEY),
-    settings.getSetting(EMAIL_SENDER_NAME_SETTING_KEY)
+    settings.getSetting(EMAIL_SENDER_NAME_SETTING_KEY),
+    settings.getSetting(EMAIL_REPLY_TO_SETTING_KEY)
   ]);
   const branding = parseBrandingSettings(
     displayName,
@@ -153,6 +156,7 @@ export async function loadEmailBranding(
     brandColor: branding.accentColor,
     supportEmail: branding.supportEmail,
     senderName: resolveEmailSenderName(senderName, branding.displayName),
+    replyToAddress: resolveEmailReplyToAddress(replyToAddress),
     logoUrl: logo ? brandingLogoUrl(env, logo.version) : null
   };
 }
