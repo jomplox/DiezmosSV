@@ -537,6 +537,7 @@ export function CredentialsPanel({
                         <input
                           value={emailSenderDraft}
                           onChange={(event) => onEmailSenderChange(event.target.value)}
+                          disabled={!emailSender || emailSenderBusy}
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
@@ -553,6 +554,7 @@ export function CredentialsPanel({
                         <input
                           value={emailReplyToDraft}
                           onChange={(event) => onEmailReplyToChange(event.target.value)}
+                          disabled={!emailSender || emailSenderBusy}
                           onKeyDown={(event) => {
                             if (event.key === "Enter") {
                               event.preventDefault();
@@ -568,7 +570,7 @@ export function CredentialsPanel({
                       <button
                         className="primary"
                         type="button"
-                        disabled={emailSenderBusy}
+                        disabled={!emailSender || emailSenderBusy}
                         onClick={() => void onEmailSenderSubmit()}
                       >
                         {emailSenderBusy ? "Guardando" : "Guardar remitente"}

@@ -102,6 +102,11 @@ import {
   type RetentionTable
 } from "./repository/retentionReads";
 import {
+  listDonors as listDonorsRepository,
+  type DonorExplorerFilters,
+  type DonorExplorerPage
+} from "./repository/donors";
+import {
   claimCorrectedWompiEventIssuance as claimCorrectedWompiEventIssuanceRepository,
   claimInitialWompiIssuanceAttempt as claimInitialWompiIssuanceAttemptRepository,
   claimStalledWompiIssuanceAttempt as claimStalledWompiIssuanceAttemptRepository,
@@ -225,6 +230,11 @@ export type {
   RetentionSnapshotTable,
   RetentionTable
 } from "./repository/retentionReads";
+export type {
+  DonorExplorerFilters,
+  DonorExplorerPage,
+  DonorExplorerRow
+} from "./repository/donors";
 
 export class Repository {
   // Optional per-request actor context. When handleApi/webhook build the Repository
@@ -790,6 +800,11 @@ export class Repository {
   } = {}): Promise<DteDocumentListPage> {
     return listDteDocumentsRepository(this.db, params);
   }
+
+  async listDonors(filters: DonorExplorerFilters): Promise<DonorExplorerPage> {
+    return listDonorsRepository(this.db, filters);
+  }
+
   // Earliest issued document's created_at, used by the backups panel to bound the
   // expected month range when the archive predates (or is emptier than) the DB.
   // Returns null when there are no documents at all.
