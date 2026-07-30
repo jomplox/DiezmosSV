@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Cloud,
   CircleHelp,
+  ContactRound,
   FileSpreadsheet,
   FileText,
   FlaskConical,
@@ -45,6 +46,8 @@ import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { type CredentialSettingsSectionId } from "./credentialSettings";
 import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
+import { DonorsView } from "./donorsView";
+import type { DonorExplorerPage } from "./donors";
 import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import {
@@ -113,7 +116,7 @@ import {
 } from "./documentsView";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
+type View = "documents" | "donors" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
 export type FiscalCorrectionTarget =
   | { kind: "WOMPI_EVENT"; id: string }
   | { kind: "DTE_DOCUMENT"; id: string };
@@ -152,6 +155,7 @@ export function shouldRetainResendRequestIdAfterFailure(
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
+  { id: "donors", label: "Donantes", icon: ContactRound, minRole: "ADMIN" },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Unplug },
   { id: "audit", label: "Auditoría", icon: ScrollText },
@@ -705,6 +709,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (view === "users" && can(user, "ADMIN")) {
       const result = await accountApi<{ users: User[] }>("/api/users");
       setUsers(result.users);
+    }
+    if (view === "donors" && can(user, "ADMIN")) {
+      const environmentResult = await accountApi<{ emissionEnvironment: EmissionEnvironmentState }>(
+        "/api/settings/emission-environment"
+      );
+      setEmissionEnvironment(environmentResult.emissionEnvironment);
     }
     if (view === "credentials" && can(user, "OWNER")) {
       const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
@@ -1841,6 +1851,22 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onToChange={setAnalyticsTo}
             onGiftFilterChange={setAnalyticsGiftFilter}
           />
+        )}
+
+        {view === "donors" && can(user, "ADMIN") && (
+          emissionEnvironment ? (
+            <DonorsView
+              environment={emissionEnvironment.environment}
+              loadPage={(params) =>
+                accountApi<DonorExplorerPage>(`/api/donors?${params.toString()}`)
+              }
+              onError={handleApiFailure}
+            />
+          ) : (
+            <section className="single-panel">
+              <p>Cargando el ambiente activo…</p>
+            </section>
+          )
         )}
 
         {view === "users" && (
@@ -3033,6 +3059,7 @@ function delay(ms: number): Promise<void> {
 
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
+  donors: "Explore donantes, sus datos de contacto y su historial de entregas.",
   failures: "CDE con errores, rechazos o pagos sin comprobante que requieren su atención.",
   contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",
   audit: "Historial de todas las acciones realizadas en el panel.",

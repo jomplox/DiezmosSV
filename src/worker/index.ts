@@ -62,7 +62,7 @@ import {
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
-import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
+import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient, MhPreDispatchError } from "./services/mhClient";
@@ -1476,6 +1476,68 @@ async function handleDonationIntentList(ctx: ApiRouteContext): Promise<Response>
   return jsonResponse({ intents: await ctx.repo.listRecentDonationIntents(50) });
 }
 
+async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
+  const environment = ambienteValue(ctx.url.searchParams.get("environment"));
+  if (!environment) {
+    return jsonResponse(
+      { error: "invalid_donor_environment", message: "Seleccione un ambiente válido (00 o 01)." },
+      { status: 400 }
+    );
+  }
+  const documentType = ctx.url.searchParams.get("documentType")?.trim() ?? "";
+  const giftTypeParam = ctx.url.searchParams.get("giftType");
+  const sourceParam = ctx.url.searchParams.get("source");
+  const parseNonNegativeInteger = (name: string, fallback: number): number | null => {
+    const value = ctx.url.searchParams.get(name);
+    if (value === null) return fallback;
+    if (!/^\d+$/.test(value)) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) ? parsed : null;
+  };
+  const minTotalCents = ctx.url.searchParams.has("minTotalCents")
+    ? parseNonNegativeInteger("minTotalCents", 0)
+    : undefined;
+  const maxTotalCents = ctx.url.searchParams.has("maxTotalCents")
+    ? parseNonNegativeInteger("maxTotalCents", 0)
+    : undefined;
+  const limit = parseNonNegativeInteger("limit", 25);
+  const offset = parseNonNegativeInteger("offset", 0);
+  const invalid =
+    (documentType !== "" && !findCatalogOption(CAT022_DOCUMENT_TYPES, documentType))
+    || (giftTypeParam !== null && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA")
+    || (sourceParam !== null && sourceParam !== "WOMPI" && sourceParam !== "MANUAL")
+    || minTotalCents === null
+    || maxTotalCents === null
+    || (minTotalCents !== undefined && maxTotalCents !== undefined && minTotalCents > maxTotalCents)
+    || limit === null
+    || limit < 1
+    || limit > 100
+    || offset === null;
+  if (invalid) {
+    return jsonResponse(
+      { error: "invalid_donor_filters", message: "Revise los filtros del explorador de donantes." },
+      { status: 400 }
+    );
+  }
+  return jsonResponse(await ctx.repo.listDonors({
+    environment,
+    documentType: documentType || undefined,
+    documentValue: ctx.url.searchParams.get("documentValue") ?? undefined,
+    name: ctx.url.searchParams.get("name") ?? undefined,
+    email: ctx.url.searchParams.get("email") ?? undefined,
+    minTotalCents,
+    maxTotalCents,
+    giftType: giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA"
+      ? giftTypeParam
+      : undefined,
+    source: sourceParam === "WOMPI" || sourceParam === "MANUAL"
+      ? sourceParam
+      : undefined,
+    limit,
+    offset
+  }));
+}
+
 function documentRouteRole(ctx: ApiRouteContext): Role {
   const action = ctx.params[1];
   if (action === "email" && ctx.request.method === "PATCH") return "OPERATOR";
@@ -2058,7 +2120,8 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
 
 const documentListRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/documents", role: "VIEWER", handler: handleDocumentList },
-  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList }
+  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList },
+  { method: "GET", pattern: "/api/donors", role: "ADMIN", handler: handleDonorList }
 ];
 
 const wompiIssuanceRoutes: Array<Route<ApiRouteContext>> = [
