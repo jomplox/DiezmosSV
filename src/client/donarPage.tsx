@@ -26,7 +26,8 @@ import {
   DONAR_INTENT_PATH,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
-  DONAR_LANDING_UNIFIER,
+  DONAR_LANDING_UNIFIER_CHURCH,
+  DONAR_LANDING_UNIFIER_LEAD,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
   DONAR_VERIFYING_NOTICE_DELAY_MS,
@@ -926,7 +927,8 @@ export function DonarPage() {
               The flag is an inline SVG badge (the flag emoji rendered as a blank
               box, leaving an orphaned period). */}
           <p className="donar-landing-unifier">
-            {DONAR_LANDING_UNIFIER} <DonarFlagBadge country="sv" />.
+            <span>{DONAR_LANDING_UNIFIER_LEAD}</span>{" "}
+            <span className="donar-landing-unifier-church">{DONAR_LANDING_UNIFIER_CHURCH}</span> <DonarFlagBadge country="sv" />.
           </p>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
@@ -1150,6 +1152,7 @@ export function DonarPage() {
                     }
                   }}
                   placeholder={form.donorDocumentType === "13" ? "00000000-0" : form.donorDocumentType === "36" ? "0000-000000-000-0" : "Documento"}
+                  inputMode={form.donorDocumentType === "13" ? "numeric" : undefined}
                   aria-label={form.donorDocumentType === "36" ? "NIT de la empresa" : "Número de documento"}
                   aria-invalid={fieldErrors.donorDocument ? true : undefined}
                   aria-describedby={donarFieldErrorRef("donorDocument", fieldErrors)}
