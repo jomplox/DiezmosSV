@@ -470,6 +470,12 @@ export function CredentialsPanel({
                         <input
                           value={emailSenderDraft}
                           onChange={(event) => onEmailSenderChange(event.target.value)}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") {
+                              event.preventDefault();
+                              void onEmailSenderSubmit();
+                            }
+                          }}
                           placeholder="Nombre que verán los destinatarios"
                           maxLength={80}
                         />

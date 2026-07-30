@@ -1191,8 +1191,9 @@ describe("donar responsive donor layout", () => {
     );
 
     expect(landingBlock).toContain("{DONAR_LANDING_UNIFIER_LEAD}");
-    expect(landingBlock).toContain('className="donar-landing-unifier-church"');
-    expect(landingBlock).toContain("{DONAR_LANDING_UNIFIER_CHURCH}");
+    expect(landingBlock).toMatch(
+      /<span className="donar-landing-unifier-church">\s*\{DONAR_LANDING_UNIFIER_CHURCH\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
+    );
     expect(landingBlock).not.toContain("<br");
     expect(stylesSource).toMatch(
       /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-landing-unifier-church\s*\{[\s\S]{0,160}display:\s*block;/

@@ -296,6 +296,8 @@ describe("email sender setting", () => {
   it.each([
     ["an empty name", "   "],
     ["a C0 control character", "Iglesia\r\nBcc: attacker@example.org"],
+    ["a leading C0 control character", "\tIglesia"],
+    ["a trailing C0 control character", "Iglesia\r"],
     ["a C1 control character", "Iglesia\u0085Bcc: attacker@example.org"],
     ["a name longer than 80 characters", "A".repeat(81)]
   ])("rejects %s in the visible sender name", async (_description, senderName) => {
