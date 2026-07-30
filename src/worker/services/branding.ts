@@ -6,6 +6,10 @@
 // keep an unbranded deployment identical to the historical "ExamplePerson1" build.
 
 import { EMAIL_PATTERN } from "../../shared/email";
+import {
+  EMAIL_SENDER_NAME_SETTING_KEY,
+  resolveEmailSenderName
+} from "./emailSender";
 
 export const BRANDING_DISPLAY_NAME_SETTING_KEY = "branding_display_name";
 export const BRANDING_ACCENT_COLOR_SETTING_KEY = "branding_accent_color";
@@ -130,17 +134,25 @@ export async function loadEmailBranding(
     getSetting(key: string): Promise<string | null>;
   },
   env: BrandingOriginEnv
-): Promise<{ organizationName: string; brandColor: string; supportEmail: string; logoUrl: string | null }> {
+): Promise<{ organizationName: string; brandColor: string; supportEmail: string; senderName: string; logoUrl: string | null }> {
+  const [displayName, accentColor, supportEmail, logoRaw, senderName] = await Promise.all([
+    settings.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
+    settings.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY),
+    settings.getSetting(BRANDING_LOGO_SETTING_KEY),
+    settings.getSetting(EMAIL_SENDER_NAME_SETTING_KEY)
+  ]);
   const branding = parseBrandingSettings(
-    await settings.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
-    await settings.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
-    await settings.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY)
+    displayName,
+    accentColor,
+    supportEmail
   );
-  const logo = parseBrandingLogoMeta(await settings.getSetting(BRANDING_LOGO_SETTING_KEY));
+  const logo = parseBrandingLogoMeta(logoRaw);
   return {
     organizationName: branding.displayName,
     brandColor: branding.accentColor,
     supportEmail: branding.supportEmail,
+    senderName: resolveEmailSenderName(senderName, branding.displayName),
     logoUrl: logo ? brandingLogoUrl(env, logo.version) : null
   };
 }

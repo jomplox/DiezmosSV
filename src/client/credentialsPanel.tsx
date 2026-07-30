@@ -17,6 +17,7 @@ import { type FormEvent, useMemo, useRef, useState } from "react";
 import type {
   CredentialStatus,
   CredentialStatusItem,
+  EmailSenderState,
   EmailTemplateSettings,
   EmailTemplateValue,
   EmissionEnvironmentState
@@ -66,6 +67,8 @@ export function CredentialsPanel({
   emissionEnvironment,
   emailTemplates,
   emailTemplateDraft,
+  emailSender,
+  emailSenderDraft,
   alertEmailDraft,
   branding,
   token,
@@ -73,12 +76,15 @@ export function CredentialsPanel({
   busy,
   emissionBusy,
   templateBusy,
+  emailSenderBusy,
   alertEmailBusy,
   writerBusy,
   onChange,
   onSubmit,
   onEmailTemplateChange,
   onEmailTemplateSubmit,
+  onEmailSenderChange,
+  onEmailSenderSubmit,
   onEmissionEnvironmentChange,
   onAlertEmailChange,
   onAlertEmailSubmit,
@@ -91,6 +97,8 @@ export function CredentialsPanel({
   emissionEnvironment: EmissionEnvironmentState | null;
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
+  emailSender: EmailSenderState | null;
+  emailSenderDraft: string;
   alertEmailDraft: string;
   branding: Branding;
   token: string;
@@ -98,12 +106,15 @@ export function CredentialsPanel({
   busy: boolean;
   emissionBusy: boolean;
   templateBusy: boolean;
+  emailSenderBusy: boolean;
   alertEmailBusy: boolean;
   writerBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
   onSubmit: () => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
   onEmailTemplateSubmit: () => Promise<void>;
+  onEmailSenderChange: (value: string) => void;
+  onEmailSenderSubmit: () => Promise<void>;
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onAlertEmailChange: (value: string) => void;
   onAlertEmailSubmit: () => Promise<void>;
@@ -450,6 +461,29 @@ export function CredentialsPanel({
                       <input value={input.emailFrom} onChange={(event) => onChange({ ...input, emailFrom: event.target.value })} placeholder={credentialReplacementPlaceholder(status, "EMAIL_FROM", "Nuevo correo remitente")} type="email" />
                       <small>Usado como remitente tanto en Cloudflare Email como en el respaldo.</small>
                     </label>
+                    <div className="credential-field-block span-2">
+                      <div className="credential-section-title">
+                        <h3>Remitente visible</h3>
+                      </div>
+                      <label>
+                        <span className="plain-field-label">Nombre visible del remitente</span>
+                        <input
+                          value={emailSenderDraft}
+                          onChange={(event) => onEmailSenderChange(event.target.value)}
+                          placeholder="Nombre que verán los destinatarios"
+                          maxLength={80}
+                        />
+                        <small>Dirección activa: {emailSender?.senderAddress || "Sin correo remitente configurado"}</small>
+                      </label>
+                      <button
+                        className="primary"
+                        type="button"
+                        disabled={emailSenderBusy}
+                        onClick={() => void onEmailSenderSubmit()}
+                      >
+                        {emailSenderBusy ? "Guardando" : "Guardar remitente"}
+                      </button>
+                    </div>
                     <div className="credential-field-block span-2">
                       <div className="credential-section-title">
                         <h3>Alertas operativas</h3>

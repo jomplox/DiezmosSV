@@ -179,13 +179,30 @@ describe("loadEmailBranding", () => {
       organizationName: "Iglesia Central",
       brandColor: "#123456",
       supportEmail: "legacy-email-119@example.com",
+      senderName: "Iglesia Central",
       logoUrl: null
     });
+  });
+
+  it("uses the customized visible email sender independently of the organization name", async () => {
+    const store: Record<string, string> = {
+      branding_display_name: "Iglesia Central",
+      email_sender_name: "Comprobantes Iglesia Central"
+    };
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => store[key] ?? null
+      },
+      originEnv
+    );
+    expect(branding.senderName).toBe("Comprobantes Iglesia Central");
+    expect(branding.organizationName).toBe("Iglesia Central");
   });
 
   it("defaults the support email to fmce when unset", async () => {
     const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
     expect(branding.supportEmail).toBe("legacy-contact-1@example.com");
+    expect(branding.senderName).toBe("ExamplePerson1");
   });
 
   it("builds an absolute logo URL from APP_ORIGIN and the stored logo version", async () => {

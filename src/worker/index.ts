@@ -22,6 +22,7 @@ import {
   validateIntentInput
 } from "./services/donations";
 import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./services/email";
+import { EMAIL_SENDER_NAME_SETTING_KEY, EmailSenderValidationError, normalizeEmailSenderName } from "./services/emailSender";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
@@ -2009,6 +2010,11 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
     handler: handleEmailTemplates
   },
   {
+    pattern: "/api/settings/email-sender",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleEmailSender
+  },
+  {
     pattern: "/api/settings/branding",
     role: ({ request }) => request.method === "PUT" ? "OWNER" : null,
     handler: handleBrandingSettings
@@ -2195,6 +2201,50 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
   } catch (error) {
     if (error instanceof EmailTemplateValidationError) {
       return jsonResponse({ error: "invalid_email_templates", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+}
+
+async function emailSenderState(ctx: Pick<ApiRouteContext, "env" | "repo">): Promise<{
+  senderName: string;
+  senderAddress: string;
+}> {
+  const branding = await loadEmailBranding(ctx.repo, ctx.env);
+  return {
+    senderName: branding.senderName,
+    senderAddress: ctx.env.EMAIL_FROM?.trim() ?? ""
+  };
+}
+
+async function handleEmailSender(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({ emailSender: await emailSenderState(ctx) });
+  }
+  if (ctx.request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "empty-object"
+  })) as { senderName?: unknown };
+  try {
+    const senderName = normalizeEmailSenderName(body.senderName);
+    await ctx.repo.setSetting(EMAIL_SENDER_NAME_SETTING_KEY, senderName, actor.id);
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "EMAIL_SENDER_UPDATED",
+      entityType: "app_setting",
+      entityId: EMAIL_SENDER_NAME_SETTING_KEY,
+      summary: "Remitente visible de correo actualizado",
+      metadata: { senderName }
+    });
+    return jsonResponse({ ok: true, emailSender: await emailSenderState(ctx) });
+  } catch (error) {
+    if (error instanceof EmailSenderValidationError) {
+      return jsonResponse({ error: "invalid_email_sender", message: error.message }, { status: 400 });
     }
     throw error;
   }

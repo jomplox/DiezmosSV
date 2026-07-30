@@ -200,6 +200,14 @@ describe("Correo provider destination authority (source contract)", () => {
     expect(credentialsPanelSource).not.toContain("input.emailApiUrl");
     expect(credentialsPanelSource).not.toContain("EMAIL_API_URL");
   });
+
+  test("offers an independently saved visible sender name in the Correo settings section", () => {
+    expect(credentialsPanelSource).toContain("Nombre visible del remitente");
+    expect(credentialsPanelSource).toContain("Guardar remitente");
+    expect(credentialsPanelSource).toContain("onEmailSenderSubmit");
+    expect(credentialsPanelSource).toContain("Dirección activa:");
+    expect(credentialsPanelSource).toContain("maxLength={80}");
+  });
 });
 
 describe("Ambiente emission-environment save guard (source contract)", () => {

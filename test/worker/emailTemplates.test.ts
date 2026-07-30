@@ -236,6 +236,80 @@ describe("email subject boundary", () => {
     expect(message.headers).not.toHaveProperty("Message-ID");
   });
 
+  it("emits the configured visible sender name through the common Cloudflare dispatch boundary", async () => {
+    const send = vi.fn(async (_message: unknown) => ({ messageId: "email_cf_sender" }));
+    const service = new EmailService(
+      {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-4@example.com",
+        EMAIL: { send }
+      } as unknown as Env,
+      undefined,
+      {
+        organizationName: "Iglesia Central",
+        senderName: "Comprobantes Iglesia Central",
+        brandColor: "#0f766e",
+        supportEmail: "soporte@example.org"
+      }
+    );
+
+    await service.sendOperationalAlert({
+      to: "ops@example.org",
+      subject: "Aviso operativo",
+      text: "Body",
+      html: "<p>Body</p>"
+    });
+
+    expect(send).toHaveBeenCalledWith(expect.objectContaining({
+      from: {
+        email: "legacy-contact-4@example.com",
+        name: "Comprobantes Iglesia Central"
+      }
+    }));
+  });
+
+  it("includes the visible sender name without replacing the HTTP provider's sender address", async () => {
+    const providerFetch = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
+      new Response(JSON.stringify({ status: "accepted", id: "email_http_sender" }), {
+        status: 202,
+        headers: { "content-type": "application/json" }
+      })
+    );
+    vi.stubGlobal("fetch", providerFetch);
+    const service = new EmailService(
+      {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "legacy-contact-4@example.com",
+        EMAIL_PROVIDER_URL: "https://mail.example/send",
+        EMAIL_API_KEY: "email-api-key"
+      } as unknown as Env,
+      undefined,
+      {
+        organizationName: "Iglesia Central",
+        senderName: "Comprobantes Iglesia Central",
+        brandColor: "#0f766e",
+        supportEmail: "soporte@example.org"
+      }
+    );
+
+    try {
+      await service.sendOperationalAlert({
+        to: "ops@example.org",
+        subject: "Aviso operativo",
+        text: "Body",
+        html: "<p>Body</p>"
+      });
+
+      const body = JSON.parse(String(providerFetch.mock.calls[0][1]?.body));
+      expect(body).toMatchObject({
+        from: "legacy-contact-4@example.com",
+        fromName: "Comprobantes Iglesia Central"
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("runs the receipt hook after preparation and before the provider side effect", async () => {
     const send = vi.fn(async () => ({ messageId: "must-not-send" }));
     const beforeProviderDispatch = vi.fn(async () => {
