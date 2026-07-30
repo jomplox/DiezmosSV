@@ -20,7 +20,8 @@ import type {
   EmailSenderState,
   EmailTemplateSettings,
   EmailTemplateValue,
-  EmissionEnvironmentState
+  EmissionEnvironmentState,
+  WompiNotificationSettings
 } from "./types";
 import {
   type Branding,
@@ -70,6 +71,7 @@ export function CredentialsPanel({
   emailSender,
   emailSenderDraft,
   emailReplyToDraft,
+  wompiNotificationsDraft,
   alertEmailDraft,
   branding,
   token,
@@ -78,6 +80,7 @@ export function CredentialsPanel({
   emissionBusy,
   templateBusy,
   emailSenderBusy,
+  wompiNotificationsBusy,
   alertEmailBusy,
   writerBusy,
   onChange,
@@ -87,6 +90,8 @@ export function CredentialsPanel({
   onEmailSenderChange,
   onEmailReplyToChange,
   onEmailSenderSubmit,
+  onWompiNotificationsChange,
+  onWompiNotificationsSubmit,
   onEmissionEnvironmentChange,
   onAlertEmailChange,
   onAlertEmailSubmit,
@@ -102,6 +107,7 @@ export function CredentialsPanel({
   emailSender: EmailSenderState | null;
   emailSenderDraft: string;
   emailReplyToDraft: string;
+  wompiNotificationsDraft: WompiNotificationSettings;
   alertEmailDraft: string;
   branding: Branding;
   token: string;
@@ -110,6 +116,7 @@ export function CredentialsPanel({
   emissionBusy: boolean;
   templateBusy: boolean;
   emailSenderBusy: boolean;
+  wompiNotificationsBusy: boolean;
   alertEmailBusy: boolean;
   writerBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
@@ -119,6 +126,8 @@ export function CredentialsPanel({
   onEmailSenderChange: (value: string) => void;
   onEmailReplyToChange: (value: string) => void;
   onEmailSenderSubmit: () => Promise<void>;
+  onWompiNotificationsChange: (value: WompiNotificationSettings) => void;
+  onWompiNotificationsSubmit: () => Promise<void>;
   onEmissionEnvironmentChange: (environment: EmissionEnvironmentState["environment"]) => Promise<void>;
   onAlertEmailChange: (value: string) => void;
   onAlertEmailSubmit: () => Promise<void>;
@@ -421,6 +430,60 @@ export function CredentialsPanel({
                       </div>
                       <small>Configure esta URL en Wompi como endpoint de notificación para pagos aprobados.</small>
                     </div>
+                    <div className="credential-section-title span-2">
+                      <h3>Avisos de entregas exitosas</h3>
+                      <p>Estos valores se incorporan a cada enlace nuevo que genere la aplicación.</p>
+                    </div>
+                    <label>
+                      <span className="plain-field-label">Correos para notificaciones exitosas de Wompi</span>
+                      <input
+                        value={wompiNotificationsDraft.emailsNotificacion}
+                        onChange={(event) => onWompiNotificationsChange({
+                          ...wompiNotificationsDraft,
+                          emailsNotificacion: event.target.value
+                        })}
+                        placeholder="tesoreria@example.org, avisos@example.org"
+                        type="email"
+                        multiple
+                      />
+                      <small>Wompi enviará avisos operativos a estos correos. Sepárelos con una coma.</small>
+                    </label>
+                    <label>
+                      <span className="plain-field-label">Celulares para SMS exitosos de Wompi</span>
+                      <input
+                        value={wompiNotificationsDraft.telefonosNotificacion}
+                        onChange={(event) => onWompiNotificationsChange({
+                          ...wompiNotificationsDraft,
+                          telefonosNotificacion: event.target.value
+                        })}
+                        placeholder="70000000, +50371234567"
+                        type="text"
+                        inputMode="tel"
+                      />
+                      <small>Use números móviles de 8 a 15 dígitos; el código de país es opcional.</small>
+                    </label>
+                    <label className="span-2 wompi-notification-toggle">
+                      <input
+                        checked={wompiNotificationsDraft.notificarTransaccionCliente}
+                        onChange={(event) => onWompiNotificationsChange({
+                          ...wompiNotificationsDraft,
+                          notificarTransaccionCliente: event.target.checked
+                        })}
+                        type="checkbox"
+                      />
+                      <span>Enviar también el correo de Wompi al donante</span>
+                    </label>
+                    <small className="span-2">
+                      Si activa esta opción, el donante recibirá el aviso de Wompi además del correo con su CDE. Los enlaces ya creados no cambian.
+                    </small>
+                    <button
+                      className="primary span-2"
+                      type="button"
+                      disabled={wompiNotificationsBusy}
+                      onClick={() => void onWompiNotificationsSubmit()}
+                    >
+                      {wompiNotificationsBusy ? "Guardando" : "Guardar notificaciones de Wompi"}
+                    </button>
                   </div>
                 )}
 
@@ -1443,7 +1506,7 @@ function credentialSettingsPanelDescription(section: CredentialSettingsSectionId
   const descriptions: Record<CredentialSettingsSectionId, string> = {
     ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales del Ministerio de Hacienda que desea revisar.",
     mh: `Administre el usuario API de ${activeEnvironmentLabel} y el certificado firmador usado para firmar DTE antes de transmitirlos.`,
-    wompi: "Configure la firma del webhook entrante y copie la URL que debe registrar en Wompi.",
+    wompi: "Configure la firma, el webhook y los avisos que se incorporarán a cada enlace nuevo de Wompi.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
     plantillas: "Edite los asuntos y cuerpos de los correos automáticos.",

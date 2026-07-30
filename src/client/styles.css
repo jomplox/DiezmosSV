@@ -2285,6 +2285,31 @@ select,
   min-width: 0;
 }
 
+.credential-fields label.wompi-notification-toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  cursor: pointer;
+}
+
+.credential-fields .wompi-notification-toggle input {
+  flex: 0 0 auto;
+  width: 18px;
+  min-height: 18px;
+  height: 18px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+
+.credential-fields .wompi-notification-toggle span {
+  line-height: 1.4;
+}
+
 .credential-file-row {
   display: flex;
   align-items: center;

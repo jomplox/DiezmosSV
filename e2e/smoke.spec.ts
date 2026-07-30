@@ -89,6 +89,21 @@ test("bootstrap owner, emit a quick CDE, and invalidate it", async ({ page }) =>
   await page.getByRole("button", { name: /^Correo\b/ }).click();
   await expect(page.getByLabel("Correo para recibir respuestas (Reply-To)")).toHaveValue("respuestas@example.org");
 
+  // --- Configure Wompi's per-link success notifications and verify persistence ---
+  await page.getByRole("button", { name: /^Wompi\b/ }).click();
+  await page.getByLabel("Correos para notificaciones exitosas de Wompi").fill("tesoreria@example.org, avisos@example.org");
+  await page.getByLabel("Celulares para SMS exitosos de Wompi").fill("7000-0000, +503 7123 4567");
+  await page.getByLabel("Enviar también el correo de Wompi al donante").check();
+  await page.getByRole("button", { name: "Guardar notificaciones de Wompi" }).click();
+  await expect(page.getByText("Notificaciones de Wompi actualizadas")).toBeVisible();
+
+  await page.reload();
+  await page.getByRole("button", { name: "Configuración" }).click();
+  await page.getByRole("button", { name: /^Wompi\b/ }).click();
+  await expect(page.getByLabel("Correos para notificaciones exitosas de Wompi")).toHaveValue("tesoreria@example.org,avisos@example.org");
+  await expect(page.getByLabel("Celulares para SMS exitosos de Wompi")).toHaveValue("70000000,+50371234567");
+  await expect(page.getByLabel("Enviar también el correo de Wompi al donante")).toBeChecked();
+
   await page.getByRole("button", { name: "Documentos" }).click();
   await expect(page.getByRole("heading", { name: "CDE rápido" })).toBeVisible();
 
