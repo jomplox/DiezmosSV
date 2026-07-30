@@ -43,6 +43,17 @@ interface WompiEnlacePagoResponse {
   urlEnlaceLargo: string;
 }
 
+export interface WompiPaymentLinkTransaction {
+  idTransaccion: string | null;
+  esAprobada: boolean;
+}
+
+export interface WompiPaymentLinkDetail {
+  idEnlace: number;
+  nombreEnlace: string | null;
+  transacciones: WompiPaymentLinkTransaction[] | null;
+}
+
 interface CachedToken {
   token: string;
   expiresAt: string;
@@ -94,6 +105,14 @@ export class WompiApiService {
     }
     const data = (await response.json()) as WompiEnlacePagoResponse;
     return { idEnlace: data.idEnlace, urlEnlace: data.urlEnlace, urlEnlaceLargo: data.urlEnlaceLargo };
+  }
+
+  async getPaymentLink(id: number): Promise<WompiPaymentLinkDetail> {
+    const response = await this.authorizedFetch(`${ENLACE_PAGO_URL}/${id}`, "GET");
+    if (!response.ok) {
+      throw new WompiApiError(`Wompi rechazó la consulta del enlace de pago: ${response.status} ${await response.text()}`);
+    }
+    return (await response.json()) as WompiPaymentLinkDetail;
   }
 
   // Deactivates an expired link by replacing its whole object with a fully-past
@@ -194,7 +213,7 @@ export class WompiApiService {
   // Performs an authenticated Wompi request using the cached token when possible.
   // A 401 with a cached token means the token was revoked server-side: invalidate
   // the cache and retry ONCE with a freshly-minted token.
-  private async authorizedFetch(url: string, method: "POST" | "PUT", body: unknown): Promise<Response> {
+  private async authorizedFetch(url: string, method: "GET" | "POST" | "PUT", body?: unknown): Promise<Response> {
     const { token, fromCache } = await this.acquireToken();
     const response = await this.sendAuthorized(url, method, body, token);
     if (response.status === 401 && fromCache) {
@@ -205,14 +224,15 @@ export class WompiApiService {
     return response;
   }
 
-  private sendAuthorized(url: string, method: "POST" | "PUT", body: unknown, token: string): Promise<Response> {
+  private sendAuthorized(url: string, method: "GET" | "POST" | "PUT", body: unknown, token: string): Promise<Response> {
+    const hasBody = body !== undefined;
     return fetch(url, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
+        ...(hasBody ? { "Content-Type": "application/json" } : {})
       },
-      body: JSON.stringify(body)
+      body: hasBody ? JSON.stringify(body) : undefined
     });
   }
 

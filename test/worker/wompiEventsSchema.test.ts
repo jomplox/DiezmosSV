@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { migratedDatabaseThrough } from "./support/migratedDatabase";
 
 // Pins the drift that caused a live D1_ERROR: no such column: created_at.
 // wompi_events (migrations/0001_init.sql) records received_at, not created_at —
@@ -10,6 +11,10 @@ import { describe, expect, it } from "vitest";
 // query, these assertions catch it before it reaches staging.
 
 const initMigration = readFileSync(resolve(import.meta.dirname, "../../migrations/0001_init.sql"), "utf8");
+const paymentLinkDedupMigration = readFileSync(
+  resolve(import.meta.dirname, "../../migrations/0029_wompi_payment_link_dedup.sql"),
+  "utf8"
+);
 const repositorySource = readFileSync(resolve(import.meta.dirname, "../../src/worker/storage/repository.ts"), "utf8");
 
 describe("wompi_events schema contract", () => {
@@ -24,6 +29,35 @@ describe("wompi_events schema contract", () => {
     for (const wompiEventsQuery of extractWompiEventsQueries(repositorySource)) {
       expect(wompiEventsQuery).not.toMatch(/\bcreated_at\b/);
     }
+  });
+
+  it("backfills and uniquely guards the stable payment-link id for dynamic approved donations", () => {
+    const database = migratedDatabaseThrough("0028");
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES (?, ?, '01', 'ExitosaAprobada', 17800, ?)`
+    ).run(
+      "wompi_existing",
+      "uuid-from-webhook",
+      JSON.stringify({
+        EnlacePago: {
+          Id: 9000001,
+          IdentificadorEnlaceComercio: "di_existing"
+        }
+      })
+    );
+
+    database.exec(paymentLinkDedupMigration);
+
+    expect(database.prepare(
+      "SELECT payment_link_id FROM wompi_events WHERE id = 'wompi_existing'"
+    ).get()).toEqual({ payment_link_id: 9000001 });
+    expect(() => database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, payment_link_id, environment, result, amount_cents, raw_body
+       ) VALUES ('wompi_duplicate', 'display-id-from-api', 9000001, '01', 'ExitosaAprobada', 17800, '{}')`
+    ).run()).toThrow(/UNIQUE/);
   });
 });
 

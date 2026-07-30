@@ -111,7 +111,7 @@ describe("operational alert dispatch", () => {
     });
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].html).toContain("https://worker.example.invalid");
+    expect(sent[0].html).toContain("https://worker.example.invalid/admin");
   });
 
   it("does nothing when alert_email is not configured", async () => {

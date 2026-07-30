@@ -79,6 +79,35 @@ describe("donation intents", () => {
     expect(outbound).not.toHaveBeenCalled();
   });
 
+  it("blocks public donation mutations during an emergency shutdown before DB or Wompi work", async () => {
+    const db = new InMemoryD1();
+    const outbound = vi.spyOn(globalThis, "fetch");
+    const testEnv = env(db, {
+      APP_ENV: "production",
+      DONATION_INTAKE_DISABLED: "true"
+    });
+    const requests = [
+      intentRequest(validIntentBody()),
+      new Request("https://example.org/api/donations/intent/di_existing/datos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: "old-tab" })
+      })
+    ];
+
+    for (const request of requests) {
+      const response = await worker.fetch(request, testEnv);
+      expect(response.status).toBe(503);
+      await expect(response.json()).resolves.toEqual({
+        error: "donation_intake_disabled"
+      });
+    }
+
+    expect(db.preparedSql).toHaveLength(0);
+    expect(db.donationIntents).toHaveLength(0);
+    expect(outbound).not.toHaveBeenCalled();
+  });
+
   it("creates a PENDING intent, attaches a mock Wompi link, and returns all three link fields", async () => {
     const db = new InMemoryD1();
     const response = await worker.fetch(intentRequest(validIntentBody()), env(db));
@@ -565,6 +594,185 @@ describe("donation intents", () => {
     expect(db.donationIntents.find((row) => row.id === "di_fresh")?.status).toBe("PENDING");
     expect(db.donationIntents.find((row) => row.id === "di_done")?.status).toBe("COMPLETED");
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("recovers an approved Wompi transaction whose webhook never arrived before expiring links", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_reconcile",
+      status: "EXPIRED",
+      amount_cents: 17800,
+      donor_name: null,
+      donor_document_type: "13",
+      donor_document: VALID_DUI,
+      donor_email: null,
+      donor_phone: null,
+      direccion_departamento: "06",
+      direccion_municipio: "23",
+      direccion_distrito: "14",
+      direccion_complemento: null,
+      donor_pais: null,
+      gift_type: "OFRENDA",
+      wompi_id_enlace: 555,
+      wompi_url_enlace: "https://s.wompi.sv/555",
+      wompi_url_enlace_largo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=555",
+      document_id: null,
+      client_ip: null,
+      datos_token_hash: null,
+      rate_limit_claim_id: null,
+      paid_at: null,
+      created_at: "2026-07-29T10:00:00.000Z",
+      updated_at: "2026-07-29T11:00:00.000Z",
+      expires_at: "2026-07-29T11:00:00.000Z"
+    });
+    const queued: unknown[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "tok",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        idEnlace: 555,
+        nombreEnlace: "di_reconcile",
+        nombreProducto: "Diezmos y Ofrendas",
+        transacciones: [{
+          datosAdicionales: {
+            Nombre: "DONANTE",
+            Apellidos: "EJEMPLO",
+            EMail: "donante@example.org",
+            Celular: "70000000",
+            Direccion: "San Salvador",
+            NombreRegion: "San Salvador",
+            NombrePais: "El Salvador",
+            CodigoPais: "SV",
+            CodigoRegion: "06"
+          },
+          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          idTransaccion: "tx-recovered",
+          esReal: true,
+          esAprobada: true,
+          codigoAutorizacion: "000001",
+          monto: 178,
+          idExterno: null
+        }]
+      }), { status: 200 }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-30T02:00:00.000Z") });
+    try {
+      await worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        env(db, {
+          APP_ENV: "production",
+          MOCK_EXTERNAL_SERVICES: "false",
+          APP_ORIGIN: "https://donations.example.invalid",
+          EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+          WOMPI_CLIENT_ID: "id",
+          WOMPI_CLIENT_SECRET: "secret",
+          ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(fetchSpy.mock.calls[1]?.[0]).toBe("https://api.wompi.sv/EnlacePago/555");
+    expect(db.donationIntents[0].paid_at).not.toBeNull();
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      transaction_id: "tx-recovered",
+      environment: "01",
+      amount_cents: 17800,
+      issuance_status: "RETRY_QUEUED"
+    });
+    expect(JSON.parse(String(db.wompiEvents[0].headers_json))).toEqual({
+      "x-wompi-event-source": "payment-link-reconciliation"
+    });
+    expect(db.audits.some((audit) =>
+      audit.action === "WOMPI_RECONCILED" &&
+      audit.entity_id === db.wompiEvents[0].id
+    )).toBe(true);
+    expect(queued).toEqual([{
+      wompiEventId: db.wompiEvents[0].id,
+      issuanceAttemptId: db.wompiEvents[0].issuance_attempt_id
+    }]);
+  });
+
+  it("throttles a reconciled link with no approved transaction without creating fiscal work", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_still_unpaid",
+      status: "EXPIRED",
+      amount_cents: 500,
+      wompi_id_enlace: 556,
+      paid_at: null,
+      created_at: "2026-07-29T10:00:00.000Z",
+      updated_at: "2026-07-29T11:00:00.000Z",
+      expires_at: "2026-07-29T11:00:00.000Z"
+    });
+    const queued: unknown[] = [];
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        access_token: "tok",
+        expires_in: 3600,
+        token_type: "Bearer"
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        idEnlace: 556,
+        nombreEnlace: "di_still_unpaid",
+        transacciones: []
+      }), { status: 200 }));
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-30T02:00:00.000Z") });
+    try {
+      await worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        env(db, {
+          APP_ENV: "production",
+          MOCK_EXTERNAL_SERVICES: "false",
+          APP_ORIGIN: "https://donations.example.invalid",
+          WOMPI_CLIENT_ID: "id",
+          WOMPI_CLIENT_SECRET: "secret",
+          ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+        })
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(db.donationIntents[0].updated_at).toBe("2026-07-30T02:00:00.000Z");
+    expect(db.wompiEvents).toHaveLength(0);
+    expect(queued).toHaveLength(0);
+  });
+
+  it("does not expire an overdue intent after its payment marker is present", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_paid_before_expiry",
+      status: "LINK_CREATED",
+      wompi_id_enlace: 557,
+      amount_cents: 500,
+      paid_at: "2026-07-04T11:59:59.000Z",
+      expires_at: "2026-07-04T11:00:00.000Z",
+      created_at: "2026-07-04T10:00:00.000Z",
+      updated_at: "2026-07-04T11:59:59.000Z"
+    });
+
+    vi.useFakeTimers({ toFake: ["Date"], now: new Date("2026-07-04T12:00:00.000Z") });
+    try {
+      await worker.scheduled(
+        { cron: "*/15 * * * *", scheduledTime: Date.now() } as ScheduledEvent,
+        env(db)
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(db.donationIntents[0].status).toBe("LINK_CREATED");
   });
 
   it("deactivates the Wompi link of each expired LINK_CREATED intent in real mode", async () => {

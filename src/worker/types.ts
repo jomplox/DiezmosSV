@@ -32,6 +32,7 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     EMAIL_API_KEY?: string;
     EMAIL_FROM?: string;
     EMISOR_CONFIG_JSON?: string;
+    DONATION_INTAKE_DISABLED?: string;
   };
 
 export interface IssuanceMessage {
@@ -355,6 +356,7 @@ export interface WompiDocumentIdentifiers {
 export interface WompiEventRecord {
   id: string;
   transaction_id: string;
+  payment_link_id: number | null;
   environment: Ambiente;
   result: string;
   amount_cents: number;

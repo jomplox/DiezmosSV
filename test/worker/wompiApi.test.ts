@@ -296,6 +296,124 @@ describe("Wompi API service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("fetches a payment link with its successful transactions through authenticated GET", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({
+        idAplicativo: "app-1",
+        nombreEnlace: "di_test",
+        monto: 25.5,
+        nombreProducto: "Diezmos y Ofrendas",
+        usable: false,
+        transaccionCompra: {
+          datosAdicionales: {
+            Nombre: "Juan",
+            Apellidos: "Donante",
+            EMail: "juan@example.org",
+            Celular: "70000000",
+            Direccion: "San Salvador",
+            NombreRegion: "San Salvador",
+            NombrePais: "El Salvador",
+            CodigoPais: "SV",
+            CodigoRegion: "06"
+          },
+          resultadoTransaccion: 0,
+          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          montoOriginal: 25.5,
+          idTransaccion: "tx-approved",
+          esReal: true,
+          esAprobada: true,
+          codigoAutorizacion: "000001",
+          mensaje: null,
+          formaPago: 0,
+          monto: 25.5,
+          idExterno: null
+        },
+        cantidadIntentoPagoFallidos: 0,
+        formaPago: CARDS_ONLY_FORMA_PAGO,
+        infoProducto: { descripcionProducto: null, urlImagenProducto: null },
+        configuracion: {
+          urlRedirect: "https://app.example.org/donar/gracias",
+          esMontoEditable: false,
+          esCantidadEditable: false,
+          cantidadPorDefecto: 1,
+          duracionInterfazIntentoMinutos: 60,
+          urlRetorno: null,
+          emailsNotificacion: null,
+          urlWebhook: "https://app.example.org/webhooks/wompi",
+          telefonosNotificacion: null,
+          notificarTransaccionCliente: false
+        },
+        cantidadMaximaCuotas: null,
+        transacciones: [{
+          datosAdicionales: {
+            Nombre: "Juan",
+            Apellidos: "Donante",
+            EMail: "juan@example.org",
+            Celular: "70000000",
+            Direccion: "San Salvador",
+            NombreRegion: "San Salvador",
+            NombrePais: "El Salvador",
+            CodigoPais: "SV",
+            CodigoRegion: "06"
+          },
+          resultadoTransaccion: 0,
+          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          montoOriginal: 25.5,
+          idTransaccion: "tx-approved",
+          esReal: true,
+          esAprobada: true,
+          codigoAutorizacion: "000001",
+          mensaje: null,
+          formaPago: 0,
+          monto: 25.5,
+          idExterno: null
+        }],
+        nombreAplicativo: "Misión ExampleOrganization",
+        cantidadPagosExitosos: 1,
+        imagenes: [],
+        vigencia: {
+          fechaInicio: "2026-07-29T18:17:44-06:00",
+          fechaFin: "2026-07-29T19:17:44-06:00"
+        },
+        limitesDeUso: {
+          cantidadMaximaPagosExitosos: 1,
+          cantidadMaximaPagosFallidos: null
+        },
+        datosAdicionales: null,
+        idGrupoTarjetas: null,
+        idEnlace: 555,
+        urlQrCodeEnlace: "https://api.wompi.sv/EnlacePago/555/qr",
+        urlEnlace: "https://s.wompi.sv/555",
+        estaProductivo: true,
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=555"
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    type PaymentLinkReader = WompiApiService & {
+      getPaymentLink(id: number): Promise<{
+        idEnlace: number;
+        nombreEnlace: string | null;
+        transacciones: Array<{ idTransaccion: string | null; esAprobada: boolean }> | null;
+      }>;
+    };
+    const detail = await (new WompiApiService(realEnv()) as PaymentLinkReader).getPaymentLink(555);
+
+    expect(detail).toMatchObject({
+      idEnlace: 555,
+      nombreEnlace: "di_test",
+      transacciones: [{ idTransaccion: "tx-approved", esAprobada: true }]
+    });
+    const [linkUrl, linkInit] = fetchMock.mock.calls[1];
+    expect(linkUrl).toBe("https://api.wompi.sv/EnlacePago/555");
+    expect(linkInit?.method).toBe("GET");
+    expect(linkInit?.headers).toMatchObject({
+      authorization: "Bearer wompi-access-token"
+    });
+    expect(linkInit?.body).toBeUndefined();
+  });
+
   it("throws a typed error with the response text on a non-2xx deactivation response", async () => {
     const fetchMock = vi
       .fn()

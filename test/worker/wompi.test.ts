@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { amountCents, ambienteFromWompi, donorName, normalizeWompiWebhook, verifyWompiHash } from "../../src/worker/domain/wompi";
+import * as wompiDomain from "../../src/worker/domain/wompi";
 import { hexFromBytes, utf8Bytes } from "../../src/worker/utils/encoding";
 
 describe("Wompi webhook security", () => {
@@ -66,5 +67,191 @@ describe("Wompi webhook security", () => {
       Monto: "12.34",
       EsProductiva: false
     })).toThrow("IdTransaccion");
+  });
+});
+
+describe("Wompi API reconciliation", () => {
+  const intent = {
+    id: "di_recover",
+    wompi_id_enlace: 9000001,
+    amount_cents: 17800
+  };
+
+  function approvedLink(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      idEnlace: 9000001,
+      nombreEnlace: "di_recover",
+      nombreProducto: "Diezmos y Ofrendas",
+      transacciones: [{
+        datosAdicionales: {
+          Nombre: "DONANTE",
+          Apellidos: "EJEMPLO",
+          EMail: "donante@example.org",
+          Celular: "70000000",
+          Direccion: "San Salvador",
+          NombreRegion: "San Salvador",
+          NombrePais: "El Salvador",
+          CodigoPais: "SV",
+          CodigoRegion: "06"
+        },
+        fechaTransaccion: "2026-07-29T18:21:14-06:00",
+        idTransaccion: "TEST-TXN-0000000001",
+        esReal: true,
+        esAprobada: true,
+        codigoAutorizacion: "000001",
+        monto: 178,
+        idExterno: null
+      }],
+      ...overrides
+    };
+  }
+
+  it("rebuilds the webhook contract from an approved payment-link transaction", () => {
+    type Reconciler = {
+      wompiWebhookFromPaymentLink(
+        intent: { id: string; wompi_id_enlace: number | null; amount_cents: number },
+        link: Record<string, unknown>
+      ): ReturnType<typeof normalizeWompiWebhook> | null;
+    };
+    const recovered = (wompiDomain as unknown as Reconciler).wompiWebhookFromPaymentLink(
+      { id: "di_recover", wompi_id_enlace: 9000001, amount_cents: 17800 },
+      {
+        idAplicativo: "app-1",
+        nombreEnlace: "di_recover",
+        monto: 178,
+        nombreProducto: "Diezmos y Ofrendas",
+        usable: false,
+        transaccionCompra: null,
+        cantidadIntentoPagoFallidos: 0,
+        formaPago: {
+          permitirTarjetaCreditoDebido: true,
+          permitirPagoConPuntoAgricola: false,
+          permitirPagoEnCuotasAgricola: false,
+          permitirPagoEnBitcoin: false,
+          permitePagoQuickPay: false,
+          permitePagoNequi: false
+        },
+        infoProducto: { descripcionProducto: null, urlImagenProducto: null },
+        configuracion: {
+          urlRedirect: "https://donations.example.invalid/donar/gracias",
+          esMontoEditable: false,
+          esCantidadEditable: false,
+          cantidadPorDefecto: 1,
+          duracionInterfazIntentoMinutos: 60,
+          urlRetorno: null,
+          emailsNotificacion: null,
+          urlWebhook: "https://donations.example.invalid/webhooks/wompi",
+          telefonosNotificacion: null,
+          notificarTransaccionCliente: false
+        },
+        cantidadMaximaCuotas: null,
+        transacciones: [{
+          datosAdicionales: {
+            Nombre: "DONANTE",
+            Apellidos: "EJEMPLO",
+            EMail: "donante@example.org",
+            Celular: "70000000",
+            Direccion: "San Salvador",
+            NombreRegion: "San Salvador",
+            NombrePais: "El Salvador",
+            CodigoPais: "SV",
+            CodigoRegion: "06"
+          },
+          resultadoTransaccion: 0,
+          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          montoOriginal: 178,
+          idTransaccion: "TEST-TXN-0000000001",
+          esReal: true,
+          esAprobada: true,
+          codigoAutorizacion: "000001",
+          mensaje: null,
+          formaPago: 0,
+          monto: 178,
+          idExterno: null
+        }],
+        nombreAplicativo: "Misión ExampleOrganization",
+        cantidadPagosExitosos: 1,
+        imagenes: [],
+        vigencia: {
+          fechaInicio: "2026-07-29T18:17:44-06:00",
+          fechaFin: "2026-07-29T19:17:44-06:00"
+        },
+        limitesDeUso: {
+          cantidadMaximaPagosExitosos: 1,
+          cantidadMaximaPagosFallidos: null
+        },
+        datosAdicionales: null,
+        idGrupoTarjetas: null,
+        idEnlace: 9000001,
+        urlQrCodeEnlace: "https://api.wompi.sv/EnlacePago/9000001/qr",
+        urlEnlace: "https://s.wompi.sv/9000001",
+        estaProductivo: true,
+        urlEnlaceLargo: "https://pagos.wompi.sv/IntentoPago/Redirect?id=9000001"
+      }
+    );
+
+    expect(recovered).toEqual({
+      IdCuenta: "",
+      FechaTransaccion: "2026-07-29T18:21:14-06:00",
+      Monto: "178",
+      IdTransaccion: "TEST-TXN-0000000001",
+      ResultadoTransaccion: "ExitosaAprobada",
+      CodigoAutorizacion: "000001",
+      IdIntentoPago: null,
+      Cantidad: 1,
+      EsProductiva: true,
+      Tarjeta: undefined,
+      EsInternacional: undefined,
+      IdExterno: undefined,
+      EnlacePago: {
+        Id: 9000001,
+        IdentificadorEnlaceComercio: "di_recover",
+        NombreProducto: "Diezmos y Ofrendas",
+        DescripcionProducto: undefined
+      },
+      Cliente: {
+        DocumentoIdentidad: undefined,
+        Nombre: "DONANTE",
+        Apellidos: "EJEMPLO",
+        Direccion: "San Salvador",
+        EMail: "donante@example.org",
+        Celular: "70000000",
+        NombreRegion: "San Salvador",
+        NombrePais: "El Salvador",
+        CodigoPais: "SV",
+        CodigoRegion: "06"
+      }
+    });
+  });
+
+  it("rejects a payment-link response that does not belong to the exact intent and link", () => {
+    expect(() => wompiDomain.wompiWebhookFromPaymentLink(
+      intent,
+      approvedLink({ idEnlace: 999 })
+    )).toThrow(/enlace/i);
+
+    expect(() => wompiDomain.wompiWebhookFromPaymentLink(
+      intent,
+      approvedLink({ nombreEnlace: "di_other" })
+    )).toThrow(/intención/i);
+  });
+
+  it("rejects an approved transaction whose amount differs from the immutable intent", () => {
+    const link = approvedLink();
+    const [transaction] = link.transacciones as Array<Record<string, unknown>>;
+    transaction.monto = 177.99;
+
+    expect(() => wompiDomain.wompiWebhookFromPaymentLink(intent, link)).toThrow(/monto/i);
+  });
+
+  it("rejects ambiguous links with more than one approved transaction", () => {
+    const link = approvedLink();
+    const [transaction] = link.transacciones as Array<Record<string, unknown>>;
+    link.transacciones = [
+      transaction,
+      { ...transaction, idTransaccion: "second-approved" }
+    ];
+
+    expect(() => wompiDomain.wompiWebhookFromPaymentLink(intent, link)).toThrow(/aprobada/i);
   });
 });

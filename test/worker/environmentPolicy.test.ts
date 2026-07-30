@@ -88,6 +88,18 @@ describe("deployment endpoint availability", () => {
   });
 });
 
+describe("production hostname policy", () => {
+  it("exposes the Worker only on the canonical production custom domain", () => {
+    const block = tomlBlock("env.production");
+
+    expect(block).toContain(
+      '{ pattern = "donations.example.invalid", custom_domain = true }'
+    );
+    expect(block).not.toContain("donations.example.invalid");
+    expect(block.match(/custom_domain = true/g) ?? []).toHaveLength(1);
+  });
+});
+
 function tomlBlock(header: string): string {
   const marker = `[${header}]`;
   const start = wranglerToml.indexOf(marker);

@@ -6,7 +6,7 @@ import type {
   WompiIssuanceRetrySnapshot,
   WompiWebhook
 } from "../../types";
-import { amountCents, donorName } from "../../domain/wompi";
+import { amountCents, donorName, isApprovedDonation } from "../../domain/wompi";
 import {
   normalizeAuditIp,
   serializeAuditContext,
@@ -23,7 +23,7 @@ import type { Repository } from "../repository";
 
 type WompiHost = Pick<
   Repository,
-  "getWompiEventById" | "getWompiEventByTransaction"
+  "getWompiEventById" | "getWompiEventByTransaction" | "getWompiEventByPaymentLinkId"
 >;
 
 const WOMPI_ISSUANCE_CLAIM_STALE_MS = 15 * 60 * 1000;
@@ -47,20 +47,24 @@ export async function insertWompiEvent(
   headers: Record<string, string>,
   environment: Ambiente
 ): Promise<{ record: WompiEventRecord; inserted: boolean }> {
-  const existing = await host.getWompiEventByTransaction(payload.IdTransaccion);
+  const paymentLinkId = dynamicApprovedPaymentLinkId(payload);
+  const existing = await host.getWompiEventByTransaction(payload.IdTransaccion)
+    ?? (paymentLinkId === null ? null : await host.getWompiEventByPaymentLinkId(paymentLinkId));
   if (existing) {
     return { record: existing, inserted: false };
   }
   const id = newId("wompi");
-  await db
+  const result = await db
     .prepare(
-`INSERT INTO wompi_events (
-          id, transaction_id, environment, result, amount_cents, donor_email, donor_name, raw_body, headers_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+`INSERT OR IGNORE INTO wompi_events (
+          id, transaction_id, payment_link_id, environment, result, amount_cents,
+          donor_email, donor_name, raw_body, headers_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .bind(
       id,
       payload.IdTransaccion,
+      paymentLinkId,
       environment,
       payload.ResultadoTransaccion,
       amountCents(payload),
@@ -70,11 +74,15 @@ export async function insertWompiEvent(
       JSON.stringify(headers)
     )
     .run();
-  const record = await host.getWompiEventById(id);
+  const inserted = Number(result.meta?.changes ?? 0) === 1;
+  const record = inserted
+    ? await host.getWompiEventById(id)
+    : await host.getWompiEventByTransaction(payload.IdTransaccion)
+      ?? (paymentLinkId === null ? null : await host.getWompiEventByPaymentLinkId(paymentLinkId));
   if (!record) {
-    throw new Error("No se pudo leer el evento Wompi creado");
+    throw new Error("No se pudo leer el evento Wompi creado o deduplicado");
   }
-  return { record, inserted: true };
+  return { record, inserted };
 }
 
 export async function getWompiEventById(
@@ -89,6 +97,26 @@ export async function getWompiEventByTransaction(
   transactionId: string
 ): Promise<WompiEventRecord | null> {
   return db.prepare("SELECT * FROM wompi_events WHERE transaction_id = ?").bind(transactionId).first<WompiEventRecord>();
+}
+
+export async function getWompiEventByPaymentLinkId(
+  db: D1Database,
+  paymentLinkId: number
+): Promise<WompiEventRecord | null> {
+  return db.prepare("SELECT * FROM wompi_events WHERE payment_link_id = ?").bind(paymentLinkId).first<WompiEventRecord>();
+}
+
+function dynamicApprovedPaymentLinkId(payload: WompiWebhook): number | null {
+  const intentId = payload.EnlacePago?.IdentificadorEnlaceComercio?.trim() ?? "";
+  const linkId = payload.EnlacePago?.Id;
+  return (
+    isApprovedDonation(payload)
+    && intentId.startsWith("di_")
+    && Number.isInteger(linkId)
+    && Number(linkId) > 0
+  )
+    ? Number(linkId)
+    : null;
 }
 
 export async function claimWompiEventIssuance(

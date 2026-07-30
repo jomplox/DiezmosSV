@@ -63,7 +63,7 @@ function invalidatedRow(page: Page): Locator {
 }
 
 test("bootstrap owner, emit a quick CDE, and invalidate it", async ({ page }) => {
-  await page.goto("/");
+  await page.goto("/admin");
 
   // --- Bootstrap the owner (fresh DB -> bootstrap mode is available) ---
   await page.getByRole("button", { name: "Crear propietario" }).click();

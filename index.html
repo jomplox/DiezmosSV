@@ -7,7 +7,9 @@
     <script>
       document.documentElement.setAttribute(
         "data-bootstrap-route",
-        window.location.pathname.startsWith("/donar") ? "donor" : "admin"
+        window.location.pathname === "/" || window.location.pathname.startsWith("/donar")
+          ? "donor"
+          : "admin"
       );
     </script>
     <style id="bootstrap-shell-styles">

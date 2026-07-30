@@ -1701,6 +1701,11 @@ export class Statement {
         this.db.wompiEvents.find((event) => event.transaction_id === this.args[0])
       ) ?? null) as T | null;
     }
+    if (this.sql.includes("SELECT * FROM wompi_events WHERE payment_link_id = ?")) {
+      return (withWompiIssuanceDefaults(
+        this.db.wompiEvents.find((event) => event.payment_link_id === this.args[0])
+      ) ?? null) as T | null;
+    }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
@@ -1881,13 +1886,51 @@ export class Statement {
       }));
       return { results: rows as T[] };
     }
+    if (
+      this.sql.includes("FROM donation_intents") &&
+      this.sql.includes("status IN ('LINK_CREATED','EXPIRED')") &&
+      this.sql.includes("created_at >= ?") &&
+      this.sql.includes("updated_at < ?")
+    ) {
+      const createdAfter = String(this.args[0]);
+      const checkedBefore = String(this.args[1]);
+      const limit = Number(this.args[2] ?? Number.POSITIVE_INFINITY);
+      const rows = this.db.donationIntents
+        .filter((intent) =>
+          (intent.status === "LINK_CREATED" || intent.status === "EXPIRED") &&
+          intent.wompi_id_enlace != null &&
+          intent.paid_at == null &&
+          typeof intent.created_at === "string" &&
+          intent.created_at >= createdAfter &&
+          typeof intent.updated_at === "string" &&
+          intent.updated_at < checkedBefore
+        )
+        .sort((left, right) =>
+          String(left.updated_at).localeCompare(String(right.updated_at)) ||
+          String(left.id).localeCompare(String(right.id))
+        )
+        .slice(0, limit)
+        .map((intent) => ({
+          id: intent.id,
+          wompi_id_enlace: intent.wompi_id_enlace,
+          amount_cents: intent.amount_cents,
+          status: intent.status,
+          gift_type: intent.gift_type ?? null,
+          updated_at: intent.updated_at
+        }));
+      return { results: rows as T[] };
+    }
     if (this.sql.includes("FROM donation_intents") && this.sql.includes("status IN ('PENDING','LINK_CREATED')") && this.sql.includes("expires_at < ?")) {
       // listIntentsExpiringBefore: same predicate as the EXPIRED update, projecting
       // the fields the deactivation sweep needs, capped oldest-first by the bound limit.
       const nowIso = String(this.args[0]);
       const limit = Number(this.args[1] ?? Number.POSITIVE_INFINITY);
       const rows = this.db.donationIntents
-        .filter((intent) => (intent.status === "PENDING" || intent.status === "LINK_CREATED") && String(intent.expires_at) < nowIso)
+        .filter((intent) =>
+          (intent.status === "PENDING" || intent.status === "LINK_CREATED") &&
+          intent.paid_at == null &&
+          String(intent.expires_at) < nowIso
+        )
         .sort((left, right) => String(left.expires_at).localeCompare(String(right.expires_at)) || String(left.id).localeCompare(String(right.id)))
         .slice(0, limit)
         .map((intent) => ({
@@ -3010,22 +3053,42 @@ export class Statement {
         changes = 1;
       }
     }
-    if (this.sql.includes("INSERT INTO wompi_events")) {
-      const [id, transactionId, environment, result, amountCents, donorEmail, donorName, rawBody, headersJson] = this.args;
-      this.db.wompiEvents.push({
+    if (this.sql.includes("INSERT") && this.sql.includes("INTO wompi_events")) {
+      const [
         id,
-        transaction_id: transactionId,
+        transactionId,
+        paymentLinkId,
         environment,
         result,
-        amount_cents: amountCents,
-        donor_email: donorEmail,
-        donor_name: donorName,
-        raw_body: rawBody,
-        headers_json: headersJson,
-        received_at: "2026-06-26T01:46:47.015Z",
-        processed_at: null,
-        created_document_id: null
-      });
+        amountCents,
+        donorEmail,
+        donorName,
+        rawBody,
+        headersJson
+      ] = this.args;
+      const duplicate = this.db.wompiEvents.some(
+        (event) =>
+          event.transaction_id === transactionId ||
+          (paymentLinkId != null && event.payment_link_id === paymentLinkId)
+      );
+      if (!duplicate) {
+        this.db.wompiEvents.push({
+          id,
+          transaction_id: transactionId,
+          payment_link_id: paymentLinkId,
+          environment,
+          result,
+          amount_cents: amountCents,
+          donor_email: donorEmail,
+          donor_name: donorName,
+          raw_body: rawBody,
+          headers_json: headersJson,
+          received_at: "2026-06-26T01:46:47.015Z",
+          processed_at: null,
+          created_document_id: null
+        });
+        changes = 1;
+      }
     }
     if (this.sql.includes("INSERT INTO donation_intents")) {
       const [
@@ -3152,6 +3215,26 @@ export class Statement {
           intent.direccion_complemento ?? (direccionComplemento == null ? null : String(direccionComplemento));
       }
     }
+    if (
+      this.sql.includes("UPDATE donation_intents") &&
+      this.sql.includes("SET updated_at = ?") &&
+      this.sql.includes("status IN ('LINK_CREATED','EXPIRED')") &&
+      this.sql.includes("updated_at = ?")
+    ) {
+      const [checkedAt, id, expectedLinkId, observedUpdatedAt] = this.args;
+      const intent = this.db.donationIntents.find(
+        (row) =>
+          row.id === id &&
+          row.wompi_id_enlace === expectedLinkId &&
+          (row.status === "LINK_CREATED" || row.status === "EXPIRED") &&
+          row.paid_at == null &&
+          row.updated_at === observedUpdatedAt
+      );
+      if (intent) {
+        intent.updated_at = String(checkedAt);
+        changes = 1;
+      }
+    }
     if (this.sql.includes("UPDATE donation_intents SET status = 'EXPIRED'")) {
       const [updatedAt, secondArg] = this.args.map(String);
       // expireDonationIntentsByIds binds an id list; expireUnpaidIntentsBefore binds
@@ -3159,6 +3242,9 @@ export class Statement {
       const ids = this.sql.includes("id IN") ? new Set(this.args.slice(1).map(String)) : null;
       for (const intent of this.db.donationIntents.filter((row) => {
         if (row.status !== "PENDING" && row.status !== "LINK_CREATED") {
+          return false;
+        }
+        if (row.paid_at != null) {
           return false;
         }
         if (ids) {

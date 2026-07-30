@@ -45,7 +45,8 @@ const ERROR_EVENTS = new Set([
   "unhandled_worker_request_error",
   "wompi_issuance_failure_list_failed",
   "wompi_issuance_retry_failed",
-  "wompi_link_deactivation_failed"
+  "wompi_link_deactivation_failed",
+  "wompi_payment_link_reconciliation_failed"
 ]);
 const ALERT_KINDS = new Set([
   "advanced_cde_failed",

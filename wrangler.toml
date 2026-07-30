@@ -2,7 +2,7 @@ name = "example-worker"
 main = "src/worker/index.ts"
 compatibility_date = "2026-06-02"
 compatibility_flags = ["nodejs_compat"]
-assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
 
 [observability]
 enabled = true
@@ -62,7 +62,7 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 #   npx wrangler d1 create diezmossv-staging-resource-example
 # Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
 [env.staging]
-assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
 
 [env.staging.observability]
 enabled = true
@@ -124,7 +124,7 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 # production issuance plan. D1/queues/R2 provisioned 2026-07-05; MH production
 # secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
 [env.production]
-assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application" }
+assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
 routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
 workers_dev = true
 
@@ -147,6 +147,7 @@ APP_ENV = "production"
 APP_ORIGIN = "https://donations.example.invalid"
 MOCK_EXTERNAL_SERVICES = "false"
 CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-resource-example"
+DONATION_INTAKE_DISABLED = "true"
 # EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
