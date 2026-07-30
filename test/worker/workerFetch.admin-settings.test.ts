@@ -164,6 +164,142 @@ describe("credential administration", () => {
   });
 });
 
+describe("Wompi notification settings", () => {
+  it("lets owners configure normalized notification targets for newly generated links", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const putResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          emailsNotificacion: " TESORERIA@EXAMPLE.ORG, avisos@example.org ",
+          telefonosNotificacion: " 7000-0000, +503 7123 4567 ",
+          notificarTransaccionCliente: true
+        })
+      }),
+      env(db)
+    );
+
+    expect(putResponse.status).toBe(200);
+    await expect(putResponse.json()).resolves.toMatchObject({
+      ok: true,
+      wompiNotifications: {
+        emailsNotificacion: "tesoreria@example.org,avisos@example.org",
+        telefonosNotificacion: "70000000,+50371234567",
+        notificarTransaccionCliente: true
+      }
+    });
+    expect(db.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: "wompi_notification_emails",
+        value: "tesoreria@example.org,avisos@example.org",
+        updated_by: "user_owner"
+      }),
+      expect.objectContaining({
+        key: "wompi_notification_phones",
+        value: "70000000,+50371234567",
+        updated_by: "user_owner"
+      }),
+      expect.objectContaining({
+        key: "wompi_notify_donor_email",
+        value: "true",
+        updated_by: "user_owner"
+      })
+    ]));
+    const audit = db.audits.find((row) => row.action === "WOMPI_NOTIFICATIONS_UPDATED");
+    expect(audit).toMatchObject({
+      entity_type: "app_setting",
+      entity_id: "wompi_notifications",
+      summary: "Notificaciones de Wompi actualizadas"
+    });
+    expect(JSON.stringify(audit)).not.toContain("tesoreria@example.org");
+    expect(JSON.stringify(audit)).not.toContain("70000000");
+
+    const getResponse = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(getResponse.status).toBe(200);
+    await expect(getResponse.json()).resolves.toMatchObject({
+      wompiNotifications: {
+        emailsNotificacion: "tesoreria@example.org,avisos@example.org",
+        telefonosNotificacion: "70000000,+50371234567",
+        notificarTransaccionCliente: true
+      }
+    });
+  });
+
+  it.each([
+    [
+      "a malformed email list",
+      {
+        emailsNotificacion: "tesoreria@example.org,correo-invalido",
+        telefonosNotificacion: "",
+        notificarTransaccionCliente: false
+      }
+    ],
+    [
+      "a malformed phone list",
+      {
+        emailsNotificacion: "",
+        telefonosNotificacion: "7000-ABCD",
+        notificarTransaccionCliente: false
+      }
+    ],
+    [
+      "a non-boolean donor notification flag",
+      {
+        emailsNotificacion: "",
+        telefonosNotificacion: "",
+        notificarTransaccionCliente: "true"
+      }
+    ]
+  ])("rejects %s without changing settings", async (_description, body) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        method: "PUT",
+        headers: {
+          Authorization: "Bearer test-token",
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(body)
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: "invalid_wompi_notifications"
+    });
+    expect(db.settings).toHaveLength(0);
+  });
+
+  it("keeps Wompi notification settings owner-only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/wompi-notifications", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(403);
+  });
+});
+
 describe("email template settings", () => {
   it("lets owners edit subject and body templates for each email type", async () => {
     const db = new InMemoryD1();

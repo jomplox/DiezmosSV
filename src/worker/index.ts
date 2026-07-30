@@ -74,6 +74,14 @@ import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBac
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
+import {
+  loadWompiNotificationSettings,
+  normalizeWompiNotificationSettings,
+  WOMPI_NOTIFICATION_EMAILS_SETTING_KEY,
+  WOMPI_NOTIFICATION_PHONES_SETTING_KEY,
+  WOMPI_NOTIFY_DONOR_EMAIL_SETTING_KEY,
+  WompiNotificationValidationError
+} from "./services/wompiNotifications";
 import { isValidEmail } from "../shared/email";
 import { elSalvadorDateOnly, formatElSalvadorDate } from "../shared/legalWindows";
 import {
@@ -2022,6 +2030,11 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
     handler: handleEmailSender
   },
   {
+    pattern: "/api/settings/wompi-notifications",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleWompiNotificationSettings
+  },
+  {
     pattern: "/api/settings/branding",
     role: ({ request }) => request.method === "PUT" ? "OWNER" : null,
     handler: handleBrandingSettings
@@ -2261,6 +2274,76 @@ async function handleEmailSender(ctx: ApiRouteContext): Promise<Response> {
   } catch (error) {
     if (error instanceof EmailSenderValidationError) {
       return jsonResponse({ error: "invalid_email_sender", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+}
+
+async function handleWompiNotificationSettings(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({
+      wompiNotifications: await loadWompiNotificationSettings(ctx.repo)
+    });
+  }
+  if (ctx.request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "empty-object"
+  })) as {
+    emailsNotificacion?: unknown;
+    telefonosNotificacion?: unknown;
+    notificarTransaccionCliente?: unknown;
+  };
+  try {
+    const wompiNotifications = normalizeWompiNotificationSettings({
+      emailsNotificacion: body.emailsNotificacion,
+      telefonosNotificacion: body.telefonosNotificacion,
+      notificarTransaccionCliente: body.notificarTransaccionCliente
+    });
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFICATION_EMAILS_SETTING_KEY,
+      wompiNotifications.emailsNotificacion,
+      actor.id
+    );
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFICATION_PHONES_SETTING_KEY,
+      wompiNotifications.telefonosNotificacion,
+      actor.id
+    );
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFY_DONOR_EMAIL_SETTING_KEY,
+      String(wompiNotifications.notificarTransaccionCliente),
+      actor.id
+    );
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "WOMPI_NOTIFICATIONS_UPDATED",
+      entityType: "app_setting",
+      entityId: "wompi_notifications",
+      summary: "Notificaciones de Wompi actualizadas",
+      // The audit trail is readable by lower roles. Keep recipient addresses and
+      // numbers in this OWNER-only setting response, never in audit metadata.
+      metadata: {
+        emailRecipientCount: wompiNotifications.emailsNotificacion
+          ? wompiNotifications.emailsNotificacion.split(",").length
+          : 0,
+        phoneRecipientCount: wompiNotifications.telefonosNotificacion
+          ? wompiNotifications.telefonosNotificacion.split(",").length
+          : 0,
+        donorEmailEnabled: wompiNotifications.notificarTransaccionCliente
+      }
+    });
+    return jsonResponse({ ok: true, wompiNotifications });
+  } catch (error) {
+    if (error instanceof WompiNotificationValidationError) {
+      return jsonResponse(
+        { error: "invalid_wompi_notifications", message: error.message },
+        { status: 400 }
+      );
     }
     throw error;
   }

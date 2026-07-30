@@ -28,7 +28,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -292,6 +292,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [emailSender, setEmailSender] = useState<EmailSenderState | null>(null);
   const [emailSenderDraft, setEmailSenderDraft] = useState("");
   const [emailReplyToDraft, setEmailReplyToDraft] = useState("");
+  const [wompiNotificationsDraft, setWompiNotificationsDraft] = useState<WompiNotificationSettings>({
+    emailsNotificacion: "",
+    telefonosNotificacion: "",
+    notificarTransaccionCliente: false
+  });
   const [alertEmailDraft, setAlertEmailDraft] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
@@ -702,17 +707,19 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setUsers(result.users);
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, alertEmailResult] = await Promise.all([
+      const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
         accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
         accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
         accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
+        accountApi<{ wompiNotifications: WompiNotificationSettings }>("/api/settings/wompi-notifications"),
         accountApi<AlertEmailState>("/api/settings/alert-email")
       ]);
       setCredentials(credentialResult.credentials);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
       applyEmailTemplates(emailTemplateResult.emailTemplates);
       applyEmailSender(emailSenderResult.emailSender);
+      setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
       applyAlertEmail(alertEmailResult.alertEmail);
     }
     if (view === "exports" && can(user, "ADMIN")) {
@@ -1479,6 +1486,20 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
+  async function updateWompiNotifications() {
+    await runAction("wompi-notifications", async () => {
+      const result = await accountApi<{ wompiNotifications: WompiNotificationSettings }>(
+        "/api/settings/wompi-notifications",
+        {
+          method: "PUT",
+          body: wompiNotificationsDraft
+        }
+      );
+      setWompiNotificationsDraft(result.wompiNotifications);
+      setToast("Notificaciones de Wompi actualizadas");
+    });
+  }
+
   async function bootstrapCredentialWriter(cloudflareToken: string): Promise<boolean> {
     setBusy("credential-writer");
     try {
@@ -1917,6 +1938,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             emailSender={emailSender}
             emailSenderDraft={emailSenderDraft}
             emailReplyToDraft={emailReplyToDraft}
+            wompiNotificationsDraft={wompiNotificationsDraft}
             alertEmailDraft={alertEmailDraft}
             branding={branding}
             token={token}
@@ -1925,6 +1947,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             emissionBusy={busy === "emission-environment"}
             templateBusy={busy === "email-templates"}
             emailSenderBusy={busy === "email-sender"}
+            wompiNotificationsBusy={busy === "wompi-notifications"}
             alertEmailBusy={busy === "alert-email"}
             writerBusy={busy === "credential-writer"}
             onChange={setCredentialInput}
@@ -1943,6 +1966,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onEmailSenderChange={setEmailSenderDraft}
             onEmailReplyToChange={setEmailReplyToDraft}
             onEmailSenderSubmit={updateEmailSender}
+            onWompiNotificationsChange={setWompiNotificationsDraft}
+            onWompiNotificationsSubmit={updateWompiNotifications}
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onAlertEmailChange={setAlertEmailDraft}
             onAlertEmailSubmit={updateAlertEmail}
@@ -1960,17 +1985,19 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}
             onRefresh={async () => {
-              const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, alertEmailResult] = await Promise.all([
+              const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
                 accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
                 accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
                 accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
                 accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
+                accountApi<{ wompiNotifications: WompiNotificationSettings }>("/api/settings/wompi-notifications"),
                 accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
               applyEmailSender(emailSenderResult.emailSender);
+              setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
               applyAlertEmail(alertEmailResult.alertEmail);
             }}
           />
