@@ -1182,6 +1182,47 @@ describe("donar wizard styles contract", () => {
   });
 });
 
+describe("donar responsive donor layout", () => {
+  it("keeps the wide landing mission line balanced without inserting a literal line break", () => {
+    const landingBlock = donarSource.slice(
+      donarSource.indexOf('<p className="donar-landing-unifier">'),
+      donarSource.indexOf('<p className="donar-landing-subtitle">')
+    );
+
+    expect(landingBlock).toContain('className="donar-landing-unifier-church"');
+    expect(landingBlock).not.toContain("<br");
+    expect(stylesSource).toMatch(
+      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-landing-unifier-church\s*\{[\s\S]{0,160}display:\s*block;/
+    );
+  });
+
+  it("uses the digit keypad for a DUI without changing its existing formatter", () => {
+    expect(donarSource).toContain('inputMode={form.donorDocumentType === "13" ? "numeric" : undefined}');
+    expect(donarSource).toContain("formatDui(");
+    expect(donarSource).toContain("isValidDui(");
+  });
+
+  it("keeps the Wompi handoff inside the usable donor-card width", () => {
+    const handoffRule = stylesSource.match(/\.donar-handoff\s*\{[^}]*\}/)?.[0] ?? "";
+    const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(handoffRule).toContain("width: 100%;");
+    expect(handoffRule).toContain("justify-items: stretch;");
+    expect(embedRule).toContain("box-sizing: border-box;");
+    expect(embedRule).toContain("max-width: 100%;");
+    expect(stylesSource).toMatch(/\.donar-handoff\s*>\s*\.donar-intro\s*\{[^}]*margin-top:\s*10px;/);
+  });
+
+  it("uses the compact 430px mobile gutter and a balanced wizard title lane", () => {
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-screen\s*\{[\s\S]{0,160}padding:\s*32px 10px 48px;/
+    );
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-title-world-icon\s*\{[\s\S]{0,200}width:\s*58px;/
+    );
+  });
+});
+
 describe("givebutter constants", () => {
   it("pins the FMCE account id and example-campaign campaign", () => {
     expect(GIVEBUTTER_ACCOUNT_ID).toBe("EXAMPLEACCT00001");

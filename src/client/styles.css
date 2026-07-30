@@ -3867,7 +3867,13 @@ pre {
 .donar-handoff {
   display: grid;
   gap: 12px;
-  justify-items: center;
+  width: 100%;
+  min-width: 0;
+  justify-items: stretch;
+}
+
+.donar-handoff > .donar-intro {
+  margin-top: 10px;
 }
 
 /* The manual Wompi backup link inherits the admin teal .link-button — repaint it
@@ -3899,6 +3905,8 @@ pre {
    the viewport gives it less. */
 .donar-embed {
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   height: min(78vh, 820px);
   transition: none;
   border: 1px solid #e5e5e5;
@@ -4149,6 +4157,9 @@ pre {
 }
 
 @media (min-width: 520px) {
+  .donar-landing-unifier-church {
+    display: block;
+  }
   .donar-doc-row {
     grid-template-columns: 1fr 1.4fr;
   }
@@ -4180,6 +4191,20 @@ pre {
   .donar-door-desc {
     margin-top: -6px;
     font-size: 12.5px;
+  }
+}
+
+@media (max-width: 430px) {
+  .donar-screen {
+    padding: 32px 10px 48px;
+  }
+  .donar-wizard-title {
+    gap: 6px;
+  }
+  .donar-title-world-icon {
+    width: 58px;
+    height: 36px;
+    flex-basis: 58px;
   }
 }
 
