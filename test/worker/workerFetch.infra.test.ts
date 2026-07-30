@@ -132,6 +132,102 @@ describe("Worker non-fetch handler error containment", () => {
 });
 
 describe("static document security policy", () => {
+  it("serves blank donor documents during an emergency shutdown without touching admin or webhook routes", async () => {
+    const db = new InMemoryD1();
+    const assetFetch = vi.fn((request: Request) =>
+      Promise.resolve(new Response(`asset:${new URL(request.url).pathname}`))
+    );
+    const testEnv = env(db, {
+      APP_ENV: "production",
+      DONATION_INTAKE_DISABLED: "true",
+      WOMPI_API_SECRET: "test-wompi-secret",
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher
+    });
+
+    for (const pathname of ["/", "/donar", "/donar/", "/donar/gracias", "/donar/gracias/"]) {
+      const response = await worker.fetch(
+        new Request(`https://donations.example.invalid${pathname}?intent=old`),
+        testEnv
+      );
+      expect(response.status, pathname).toBe(200);
+      expect(response.headers.get("Content-Type"), pathname).toBe("text/html; charset=utf-8");
+      expect(response.headers.get("Cache-Control"), pathname).toBe("no-store");
+      await expect(response.text(), pathname).resolves.toBe("");
+    }
+
+    const admin = await worker.fetch(
+      new Request("https://donations.example.invalid/admin"),
+      testEnv
+    );
+    expect(admin.status).toBe(200);
+    await expect(admin.text()).resolves.toBe("asset:/admin");
+
+    const webhook = await worker.fetch(
+      new Request("https://donations.example.invalid/webhooks/wompi", {
+        method: "POST",
+        body: "{}"
+      }),
+      testEnv
+    );
+    expect(webhook.status).toBe(401);
+    await expect(webhook.json()).resolves.toEqual({ error: "invalid_wompi_hash" });
+    expect(assetFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves only the donor, admin, callback, and asset paths while redirecting other documents", async () => {
+    const db = new InMemoryD1();
+    const assetFetch = vi.fn((request: Request) =>
+      Promise.resolve(new Response(`asset:${new URL(request.url).pathname}`))
+    );
+    const testEnv = env(db, {
+      APP_ENV: "production",
+      APP_ORIGIN: "https://donations.example.invalid",
+      ASSETS: { fetch: assetFetch } as unknown as Fetcher
+    });
+    const cases = [
+      { url: "https://donations.example.invalid/", status: 200, location: null },
+      { url: "https://donations.example.invalid/admin", status: 200, location: null },
+      { url: "https://donations.example.invalid/admin/users", status: 200, location: null },
+      { url: "https://donations.example.invalid/donar/gracias?intent=abc", status: 200, location: null },
+      { url: "https://donations.example.invalid/assets/app.js", status: 200, location: null },
+      {
+        url: "https://donations.example.invalid/donar?ruta=sv",
+        status: 302,
+        location: "https://donations.example.invalid/?ruta=sv"
+      },
+      {
+        url: "https://donations.example.invalid/documents?stale=1",
+        status: 302,
+        location: "https://donations.example.invalid/"
+      },
+      {
+        url: "https://worker.example.invalid/donar?ruta=us",
+        status: 302,
+        location: "https://donations.example.invalid/?ruta=us"
+      },
+      {
+        url: "https://worker.example.invalid/donar/gracias?intent=legacy",
+        status: 302,
+        location: "https://donations.example.invalid/donar/gracias?intent=legacy"
+      },
+      {
+        url: "https://worker.example.invalid/admin",
+        status: 302,
+        location: "https://donations.example.invalid/admin"
+      }
+    ] as const;
+
+    for (const testCase of cases) {
+      const response = await worker.fetch(new Request(testCase.url), testEnv);
+      expect(
+        { status: response.status, location: response.headers.get("Location") },
+        testCase.url
+      ).toEqual({ status: testCase.status, location: testCase.location });
+    }
+
+    expect(assetFetch).toHaveBeenCalledTimes(5);
+  });
+
   it("adds anti-framing and no-referrer headers without changing the asset response", async () => {
     const db = new InMemoryD1();
     const assetResponse = new Response("<!doctype html><title>DiezmosSV</title>", {

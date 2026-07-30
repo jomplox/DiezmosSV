@@ -210,10 +210,10 @@ function sanitizeAlertText(value: string, fallback: string, maxChars: number): s
   return (redacted || fallback).slice(0, maxChars);
 }
 
-// The alert body links back to the admin panel with a trailing slash (historical form);
-// brandingOrigin returns the same origin without one, so re-add it here.
+// Operational alerts must land inside the Access-protected admin path now that the
+// public origin belongs to the donor wizard.
 function originUrl(env: Env): string {
-  return `${brandingOrigin(env).replace(/\/+$/, "")}/`;
+  return `${brandingOrigin(env).replace(/\/+$/, "")}/admin`;
 }
 
 function parseAlertRecipients(value: string | null | undefined): string[] | null {

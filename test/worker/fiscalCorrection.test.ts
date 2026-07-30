@@ -310,6 +310,7 @@ describe("fiscal correction failure classification", () => {
     const event = {
       id: "wompi_known_donor_code",
       transaction_id: "transaction_known_donor_code",
+      payment_link_id: null,
       environment: "00",
       result: "ExitosaAprobada",
       amount_cents: 1000,

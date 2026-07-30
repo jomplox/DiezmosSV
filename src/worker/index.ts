@@ -1,7 +1,7 @@
-import { getEmisorConfig, getMhCertificateXml, requireSecret } from "./config";
+import { getEmisorConfig, getMhCertificateXml, isMockMode, requireSecret } from "./config";
 import { buildAdvancedCdeDocument, buildDirectCdeDocument, buildInvalidacionEvent, cdeDocumentSummary, webhookDonorComplemento, type DirectCdeInput, type InvalidationInput } from "./domain/dteBuilder";
 import { certificateExpiry, signMhDocument } from "./domain/signer";
-import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader } from "./domain/wompi";
+import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader, wompiWebhookFromPaymentLink } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
 import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
@@ -110,6 +110,8 @@ const BOOTSTRAP_OWNER_TOKEN_HEADER = "X-Bootstrap-Owner-Token";
 const EMISSION_ENVIRONMENT_SETTING = "emission_environment";
 const RETENTION_EXPORT_CRON = "0 9 1 * *";
 const CERT_EXPIRY_ALERT_THRESHOLD_DAYS = [30, 14, 3];
+const WOMPI_RECONCILIATION_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000;
+const WOMPI_RECONCILIATION_RECHECK_MS = 10 * 60 * 1000;
 // Auth throttling uses atomic claim ledgers for aggregate login attempts and
 // password-reset requests. Account-specific login failures remain keyed on
 // (email, caller IP), so a third party cannot lock out a victim's email by spamming
@@ -222,6 +224,44 @@ function resolveAppOrigin(env: Env, url: URL): string {
   return url.origin;
 }
 
+function redirectToCanonicalDocument(env: Env, url: URL): Response | null {
+  const canonicalOrigin = resolveAppOrigin(env, url);
+  const documentOrigin = env.APP_ENV === "production" ? canonicalOrigin : url.origin;
+  const shouldCanonicalizeOrigin =
+    env.APP_ENV === "production" && url.origin !== canonicalOrigin;
+  const isAdminPath = url.pathname === "/admin" || url.pathname.startsWith("/admin/");
+  const isGraciasPath =
+    url.pathname === "/donar/gracias" || url.pathname === "/donar/gracias/";
+
+  if (shouldCanonicalizeOrigin) {
+    const target = new URL(canonicalOrigin);
+    if (isAdminPath || isGraciasPath) {
+      target.pathname = url.pathname;
+      target.search = url.search;
+    } else if (url.pathname === "/donar" || url.pathname === "/donar/") {
+      target.search = url.search;
+    }
+    return Response.redirect(target.toString(), 302);
+  }
+
+  if (url.pathname === "/donar" || url.pathname === "/donar/") {
+    const target = new URL(documentOrigin);
+    target.search = url.search;
+    return Response.redirect(target.toString(), 302);
+  }
+
+  if (
+    url.pathname === "/" ||
+    isAdminPath ||
+    isGraciasPath ||
+    url.pathname.startsWith("/assets/")
+  ) {
+    return null;
+  }
+
+  return Response.redirect(`${documentOrigin}/`, 302);
+}
+
 // A cross-origin browser can send a CORS-simple text/plain POST even when it cannot
 // read the response. Reject that request before it can spend the visitor's IP quota,
 // write D1 state, or call Wompi. Direct server clients may omit Origin, but every
@@ -273,15 +313,60 @@ function documentResponseWithSecurityHeaders(response: Response): Response {
   });
 }
 
+const DONOR_DOCUMENT_PATHS = new Set([
+  "/",
+  "/donar",
+  "/donar/",
+  "/donar/gracias",
+  "/donar/gracias/"
+]);
+
+function emergencyDonationShutdownResponse(request: Request, env: Env, url: URL): Response | null {
+  if (env.DONATION_INTAKE_DISABLED !== "true") {
+    return null;
+  }
+  if (
+    request.method === "POST" &&
+    (url.pathname === "/api/donations/intent" || url.pathname.startsWith("/api/donations/intent/"))
+  ) {
+    return jsonResponse(
+      { error: "donation_intake_disabled" },
+      { status: 503, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  if (!DONOR_DOCUMENT_PATHS.has(url.pathname)) {
+    return null;
+  }
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+      "Content-Type": "text/html; charset=utf-8",
+      "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options": "DENY"
+    }
+  });
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     try {
       const url = new URL(request.url);
+      const shutdownResponse = emergencyDonationShutdownResponse(request, env, url);
+      if (shutdownResponse) {
+        return shutdownResponse;
+      }
       if (url.pathname.startsWith("/api/")) {
         return await handleApi(request, env, url, ctx);
       }
       if (url.pathname === "/webhooks/wompi") {
         return await handleWompiWebhook(request, env);
+      }
+      const documentRedirect = redirectToCanonicalDocument(env, url);
+      if (documentRedirect) {
+        return documentRedirect;
       }
       return documentResponseWithSecurityHeaders(await env.ASSETS.fetch(request));
     } catch (error) {
@@ -497,6 +582,12 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   } catch (error) {
     logWorkerError(env, "fiscal_correction_recovery_failed", error);
   }
+  const wompi = new WompiApiService(env);
+  try {
+    await reconcileMissingWompiCallbacks(env, repo, wompi, event.scheduledTime ?? Date.now());
+  } catch (error) {
+    logWorkerError(env, "wompi_payment_link_reconciliation_failed", error);
+  }
   try {
     // Process a bounded page per tick: snapshot the capped set of expiring intents,
     // then expire exactly that page by id, so public intent creation cannot force one
@@ -504,7 +595,6 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
     // is picked up by the next tick.
     const expiring = await repo.listIntentsExpiringBefore(now);
     await repo.expireDonationIntentsByIds(expiring.map((intent) => intent.id), now);
-    const wompi = new WompiApiService(env);
     for (const intent of expiring) {
       if (intent.wompi_id_enlace == null) {
         continue;
@@ -718,27 +808,66 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
   // The webhook is an inbound Cloudflare request too — capture Wompi's IP/context so
   // WOMPI_RECEIVED/WOMPI_DUPLICATE audits carry the same actor context as UI actions.
   const repo = new Repository(env.DB, auditContextFrom(request));
-  // The signed payload remains the event's fiscal environment, but the deployment
-  // capability decides whether this Worker may issue it. Incompatible events are
-  // retained as evidence and quarantined from paid marking and the issuance queue.
+  const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
+  const ingested = await ingestTrustedWompiPayload(env, repo, payload, rawBody, headers, {
+    insertedAction: "WOMPI_RECEIVED",
+    duplicateAction: "WOMPI_DUPLICATE"
+  });
+  return jsonResponse({
+    ok: true,
+    wompiEventId: ingested.wompiEventId,
+    inserted: ingested.inserted,
+    queued: ingested.queued
+  }, { status: ingested.inserted ? 202 : 200 });
+}
+
+interface TrustedWompiIngestionSource {
+  insertedAction: string;
+  duplicateAction?: string;
+  auditMetadata?: Record<string, unknown>;
+}
+
+async function ingestTrustedWompiPayload(
+  env: Env,
+  repo: Repository,
+  payload: WompiWebhook,
+  rawBody: string,
+  headers: Record<string, string>,
+  source: TrustedWompiIngestionSource
+): Promise<{
+  wompiEventId: string;
+  inserted: boolean;
+  queued: boolean;
+  environmentAllowed: boolean;
+}> {
+  // The signed webhook or authenticated payment-link response remains the event's
+  // fiscal environment, but the deployment capability decides whether this Worker
+  // may issue it. Incompatible events are retained as evidence and quarantined.
   const environment = ambienteFromWompi(payload);
   const policy = deploymentEnvironmentPolicy(env);
   const environmentAllowed = policy.allowedAmbiente === environment;
-  const headers = Object.fromEntries([...request.headers.entries()].filter(([key]) => key.toLowerCase() !== "authorization"));
   const { record, inserted } = await repo.insertWompiEvent(payload, rawBody, headers, environment);
-  await repo.createAudit({
-    action: inserted ? "WOMPI_RECEIVED" : "WOMPI_DUPLICATE",
-    entityType: "wompi_event",
-    entityId: record.id,
-    summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`
-  });
+  const action = inserted ? source.insertedAction : source.duplicateAction;
+  if (action) {
+    await repo.createAudit({
+      action,
+      entityType: "wompi_event",
+      entityId: record.id,
+      summary: `${payload.IdTransaccion} ${payload.ResultadoTransaccion}`,
+      metadata: source.auditMetadata
+    });
+  }
   if (inserted && !environmentAllowed) {
     await repo.createAudit({
       action: "WOMPI_ENVIRONMENT_MISMATCH",
       entityType: "wompi_event",
       entityId: record.id,
-      summary: `El webhook declara ambiente ${environment}, incompatible con este despliegue; queda en cuarentena`,
-      metadata: { payloadEnvironment: environment, activeEnvironment: policy.allowedAmbiente }
+      summary: `El evento Wompi declara ambiente ${environment}, incompatible con este despliegue; queda en cuarentena`,
+      metadata: {
+        payloadEnvironment: environment,
+        activeEnvironment: policy.allowedAmbiente,
+        ...source.auditMetadata
+      }
     });
   }
   // Stamp the donor's payment marker synchronously, BEFORE the queue enqueue and
@@ -750,14 +879,104 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     await markIntentPaidFromWebhook(env, repo, payload);
   }
   let queued = false;
-  if (inserted && environmentAllowed && isApprovedDonation(payload)) {
+  if (environmentAllowed && isApprovedDonation(payload)) {
+    // Claim on duplicates too. If a previous delivery inserted the event but failed
+    // before queueing it, the CAS repairs that gap; an already-queued event returns null.
     const attemptId = await repo.claimInitialWompiIssuanceAttempt(record.id);
     if (attemptId) {
       await env.ISSUANCE_QUEUE.send({ wompiEventId: record.id, issuanceAttemptId: attemptId });
       queued = true;
     }
   }
-  return jsonResponse({ ok: true, wompiEventId: record.id, inserted, queued }, { status: inserted ? 202 : 200 });
+  return {
+    wompiEventId: record.id,
+    inserted,
+    queued,
+    environmentAllowed
+  };
+}
+
+async function reconcileMissingWompiCallbacks(
+  env: Env,
+  repo: Repository,
+  wompi: WompiApiService,
+  scheduledTime: number
+): Promise<void> {
+  if (isMockMode(env)) {
+    return;
+  }
+  const checkedAt = new Date(scheduledTime).toISOString();
+  const createdAfter = new Date(scheduledTime - WOMPI_RECONCILIATION_LOOKBACK_MS).toISOString();
+  const checkedBefore = new Date(scheduledTime - WOMPI_RECONCILIATION_RECHECK_MS).toISOString();
+  const candidates = await repo.listIntentsForWompiReconciliation(createdAfter, checkedBefore);
+
+  for (const intent of candidates) {
+    if (intent.wompi_id_enlace === null) {
+      continue;
+    }
+    try {
+      const link = await wompi.getPaymentLink(intent.wompi_id_enlace);
+      const payload = wompiWebhookFromPaymentLink(intent, link);
+      if (!payload) {
+        await repo.touchIntentWompiReconciliationCheck(
+          intent.id,
+          intent.wompi_id_enlace,
+          intent.updated_at,
+          checkedAt
+        );
+        continue;
+      }
+      const ingested = await ingestTrustedWompiPayload(
+        env,
+        repo,
+        payload,
+        JSON.stringify(payload),
+        { "x-wompi-event-source": "payment-link-reconciliation" },
+        {
+          insertedAction: "WOMPI_RECONCILED",
+          auditMetadata: {
+            source: "payment_link_api",
+            paymentLinkId: intent.wompi_id_enlace
+          }
+        }
+      );
+      if (!ingested.environmentAllowed) {
+        await repo.touchIntentWompiReconciliationCheck(
+          intent.id,
+          intent.wompi_id_enlace,
+          intent.updated_at,
+          checkedAt
+        );
+      }
+    } catch (error) {
+      if (error instanceof WompiPayloadError) {
+        try {
+          await repo.createAuditIfAbsent({
+            action: "WOMPI_RECONCILIATION_REJECTED",
+            entityType: "donation_intent",
+            entityId: intent.id,
+            summary: "La respuesta del enlace Wompi no superó la correlación estricta",
+            metadata: {
+              paymentLinkId: intent.wompi_id_enlace,
+              reason: error.message
+            }
+          });
+          await repo.touchIntentWompiReconciliationCheck(
+            intent.id,
+            intent.wompi_id_enlace,
+            intent.updated_at,
+            checkedAt
+          );
+        } catch (repositoryError) {
+          logWorkerError(env, "wompi_payment_link_reconciliation_failed", repositoryError);
+        }
+        continue;
+      }
+      // Network/API failures remain eligible for the next cron tick; do not move
+      // updated_at when Wompi itself could not answer.
+      logWorkerError(env, "wompi_payment_link_reconciliation_failed", error);
+    }
+  }
 }
 
 // Marks payment only after the shared resolver binds both Wompi identifiers to the
@@ -812,7 +1031,7 @@ async function processPasswordResetRequest(
   const created = await auth.createPasswordResetToken(email);
   if (!created) return;
 
-  const link = `${resolveAppOrigin(env, url)}/#reset=${created.token}`;
+  const link = `${resolveAppOrigin(env, url)}/admin#reset=${created.token}`;
   try {
     const resetBranding = await loadEmailBranding(repo, env);
     await new EmailService(env, DEFAULT_EMAIL_TEMPLATES, resetBranding).sendPasswordReset(

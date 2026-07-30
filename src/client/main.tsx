@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { isDonarPath } from "./donation";
+import { isDonarGraciasPath, isDonarPath } from "./donation";
 import { donorBrandingSettled } from "./donorReady";
 import { readPasswordResetLocation } from "./passwordReset";
 import "./styles.css";
@@ -25,7 +25,10 @@ function BootstrappedApp() {
   useEffect(() => {
     document.getElementById("app-bootstrap")?.remove();
 
-    if (!window.location.pathname.startsWith("/donar")) {
+    if (
+      !isDonarPath(window.location.pathname) &&
+      !isDonarGraciasPath(window.location.pathname)
+    ) {
       return;
     }
 

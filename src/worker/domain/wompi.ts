@@ -4,6 +4,12 @@ import { isRecord } from "../utils/guards";
 
 type JsonRecord = Record<string, unknown>;
 
+interface ReconciliationIntent {
+  id: string;
+  wompi_id_enlace: number | null;
+  amount_cents: number;
+}
+
 export class WompiPayloadError extends Error {
   constructor(message: string) {
     super(message);
@@ -95,6 +101,95 @@ export function amountCents(payload: WompiWebhook): number {
     throw new Error("El monto debe ser un valor decimal positivo");
   }
   return Math.round(amount * 100);
+}
+
+export function wompiWebhookFromPaymentLink(
+  intent: ReconciliationIntent,
+  input: unknown
+): WompiWebhook | null {
+  if (intent.wompi_id_enlace === null) {
+    throw new WompiPayloadError("La intención no tiene un enlace Wompi para reconciliar");
+  }
+  if (!isRecord(input)) {
+    throw new WompiPayloadError("La consulta del enlace Wompi no devolvió un objeto JSON");
+  }
+  const linkId = optionalNumber(input, "idEnlace", "IdEnlace");
+  if (!Number.isInteger(linkId) || linkId !== intent.wompi_id_enlace) {
+    throw new WompiPayloadError("La respuesta Wompi no coincide con el enlace de la intención");
+  }
+  const intentId = optionalString(input, "nombreEnlace", "NombreEnlace");
+  if (intentId !== intent.id) {
+    throw new WompiPayloadError("La respuesta Wompi no coincide con la intención");
+  }
+
+  const rawTransactions = read(input, ["transacciones", "Transacciones"]);
+  if (rawTransactions == null) {
+    return null;
+  }
+  if (!Array.isArray(rawTransactions)) {
+    throw new WompiPayloadError("La lista de transacciones Wompi es inválida");
+  }
+  const transactions = rawTransactions.map((candidate) => {
+    if (!isRecord(candidate)) {
+      throw new WompiPayloadError("La consulta Wompi contiene una transacción inválida");
+    }
+    return candidate;
+  });
+  const approved = transactions.filter(
+    (candidate) => optionalBoolean(candidate, "esAprobada", "EsAprobada") === true
+  );
+  if (approved.length === 0) {
+    return null;
+  }
+  if (approved.length > 1) {
+    throw new WompiPayloadError("El enlace Wompi contiene más de una transacción aprobada");
+  }
+
+  const transaction = approved[0];
+  const transactionId = requiredString(transaction, "idTransaccion", "IdTransaccion");
+  const transactionDate = requiredString(transaction, "fechaTransaccion", "FechaTransaccion");
+  if (!Number.isFinite(Date.parse(transactionDate))) {
+    throw new WompiPayloadError("La transacción aprobada no tiene una fecha válida");
+  }
+  const transactionAmount = optionalNumber(transaction, "monto", "Monto");
+  if (
+    transactionAmount === undefined
+    || transactionAmount <= 0
+    || Math.round(transactionAmount * 100) !== intent.amount_cents
+  ) {
+    throw new WompiPayloadError("El monto aprobado no coincide con la intención");
+  }
+  const production = requiredBoolean(transaction, "esReal", "EsReal");
+  const additional = optionalRecord(transaction, "datosAdicionales", "DatosAdicionales") ?? {};
+
+  return normalizeWompiWebhook({
+    IdCuenta: "",
+    FechaTransaccion: transactionDate,
+    Monto: transactionAmount,
+    IdTransaccion: transactionId,
+    ResultadoTransaccion: "ExitosaAprobada",
+    CodigoAutorizacion: optionalString(transaction, "codigoAutorizacion", "CodigoAutorizacion"),
+    IdIntentoPago: null,
+    Cantidad: 1,
+    EsProductiva: production,
+    IdExterno: optionalString(transaction, "idExterno", "IdExterno") ?? null,
+    EnlacePago: {
+      Id: linkId,
+      IdentificadorEnlaceComercio: intent.id,
+      NombreProducto: optionalString(input, "nombreProducto", "NombreProducto")
+    },
+    Cliente: {
+      Nombre: optionalString(additional, "Nombre", "nombre"),
+      Apellidos: optionalString(additional, "Apellidos", "apellidos"),
+      Direccion: optionalString(additional, "Direccion", "direccion"),
+      EMail: optionalString(additional, "EMail", "Email", "email"),
+      Celular: optionalString(additional, "Celular", "celular"),
+      NombreRegion: optionalString(additional, "NombreRegion", "nombreRegion"),
+      NombrePais: optionalString(additional, "NombrePais", "nombrePais"),
+      CodigoPais: optionalString(additional, "CodigoPais", "codigoPais"),
+      CodigoRegion: optionalString(additional, "CodigoRegion", "codigoRegion")
+    }
+  });
 }
 
 export async function verifyWompiHash(rawBody: string, receivedHash: string | null, secret: string): Promise<boolean> {

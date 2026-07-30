@@ -12,6 +12,7 @@ interface DonationIntentHost {
 }
 
 export const INTENT_EXPIRY_SWEEP_LIMIT = 100;
+export const INTENT_RECONCILIATION_SWEEP_LIMIT = 25;
 
 export interface CreateDonationIntentInput {
   id: string;
@@ -257,6 +258,57 @@ export async function markIntentPaid(
     .run();
 }
 
+// Bounded recovery candidates for successful Wompi transactions whose webhook has
+// not reached us yet. LINK_CREATED covers active checkouts and EXPIRED covers the
+// late/missing-callback incident class seen in production. updated_at doubles as the
+// last-check timestamp so an unpaid link is queried at most once per stale window,
+// without a launch-day schema migration.
+export async function listIntentsForWompiReconciliation(
+  db: D1Database,
+  createdAfter: string,
+  checkedBefore: string,
+  limit = INTENT_RECONCILIATION_SWEEP_LIMIT
+): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type" | "updated_at">>> {
+  const safeLimit = Math.max(1, Math.min(Math.trunc(limit), INTENT_RECONCILIATION_SWEEP_LIMIT));
+  const result = await db
+    .prepare(
+      `SELECT id, wompi_id_enlace, amount_cents, status, gift_type, updated_at
+         FROM donation_intents
+        WHERE status IN ('LINK_CREATED','EXPIRED')
+          AND wompi_id_enlace IS NOT NULL
+          AND paid_at IS NULL
+          AND created_at >= ?
+          AND updated_at < ?
+        ORDER BY updated_at ASC, id ASC
+        LIMIT ?`
+    )
+    .bind(createdAfter, checkedBefore, safeLimit)
+    .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type" | "updated_at">>();
+  return result.results;
+}
+
+export async function touchIntentWompiReconciliationCheck(
+  db: D1Database,
+  id: string,
+  expectedLinkId: number,
+  observedUpdatedAt: string,
+  checkedAt: string
+): Promise<boolean> {
+  const result = await db
+    .prepare(
+      `UPDATE donation_intents
+          SET updated_at = ?
+        WHERE id = ?
+          AND wompi_id_enlace = ?
+          AND status IN ('LINK_CREATED','EXPIRED')
+          AND paid_at IS NULL
+          AND updated_at = ?`
+    )
+    .bind(checkedAt, id, expectedLinkId, observedUpdatedAt)
+    .run();
+  return Number(result.meta?.changes ?? 0) === 1;
+}
+
 // The intents the next expireUnpaidIntentsBefore(nowIso) call will flip: same
 // (status, expires_at) predicate as the UPDATE, so the sweep can deactivate the
 // Wompi links of exactly the rows it is about to expire. Read this BEFORE the
@@ -274,7 +326,7 @@ export async function listIntentsExpiringBefore(
   // next tick continues from the remaining PENDING/LINK_CREATED rows.
   const safeLimit = Math.max(1, Math.min(Math.trunc(limit), INTENT_EXPIRY_SWEEP_LIMIT));
   const result = await db
-    .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND expires_at < ? ORDER BY expires_at ASC, id ASC LIMIT ?")
+    .prepare("SELECT id, wompi_id_enlace, amount_cents, status, gift_type FROM donation_intents WHERE status IN ('PENDING','LINK_CREATED') AND paid_at IS NULL AND expires_at < ? ORDER BY expires_at ASC, id ASC LIMIT ?")
     .bind(nowIso, safeLimit)
     .all<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type">>();
   return result.results;
@@ -293,7 +345,7 @@ export async function expireDonationIntentsByIds(
   }
   const placeholders = ids.map(() => "?").join(", ");
   await db
-    .prepare(`UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND id IN (${placeholders})`)
+    .prepare(`UPDATE donation_intents SET status = 'EXPIRED', updated_at = ? WHERE status IN ('PENDING','LINK_CREATED') AND paid_at IS NULL AND id IN (${placeholders})`)
     .bind(updatedAt, ...ids)
     .run();
 }

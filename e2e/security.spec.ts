@@ -10,9 +10,9 @@ test("reset fragments are scrubbed before mount and never enter request metadata
     });
   });
 
-  await page.goto(`/#reset=${sentinel}`);
+  await page.goto(`/admin#reset=${sentinel}`);
 
-  await expect(page).toHaveURL("http://127.0.0.1:8787/");
+  await expect(page).toHaveURL("http://127.0.0.1:8787/admin");
   await expect(page.getByPlaceholder("Nueva contraseña", { exact: true })).toBeVisible();
   expect(observed.some((request) => request.url.includes(sentinel) || request.referer.includes(sentinel))).toBe(false);
 });
@@ -28,9 +28,9 @@ test("legacy query links remain usable but only the initial navigation carries t
     });
   });
 
-  await page.goto(`/?reset=${sentinel}&utm_source=email`);
+  await page.goto(`/admin?reset=${sentinel}&utm_source=email`);
 
-  await expect(page).toHaveURL("http://127.0.0.1:8787/?utm_source=email");
+  await expect(page).toHaveURL("http://127.0.0.1:8787/admin?utm_source=email");
   await expect(page.getByPlaceholder("Nueva contraseña", { exact: true })).toBeVisible();
   const carryingToken = observed.filter(
     (request) => request.url.includes(sentinel) || request.referer.includes(sentinel)

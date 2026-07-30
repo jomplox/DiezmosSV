@@ -28,6 +28,13 @@ export const DONAR_POLL_TIMEOUT_MS = CHECKOUT_WINDOW_MS;
 // If the embedded checkout iframe has not loaded within this window, surface the
 // hosted-checkout CTA (the iframe keeps loading underneath — never a redirect).
 export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
+// Wompi posts { message: "close" } at the 3DS HAND-OFF, not at payment, so that signal
+// alone must never put "Verificando su entrega…" on screen: the donor is still inside
+// the bank challenge, and a spinner claiming to verify an entrega they have not made
+// reads as a hung page. Wompi's own iframe narrates the challenge and then its success
+// screen; hold our notice back for four poll cycles, by which point a donor who
+// finished is already on thanks and only a genuinely stuck entrega is still waiting.
+export const DONAR_VERIFYING_NOTICE_DELAY_MS = 20_000;
 
 // A background-minted draft carries a Wompi link minted with a one-hour vigencia on the
 // worker (INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS). If the donor leaves the tab open
@@ -300,7 +307,7 @@ export interface DonationFormInput {
 }
 
 export function isDonarPath(pathname: string): boolean {
-  return pathname === "/donar" || pathname === "/donar/";
+  return pathname === "/" || pathname === "/donar" || pathname === "/donar/";
 }
 
 export function isDonarGraciasPath(pathname: string): boolean {

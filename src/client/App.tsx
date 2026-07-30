@@ -29,7 +29,11 @@ import {
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
 import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
-import { shouldShowBootstrapMode, type AuthBootstrapStatus } from "./authBootstrap";
+import {
+  resolveAuthBootstrapStatus,
+  shouldShowBootstrapMode,
+  type AuthBootstrapStatus
+} from "./authBootstrap";
 import { AccountStateGuard, StaleAccountStateError } from "./accountState";
 import { applyBranding, brandingDonorLogoSrc, brandingLogoSrc, CLIENT_BRANDING_DEFAULTS, parseBrandingResponse, type Branding } from "./branding";
 import { filterAuditEntries } from "./auditFilter";
@@ -606,13 +610,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
     let cancelled = false;
     setAuthBootstrapStatus(null);
-    void api<AuthBootstrapStatus>("/api/auth/bootstrap-status", "")
-      .then((result) => {
-        if (!cancelled) setAuthBootstrapStatus(result);
-      })
-      .catch(() => {
-        if (!cancelled) setAuthBootstrapStatus({ bootstrapAvailable: false });
-      });
+    void resolveAuthBootstrapStatus(
+      () => api<AuthBootstrapStatus>("/api/auth/bootstrap-status", "")
+    ).then((result) => {
+      if (!cancelled) setAuthBootstrapStatus(result);
+    });
     return () => {
       cancelled = true;
     };

@@ -44,6 +44,7 @@ import {
 } from "./repository/rateLimits";
 import {
   INTENT_EXPIRY_SWEEP_LIMIT as DONATION_INTENT_EXPIRY_SWEEP_LIMIT,
+  INTENT_RECONCILIATION_SWEEP_LIMIT as DONATION_INTENT_RECONCILIATION_SWEEP_LIMIT,
   applyIntentDatosWithCapability as applyIntentDatosWithCapabilityRepository,
   attachIntentLink as attachIntentLinkRepository,
   completeIntentForPostAcceptOwner as completeIntentForPostAcceptOwnerRepository,
@@ -52,10 +53,12 @@ import {
   getCompletedIntentForDocument as getCompletedIntentForDocumentRepository,
   getDonationIntent as getDonationIntentRepository,
   hasAuditAction as hasAuditActionRepository,
+  listIntentsForWompiReconciliation as listIntentsForWompiReconciliationRepository,
   listIntentsExpiringBefore as listIntentsExpiringBeforeRepository,
   listRecentDonationIntents as listRecentDonationIntentsRepository,
   markIntentCompleted as markIntentCompletedRepository,
   markIntentPaid as markIntentPaidRepository,
+  touchIntentWompiReconciliationCheck as touchIntentWompiReconciliationCheckRepository,
   type CreateDonationIntentInput,
   type IntentDatosInput
 } from "./repository/donationIntents";
@@ -106,6 +109,7 @@ import {
   claimWompiIssuanceRetry as claimWompiIssuanceRetryRepository,
   createWompiAttemptAudit as createWompiAttemptAuditRepository,
   getWompiEventById as getWompiEventByIdRepository,
+  getWompiEventByPaymentLinkId as getWompiEventByPaymentLinkIdRepository,
   getWompiEventByTransaction as getWompiEventByTransactionRepository,
   getWompiIssuanceFailureById as getWompiIssuanceFailureByIdRepository,
   getWompiIssuanceRetrySnapshotById as getWompiIssuanceRetrySnapshotByIdRepository,
@@ -198,6 +202,7 @@ export type {
 
 export { legacyIssuanceAttemptId } from "./repository/wompiIssuance";
 export { INTENT_EXPIRY_SWEEP_LIMIT } from "./repository/donationIntents";
+export { INTENT_RECONCILIATION_SWEEP_LIMIT } from "./repository/donationIntents";
 export {
   OwnerTargetProtectedError,
   UserMutationConflictError
@@ -249,6 +254,10 @@ export class Repository {
 
   async getWompiEventByTransaction(transactionId: string): Promise<WompiEventRecord | null> {
     return getWompiEventByTransactionRepository(this.db, transactionId);
+  }
+
+  async getWompiEventByPaymentLinkId(paymentLinkId: number): Promise<WompiEventRecord | null> {
+    return getWompiEventByPaymentLinkIdRepository(this.db, paymentLinkId);
   }
 
   async claimWompiFiscalCorrection(
@@ -642,6 +651,34 @@ export class Repository {
     direccionComplemento: string | null = null
   ): Promise<void> {
     return markIntentPaidRepository(this.db, id, expectedLinkId, donorPhone, direccionComplemento);
+  }
+
+  async listIntentsForWompiReconciliation(
+    createdAfter: string,
+    checkedBefore: string,
+    limit = DONATION_INTENT_RECONCILIATION_SWEEP_LIMIT
+  ): Promise<Array<Pick<DonationIntentRecord, "id" | "wompi_id_enlace" | "amount_cents" | "status" | "gift_type" | "updated_at">>> {
+    return listIntentsForWompiReconciliationRepository(
+      this.db,
+      createdAfter,
+      checkedBefore,
+      limit
+    );
+  }
+
+  async touchIntentWompiReconciliationCheck(
+    id: string,
+    expectedLinkId: number,
+    observedUpdatedAt: string,
+    checkedAt: string
+  ): Promise<boolean> {
+    return touchIntentWompiReconciliationCheckRepository(
+      this.db,
+      id,
+      expectedLinkId,
+      observedUpdatedAt,
+      checkedAt
+    );
   }
 
   async listIntentsExpiringBefore(

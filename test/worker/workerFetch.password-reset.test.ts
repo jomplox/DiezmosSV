@@ -59,9 +59,9 @@ describe("password reset", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
     expect(db.resetTokens).toHaveLength(1);
     expect(sentMessages).toHaveLength(1);
-    const link = /https:\/\/example\.org\/#reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
+    const link = /https:\/\/example\.org\/admin#reset=([A-Za-z0-9_-]+)/.exec(sentMessages[0].text);
     expect(link).toBeTruthy();
-    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/#reset=${link![1]}"`);
+    expect((sentMessages[0] as { html?: string }).html).toContain(`href="https://example.org/admin#reset=${link![1]}"`);
     expect(String(db.resetTokens[0].token_hash)).toBe(await sha256Hex(utf8Bytes(link![1])));
     expect(String(db.resetTokens[0].token_hash)).not.toBe(link![1]);
     expect(db.audits).toContainEqual(expect.objectContaining({
@@ -100,9 +100,9 @@ describe("password reset", () => {
 
     expect(response.status).toBe(200);
     expect(sentMessages).toHaveLength(1);
-    expect(sentMessages[0].text).toContain("https://app.example.org/#reset=");
-    expect(sentMessages[0].text).not.toContain("https://attacker.example/#reset=");
-    expect(sentMessages[0].html).toContain('href="https://app.example.org/#reset=');
+    expect(sentMessages[0].text).toContain("https://app.example.org/admin#reset=");
+    expect(sentMessages[0].text).not.toContain("https://attacker.example/admin#reset=");
+    expect(sentMessages[0].html).toContain('href="https://app.example.org/admin#reset=');
   });
 
   it("returns ok without creating tokens or sending email for unknown accounts", async () => {

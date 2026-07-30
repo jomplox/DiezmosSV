@@ -29,6 +29,7 @@ import {
   DONAR_LANDING_UNIFIER,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
+  DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_ROUTE_PARAM,
   DONAR_SCRIPT_TIMEOUT_MS,
   DONAR_STEP_COUNT_SV,
@@ -695,6 +696,23 @@ export function DonarPage() {
     return () => window.removeEventListener("message", onWompiMessage);
   }, [stage, intent]);
 
+  // "verifying" is entered at Wompi's "close", which fires at the 3DS hand-off — long
+  // before the donor has paid. Arm the notice on a delay rather than showing it then:
+  // a donor who completes normally reaches thanks first and never sees it, while an
+  // entrega that really is stuck still gets reassurance. Disarmed whenever the state
+  // leaves "verifying" so a reopened checkout never inherits a stale timer.
+  const [verifyingNoticeVisible, setVerifyingNoticeVisible] = useState(false);
+  useEffect(() => {
+    if (handoff !== "verifying") {
+      setVerifyingNoticeVisible(false);
+      return;
+    }
+    const notice = window.setTimeout(() => setVerifyingNoticeVisible(true), DONAR_VERIFYING_NOTICE_DELAY_MS);
+    return () => {
+      window.clearTimeout(notice);
+    };
+  }, [handoff]);
+
   // Poll the intent status while the embedded checkout is open; COMPLETED -> thank-you.
   // Stop after ~3 minutes with a neutral closing message. Entering the post-close
   // verification state restarts that window so a slow checkout never shortens the
@@ -1296,8 +1314,10 @@ export function DonarPage() {
                     { message: "close" } both when the donor backs out and when it hands
                     off to the bank's 3DS challenge — and that challenge renders inside
                     this very iframe. Unmounting it on "verifying" killed the challenge
-                    mid-flight: no charge, no CDE. The spinner sits above it instead. */}
-                {handoff === "verifying" && (
+                    mid-flight: no charge, no CDE. The spinner sits above it instead —
+                    and only once the delay has elapsed, since "close" arrives at the
+                    hand-off while the donor is still inside the bank's challenge. */}
+                {verifyingNoticeVisible && (
                   <div className="donar-widget-loading" role="status">
                     <span className="donar-spinner" aria-hidden="true" />
                     {DONAR_WIDGET_VERIFYING_MESSAGE}

@@ -517,6 +517,70 @@ describe("Wompi webhook integration", () => {
     }]);
   });
 
+  it("deduplicates one approved payment link even when Wompi uses a different transaction id later", async () => {
+    const db = new InMemoryD1();
+    db.donationIntents.push({
+      id: "di_link_dedupe",
+      status: "LINK_CREATED",
+      amount_cents: 2500,
+      donor_document: "10000001-9",
+      wompi_id_enlace: 555,
+      paid_at: null
+    });
+    const queued: unknown[] = [];
+    const secret = "wompi-secret";
+    const payload = (transactionId: string) => JSON.stringify({
+      IdCuenta: "acct_1",
+      FechaTransaccion: "2026-06-27T10:00:00-06:00",
+      Monto: "25.00",
+      IdTransaccion: transactionId,
+      ResultadoTransaccion: "ExitosaAprobada",
+      CodigoAutorizacion: "000001",
+      EsProductiva: false,
+      Cliente: {
+        Nombre: "Example",
+        Apellidos: "Person",
+        EMail: "donor@example.org"
+      },
+      EnlacePago: {
+        Id: 555,
+        IdentificadorEnlaceComercio: "di_link_dedupe"
+      }
+    });
+    const post = async (transactionId: string) => {
+      const rawBody = payload(transactionId);
+      return worker.fetch(
+        new Request("https://example.org/webhooks/wompi", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            wompi_hash: await signWompiBody(rawBody, secret)
+          },
+          body: rawBody
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          WOMPI_API_SECRET: secret,
+          ISSUANCE_QUEUE: { send: async (message: unknown) => queued.push(message) } as unknown as Queue
+        })
+      );
+    };
+
+    const reconciledShape = await post("display-id-from-payment-link-api");
+    const delayedWebhookShape = await post("uuid-from-delayed-webhook");
+
+    expect(reconciledShape.status).toBe(202);
+    await expect(reconciledShape.json()).resolves.toMatchObject({ inserted: true, queued: true });
+    expect(delayedWebhookShape.status).toBe(200);
+    await expect(delayedWebhookShape.json()).resolves.toMatchObject({ inserted: false, queued: false });
+    expect(db.wompiEvents).toHaveLength(1);
+    expect(db.wompiEvents[0]).toMatchObject({
+      transaction_id: "display-id-from-payment-link-api",
+      payment_link_id: 555
+    });
+    expect(queued).toHaveLength(1);
+  });
+
   it("stores but quarantines a signed webhook whose ambiente is incompatible with the deployment", async () => {
     const db = new InMemoryD1();
     // Owner has the app set to PRODUCTION emission, but a TEST-mode payment arrives.

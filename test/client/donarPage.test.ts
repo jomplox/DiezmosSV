@@ -25,6 +25,7 @@ import {
   DONAR_WIDGET_DELAYED_MESSAGE,
   DONAR_WIDGET_FALLBACK_CTA,
   DONAR_WIDGET_LOADING_MESSAGE,
+  DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
   GIVEBUTTER_ACCOUNT_ID,
@@ -89,9 +90,11 @@ const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/m
 
 describe("donar page routing", () => {
   it("recognizes the public donation routes (with and without trailing slash)", () => {
+    expect(isDonarPath("/")).toBe(true);
     expect(isDonarPath("/donar")).toBe(true);
     expect(isDonarPath("/donar/")).toBe(true);
     expect(isDonarPath("/donar/gracias")).toBe(false);
+    expect(isDonarPath("/admin")).toBe(false);
     expect(isDonarPath("/documents")).toBe(false);
 
     expect(isDonarGraciasPath("/donar/gracias")).toBe(true);
@@ -749,6 +752,30 @@ describe("donar wizard source contract", () => {
     // frame), rendered unconditionally within the widget stage rather than behind a
     // handoff ternary.
     expect(donarSource.match(/className="donar-embed"/g) ?? []).toHaveLength(1);
+  });
+
+  // Wompi posts { message: "close" } at the 3DS HAND-OFF, not at payment. Showing
+  // "Verificando su entrega…" the instant it arrives put a spinner over the donor for
+  // the entire bank challenge — claiming to verify an entrega they had not yet made,
+  // and reading as a hung page (reported from production 2026-07-29). Wompi's own
+  // iframe narrates the challenge and then its success screen; our notice must wait
+  // until the poll has genuinely failed to settle, where it reassures instead of lying.
+  it("delays the verifying notice past several poll cycles instead of firing on close", () => {
+    expect(DONAR_VERIFYING_NOTICE_DELAY_MS).toBeGreaterThan(DONAR_POLL_INTERVAL_MS * 3);
+    // A donor who finishes must land on thanks without ever seeing the notice, so the
+    // delay has to outlast normal webhook + poll latency, while staying well inside
+    // the checkout window so a genuinely stuck entrega still gets reassurance.
+    expect(DONAR_VERIFYING_NOTICE_DELAY_MS).toBeLessThan(DONAR_POLL_TIMEOUT_MS);
+  });
+
+  it("gates the verifying notice on the delay elapsing, not on the close message", () => {
+    // The notice renders off its own delayed flag. Rendering it directly off the
+    // handoff state is the production bug: close fires at 3DS hand-off.
+    expect(donarSource).not.toContain('{handoff === "verifying" && (');
+    expect(donarSource).toContain("{verifyingNoticeVisible && (");
+    // The delay must be armed from the verifying state and disarmed when it ends,
+    // so a donor who returns to a live checkout is not left with a stale timer.
+    expect(donarSource).toContain("DONAR_VERIFYING_NOTICE_DELAY_MS");
   });
 
   it("labels the form fields in usted-form Spanish with the diezmo/ofrenda heading", () => {

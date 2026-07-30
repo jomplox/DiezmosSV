@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { DONAR_VERIFYING_NOTICE_DELAY_MS } from "../src/client/donation";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -253,7 +254,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
 
   // Handoff: the checkout is EMBEDDED in the wizard card — an iframe pointing at
   // the payment link with the esWidget flag — with the manual backup link below.
-  // There is no automatic redirect: the donor stays on /donar.
+  // There is no automatic redirect: the donor stays on the canonical root wizard.
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible({ timeout: 15_000 });
   await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
@@ -272,7 +273,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
     await expect(embed).toHaveCSS("height", `${renderedHeight}px`);
   }
   await expect(page.getByRole("button", { name: "¿No se muestra el formulario? Continúe aquí" })).toBeVisible();
-  expect(page.url()).toContain("/donar");
+  expect(new URL(page.url()).pathname).toBe("/");
 });
 
 test("keeps checking the same intent when Wompi closes before its webhook is visible", async ({ page }) => {
@@ -311,7 +312,11 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   });
 
   await expect.poll(() => statusChecks).toBeGreaterThan(0);
-  await expect(page.getByText("Verificando su entrega…")).toBeVisible();
+  const verifyingMessage = page.getByText("Verificando su entrega…");
+  await expect(verifyingMessage).toHaveCount(0);
+  await expect(verifyingMessage).toBeVisible({
+    timeout: DONAR_VERIFYING_NOTICE_DELAY_MS + 5_000
+  });
   const verifyingSpinner = page.locator(".donar-widget-loading .donar-spinner");
   await expect(verifyingSpinner).toBeVisible();
   await expect(verifyingSpinner).toHaveCSS("width", "24px");
