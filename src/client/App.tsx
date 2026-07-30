@@ -1247,6 +1247,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
+  async function downloadDonors(params: URLSearchParams) {
+    await runAction("export-donors", async () => {
+      const { blob, contentDisposition } = await fetchAccountDownload(
+        `/api/exports/donors.csv?${params.toString()}`
+      );
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(contentDisposition, "donantes.csv");
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast("Donantes exportados");
+    });
+  }
+
   async function verifyBackup(month: string) {
     await runAction(`backup-verify-${month}`, async () => {
       const result = await accountApi<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, { method: "POST" });
@@ -1856,10 +1871,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         {view === "donors" && can(user, "ADMIN") && (
           emissionEnvironment ? (
             <DonorsView
+              downloadingCsv={busy === "export-donors"}
               environment={emissionEnvironment.environment}
               loadPage={(params) =>
                 accountApi<DonorExplorerPage>(`/api/donors?${params.toString()}`)
               }
+              onDownloadCsv={downloadDonors}
               onError={handleApiFailure}
             />
           ) : (
