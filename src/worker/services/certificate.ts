@@ -454,6 +454,7 @@ export async function sendAnnualCertificates(
   const branding = await loadEmailBranding(repo, env);
   const email = new EmailService(env, undefined, {
     organizationName: emisor.nombre,
+    senderName: branding.senderName,
     brandColor: branding.brandColor,
     supportEmail: branding.supportEmail,
     logoUrl: branding.logoUrl

@@ -311,7 +311,10 @@ describe("document email resend", () => {
     await expect(response.json()).resolves.toMatchObject({ ok: true });
     expect(sentMessages).toHaveLength(1);
     expect(sentMessages[0]).toMatchObject({
-      from: "legacy-contact-6@example.com",
+      from: {
+        email: "legacy-contact-6@example.com",
+        name: "ExamplePerson1"
+      },
       to: "legacy-contact-2@example.com",
       headers: {
         "X-Idempotency-Key": expect.stringMatching(/^dsv-receipt-resend-v1-[a-f0-9]{64}$/)

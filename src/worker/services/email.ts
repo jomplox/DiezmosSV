@@ -3,6 +3,7 @@ import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { isRecord } from "../utils/guards";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
+import { resolveEmailSenderName } from "./emailSender";
 import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
@@ -121,6 +122,7 @@ export interface EmailBranding {
   organizationName: string;
   brandColor: string;
   supportEmail: string;
+  senderName?: string;
   // Absolute, version-qualified logo URL (or null). Rendered in the header of every rich
   // HTML email above the organization name; null keeps exactly the historical, logo-less
   // chrome. Absolute because a relative path is meaningless inside an email client.
@@ -146,11 +148,14 @@ export class EmailService {
   // Sender identity for real dispatch. EMAIL_FROM is required for any actual send;
   // mock mode short-circuits before `from` is used, so an unset value stays harmless
   // there and only surfaces as an error when a real provider would be contacted.
-  private resolveFrom(): string {
+  private resolveFrom(): EmailSenderIdentity {
+    const branding = this.resolveBranding();
+    const senderName = resolveEmailSenderName(branding.senderName, branding.organizationName);
     if (isMockMode(this.env)) {
-      return this.env.EMAIL_FROM ?? "";
+      return { email: this.env.EMAIL_FROM?.trim() ?? "", name: senderName };
     }
-    if (!this.env.EMAIL_FROM) {
+    const senderAddress = this.env.EMAIL_FROM?.trim();
+    if (!senderAddress) {
       throw new EmailDispatchError(
         "Configure el remitente de correo antes de enviar.",
         "EMAIL_FROM_REQUIRED",
@@ -158,7 +163,7 @@ export class EmailService {
         true
       );
     }
-    return this.env.EMAIL_FROM;
+    return { email: senderAddress, name: senderName };
   }
 
   async sendReceipt(
@@ -356,7 +361,10 @@ export class EmailService {
       // validation codes can prove a pre-accept rejection, but every unrecognized
       // rejection remains outcome-ambiguous and requires durable review.
       const result = await this.env.EMAIL.send({
-        from: payload.from,
+        from: {
+          email: payload.from.email,
+          name: payload.from.name
+        },
         to: payload.to,
         subject: payload.subject,
         ...(payload.idempotencyKey ? { headers: providerIdentityHeaders(payload.idempotencyKey) } : {}),
@@ -398,6 +406,11 @@ interface CloudflareEmailAttachment {
 interface EmailMessage {
   subject: string;
   text: string;
+}
+
+interface EmailSenderIdentity {
+  email: string;
+  name: string;
 }
 
 async function sendViaHttpProvider(env: Env, payload: EmailPayload): Promise<unknown> {
@@ -514,7 +527,7 @@ function providerIdentityHeaders(idempotencyKey: string): Record<string, string>
 }
 
 interface EmailPayload {
-  from: string;
+  from: EmailSenderIdentity;
   to: string;
   idempotencyKey?: string;
   subject: string;
@@ -527,9 +540,15 @@ interface EmailPayload {
   }>;
 }
 
-function providerPayload(payload: EmailPayload): Omit<EmailPayload, "idempotencyKey"> {
-  const { idempotencyKey: _idempotencyKey, ...body } = payload;
-  return body;
+function providerPayload(
+  payload: EmailPayload
+): Omit<EmailPayload, "idempotencyKey" | "from"> & { from: string; fromName: string } {
+  const { idempotencyKey: _idempotencyKey, from, ...body } = payload;
+  return {
+    ...body,
+    from: from.email,
+    fromName: from.name
+  };
 }
 
 function organizationName(env: Env): string {

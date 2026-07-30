@@ -228,6 +228,11 @@ export interface EmailTemplateSettings {
   templates: Record<string, EmailTemplateValue>;
 }
 
+export interface EmailSenderState {
+  senderName: string;
+  senderAddress: string;
+}
+
 export interface AlertEmailState {
   alertEmail: string;
 }

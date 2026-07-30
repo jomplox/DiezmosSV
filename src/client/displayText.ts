@@ -88,6 +88,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   EMAIL_INVALIDATION_SENT: "Aviso de invalidación enviado",
   EMAIL_RESEND_FAILED: "Reenvío de correo fallido",
   EMAIL_RESENT: "Correo reenviado",
+  EMAIL_SENDER_UPDATED: "Remitente visible de correo actualizado",
   EMAIL_SENT: "Correo enviado",
   EMAIL_SKIPPED: "Correo omitido",
   EMAIL_TEMPLATES_UPDATED: "Plantillas de correo actualizadas",
