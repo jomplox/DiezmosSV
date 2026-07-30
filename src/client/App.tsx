@@ -1407,6 +1407,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast(`Secretos actualizados: ${result.updated.length}`);
       setCredentialInput(emptyCredentialInput(credentialInput.environment));
       setCredentials((await accountApi<{ credentials: CredentialStatus }>("/api/credentials")).credentials);
+      const emailSenderResult = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender");
+      applyEmailSender(emailSenderResult.emailSender);
     });
   }
 
@@ -1939,6 +1941,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onBrandingSave={(next) => {
               applyBranding(next);
               setBranding(next);
+              void accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")
+                .then((emailSenderResult) => {
+                  applyEmailSender(emailSenderResult.emailSender);
+                })
+                .catch((error) => {
+                  if (!(error instanceof StaleAccountStateError)) handleApiFailure(error);
+                });
             }}
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}

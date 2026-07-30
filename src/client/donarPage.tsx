@@ -928,7 +928,7 @@ export function DonarPage() {
               box, leaving an orphaned period). */}
           <p className="donar-landing-unifier">
             <span>{DONAR_LANDING_UNIFIER_LEAD}</span>{" "}
-            <span className="donar-landing-unifier-church">{DONAR_LANDING_UNIFIER_CHURCH}</span> <DonarFlagBadge country="sv" />.
+            <span className="donar-landing-unifier-church">{DONAR_LANDING_UNIFIER_CHURCH} <DonarFlagBadge country="sv" />.</span>
           </p>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">

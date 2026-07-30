@@ -7,17 +7,17 @@ const DEFAULT_EMAIL_SENDER_NAME = "ExamplePerson1";
 export class EmailSenderValidationError extends Error {}
 
 export function normalizeEmailSenderName(value: unknown): string {
-  if (typeof value !== "string" || !value.trim()) {
-    throw new EmailSenderValidationError("Ingrese el nombre visible del remitente.");
+  if (typeof value !== "string" || EMAIL_SENDER_NAME_CONTROL_PATTERN.test(value)) {
+    throw new EmailSenderValidationError("El nombre del remitente contiene caracteres no permitidos.");
   }
   const senderName = value.trim();
+  if (!senderName) {
+    throw new EmailSenderValidationError("Ingrese el nombre visible del remitente.");
+  }
   if (senderName.length > EMAIL_SENDER_NAME_MAX_LENGTH) {
     throw new EmailSenderValidationError(
       `El nombre del remitente no puede superar los ${EMAIL_SENDER_NAME_MAX_LENGTH} caracteres.`
     );
-  }
-  if (EMAIL_SENDER_NAME_CONTROL_PATTERN.test(senderName)) {
-    throw new EmailSenderValidationError("El nombre del remitente contiene caracteres no permitidos.");
   }
   return senderName;
 }
