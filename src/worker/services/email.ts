@@ -3,7 +3,7 @@ import type { DteDocumentRecord, Env } from "../types";
 import { bytesToBase64, sha256Hex, utf8Bytes } from "../utils/encoding";
 import { isRecord } from "../utils/guards";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
-import { resolveEmailSenderName } from "./emailSender";
+import { resolveEmailReplyToAddress, resolveEmailSenderName } from "./emailSender";
 import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
 import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
 
@@ -123,6 +123,7 @@ export interface EmailBranding {
   brandColor: string;
   supportEmail: string;
   senderName?: string;
+  replyToAddress?: string | null;
   // Absolute, version-qualified logo URL (or null). Rendered in the header of every rich
   // HTML email above the organization name; null keeps exactly the historical, logo-less
   // chrome. Absolute because a relative path is meaningless inside an email client.
@@ -350,6 +351,8 @@ export class EmailService {
         messageId: await hashProviderDeliveryId("mock-email-accepted")
       };
     }
+    const replyTo = resolveEmailReplyToAddress(this.resolveBranding().replyToAddress);
+    const dispatchPayload: EmailPayload = replyTo ? { ...payload, replyTo } : payload;
     const httpProviderConfigured = hasHttpProvider(this.env);
     const cloudflareSelected = Boolean(
       this.env.EMAIL &&
@@ -362,14 +365,15 @@ export class EmailService {
       // rejection remains outcome-ambiguous and requires durable review.
       const result = await this.env.EMAIL.send({
         from: {
-          email: payload.from.email,
-          name: payload.from.name
+          email: dispatchPayload.from.email,
+          name: dispatchPayload.from.name
         },
-        to: payload.to,
-        subject: payload.subject,
-        ...(payload.idempotencyKey ? { headers: providerIdentityHeaders(payload.idempotencyKey) } : {}),
-        text: payload.text,
-        ...(payload.html ? { html: payload.html } : {}),
+        to: dispatchPayload.to,
+        subject: dispatchPayload.subject,
+        ...(dispatchPayload.replyTo ? { replyTo: dispatchPayload.replyTo } : {}),
+        ...(dispatchPayload.idempotencyKey ? { headers: providerIdentityHeaders(dispatchPayload.idempotencyKey) } : {}),
+        text: dispatchPayload.text,
+        ...(dispatchPayload.html ? { html: dispatchPayload.html } : {}),
         ...(cfAttachments.length > 0 ? { attachments: cfAttachments } : {})
       });
       const messageId = await hashProviderDeliveryId(result.messageId);
@@ -385,7 +389,7 @@ export class EmailService {
     }
     if (httpProviderConfigured) {
       await beforeProviderDispatch?.();
-      return sendViaHttpProvider(this.env, payload);
+      return sendViaHttpProvider(this.env, dispatchPayload);
     }
     throw new EmailDispatchError(
       "Configure el servicio de correo antes de enviar comprobantes.",
@@ -529,6 +533,7 @@ function providerIdentityHeaders(idempotencyKey: string): Record<string, string>
 interface EmailPayload {
   from: EmailSenderIdentity;
   to: string;
+  replyTo?: string;
   idempotencyKey?: string;
   subject: string;
   text: string;

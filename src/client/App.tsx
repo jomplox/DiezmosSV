@@ -291,6 +291,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
   const [emailSender, setEmailSender] = useState<EmailSenderState | null>(null);
   const [emailSenderDraft, setEmailSenderDraft] = useState("");
+  const [emailReplyToDraft, setEmailReplyToDraft] = useState("");
   const [alertEmailDraft, setAlertEmailDraft] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
@@ -758,6 +759,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setEmailTemplateDraft({});
     setEmailSender(null);
     setEmailSenderDraft("");
+    setEmailReplyToDraft("");
     setAlertEmailDraft("");
     setQuery("");
     setDebouncedQuery("");
@@ -1434,6 +1436,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function applyEmailSender(sender: EmailSenderState) {
     setEmailSender(sender);
     setEmailSenderDraft(sender.senderName);
+    setEmailReplyToDraft(sender.replyToAddress);
   }
 
   function applyAlertEmail(value: string) {
@@ -1466,10 +1469,13 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     await runAction("email-sender", async () => {
       const result = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender", {
         method: "PUT",
-        body: { senderName: emailSenderDraft }
+        body: {
+          senderName: emailSenderDraft,
+          replyToAddress: emailReplyToDraft
+        }
       });
       applyEmailSender(result.emailSender);
-      setToast("Nombre visible del remitente actualizado");
+      setToast("Configuración del remitente actualizada");
     });
   }
 
@@ -1910,6 +1916,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             emailTemplateDraft={emailTemplateDraft}
             emailSender={emailSender}
             emailSenderDraft={emailSenderDraft}
+            emailReplyToDraft={emailReplyToDraft}
             alertEmailDraft={alertEmailDraft}
             branding={branding}
             token={token}
@@ -1934,6 +1941,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             }}
             onEmailTemplateSubmit={updateEmailTemplates}
             onEmailSenderChange={setEmailSenderDraft}
+            onEmailReplyToChange={setEmailReplyToDraft}
             onEmailSenderSubmit={updateEmailSender}
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onAlertEmailChange={setAlertEmailDraft}

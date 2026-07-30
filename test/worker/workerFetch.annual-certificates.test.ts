@@ -154,8 +154,9 @@ describe("annual donor certificates", () => {
   it("sends one certificate per donor with email, attaches the PDF, and skips donors without email", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.settings.push({ key: "email_reply_to", value: "legacy-contact-7@example.com" });
     seedYear(db);
-    const sent: Array<{ to: string; subject: string; attachments?: Array<{ filename: string; type: string; content: Uint8Array }> }> = [];
+    const sent: Array<{ to: string; subject: string; replyTo?: string; attachments?: Array<{ filename: string; type: string; content: Uint8Array }> }> = [];
 
     const response = await worker.fetch(
       new Request("https://example.org/api/certificates/annual/send?year=2025", {
@@ -180,6 +181,7 @@ describe("annual donor certificates", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0].to).toBe("ana@example.org");
     expect(sent[0].subject).toBe("Constancia de donaciones 2025");
+    expect(sent[0].replyTo).toBe("legacy-contact-7@example.com");
     const attachments = sent[0].attachments ?? [];
     expect(attachments).toHaveLength(1);
     expect(attachments[0].filename).toBe("constancia-donaciones-2025.pdf");

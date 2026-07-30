@@ -167,7 +167,8 @@ describe("loadEmailBranding", () => {
     const store: Record<string, string> = {
       branding_display_name: "Iglesia Central",
       branding_accent_color: "#123456",
-      branding_support_email: "legacy-email-119@example.com"
+      branding_support_email: "legacy-email-119@example.com",
+      email_reply_to: "legacy-email-117@example.com"
     };
     const branding = await loadEmailBranding(
       {
@@ -180,6 +181,7 @@ describe("loadEmailBranding", () => {
       brandColor: "#123456",
       supportEmail: "legacy-email-119@example.com",
       senderName: "Iglesia Central",
+      replyToAddress: "legacy-email-117@example.com",
       logoUrl: null
     });
   });
@@ -203,6 +205,20 @@ describe("loadEmailBranding", () => {
     const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
     expect(branding.supportEmail).toBe("legacy-contact-1@example.com");
     expect(branding.senderName).toBe("ExamplePerson1");
+    expect(branding.replyToAddress).toBeNull();
+  });
+
+  it("ignores an invalid legacy Reply-To setting instead of blocking email delivery", async () => {
+    const branding = await loadEmailBranding(
+      {
+        getSetting: async (key: string) => key === "email_reply_to"
+          ? "replies@example.org\r\nBcc: attacker@example.org"
+          : null
+      },
+      originEnv
+    );
+
+    expect(branding.replyToAddress).toBeNull();
   });
 
   it("builds an absolute logo URL from APP_ORIGIN and the stored logo version", async () => {
