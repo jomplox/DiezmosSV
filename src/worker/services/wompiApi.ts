@@ -3,6 +3,7 @@ import { isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
+import { loadWompiNotificationSettings } from "./wompiNotifications";
 
 const TOKEN_URL = "https://id.wompi.sv/connect/token";
 const ENLACE_PAGO_URL = "https://api.wompi.sv/EnlacePago";
@@ -96,7 +97,7 @@ export class WompiApiService {
       // esMontoEditable/esCantidadEditable false pins the amount: the donor cannot
       // change the monto or quantity on Wompi's hosted sheet, so the paid amount
       // always matches the intent (and the CDE we later emit).
-      configuracion: this.linkConfiguracion()
+      configuracion: await this.linkConfiguracion()
     };
 
     const response = await this.authorizedFetch(ENLACE_PAGO_URL, "POST", body);
@@ -150,7 +151,7 @@ export class WompiApiService {
       // The PUT replaces the whole object, so formaPago and configuracion must be
       // resent or Wompi would re-enable every payment method / re-email the donor.
       formaPago: this.linkFormaPago(),
-      configuracion: this.linkConfiguracion()
+      configuracion: await this.linkConfiguracion()
     };
 
     const response = await this.authorizedFetch(`${ENLACE_PAGO_URL}/${intent.wompi_id_enlace}`, "PUT", body);
@@ -188,22 +189,32 @@ export class WompiApiService {
     };
   }
 
-  private linkConfiguracion(): {
+  private async linkConfiguracion(): Promise<{
     urlRedirect: string;
     urlWebhook: string;
     esMontoEditable: false;
     esCantidadEditable: false;
-    notificarTransaccionCliente: false;
+    emailsNotificacion?: string;
+    telefonosNotificacion?: string;
+    notificarTransaccionCliente: boolean;
     duracionInterfazIntentoMinutos: number;
-  } {
+  }> {
     const origin = requireSecret(this.env, "APP_ORIGIN");
+    // These values live in D1 and are intentionally read for every link. An owner
+    // can change notification targets without rotating secrets or redeploying.
+    const notifications = await loadWompiNotificationSettings(this.repo);
     return {
       urlRedirect: `${origin}/donar/gracias`,
       urlWebhook: `${origin}/webhooks/wompi`,
       esMontoEditable: false,
       esCantidadEditable: false,
-      // We send the donor their CDE email ourselves; Wompi must not email them.
-      notificarTransaccionCliente: false,
+      ...(notifications.emailsNotificacion
+        ? { emailsNotificacion: notifications.emailsNotificacion }
+        : {}),
+      ...(notifications.telefonosNotificacion
+        ? { telefonosNotificacion: notifications.telefonosNotificacion }
+        : {}),
+      notificarTransaccionCliente: notifications.notificarTransaccionCliente,
       // Set explicitly rather than inheriting Wompi's undocumented default: production
       // 3DS makes the bank challenge mandatory, and /donar polls for exactly this long.
       duracionInterfazIntentoMinutos: CHECKOUT_WINDOW_MINUTES

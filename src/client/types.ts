@@ -228,6 +228,18 @@ export interface EmailTemplateSettings {
   templates: Record<string, EmailTemplateValue>;
 }
 
+export interface EmailSenderState {
+  senderName: string;
+  senderAddress: string;
+  replyToAddress: string;
+}
+
+export interface WompiNotificationSettings {
+  emailsNotificacion: string;
+  telefonosNotificacion: string;
+  notificarTransaccionCliente: boolean;
+}
+
 export interface AlertEmailState {
   alertEmail: string;
 }

@@ -48,7 +48,8 @@ import {
   DONAR_GIFT_TYPE_LABEL,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
-  DONAR_LANDING_UNIFIER,
+  DONAR_LANDING_UNIFIER_CHURCH,
+  DONAR_LANDING_UNIFIER_LEAD,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
   donarDatosPath,
@@ -1182,6 +1183,53 @@ describe("donar wizard styles contract", () => {
   });
 });
 
+describe("donar responsive donor layout", () => {
+  it("keeps the wide landing mission line balanced without inserting a literal line break", () => {
+    const landingBlock = donarSource.slice(
+      donarSource.indexOf('<p className="donar-landing-unifier">'),
+      donarSource.indexOf('<p className="donar-landing-subtitle">')
+    );
+
+    expect(landingBlock).toContain("{DONAR_LANDING_UNIFIER_LEAD}");
+    expect(landingBlock).toMatch(
+      /<span className="donar-landing-unifier-church">\s*\{DONAR_LANDING_UNIFIER_CHURCH\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
+    );
+    expect(landingBlock).not.toContain("<br");
+    expect(stylesSource).toMatch(
+      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-landing-unifier-church\s*\{[\s\S]{0,160}display:\s*block;/
+    );
+  });
+
+  it("uses the digit keypad for a DUI without changing its existing formatter", () => {
+    expect(donarSource).toContain('inputMode={form.donorDocumentType === "13" ? "numeric" : undefined}');
+    expect(donarSource).toContain("formatDui(");
+    expect(donarSource).toContain("isValidDui(");
+  });
+
+  it("keeps the Wompi handoff inside the usable donor-card width", () => {
+    const handoffRule = stylesSource.match(/\.donar-handoff\s*\{[^}]*\}/)?.[0] ?? "";
+    const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
+
+    expect(handoffRule).toContain("width: 100%;");
+    expect(handoffRule).toContain("justify-items: stretch;");
+    expect(embedRule).not.toContain("box-sizing:");
+    expect(embedRule).toContain("max-width: 100%;");
+    expect(stylesSource).toMatch(/\.donar-handoff\s*>\s*\.donar-intro\s*\{[^}]*margin-top:\s*10px;/);
+  });
+
+  it("uses the compact 430px mobile gutter and a balanced wizard title lane", () => {
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-screen\s*\{[\s\S]{0,160}padding:\s*32px 10px 48px;/
+    );
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-wizard-title\s*\{[\s\S]{0,160}gap:\s*6px;/
+    );
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-title-world-icon\s*\{[\s\S]{0,200}width:\s*58px;[\s\S]{0,120}height:\s*36px;[\s\S]{0,120}flex-basis:\s*58px;/
+    );
+  });
+});
+
 describe("givebutter constants", () => {
   it("pins the FMCE account id and example-campaign campaign", () => {
     expect(GIVEBUTTER_ACCOUNT_ID).toBe("EXAMPLEACCT00001");
@@ -1363,10 +1411,12 @@ describe("two-door landing copy", () => {
     expect(DONAR_LANDING_SUBTITLE).toBe("Elija según su lugar de residencia.");
   });
 
-  it("pins the unifying line that both doors fund the same church in El Salvador", () => {
+  it("pins the two rendered parts of the unifying line that both doors fund the same church", () => {
     // The SV flag (an inline SVG badge) and the closing period are appended in
     // JSX — the emoji rendered as a blank box, leaving an orphaned period.
-    expect(DONAR_LANDING_UNIFIER).toBe(
+    expect(DONAR_LANDING_UNIFIER_LEAD).toBe("Todos los diezmos y ofrendas apoyan la obra de");
+    expect(DONAR_LANDING_UNIFIER_CHURCH).toBe("Misión ExampleOrganization en El Salvador");
+    expect(`${DONAR_LANDING_UNIFIER_LEAD} ${DONAR_LANDING_UNIFIER_CHURCH}`).toBe(
       "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador"
     );
   });
@@ -1392,7 +1442,8 @@ describe("two-door landing source contract", () => {
   it("renders the landing heading, subtitle, unifier, and both door labels + descriptors", () => {
     expect(donarSource).toContain("DONAR_LANDING_HEADING");
     expect(donarSource).toContain("DONAR_LANDING_SUBTITLE");
-    expect(donarSource).toContain("DONAR_LANDING_UNIFIER");
+    expect(donarSource).toContain("DONAR_LANDING_UNIFIER_LEAD");
+    expect(donarSource).toContain("DONAR_LANDING_UNIFIER_CHURCH");
     expect(donarSource).toContain("DONAR_DOOR_SV_LABEL");
     expect(donarSource).toContain("DONAR_DOOR_SV_DESC");
     expect(donarSource).toContain("DONAR_DOOR_EEUU_LABEL");
@@ -1405,7 +1456,7 @@ describe("two-door landing source contract", () => {
       donarSource.indexOf('<div className="donar-doors">')
     );
 
-    expect(landingBlock.indexOf("DONAR_LANDING_UNIFIER")).toBeLessThan(
+    expect(landingBlock.indexOf("DONAR_LANDING_UNIFIER_LEAD")).toBeLessThan(
       landingBlock.indexOf("DONAR_LANDING_SUBTITLE")
     );
   });

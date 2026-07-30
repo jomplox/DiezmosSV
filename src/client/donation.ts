@@ -135,11 +135,11 @@ export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
 // tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
-// The SV flag is rendered as an inline SVG badge after this text (flag EMOJI are
-// unreliable: Windows renders them as bare letters, other platforms as a blank
+// The SV flag is rendered as an inline SVG badge after the church name (flag EMOJI
+// are unreliable: Windows renders them as bare letters, other platforms as a blank
 // box — the landing showed "El Salvador  ." with an orphaned period).
-export const DONAR_LANDING_UNIFIER =
-  "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador";
+export const DONAR_LANDING_UNIFIER_LEAD = "Todos los diezmos y ofrendas apoyan la obra de";
+export const DONAR_LANDING_UNIFIER_CHURCH = "Misión ExampleOrganization en El Salvador";
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
 export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";

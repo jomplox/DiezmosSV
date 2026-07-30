@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Cloud,
   CircleHelp,
+  ContactRound,
   FileSpreadsheet,
   FileText,
   FlaskConical,
@@ -28,7 +29,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -45,6 +46,8 @@ import { DonarGraciasPage, DonarPage } from "./donarPage";
 import { type CredentialSettingsSectionId } from "./credentialSettings";
 import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
+import { DonorsView } from "./donorsView";
+import type { DonorExplorerPage } from "./donors";
 import type { AnalyticsResponse } from "./types";
 import { auditActionLabel, auditActorLabel, auditLocationLabel, auditProtocolLabel, AUDIT_CONTEXT_LABELS, auditSummaryLabel, catalogOptionLabel, documentDisplayStatus, entityLabel, environmentLabel, parseAuditContext, roleLabel, statusLabel, userFacingErrorMessage } from "./displayText";
 import {
@@ -113,7 +116,7 @@ import {
 } from "./documentsView";
 
 type Role = "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER";
-type View = "documents" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
+type View = "documents" | "donors" | "failures" | "contingency" | "audit" | "analytics" | "users" | "exports" | "credentials";
 export type FiscalCorrectionTarget =
   | { kind: "WOMPI_EVENT"; id: string }
   | { kind: "DTE_DOCUMENT"; id: string };
@@ -152,6 +155,7 @@ export function shouldRetainResendRequestIdAfterFailure(
 
 const navItems: Array<{ id: View; label: string; icon: typeof FileText; minRole?: Role }> = [
   { id: "documents", label: "Documentos", icon: FileText },
+  { id: "donors", label: "Donantes", icon: ContactRound, minRole: "ADMIN" },
   { id: "failures", label: "Fallos", icon: AlertTriangle },
   { id: "contingency", label: "Contingencia", icon: Unplug },
   { id: "audit", label: "Auditoría", icon: ScrollText },
@@ -289,6 +293,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings | null>(null);
   const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
+  const [emailSender, setEmailSender] = useState<EmailSenderState | null>(null);
+  const [emailSenderDraft, setEmailSenderDraft] = useState("");
+  const [emailReplyToDraft, setEmailReplyToDraft] = useState("");
+  const [wompiNotificationsDraft, setWompiNotificationsDraft] = useState<WompiNotificationSettings>({
+    emailsNotificacion: "",
+    telefonosNotificacion: "",
+    notificarTransaccionCliente: false
+  });
   const [alertEmailDraft, setAlertEmailDraft] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("diezmos_sidebar_collapsed") === "true");
   const [query, setQuery] = useState("");
@@ -698,16 +710,26 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       const result = await accountApi<{ users: User[] }>("/api/users");
       setUsers(result.users);
     }
+    if (view === "donors" && can(user, "ADMIN")) {
+      const environmentResult = await accountApi<{ emissionEnvironment: EmissionEnvironmentState }>(
+        "/api/settings/emission-environment"
+      );
+      setEmissionEnvironment(environmentResult.emissionEnvironment);
+    }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
+      const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
         accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
         accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
+        accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
+        accountApi<{ wompiNotifications: WompiNotificationSettings }>("/api/settings/wompi-notifications"),
         accountApi<AlertEmailState>("/api/settings/alert-email")
       ]);
       setCredentials(credentialResult.credentials);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
       applyEmailTemplates(emailTemplateResult.emailTemplates);
+      applyEmailSender(emailSenderResult.emailSender);
+      setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
       applyAlertEmail(alertEmailResult.alertEmail);
     }
     if (view === "exports" && can(user, "ADMIN")) {
@@ -752,6 +774,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setEmissionEnvironment(null);
     setEmailTemplates(null);
     setEmailTemplateDraft({});
+    setEmailSender(null);
+    setEmailSenderDraft("");
+    setEmailReplyToDraft("");
     setAlertEmailDraft("");
     setQuery("");
     setDebouncedQuery("");
@@ -1222,6 +1247,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
+  async function downloadDonors(params: URLSearchParams) {
+    await runAction("export-donors", async () => {
+      const { blob, contentDisposition } = await fetchAccountDownload(
+        `/api/exports/donors.csv?${params.toString()}`
+      );
+      const href = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = href;
+      link.download = filenameFromDisposition(contentDisposition, "donantes.csv");
+      link.click();
+      URL.revokeObjectURL(href);
+      setToast("Donantes exportados");
+    });
+  }
+
   async function verifyBackup(month: string) {
     await runAction(`backup-verify-${month}`, async () => {
       const result = await accountApi<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, { method: "POST" });
@@ -1401,6 +1441,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast(`Secretos actualizados: ${result.updated.length}`);
       setCredentialInput(emptyCredentialInput(credentialInput.environment));
       setCredentials((await accountApi<{ credentials: CredentialStatus }>("/api/credentials")).credentials);
+      const emailSenderResult = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender");
+      applyEmailSender(emailSenderResult.emailSender);
     });
   }
 
@@ -1421,6 +1463,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function applyEmailTemplates(settings: EmailTemplateSettings) {
     setEmailTemplates(settings);
     setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
+  }
+
+  function applyEmailSender(sender: EmailSenderState) {
+    setEmailSender(sender);
+    setEmailSenderDraft(sender.senderName);
+    setEmailReplyToDraft(sender.replyToAddress);
   }
 
   function applyAlertEmail(value: string) {
@@ -1446,6 +1494,34 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       });
       applyEmailTemplates(result.emailTemplates);
       setToast("Plantillas de correo actualizadas");
+    });
+  }
+
+  async function updateEmailSender() {
+    await runAction("email-sender", async () => {
+      const result = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender", {
+        method: "PUT",
+        body: {
+          senderName: emailSenderDraft,
+          replyToAddress: emailReplyToDraft
+        }
+      });
+      applyEmailSender(result.emailSender);
+      setToast("Configuración del remitente actualizada");
+    });
+  }
+
+  async function updateWompiNotifications() {
+    await runAction("wompi-notifications", async () => {
+      const result = await accountApi<{ wompiNotifications: WompiNotificationSettings }>(
+        "/api/settings/wompi-notifications",
+        {
+          method: "PUT",
+          body: wompiNotificationsDraft
+        }
+      );
+      setWompiNotificationsDraft(result.wompiNotifications);
+      setToast("Notificaciones de Wompi actualizadas");
     });
   }
 
@@ -1792,6 +1868,24 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           />
         )}
 
+        {view === "donors" && can(user, "ADMIN") && (
+          emissionEnvironment ? (
+            <DonorsView
+              downloadingCsv={busy === "export-donors"}
+              environment={emissionEnvironment.environment}
+              loadPage={(params) =>
+                accountApi<DonorExplorerPage>(`/api/donors?${params.toString()}`)
+              }
+              onDownloadCsv={downloadDonors}
+              onError={handleApiFailure}
+            />
+          ) : (
+            <section className="single-panel">
+              <p>Cargando el ambiente activo…</p>
+            </section>
+          )
+        )}
+
         {view === "users" && (
           <section className="single-panel">
             {can(user, "ADMIN") ? (
@@ -1884,6 +1978,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             emissionEnvironment={emissionEnvironment}
             emailTemplates={emailTemplates}
             emailTemplateDraft={emailTemplateDraft}
+            emailSender={emailSender}
+            emailSenderDraft={emailSenderDraft}
+            emailReplyToDraft={emailReplyToDraft}
+            wompiNotificationsDraft={wompiNotificationsDraft}
             alertEmailDraft={alertEmailDraft}
             branding={branding}
             token={token}
@@ -1891,6 +1989,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             busy={busy === "credentials"}
             emissionBusy={busy === "emission-environment"}
             templateBusy={busy === "email-templates"}
+            emailSenderBusy={busy === "email-sender"}
+            wompiNotificationsBusy={busy === "wompi-notifications"}
             alertEmailBusy={busy === "alert-email"}
             writerBusy={busy === "credential-writer"}
             onChange={setCredentialInput}
@@ -1906,25 +2006,41 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               }));
             }}
             onEmailTemplateSubmit={updateEmailTemplates}
+            onEmailSenderChange={setEmailSenderDraft}
+            onEmailReplyToChange={setEmailReplyToDraft}
+            onEmailSenderSubmit={updateEmailSender}
+            onWompiNotificationsChange={setWompiNotificationsDraft}
+            onWompiNotificationsSubmit={updateWompiNotifications}
             onEmissionEnvironmentChange={updateEmissionEnvironment}
             onAlertEmailChange={setAlertEmailDraft}
             onAlertEmailSubmit={updateAlertEmail}
             onBrandingSave={(next) => {
               applyBranding(next);
               setBranding(next);
+              void accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")
+                .then((emailSenderResult) => {
+                  applyEmailSender(emailSenderResult.emailSender);
+                })
+                .catch((error) => {
+                  if (!(error instanceof StaleAccountStateError)) handleApiFailure(error);
+                });
             }}
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}
             onRefresh={async () => {
-              const [credentialResult, environmentResult, emailTemplateResult, alertEmailResult] = await Promise.all([
+              const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
                 accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
                 accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
                 accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
+                accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
+                accountApi<{ wompiNotifications: WompiNotificationSettings }>("/api/settings/wompi-notifications"),
                 accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
+              applyEmailSender(emailSenderResult.emailSender);
+              setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
               applyAlertEmail(alertEmailResult.alertEmail);
             }}
           />
@@ -2960,6 +3076,7 @@ function delay(ms: number): Promise<void> {
 
 const VIEW_SUBTITLES: Record<View, string> = {
   documents: "Emita, envíe por correo y administre los comprobantes de donación (CDE).",
+  donors: "Explore donantes, sus datos de contacto y su historial de entregas.",
   failures: "CDE con errores, rechazos o pagos sin comprobante que requieren su atención.",
   contingency: "El CDE no usa contingencia; cuando Hacienda no responde, queda en trámite y se reintenta automáticamente.",
   audit: "Historial de todas las acciones realizadas en el panel.",

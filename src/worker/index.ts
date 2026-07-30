@@ -22,6 +22,14 @@ import {
   validateIntentInput
 } from "./services/donations";
 import { classifyEmailDispatchError, emailDeliveryAuditEvidence, EmailService, type EmailDeliveryResult } from "./services/email";
+import {
+  EMAIL_REPLY_TO_SETTING_KEY,
+  EMAIL_SENDER_NAME_SETTING_KEY,
+  EmailSenderValidationError,
+  normalizeEmailReplyToAddress,
+  normalizeEmailSenderName,
+  resolveEmailReplyToAddress
+} from "./services/emailSender";
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
@@ -54,8 +62,9 @@ import {
 } from "./services/branding";
 import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
-import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption } from "../shared/catalogs";
+import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
+import { buildDonorExplorerCsv, donorExplorerCsvFilename } from "./services/donorExport";
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
@@ -66,6 +75,14 @@ import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBac
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
+import {
+  loadWompiNotificationSettings,
+  normalizeWompiNotificationSettings,
+  WOMPI_NOTIFICATION_EMAILS_SETTING_KEY,
+  WOMPI_NOTIFICATION_PHONES_SETTING_KEY,
+  WOMPI_NOTIFY_DONOR_EMAIL_SETTING_KEY,
+  WompiNotificationValidationError
+} from "./services/wompiNotifications";
 import { isValidEmail } from "../shared/email";
 import { elSalvadorDateOnly, formatElSalvadorDate } from "../shared/legalWindows";
 import {
@@ -1460,6 +1477,160 @@ async function handleDonationIntentList(ctx: ApiRouteContext): Promise<Response>
   return jsonResponse({ intents: await ctx.repo.listRecentDonationIntents(50) });
 }
 
+type DonorFilterValues = Omit<
+  Parameters<Repository["listDonors"]>[0],
+  "limit" | "offset"
+>;
+
+type DonorFilterParseResult =
+  | { ok: true; filters: DonorFilterValues }
+  | { ok: false; response: Response };
+
+function parseNonNegativeIntegerParam(
+  params: URLSearchParams,
+  name: string,
+  fallback: number
+): number | null {
+  const value = params.get(name);
+  if (value === null) return fallback;
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function parseDonorFilterValues(url: URL): DonorFilterParseResult {
+  const environment = ambienteValue(url.searchParams.get("environment"));
+  if (!environment) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "invalid_donor_environment", message: "Seleccione un ambiente válido (00 o 01)." },
+        { status: 400 }
+      )
+    };
+  }
+  const documentType = url.searchParams.get("documentType")?.trim() ?? "";
+  const giftTypeParam = url.searchParams.get("giftType");
+  const sourceParam = url.searchParams.get("source");
+  const minTotalCents = url.searchParams.has("minTotalCents")
+    ? parseNonNegativeIntegerParam(url.searchParams, "minTotalCents", 0)
+    : undefined;
+  const maxTotalCents = url.searchParams.has("maxTotalCents")
+    ? parseNonNegativeIntegerParam(url.searchParams, "maxTotalCents", 0)
+    : undefined;
+  const invalid =
+    (documentType !== "" && !findCatalogOption(CAT022_DOCUMENT_TYPES, documentType))
+    || (giftTypeParam !== null && giftTypeParam !== "DIEZMO" && giftTypeParam !== "OFRENDA")
+    || (sourceParam !== null && sourceParam !== "WOMPI" && sourceParam !== "MANUAL")
+    || minTotalCents === null
+    || maxTotalCents === null
+    || (minTotalCents !== undefined && maxTotalCents !== undefined && minTotalCents > maxTotalCents);
+  if (invalid) {
+    return {
+      ok: false,
+      response: jsonResponse(
+        { error: "invalid_donor_filters", message: "Revise los filtros del explorador de donantes." },
+        { status: 400 }
+      )
+    };
+  }
+
+  return {
+    ok: true,
+    filters: {
+      environment,
+      documentType: documentType || undefined,
+      documentValue: url.searchParams.get("documentValue")?.trim() || undefined,
+      name: url.searchParams.get("name")?.trim() || undefined,
+      email: url.searchParams.get("email")?.trim() || undefined,
+      minTotalCents,
+      maxTotalCents,
+      giftType: giftTypeParam === "DIEZMO" || giftTypeParam === "OFRENDA"
+        ? giftTypeParam
+        : undefined,
+      source: sourceParam === "WOMPI" || sourceParam === "MANUAL"
+        ? sourceParam
+        : undefined
+    }
+  };
+}
+
+async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
+  const parsed = parseDonorFilterValues(ctx.url);
+  if (!parsed.ok) return parsed.response;
+  const limit = parseNonNegativeIntegerParam(ctx.url.searchParams, "limit", 25);
+  const offset = parseNonNegativeIntegerParam(ctx.url.searchParams, "offset", 0);
+  if (limit === null || limit < 1 || limit > 100 || offset === null) {
+    return jsonResponse(
+      { error: "invalid_donor_filters", message: "Revise los filtros del explorador de donantes." },
+      { status: 400 }
+    );
+  }
+  return jsonResponse(await ctx.repo.listDonors({
+    ...parsed.filters,
+    limit,
+    offset
+  }));
+}
+
+async function handleDonorExport(ctx: ApiRouteContext): Promise<Response> {
+  const parsed = parseDonorFilterValues(ctx.url);
+  if (!parsed.ok) return parsed.response;
+
+  const donors = [];
+  let offset = 0;
+  for (;;) {
+    const page = await ctx.repo.listDonors({
+      ...parsed.filters,
+      limit: 100,
+      offset
+    });
+    donors.push(...page.donors);
+    if (!page.hasMore || page.donors.length === 0) break;
+    offset += page.donors.length;
+  }
+
+  const filterMetadata: Record<string, string | number | boolean> = {
+    ...(parsed.filters.documentType ? { documentType: parsed.filters.documentType } : {}),
+    ...(parsed.filters.documentValue ? { hasDocumentValue: true } : {}),
+    ...(parsed.filters.name ? { hasName: true } : {}),
+    ...(parsed.filters.email ? { hasEmail: true } : {}),
+    ...(parsed.filters.minTotalCents !== undefined
+      ? { minTotalCents: parsed.filters.minTotalCents }
+      : {}),
+    ...(parsed.filters.maxTotalCents !== undefined
+      ? { maxTotalCents: parsed.filters.maxTotalCents }
+      : {}),
+    ...(parsed.filters.giftType ? { giftType: parsed.filters.giftType } : {}),
+    ...(parsed.filters.source ? { source: parsed.filters.source } : {})
+  };
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "DONORS_EXPORTED",
+    entityType: "export",
+    entityId: `donors:${parsed.filters.environment}`,
+    summary: donors.length === 1
+      ? `1 donante exportado (ambiente ${parsed.filters.environment})`
+      : `${donors.length} donantes exportados (ambiente ${parsed.filters.environment})`,
+    metadata: {
+      environment: parsed.filters.environment,
+      donors: donors.length,
+      filters: filterMetadata
+    }
+  });
+
+  return new Response(buildDonorExplorerCsv(donors), {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${donorExplorerCsvFilename(
+        parsed.filters.environment,
+        donors.length
+      )}"`
+    }
+  });
+}
+
 function documentRouteRole(ctx: ApiRouteContext): Role {
   const action = ctx.params[1];
   if (action === "email" && ctx.request.method === "PATCH") return "OPERATOR";
@@ -2009,6 +2180,16 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
     handler: handleEmailTemplates
   },
   {
+    pattern: "/api/settings/email-sender",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleEmailSender
+  },
+  {
+    pattern: "/api/settings/wompi-notifications",
+    role: ({ request }) => request.method === "GET" || request.method === "PUT" ? "OWNER" : null,
+    handler: handleWompiNotificationSettings
+  },
+  {
     pattern: "/api/settings/branding",
     role: ({ request }) => request.method === "PUT" ? "OWNER" : null,
     handler: handleBrandingSettings
@@ -2032,7 +2213,8 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
 
 const documentListRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/documents", role: "VIEWER", handler: handleDocumentList },
-  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList }
+  { method: "GET", pattern: "/api/donations/intents", role: "VIEWER", handler: handleDonationIntentList },
+  { method: "GET", pattern: "/api/donors", role: "ADMIN", handler: handleDonorList }
 ];
 
 const wompiIssuanceRoutes: Array<Route<ApiRouteContext>> = [
@@ -2058,6 +2240,7 @@ const exportRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/exports/f960.csv", role: "ADMIN", handler: handleF960Csv },
   { method: "GET", pattern: "/api/exports/f960.xlsx", role: "ADMIN", handler: handleF960Xlsx },
   { method: "GET", pattern: "/api/exports/contacts", role: "ADMIN", handler: handleContactsExport },
+  { method: "GET", pattern: "/api/exports/donors.csv", role: "ADMIN", handler: handleDonorExport },
   { method: "GET", pattern: "/api/certificates/annual", role: "ADMIN", handler: handleAnnualCertificatePreview },
   { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend }
 ];
@@ -2195,6 +2378,129 @@ async function handleEmailTemplates(ctx: ApiRouteContext): Promise<Response> {
   } catch (error) {
     if (error instanceof EmailTemplateValidationError) {
       return jsonResponse({ error: "invalid_email_templates", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+}
+
+async function emailSenderState(ctx: Pick<ApiRouteContext, "env" | "repo">): Promise<{
+  senderName: string;
+  senderAddress: string;
+  replyToAddress: string;
+}> {
+  const branding = await loadEmailBranding(ctx.repo, ctx.env);
+  return {
+    senderName: branding.senderName,
+    senderAddress: ctx.env.EMAIL_FROM?.trim() ?? "",
+    replyToAddress: branding.replyToAddress ?? ""
+  };
+}
+
+async function handleEmailSender(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({ emailSender: await emailSenderState(ctx) });
+  }
+  if (ctx.request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "empty-object"
+  })) as { senderName?: unknown; replyToAddress?: unknown };
+  try {
+    const senderName = normalizeEmailSenderName(body.senderName);
+    const updatesReplyTo = Object.prototype.hasOwnProperty.call(body, "replyToAddress");
+    const replyToAddress = updatesReplyTo
+      ? normalizeEmailReplyToAddress(body.replyToAddress)
+      : resolveEmailReplyToAddress(await ctx.repo.getSetting(EMAIL_REPLY_TO_SETTING_KEY)) ?? "";
+    await ctx.repo.setSetting(EMAIL_SENDER_NAME_SETTING_KEY, senderName, actor.id);
+    if (updatesReplyTo) {
+      await ctx.repo.setSetting(EMAIL_REPLY_TO_SETTING_KEY, replyToAddress, actor.id);
+    }
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "EMAIL_SENDER_UPDATED",
+      entityType: "app_setting",
+      entityId: "email_sender_identity",
+      summary: "Identidad de correo actualizada",
+      metadata: { senderName, replyToConfigured: Boolean(replyToAddress) }
+    });
+    return jsonResponse({ ok: true, emailSender: await emailSenderState(ctx) });
+  } catch (error) {
+    if (error instanceof EmailSenderValidationError) {
+      return jsonResponse({ error: "invalid_email_sender", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+}
+
+async function handleWompiNotificationSettings(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    return jsonResponse({
+      wompiNotifications: await loadWompiNotificationSettings(ctx.repo)
+    });
+  }
+  if (ctx.request.method !== "PUT") {
+    return methodNotAllowed();
+  }
+  const actor = ctx.actor!;
+  const body = (await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "empty-object"
+  })) as {
+    emailsNotificacion?: unknown;
+    telefonosNotificacion?: unknown;
+    notificarTransaccionCliente?: unknown;
+  };
+  try {
+    const wompiNotifications = normalizeWompiNotificationSettings({
+      emailsNotificacion: body.emailsNotificacion,
+      telefonosNotificacion: body.telefonosNotificacion,
+      notificarTransaccionCliente: body.notificarTransaccionCliente
+    });
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFICATION_EMAILS_SETTING_KEY,
+      wompiNotifications.emailsNotificacion,
+      actor.id
+    );
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFICATION_PHONES_SETTING_KEY,
+      wompiNotifications.telefonosNotificacion,
+      actor.id
+    );
+    await ctx.repo.setSetting(
+      WOMPI_NOTIFY_DONOR_EMAIL_SETTING_KEY,
+      String(wompiNotifications.notificarTransaccionCliente),
+      actor.id
+    );
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: actor.id,
+      action: "WOMPI_NOTIFICATIONS_UPDATED",
+      entityType: "app_setting",
+      entityId: "wompi_notifications",
+      summary: "Notificaciones de Wompi actualizadas",
+      // The audit trail is readable by lower roles. Keep recipient addresses and
+      // numbers in this OWNER-only setting response, never in audit metadata.
+      metadata: {
+        emailRecipientCount: wompiNotifications.emailsNotificacion
+          ? wompiNotifications.emailsNotificacion.split(",").length
+          : 0,
+        phoneRecipientCount: wompiNotifications.telefonosNotificacion
+          ? wompiNotifications.telefonosNotificacion.split(",").length
+          : 0,
+        donorEmailEnabled: wompiNotifications.notificarTransaccionCliente
+      }
+    });
+    return jsonResponse({ ok: true, wompiNotifications });
+  } catch (error) {
+    if (error instanceof WompiNotificationValidationError) {
+      return jsonResponse(
+        { error: "invalid_wompi_notifications", message: error.message },
+        { status: 400 }
+      );
     }
     throw error;
   }

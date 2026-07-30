@@ -70,6 +70,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   CONTINGENCY_OPEN_REUSED: "Periodo histórico reutilizado",
   CONTINGENCY_OPENED: "Periodo histórico abierto",
   CONTACTS_EXPORTED: "Exportación de contactos",
+  DONORS_EXPORTED: "Exportación de donantes",
   CREDENTIALS_UPDATED: "Credenciales actualizadas",
   DTE_ACCEPTED: "DTE aceptado",
   DTE_CONTINGENCY_PENDING: "DTE histórico sin sello",
@@ -88,6 +89,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   EMAIL_INVALIDATION_SENT: "Aviso de invalidación enviado",
   EMAIL_RESEND_FAILED: "Reenvío de correo fallido",
   EMAIL_RESENT: "Correo reenviado",
+  EMAIL_SENDER_UPDATED: "Remitente visible de correo actualizado",
   EMAIL_SENT: "Correo enviado",
   EMAIL_SKIPPED: "Correo omitido",
   EMAIL_TEMPLATES_UPDATED: "Plantillas de correo actualizadas",
@@ -127,6 +129,7 @@ const AUDIT_ACTION_LABELS: Record<string, string> = {
   WOMPI_IGNORED: "Wompi ignorado",
   WOMPI_ISSUANCE_FAILED: "CDE no creado",
   WOMPI_ISSUANCE_RETRY_QUEUED: "Reintento de creación en cola",
+  WOMPI_NOTIFICATIONS_UPDATED: "Notificaciones de Wompi actualizadas",
   WOMPI_RECEIVED: "Wompi recibido"
 };
 

@@ -114,11 +114,58 @@ describe("Wompi API service", () => {
         // The amount is pinned: the donor cannot edit the monto or quantity on Wompi's sheet.
         esMontoEditable: false,
         esCantidadEditable: false,
-        // Wompi must NOT email the donor: we send the CDE ourselves.
+        // The default stays off because the application sends the CDE itself.
         notificarTransaccionCliente: false
       }
     });
     expect(new Date(body.vigencia.fechaFin).getTime() - new Date(body.vigencia.fechaInicio).getTime()).toBe(60 * 60 * 1000);
+  });
+
+  it("reads the latest Wompi notification settings for every newly minted link", async () => {
+    const db = new FakeD1();
+    db.settings.set("wompi_notification_emails", "tesoreria@example.org,avisos@example.org");
+    db.settings.set("wompi_notification_phones", "70000000,+50371234567");
+    db.settings.set("wompi_notify_donor_email", "true");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ access_token: "wompi-access-token", expires_in: 3600, token_type: "Bearer" }))
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 1, urlEnlace: "https://s.wompi.sv/1", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=1" }))
+      .mockResolvedValueOnce(jsonResponse({ idEnlace: 2, urlEnlace: "https://s.wompi.sv/2", urlEnlaceLargo: "https://pagos.wompi.sv/L?id=2" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const service = new WompiApiService(realEnv(db));
+    await service.createPaymentLink(intent({ id: "di_first" }));
+
+    const firstBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as {
+      configuracion: {
+        emailsNotificacion?: string;
+        telefonosNotificacion?: string;
+        notificarTransaccionCliente: boolean;
+      };
+    };
+    expect(firstBody.configuracion).toMatchObject({
+      emailsNotificacion: "tesoreria@example.org,avisos@example.org",
+      telefonosNotificacion: "70000000,+50371234567",
+      notificarTransaccionCliente: true
+    });
+
+    db.settings.set("wompi_notification_emails", "contabilidad@example.org");
+    db.settings.set("wompi_notification_phones", "");
+    db.settings.set("wompi_notify_donor_email", "false");
+    await service.createPaymentLink(intent({ id: "di_second" }));
+
+    const secondBody = JSON.parse(String(fetchMock.mock.calls[2][1]?.body)) as {
+      configuracion: {
+        emailsNotificacion?: string;
+        telefonosNotificacion?: string;
+        notificarTransaccionCliente: boolean;
+      };
+    };
+    expect(secondBody.configuracion).toMatchObject({
+      emailsNotificacion: "contabilidad@example.org",
+      notificarTransaccionCliente: false
+    });
+    expect(secondBody.configuracion).not.toHaveProperty("telefonosNotificacion");
   });
 
   // The donor sees this on Wompi's hosted sheet. Links are minted per donation, so the
