@@ -315,7 +315,7 @@ operativa, contacte a soporte para que revise ambas señales.
 
 Configuración técnica durable para **staging**:
 
-1. Guarde una consulta con los filtros `$metadata.service = "diezmossv-staging-resource-example"` y
+1. Guarde una consulta con los filtros `$metadata.service = "diezmossv-staging-example"` y
    `event = "operational_alert"`.
 2. Configure la alerta para disparar cuando el conteo sea mayor que cero y volver a
    **NORMAL** cuando la ventana quede vacía.

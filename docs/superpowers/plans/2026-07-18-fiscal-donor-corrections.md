@@ -1405,7 +1405,7 @@ rtk env FISCAL_CUTOVER_QUIESCED=1 WRANGLER_LOG_PATH=/private/tmp/diezmos-wrangle
 ```
 
 Expected: preflight succeeds and migration `0027_fiscal_corrections.sql` is applied only
-to `diezmossv-staging-resource-example`.
+to `diezmossv-staging-example`.
 
 - [ ] **Step 9: Deploy the exact commit to Cloudflare staging**
 
@@ -1413,7 +1413,7 @@ to `diezmossv-staging-resource-example`.
 rtk env FISCAL_CUTOVER_QUIESCED=1 WRANGLER_LOG_PATH=/private/tmp/diezmos-wrangler-deploy-fiscal-corrections.log npm run cf:deploy:staging
 ```
 
-Expected: deployment succeeds for `diezmossv-staging-resource-example`; production is untouched.
+Expected: deployment succeeds for `diezmossv-staging-example`; production is untouched.
 
 - [ ] **Step 10: Verify staging health**
 

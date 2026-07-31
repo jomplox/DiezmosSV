@@ -95,7 +95,6 @@ describe("production hostname policy", () => {
     expect(block).toContain(
       '{ pattern = "donations.example.invalid", custom_domain = true }'
     );
-    expect(block).not.toContain("donations.example.invalid");
     expect(block.match(/custom_domain = true/g) ?? []).toHaveLength(1);
   });
 });

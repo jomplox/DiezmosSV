@@ -7,7 +7,7 @@ describe("credential status", () => {
   it("reports readiness, exposes allowlisted operational values, and keeps deployment credentials write-only", () => {
     const status = credentialStatus(env({
       APP_ENV: "staging",
-      CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+      CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
       CLOUDFLARE_API_TOKEN: "secret-token",
       CLOUDFLARE_ACCOUNT_ID: "account-id",
       MH_USER_TEST: "0614",
@@ -27,7 +27,7 @@ describe("credential status", () => {
 
     expect(status.target).toEqual({
       appEnv: "staging",
-      scriptName: "diezmossv-staging-resource-example",
+      scriptName: "diezmossv-staging-example",
       writerConfigured: true,
       writerMissing: []
     });
@@ -227,14 +227,14 @@ describe("credential writer bootstrap", () => {
       const result = await bootstrapCloudflareWriterToken(
         env({
           CLOUDFLARE_ACCOUNT_ID: "account-id",
-          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+          CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
           CLOUDFLARE_API_BASE_URL: "https://cf.test"
         }),
         "cf-writer-token"
       );
 
       const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-resource-example/secrets-bulk");
+      expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
       expect(init.method).toBe("PATCH");
       expect(init.headers).toMatchObject({
         Authorization: "Bearer cf-writer-token",

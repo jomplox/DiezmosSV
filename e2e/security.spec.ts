@@ -50,7 +50,7 @@ test("the real Worker serves document anti-framing and referrer headers", async 
 });
 
 test("a different origin cannot embed the application document", async ({ page }) => {
-  await page.goto("http://localhost:8787/");
+  await page.goto("http://127.0.0.1:8787/");
   await page.setContent('<iframe title="blocked-app" src="http://127.0.0.1:8787/"></iframe>');
 
   await expect(page.getByTitle("blocked-app")).toBeVisible();

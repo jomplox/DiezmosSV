@@ -92,11 +92,11 @@ Expected: FAIL because the four routine commands still contain `assert-fiscal-cu
 In `package.json`, make the remote command block exactly:
 
 ```json
-    "cf:migrate:staging": "node scripts/d1-migration-preflight.mjs --database diezmossv-staging-resource-example --env staging && wrangler d1 migrations apply diezmossv-staging-resource-example --env staging --remote",
+    "cf:migrate:staging": "node scripts/d1-migration-preflight.mjs --database diezmossv-staging-example --env staging && wrangler d1 migrations apply diezmossv-staging-example --env staging --remote",
     "cf:deploy:staging": "npm run build && wrangler deploy --env staging --keep-vars",
     "cf:cutover:staging": "node scripts/assert-fiscal-cutover.mjs && npm run cf:migrate:staging && npm run cf:deploy:staging",
     "cf:tail:staging": "wrangler tail --env staging",
-    "cf:migrate:prod": "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --database diezmossv-production-resource-example --env production && wrangler d1 migrations apply diezmossv-production-resource-example --env production --remote",
+    "cf:migrate:prod": "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --database diezmossv-production-example --env production && wrangler d1 migrations apply diezmossv-production-example --env production --remote",
     "cf:deploy:prod": "node scripts/assert-fiscal-cutover.mjs && npm run build && wrangler deploy --env production --keep-vars",
     "cf:tail:prod": "wrangler tail --env production",
 ```

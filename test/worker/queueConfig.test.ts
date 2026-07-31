@@ -5,7 +5,11 @@ import { describe, expect, it } from "vitest";
 const wranglerToml = readFileSync(resolve(import.meta.dirname, "../../wrangler.toml"), "utf8");
 
 describe("issuance queue failure configuration", () => {
-  const issuanceQueues = ["diezmossv-local-issuance-example", "diezmossv-staging-issuance-example", "diezmossv-production-issuance-example"];
+  const issuanceQueues = [
+    "diezmossv-local-issuance-example",
+    "diezmossv-staging-issuance-example",
+    "diezmossv-production-issuance-example"
+  ];
 
   it("gives every issuance consumer explicit retries and a dead-letter queue", () => {
     for (const queue of issuanceQueues) {

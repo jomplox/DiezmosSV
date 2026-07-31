@@ -262,7 +262,7 @@ After both task reviews and the broad final review approve the code:
 4. Verify the deployed staging version/tag, `/api/health`, and Worker
    observability settings independently.
 5. Save a Workers Observability query matching:
-   - `$metadata.service = "diezmossv-staging-resource-example"`
+   - `$metadata.service = "diezmossv-staging-example"`
    - `event = "operational_alert"`
 6. Create a Workers Observability alert whose condition is count greater than
    zero and whose recovery returns to normal when the window is empty.

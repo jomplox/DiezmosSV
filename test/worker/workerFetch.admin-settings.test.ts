@@ -19,7 +19,7 @@ describe("credential administration", () => {
       }),
       env(db, {
         APP_ENV: "staging",
-        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
         MH_USER_TEST: "0614",
         MH_PASSWORD_TEST: "test-password",
         MH_CERT_XML_PART_1: "<CertificadoMH>",
@@ -35,7 +35,7 @@ describe("credential administration", () => {
       credentials: {
         target: {
           appEnv: "staging",
-          scriptName: "diezmossv-staging-resource-example",
+          scriptName: "diezmossv-staging-example",
           writerConfigured: false,
           writerMissing: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
         },
@@ -135,7 +135,7 @@ describe("credential administration", () => {
       env(db, {
         APP_ENV: "staging",
         CLOUDFLARE_ACCOUNT_ID: "account-id",
-        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-resource-example",
+        CLOUDFLARE_SCRIPT_NAME: "diezmossv-staging-example",
         CLOUDFLARE_API_BASE_URL: "https://cf.test"
       })
     );
@@ -156,10 +156,10 @@ describe("credential administration", () => {
     expect(JSON.stringify(db.audits)).not.toContain("cf-writer-token");
     expect(db.audits).toContainEqual(expect.objectContaining({
       action: "CLOUDFLARE_WRITER_ENABLED",
-      entity_id: "diezmossv-staging-resource-example"
+      entity_id: "diezmossv-staging-example"
     }));
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-resource-example/secrets-bulk");
+    expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
     expect(init.headers).toMatchObject({ Authorization: "Bearer cf-writer-token" });
   });
 });

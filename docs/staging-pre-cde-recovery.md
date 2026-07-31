@@ -26,13 +26,13 @@ historical D1 mutation has separate approval. Never run this recovery against pr
 
 ## Read-only preflight
 
-These five commands target only the configured `diezmossv-staging-resource-example` D1 database. They
+These five commands target only the configured `diezmossv-staging-example` D1 database. They
 were prepared locally and were not executed while implementing the feature.
 
 ### 1. Exact failed Wompi event
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT id, transaction_id, environment, result, received_at, processed_at, created_document_id, issuance_status, control_prefix, control_sequence, reserved_numero_control, reserved_codigo_generacion, issuance_attempt_count, issuance_error_code, issuance_error_message, issuance_last_attempt_at, issuance_failed_at, issuance_dead_lettered_at FROM wompi_events WHERE id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8';"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT id, transaction_id, environment, result, received_at, processed_at, created_document_id, issuance_status, control_prefix, control_sequence, reserved_numero_control, reserved_codigo_generacion, issuance_attempt_count, issuance_error_code, issuance_error_message, issuance_last_attempt_at, issuance_failed_at, issuance_dead_lettered_at FROM wompi_events WHERE id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8';"
 ```
 
 Expected before recovery: exactly one `ExitosaAprobada` row in environment `00`, with
@@ -43,7 +43,7 @@ row may also have null lifecycle/error columns after the migration adds them.
 ### 1b. Recorded dead-letter timestamp
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT action, summary, created_at FROM audit_logs WHERE entity_type = 'wompi_event' AND entity_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8' AND action = 'ISSUANCE_DEAD_LETTERED' ORDER BY created_at, id;"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT action, summary, created_at FROM audit_logs WHERE entity_type = 'wompi_event' AND entity_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8' AND action = 'ISSUANCE_DEAD_LETTERED' ORDER BY created_at, id;"
 ```
 
 Expected before recovery: exactly one row. Its `created_at` is the recorded terminal
@@ -53,7 +53,7 @@ displayed local time.
 ### 2. CDE, signature, and MH-response evidence
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT id, wompi_event_id, environment, numero_control, codigo_generacion, status, CASE WHEN signed_jws IS NOT NULL AND length(trim(signed_jws)) > 0 THEN 1 ELSE 0 END AS has_signature, CASE WHEN sello_recibido IS NOT NULL AND length(trim(sello_recibido)) > 0 THEN 1 ELSE 0 END AS has_mh_seal, CASE WHEN mh_estado IS NOT NULL OR mh_observaciones_json <> '[]' THEN 1 ELSE 0 END AS has_mh_response, mh_estado, issued_at, accepted_at FROM dte_documents WHERE wompi_event_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8' OR (environment = '00' AND numero_control IN ('DTE-15-M001P004-000000000000031', 'DTE-15-M001P004-000000000000032', 'DTE-15-M001P004-000000000000033', 'DTE-15-M001P004-000000000000034')) ORDER BY numero_control, id;"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT id, wompi_event_id, environment, numero_control, codigo_generacion, status, CASE WHEN signed_jws IS NOT NULL AND length(trim(signed_jws)) > 0 THEN 1 ELSE 0 END AS has_signature, CASE WHEN sello_recibido IS NOT NULL AND length(trim(sello_recibido)) > 0 THEN 1 ELSE 0 END AS has_mh_seal, CASE WHEN mh_estado IS NOT NULL OR mh_observaciones_json <> '[]' THEN 1 ELSE 0 END AS has_mh_response, mh_estado, issued_at, accepted_at FROM dte_documents WHERE wompi_event_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8' OR (environment = '00' AND numero_control IN ('DTE-15-M001P004-000000000000031', 'DTE-15-M001P004-000000000000032', 'DTE-15-M001P004-000000000000033', 'DTE-15-M001P004-000000000000034')) ORDER BY numero_control, id;"
 ```
 
 Expected before recovery: zero rows. Any row means at least one recorded invariant has
@@ -62,7 +62,7 @@ changed, even if its signature or MH-response flags are zero.
 ### 3. Wompi reservations for 31 through 34
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT id, environment, created_document_id, issuance_status, control_prefix, control_sequence, reserved_numero_control, reserved_codigo_generacion FROM wompi_events WHERE environment = '00' AND ((control_prefix = 'M001P004' AND control_sequence BETWEEN 31 AND 34) OR reserved_numero_control IN ('DTE-15-M001P004-000000000000031', 'DTE-15-M001P004-000000000000032', 'DTE-15-M001P004-000000000000033', 'DTE-15-M001P004-000000000000034')) ORDER BY control_sequence, id;"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT id, environment, created_document_id, issuance_status, control_prefix, control_sequence, reserved_numero_control, reserved_codigo_generacion FROM wompi_events WHERE environment = '00' AND ((control_prefix = 'M001P004' AND control_sequence BETWEEN 31 AND 34) OR reserved_numero_control IN ('DTE-15-M001P004-000000000000031', 'DTE-15-M001P004-000000000000032', 'DTE-15-M001P004-000000000000033', 'DTE-15-M001P004-000000000000034')) ORDER BY control_sequence, id;"
 ```
 
 Expected before recovery: zero rows.
@@ -70,7 +70,7 @@ Expected before recovery: zero rows.
 ### 4. Sequence counter
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT environment, control_prefix, next_value FROM document_sequences WHERE environment = '00' AND control_prefix = 'M001P004';"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT environment, control_prefix, next_value FROM document_sequences WHERE environment = '00' AND control_prefix = 'M001P004';"
 ```
 
 Expected before recovery: exactly one row with `next_value = 35`.
@@ -137,7 +137,7 @@ After the authorized atomic repair succeeds:
 3. Run this read-only seal check:
 
 ```bash
-npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "SELECT id, wompi_event_id, environment, numero_control, codigo_generacion, status, CASE WHEN signed_jws IS NOT NULL AND length(trim(signed_jws)) > 0 THEN 1 ELSE 0 END AS has_signature, sello_recibido, mh_estado, accepted_at FROM dte_documents WHERE wompi_event_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8';"
+npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "SELECT id, wompi_event_id, environment, numero_control, codigo_generacion, status, CASE WHEN signed_jws IS NOT NULL AND length(trim(signed_jws)) > 0 THEN 1 ELSE 0 END AS has_signature, sello_recibido, mh_estado, accepted_at FROM dte_documents WHERE wompi_event_id = 'wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8';"
 ```
 
 Expected: exactly one environment-`00` row using control number 31, `status =

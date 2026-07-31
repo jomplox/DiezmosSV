@@ -289,9 +289,9 @@ npm run cf:whoami
 
 # 2 - Create remote resources, then copy the returned D1 id into
 #     wrangler.toml under [[env.staging.d1_databases]]
-npx wrangler d1 create diezmossv-staging-resource-example
-npx wrangler queues create diezmossv-staging-issuance-example
-npx wrangler queues create diezmossv-staging-issuance-example-dlq
+npx wrangler d1 create diezmossv-staging-example
+npx wrangler queues create diezmossv-staging-example-issuance
+npx wrangler queues create diezmossv-staging-example-issuance-dlq
 npx wrangler r2 bucket create diezmossv-staging-archive-example
 
 # 3 - Set TEST/staging secrets
@@ -342,8 +342,8 @@ UAT approval.
 
 ```bash
 # 1 - Verify the production resources exist. They were provisioned on 2026-07-05
-#     (D1 diezmossv-production-resource-example, queues diezmossv-production-issuance-example and
-#     diezmossv-production-issuance-example-dlq, R2 diezmossv-production-archive-example) and
+#     (D1 diezmossv-production-example, queues diezmossv-production-example-issuance and
+#     diezmossv-production-example-issuance-dlq, R2 diezmossv-production-archive-example) and
 #     their ids are already committed in wrangler.toml under [env.production].
 npx wrangler d1 list
 npx wrangler queues list

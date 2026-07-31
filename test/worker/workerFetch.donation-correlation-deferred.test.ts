@@ -363,7 +363,7 @@ describe("donation intent correlation", () => {
       const ack = vi.fn();
       const retry = vi.fn();
       const batch = {
-        queue: "diezmossv-staging-issuance-example",
+        queue: "diezmossv-staging-example-issuance",
         messages: [{
           id: crypto.randomUUID(),
           timestamp: new Date(),
