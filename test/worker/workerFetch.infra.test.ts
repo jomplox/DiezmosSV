@@ -51,7 +51,7 @@ describe("Worker non-fetch handler error containment", () => {
     const retry = vi.fn();
     const retryAll = vi.fn();
     const batch = {
-      queue: "diezmossv-staging-issuance-example-dlq",
+      queue: "diezmossv-staging-example-issuance-dlq",
       messages: [{
         id: "msg_private",
         timestamp: new Date(),

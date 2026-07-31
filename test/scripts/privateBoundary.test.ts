@@ -57,6 +57,48 @@ describe("private artifact boundary checker", () => {
   });
 
   it.each([
+    `https://tenant.${"workers.dev"}/admin`,
+    `https://tenant.${"elim" + ".example"}/donar`,
+    `https://api.cloudflare.com/client/v4/accounts/${"1000000019abcdef".repeat(2)}/workers/scripts/private`
+  ])("rejects a tracked implementation endpoint without printing it: %s", (endpoint) => {
+    const cwd = trackedFixture({ "README.md": `private endpoint: ${endpoint}` });
+    const result = run(cwd);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("README.md");
+    expect(result.stdout + result.stderr).not.toContain(endpoint);
+  });
+
+  it("rejects live resource identifiers in a tracked Wrangler config", () => {
+    const cwd = trackedFixture({
+      "wrangler.toml": [
+        'database_name = "live-database"',
+        'database_id = "11111111-1111-1111-1111-111111111111"',
+        'bucket_name = "live-archive"',
+        'queue = "live-queue"'
+      ].join("\n")
+    });
+    const result = run(cwd);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("wrangler.toml");
+    expect(result.stdout + result.stderr).not.toContain("live-database");
+  });
+
+  it.each([
+    `tenant.${"workers.dev"}`,
+    `tenant.${"elim" + ".example"}`,
+    `example-worker-${"production"}`
+  ])("rejects a tracked raw implementation identifier without printing it: %s", (identifier) => {
+    const cwd = trackedFixture({ "README.md": `private identifier: ${identifier}` });
+    const result = run(cwd);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stdout + result.stderr).toContain("README.md");
+    expect(result.stdout + result.stderr).not.toContain(identifier);
+  });
+
+  it.each([
     "DTE/private.csv",
     "DTE/exports/2026/private.csv",
     "DTE/exports/private.xlsx",
@@ -87,6 +129,16 @@ function fixture(files: Record<string, string>): string {
     mkdirSync(dirname(absolute), { recursive: true });
     writeFileSync(absolute, contents);
   }
+  return cwd;
+}
+
+function trackedFixture(files: Record<string, string>): string {
+  const cwd = fixture(files);
+  expect(spawnSync("git", ["init", "--quiet"], { cwd, encoding: "utf8" }).status).toBe(0);
+  expect(spawnSync("git", ["add", "--", ...Object.keys(files)], {
+    cwd,
+    encoding: "utf8"
+  }).status).toBe(0);
   return cwd;
 }
 

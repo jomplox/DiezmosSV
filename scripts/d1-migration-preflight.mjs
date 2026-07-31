@@ -1,5 +1,10 @@
 import { spawnSync } from "node:child_process";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  preparePrivateWranglerConfig,
+  resolvePrivateWranglerConfig
+} from "./private-wrangler-config.mjs";
 
 export const DUPLICATE_WOMPI_EVENT_IDS_QUERY = `
 SELECT wompi_event_id, COUNT(*) AS document_count
@@ -38,37 +43,50 @@ function parseArgs(argv) {
     const key = argv[index];
     const value = argv[index + 1];
     if (!key?.startsWith("--") || !value) {
-      throw new Error("Usage: d1-migration-preflight --database <name> --env <name>");
+      throw new Error("Usage: d1-migration-preflight --binding <name> --env <name>");
     }
     values.set(key.slice(2), value);
   }
-  const database = values.get("database");
+  const binding = values.get("binding");
   const environment = values.get("env");
-  if (!database || !environment) {
-    throw new Error("Usage: d1-migration-preflight --database <name> --env <name>");
+  if (!binding || !environment) {
+    throw new Error("Usage: d1-migration-preflight --binding <name> --env <name>");
   }
-  return { database, environment };
+  return { binding, environment };
 }
 
 function runPreflight(argv) {
-  const { database, environment } = parseArgs(argv);
-  const executable = process.platform === "win32" ? "npx.cmd" : "npx";
-  const result = spawnSync(
-    executable,
-    [
-      "wrangler",
-      "d1",
-      "execute",
-      database,
-      "--env",
-      environment,
-      "--remote",
-      "--json",
-      "--command",
-      DUPLICATE_WOMPI_EVENT_IDS_QUERY
-    ],
-    { encoding: "utf8" }
+  const { binding, environment } = parseArgs(argv);
+  const preparedConfig = preparePrivateWranglerConfig(
+    resolvePrivateWranglerConfig()
   );
+  const executable = join(
+    process.cwd(),
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "wrangler.cmd" : "wrangler"
+  );
+  let result;
+  try {
+    result = spawnSync(
+      executable,
+      [
+        `--config=${preparedConfig.configPath}`,
+        "d1",
+        "execute",
+        binding,
+        "--env",
+        environment,
+        "--remote",
+        "--json",
+        "--command",
+        DUPLICATE_WOMPI_EVENT_IDS_QUERY
+      ],
+      { encoding: "utf8" }
+    );
+  } finally {
+    preparedConfig.cleanup();
+  }
   if (result.status !== 0) {
     throw new Error(result.stderr.trim() || "D1 migration preflight query failed");
   }

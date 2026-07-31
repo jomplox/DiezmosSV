@@ -72,7 +72,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     for (let attempt = 1; attempt <= 4; attempt += 1) {
       const { batch, ack, retry } = deadLetterBatch(
         { wompiEventId: eventId },
-        "diezmossv-staging-issuance-example"
+        "diezmossv-staging-example-issuance"
       );
 
       await worker.queue(batch, runtime);
@@ -83,7 +83,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
 
     const { batch: deadLetter, ack } = deadLetterBatch(
       { wompiEventId: eventId },
-      "diezmossv-staging-issuance-example-dlq"
+      "diezmossv-staging-example-issuance-dlq"
     );
     await worker.queue(deadLetter, runtime);
 
@@ -116,7 +116,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { batch, retry } = deadLetterBatch(
       { wompiEventId: eventId },
-      "diezmossv-staging-issuance-example"
+      "diezmossv-staging-example-issuance"
     );
 
     await worker.queue(batch, env(db));
@@ -229,7 +229,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       issuance_status: "PROCESSING",
       issuance_attempt_id: null
     }));
-    const { batch, ack, retry } = deadLetterBatch({ wompiEventId: "wompi_dead" }, "diezmossv-staging-issuance-example-dlq");
+    const { batch, ack, retry } = deadLetterBatch({ wompiEventId: "wompi_dead" }, "diezmossv-staging-example-issuance-dlq");
 
     await worker.queue(batch, env(db));
 
@@ -255,7 +255,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     }));
     const { batch, ack } = deadLetterBatch(
       { wompiEventId: eventId, issuanceAttemptId: "attempt-old" } as IssuanceMessage,
-      "diezmossv-staging-issuance-example-dlq"
+      "diezmossv-staging-example-issuance-dlq"
     );
 
     await worker.queue(batch, env(db));
@@ -289,7 +289,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     }));
     const { batch, ack } = deadLetterBatch(
       { wompiEventId: eventId, issuanceAttemptId: "attempt-current" } as IssuanceMessage,
-      "diezmossv-staging-issuance-example-dlq"
+      "diezmossv-staging-example-issuance-dlq"
     );
 
     await worker.queue(batch, env(db));
@@ -329,7 +329,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { batch, retry } = deadLetterBatch(
       { wompiEventId: eventId },
-      "diezmossv-staging-issuance-example"
+      "diezmossv-staging-example-issuance"
     );
 
     await worker.queue(batch, env(db));
@@ -361,7 +361,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const { batch, ack, retry } = deadLetterBatch(
       { wompiEventId: eventId, issuanceAttemptId: "attempt-old" },
-      "diezmossv-staging-issuance-example"
+      "diezmossv-staging-example-issuance"
     );
 
     await worker.queue(batch, env(db));
@@ -404,7 +404,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     for (let delivery = 0; delivery < 2; delivery += 1) {
       const { batch, ack } = deadLetterBatch(
         { wompiEventId: eventId, issuanceAttemptId: "attempt-current" },
-        "diezmossv-staging-issuance-example-dlq"
+        "diezmossv-staging-example-issuance-dlq"
       );
       await worker.queue(batch, runtime);
       expect(ack).toHaveBeenCalledTimes(1);
@@ -429,7 +429,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       issuance_attempt_id: null
     }));
     const sentAlerts: Array<{ to: string; subject: string }> = [];
-    const { batch } = deadLetterBatch({ wompiEventId: "wompi_dead_alert" }, "diezmossv-staging-issuance-example-dlq");
+    const { batch } = deadLetterBatch({ wompiEventId: "wompi_dead_alert" }, "diezmossv-staging-example-issuance-dlq");
 
     await worker.queue(
       batch,

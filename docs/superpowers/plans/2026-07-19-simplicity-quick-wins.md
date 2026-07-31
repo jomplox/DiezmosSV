@@ -135,7 +135,7 @@ function roleOptionsFor(actor: { role: Role }): Array<{ value: Role; label: stri
 - Modify: `README.md:345-351` (production cutover step 1)
 - Modify: `tsconfig.json` (include `test/client`, `test/scripts`, `test/migrations` — or add them to the worker project if DOM types conflict; the requirement is that `npm run typecheck` compiles ALL test directories)
 
-- [ ] **Step 1: Rewrite README production step 1** to state the resources (D1 `diezmossv-production-resource-example`, both queues, R2 `diezmossv-production-archive-example`) were provisioned 2026-07-05 and the ids are already in `wrangler.toml`; replace the `create` commands with a verification command (`npx wrangler d1 list`, `npx wrangler queues list`, `npx wrangler r2 bucket list`). Keep the secrets step unchanged.
+- [ ] **Step 1: Rewrite README production step 1** to state the resources (D1 `diezmossv-production-example`, both queues, R2 `diezmossv-production-archive-example`) were provisioned 2026-07-05 and the ids are already in `wrangler.toml`; replace the `create` commands with a verification command (`npx wrangler d1 list`, `npx wrangler queues list`, `npx wrangler r2 bucket list`). Keep the secrets step unchanged.
 - [ ] **Step 2: Widen typecheck.** Add the missing test dirs to the appropriate tsconfig `include`s. Run `npm run typecheck`; fix every surfaced type error in test files (expected: a handful; fix them properly, no `any` blankets, no `@ts-ignore`).
 - [ ] **Step 3: Full gates. Commit** `docs: correct production provisioning step; chore: typecheck all test directories`.
 

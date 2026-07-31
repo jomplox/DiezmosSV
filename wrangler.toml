@@ -1,4 +1,8 @@
-name = "example-worker"
+# Public development/example configuration only.
+# Remote npm scripts load an owner-only config from outside this repository via
+# scripts/run-private-wrangler.mjs. Never put live account, route, resource, or
+# deployment identifiers in this file.
+name = "diezmossv-local-example"
 main = "src/worker/index.ts"
 compatibility_date = "2026-06-02"
 compatibility_flags = ["nodejs_compat"]
@@ -16,15 +20,15 @@ enabled = false
 
 [[send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["legacy-contact-4@example.com"]
+allowed_sender_addresses = ["donations@example.org"]
 
 [vars]
 APP_ENV = "local"
-APP_ORIGIN = "http://localhost:8787"
+APP_ORIGIN = "http://127.0.0.1:8787"
 MOCK_EXTERNAL_SERVICES = "true"
-CLOUDFLARE_SCRIPT_NAME = "example-worker"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-local-example"
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
-MH_AUTH_URL_TEST_FALLBACK = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_TEST_FALLBACK = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
 MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
 MH_USER_AGENT = "DiezmosSV/1.0"
@@ -58,10 +62,8 @@ max_batch_timeout = 5
 [triggers]
 crons = ["*/15 * * * *", "0 9 1 * *"]
 
-# Remote TEST/Staging. Replace the zero database_id after:
-#   npx wrangler d1 create diezmossv-staging-resource-example
-# Secrets must be set with `npx wrangler secret put <NAME> --env staging`.
 [env.staging]
+name = "diezmossv-staging-example"
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
 
 [env.staging.observability]
@@ -76,24 +78,24 @@ enabled = false
 
 [[env.staging.send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["legacy-contact-4@example.com"]
+allowed_sender_addresses = ["donations@example.org"]
 
 [env.staging.vars]
 APP_ENV = "staging"
-APP_ORIGIN = "https://worker.example.invalid"
+APP_ORIGIN = "https://staging.example.invalid"
 MOCK_EXTERNAL_SERVICES = "false"
-CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-resource-example"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-staging-example"
 EMAIL_ARBITRARY_RECIPIENTS = "true"
-# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a staging secret.
+# EMISOR_CONFIG_JSON is intentionally omitted. Store it as a staging secret.
 MH_AUTH_URL_TEST = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
-MH_AUTH_URL_TEST_FALLBACK = "https://api.dtes.mh.gob.sv/seguridad/auth"
+MH_AUTH_URL_TEST_FALLBACK = "https://apitest.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/recepciondte"
 MH_ANULACION_URL_TEST = "https://apitest.dtes.mh.gob.sv/fesv/anulardte"
 MH_USER_AGENT = "DiezmosSV/1.0"
 
 [[env.staging.d1_databases]]
 binding = "DB"
-database_name = "diezmossv-staging-resource-example"
+database_name = "diezmossv-staging-db-example"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 
@@ -120,10 +122,8 @@ max_batch_timeout = 5
 [env.staging.triggers]
 crons = ["*/15 * * * *", "0 9 1 * *"]
 
-# Remote production. Deploy only after staging UAT approval and one controlled
-# production issuance plan. D1/queues/R2 provisioned 2026-07-05; MH production
-# secrets and BOOTSTRAP_OWNER_TOKEN are set separately at go-live.
 [env.production]
+name = "diezmossv-production-example"
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
 routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
 workers_dev = true
@@ -140,15 +140,15 @@ enabled = false
 
 [[env.production.send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["legacy-contact-4@example.com"]
+allowed_sender_addresses = ["donations@example.org"]
 
 [env.production.vars]
 APP_ENV = "production"
 APP_ORIGIN = "https://donations.example.invalid"
 MOCK_EXTERNAL_SERVICES = "false"
-CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-resource-example"
+CLOUDFLARE_SCRIPT_NAME = "diezmossv-production-example"
 DONATION_INTAKE_DISABLED = "true"
-# EMISOR_CONFIG_JSON is intentionally omitted here. Set it as a production secret.
+# EMISOR_CONFIG_JSON is intentionally omitted. Store it as a production secret.
 MH_AUTH_URL_PROD = "https://api.dtes.mh.gob.sv/seguridad/auth"
 MH_RECEPCION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/recepciondte"
 MH_ANULACION_URL_PROD = "https://api.dtes.mh.gob.sv/fesv/anulardte"
@@ -156,7 +156,7 @@ MH_USER_AGENT = "DiezmosSV/1.0"
 
 [[env.production.d1_databases]]
 binding = "DB"
-database_name = "diezmossv-production-resource-example"
+database_name = "diezmossv-production-db-example"
 database_id = "00000000-0000-0000-0000-000000000000"
 migrations_dir = "migrations"
 

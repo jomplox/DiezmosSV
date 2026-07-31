@@ -22,8 +22,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
 3. Create or verify the remote resources:
 
    ```bash
-   npx wrangler d1 create diezmossv-staging-resource-example
-   npx wrangler queues create diezmossv-staging-issuance-example
+   npx wrangler d1 create diezmossv-staging-example
+   npx wrangler queues create diezmossv-staging-example-issuance
    ```
 
 4. Put the returned D1 id in `wrangler.toml` under `[[env.staging.d1_databases]]`.

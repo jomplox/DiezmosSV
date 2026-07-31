@@ -9,7 +9,7 @@ const help = `
 DiezmosSV Cloudflare staging smoke test
 
 Required env:
-  STAGING_URL              Deployed Worker URL, for example https://diezmossv-staging-resource-example.<account>.workers.dev
+  STAGING_URL              Deployed Worker URL, for example https://diezmossv-staging-example.<account>.workers.dev
   STAGING_EMAIL            Admin/operator login email
   STAGING_PASSWORD         Admin/operator login password
   SMOKE_DONOR_DOCUMENT     Valid Salvadoran DUI to place on the TEST CDE
@@ -316,7 +316,7 @@ function buildWompiPayload(input, transactionId) {
   const firstName = parts.length <= 1 ? fullName : parts.slice(0, -1).join(" ");
   const lastName = parts.length <= 1 ? "Smoke" : parts.at(-1);
   return {
-    IdCuenta: "diezmossv-staging-resource-example",
+    IdCuenta: "diezmossv-staging-example",
     FechaTransaccion: new Date().toISOString(),
     Monto: input.amount,
     IdTransaccion: transactionId,
@@ -328,7 +328,7 @@ function buildWompiPayload(input, transactionId) {
     Aplicativo: {
       Nombre: "DiezmosSV Staging",
       Url: input.baseUrl,
-      Id: "diezmossv-staging-resource-example"
+      Id: "diezmossv-staging-example"
     },
     EnlacePago: {
       Id: 1,

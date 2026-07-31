@@ -624,7 +624,7 @@ describe("guarded fiscal correction API", () => {
     const ack = vi.fn();
     const retry = vi.fn();
     await worker.queue({
-      queue: "diezmossv-staging-issuance-example",
+      queue: "diezmossv-staging-example-issuance",
       messages: [{ id, timestamp: new Date(), body, attempts: 1, ack, retry }],
       ackAll: vi.fn(),
       retryAll: vi.fn()
@@ -645,7 +645,7 @@ describe("guarded fiscal correction API", () => {
     const retry = vi.fn();
     const retryAll = vi.fn();
     await worker.queue({
-      queue: "diezmossv-staging-issuance-example-dlq",
+      queue: "diezmossv-staging-example-issuance-dlq",
       messages: [{ id, timestamp: new Date(), body, attempts: 4, ack, retry }],
       ackAll: vi.fn(),
       retryAll
@@ -2231,7 +2231,7 @@ describe("guarded fiscal correction API", () => {
     const ack = vi.fn();
     const retry = vi.fn();
     await worker.queue({
-      queue: "diezmossv-staging-issuance-example",
+      queue: "diezmossv-staging-example-issuance",
       messages: [{
         id: "msg_corrected_wompi_1",
         timestamp: new Date(),

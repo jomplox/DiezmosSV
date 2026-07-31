@@ -10,7 +10,7 @@ const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/Ap
 const status: CredentialStatus = {
   target: {
     appEnv: "staging",
-    scriptName: "diezmossv-staging-resource-example",
+    scriptName: "diezmossv-staging-example",
     writerConfigured: true,
     writerMissing: []
   },

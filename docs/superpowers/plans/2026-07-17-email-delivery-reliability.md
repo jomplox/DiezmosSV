@@ -63,7 +63,7 @@ the active staging deployment reports code from the pre-remediation baseline
 Run:
 
 ```bash
-rtk npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "
+rtk npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "
 WITH latest AS (
   SELECT e.*,
          ROW_NUMBER() OVER (
@@ -136,7 +136,7 @@ Expected: one success toast per document and no repeated click.
 Run the query from Step 2 again, plus:
 
 ```bash
-rtk npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --command "
+rtk npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "
 SELECT document_id,
        SUM(CASE WHEN status = 'SENT' THEN 1 ELSE 0 END) AS sent_rows,
        COUNT(DISTINCT provider_delivery_id) AS provider_ids,
@@ -1199,7 +1199,7 @@ Expected: every command exits zero.
 Run:
 
 ```bash
-rtk node scripts/d1-migration-preflight.mjs --database diezmossv-staging-resource-example --env staging
+rtk node scripts/d1-migration-preflight.mjs --database diezmossv-staging-example --env staging
 ```
 
 Expected: migration 0025 is valid and pending only where expected. Do not run any
@@ -1274,7 +1274,7 @@ Run:
 rtk npm run cf:migrate:staging
 ```
 
-Expected: migration 0025 applies to `diezmossv-staging-resource-example`; production remains
+Expected: migration 0025 applies to `diezmossv-staging-example`; production remains
 untouched.
 
 - [ ] **Step 4: Deploy the exact green SHA to staging**

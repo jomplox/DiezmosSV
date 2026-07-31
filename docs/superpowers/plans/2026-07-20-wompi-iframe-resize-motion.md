@@ -248,7 +248,7 @@ rtk npm run build
 rtk npx wrangler deploy --env staging --keep-vars --dry-run --message "git_sha=$TASK_SHA"
 ```
 
-Expected: authentication succeeds, the build succeeds, the dry run names `diezmossv-staging-resource-example`, and no production environment is selected.
+Expected: authentication succeeds, the build succeeds, the dry run names `diezmossv-staging-example`, and no production environment is selected.
 
 - [ ] **Step 6: Deploy the exact SHA to Cloudflare staging**
 

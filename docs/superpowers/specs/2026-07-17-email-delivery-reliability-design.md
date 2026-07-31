@@ -337,7 +337,7 @@ After local verification:
    operator documentation.
 2. Push `main`.
 3. Wait for every required GitHub check on the exact pushed SHA.
-4. Apply migrations only to `diezmossv-staging-resource-example`.
+4. Apply migrations only to `diezmossv-staging-example`.
 5. Deploy only the exact green SHA to the staging Worker.
 6. Verify the deployed version metadata matches the SHA.
 7. Run authenticated live checks for the Fallos result, resend deduplication,

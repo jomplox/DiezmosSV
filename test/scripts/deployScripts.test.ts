@@ -42,7 +42,26 @@ describe("remote deploy and migration scripts", () => {
   it("still runs the D1 preflight before every remote migration", () => {
     for (const script of ["cf:migrate:staging", "cf:migrate:prod"] as const) {
       expect(packageJson.scripts[script]).toMatch(
-        /^(node scripts\/assert-fiscal-cutover\.mjs && )?node scripts\/d1-migration-preflight\.mjs .* && wrangler d1 migrations apply /
+        /^(node scripts\/assert-fiscal-cutover\.mjs && )?node scripts\/d1-migration-preflight\.mjs --binding DB .* && node scripts\/run-private-wrangler\.mjs d1 migrations apply DB /
+      );
+    }
+  });
+
+  it("routes every remote Wrangler command through the private config wrapper", () => {
+    for (const script of [
+      "cf:whoami",
+      "cf:migrate:staging",
+      "cf:deploy:staging",
+      "cf:tail:staging",
+      "cf:migrate:prod",
+      "cf:deploy:prod",
+      "cf:tail:prod"
+    ] as const) {
+      expect(packageJson.scripts[script], `script ${script}`).toContain(
+        "scripts/run-private-wrangler.mjs"
+      );
+      expect(packageJson.scripts[script], `script ${script}`).not.toMatch(
+        /(?:^|&& )wrangler /
       );
     }
   });

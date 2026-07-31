@@ -22,8 +22,8 @@ Do not put `BEGIN`, `BEGIN IMMEDIATE`, or `COMMIT` in a Wrangler D1 file: D1 exe
 If the reviewed incident uses Wrangler instead, place only the approved statements (no transaction wrappers) in an out-of-tree `0600` file and run the exact environment command:
 
 ```bash
-rtk npx wrangler d1 execute diezmossv-staging-resource-example --env staging --remote --file "$RECONCILIATION_SQL"
-rtk npx wrangler d1 execute diezmossv-production-resource-example --env production --remote --file "$RECONCILIATION_SQL"
+rtk npx wrangler d1 execute diezmossv-staging-example --env staging --remote --file "$RECONCILIATION_SQL"
+rtk npx wrangler d1 execute diezmossv-production-example --env production --remote --file "$RECONCILIATION_SQL"
 ```
 
 Run only one of those commands. The operator must verify the target database first, inspect the per-statement results, and require the change counts specified below. Never paste a generic claim-clear statement into the console.

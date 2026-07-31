@@ -1,4 +1,5 @@
-import { lstatSync, readdirSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, relative, sep } from "node:path";
 
 const root = process.cwd();
@@ -15,6 +16,7 @@ collectExact("node_modules/.mf/cf.json");
 
 collectMatchingTree("DTE", (name) => /\.(?:csv|xlsx|pdf)$/i.test(name) || /_OCR\.md$/i.test(name) || /_by_PaddleOCR.*\.md$/i.test(name));
 collectMatchingTree("examples", (name) => /^DTE-.*\.(?:json|pdf)$/i.test(name));
+collectTrackedImplementationDetails();
 
 if (violations.size > 0) {
   console.error("Private artifacts must be moved outside the repository:");
@@ -100,6 +102,73 @@ function collectDevVars(directory) {
       collectDevVars(absolute);
     }
   }
+}
+
+function collectTrackedImplementationDetails() {
+  const result = spawnSync("git", ["ls-files", "-z"], {
+    cwd: root,
+    encoding: "utf8"
+  });
+  if (result.status !== 0) return;
+
+  for (const path of result.stdout.split("\0").filter(Boolean)) {
+    let contents;
+    try {
+      const buffer = readFileSync(join(root, path));
+      if (buffer.length > 2 * 1024 * 1024 || buffer.includes(0)) continue;
+      contents = buffer.toString("utf8");
+    } catch {
+      continue;
+    }
+
+    if (containsImplementationEndpoint(contents)) {
+      violations.add(normalize(path));
+      continue;
+    }
+    if (path === "wrangler.toml" && containsLiveWranglerIdentifier(contents)) {
+      violations.add(normalize(path));
+    }
+  }
+}
+
+function containsImplementationEndpoint(contents) {
+  if (
+    /(^|[^@A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)+workers\.dev\b/i.test(contents) ||
+    /(^|[^@A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)*elim\.[A-Za-z0-9.-]+\b/i.test(contents) ||
+    /\bexample-worker-(?:staging|production)\b/i.test(contents)
+  ) {
+    return true;
+  }
+  for (const match of contents.matchAll(/https?:\/\/[^\s"'`<>)}\]]+/gi)) {
+    const authority = match[0]
+      .replace(/^https?:\/\//i, "")
+      .split("/", 1)[0]
+      .toLowerCase();
+    if (
+      authority.includes(".workers.dev") ||
+      /(^|[.-])elim[.-]/i.test(authority)
+    ) {
+      return true;
+    }
+  }
+  return /https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/[0-9a-f]{32}(?:\/|$)/i.test(
+    contents
+  );
+}
+
+function containsLiveWranglerIdentifier(contents) {
+  const resourceAssignments =
+    /^\s*(?:database_name|bucket_name|queue|dead_letter_queue|CLOUDFLARE_SCRIPT_NAME)\s*=\s*"([^"]+)"\s*$/gim;
+  for (const match of contents.matchAll(resourceAssignments)) {
+    if (!match[1].toLowerCase().includes("example")) return true;
+  }
+
+  for (const match of contents.matchAll(
+    /^\s*database_id\s*=\s*"([0-9a-f-]+)"\s*$/gim
+  )) {
+    if (match[1] !== "00000000-0000-0000-0000-000000000000") return true;
+  }
+  return false;
 }
 
 function safeReadDir(path) {
