@@ -833,10 +833,10 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain('form.amount === chip.toFixed(2) ? "donar-chip active" : "donar-chip"');
   });
 
-  it("leaves Paso 1 unfocused while retaining user-initiated and later-step focus", () => {
+  it("leaves Paso 1 and Paso 2 unfocused while retaining user-initiated and Paso 3 focus", () => {
     const heroFocusCalls = donarSource.match(/heroInputRef\.current\?\.focus\(\)/g) ?? [];
     expect(heroFocusCalls).toHaveLength(1);
-    expect(donarSource).toContain("step2FirstFieldRef.current.focus()");
+    expect(donarSource).not.toContain("step2FirstFieldRef");
     expect(donarSource).toContain("summaryEditRef.current?.focus()");
   });
 
@@ -997,7 +997,7 @@ describe("donar wizard source contract", () => {
     const assignments = donarSource.match(/window\.location\.href\s*=/g) ?? [];
     expect(assignments).toHaveLength(1);
     const at = donarSource.indexOf("window.location.href =");
-    expect(donarSource.slice(at, at + 260)).toContain("¿No se muestra el formulario? Continúe aquí");
+    expect(donarSource.slice(at, at + 260)).toContain("¿Problemas con el formulario? Continúe aquí");
     // The slow path renders a prominent hosted-checkout anchor, not a redirect.
     expect(donarSource).toContain("DONAR_WIDGET_FALLBACK_CTA");
     expect(donarSource).toContain("donar-widget-fallback");
@@ -1104,7 +1104,7 @@ describe("donar wizard source contract", () => {
 
   it("keeps the manual backup button and 'Continúe aquí' link visible", () => {
     // The modal can be closed and reopened, so the manual path stays on screen.
-    expect(donarSource).toContain("¿No se muestra el formulario? Continúe aquí");
+    expect(donarSource).toContain("¿Problemas con el formulario? Continúe aquí");
   });
 
   it("shows the configured support contact on the donor screens, defaulting to fmce", () => {
@@ -1206,20 +1206,30 @@ describe("donar responsive donor layout", () => {
     expect(donarSource).toContain("isValidDui(");
   });
 
-  it("keeps the Wompi handoff inside the usable donor-card width", () => {
+  it("lets the Wompi iframe go edge-to-edge only on mobile", () => {
     const handoffRule = stylesSource.match(/\.donar-handoff\s*\{[^}]*\}/)?.[0] ?? "";
     const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
 
     expect(handoffRule).toContain("width: 100%;");
     expect(handoffRule).toContain("justify-items: stretch;");
-    expect(embedRule).not.toContain("box-sizing:");
-    expect(embedRule).toContain("max-width: 100%;");
+    expect(embedRule).toContain("width: 100vw;");
+    expect(embedRule).toContain("max-width: none;");
+    expect(embedRule).toContain("margin-inline: calc((100% - 100vw) / 2);");
+    expect(stylesSource).toMatch(
+      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-embed\s*\{[\s\S]{0,200}width:\s*calc\(100% \+ 80px\);[\s\S]{0,200}margin-inline:\s*-40px;/
+    );
     expect(stylesSource).toMatch(/\.donar-handoff\s*>\s*\.donar-intro\s*\{[^}]*margin-top:\s*10px;/);
   });
 
-  it("uses the compact 430px mobile gutter and a balanced wizard title lane", () => {
+  it("uses a flat full-bleed shell at 430px while keeping the title balanced", () => {
     expect(stylesSource).toMatch(
-      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-screen\s*\{[\s\S]{0,160}padding:\s*32px 10px 48px;/
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-screen\s*\{[\s\S]{0,160}padding:\s*0;[\s\S]{0,160}background:\s*#ffffff;/
+    );
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-card\s*\{[\s\S]{0,200}border:\s*0;[\s\S]{0,120}border-radius:\s*0;[\s\S]{0,120}box-shadow:\s*none;/
+    );
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-embed\s*\{[\s\S]{0,160}border:\s*0;[\s\S]{0,120}border-radius:\s*0;/
     );
     expect(stylesSource).toMatch(
       /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-wizard-title\s*\{[\s\S]{0,160}gap:\s*6px;/

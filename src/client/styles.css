@@ -3927,15 +3927,24 @@ pre {
 
 /* Paso 3: the Wompi checkout embedded directly in the wizard card. The page
    (urlEnlaceLargo + esWidget=1) runs ~830px tall and scrolls internally when
-   the viewport gives it less. */
+   the viewport gives it less. On mobile only the iframe breaks out to the
+   viewport edges; from 520px onward it meets the card interior instead. */
 .donar-embed {
-  width: 100%;
-  max-width: 100%;
+  width: 100vw;
+  max-width: none;
+  margin-inline: calc((100% - 100vw) / 2);
   height: min(78vh, 820px);
   transition: none;
   border: 1px solid #e5e5e5;
   border-radius: 12px;
   background: #ffffff;
+}
+
+@media (min-width: 520px) {
+  .donar-embed {
+    width: calc(100% + 80px);
+    margin-inline: -40px;
+  }
 }
 
 /* Paso 3 handoff states: monochrome spinner while the embedded checkout loads,
@@ -4220,7 +4229,17 @@ pre {
 
 @media (max-width: 430px) {
   .donar-screen {
-    padding: 32px 10px 48px;
+    padding: 0;
+    background: #ffffff;
+  }
+  .donar-card {
+    border: 0;
+    border-radius: 0;
+    box-shadow: none;
+  }
+  .donar-embed {
+    border: 0;
+    border-radius: 0;
   }
   .donar-wizard-title {
     gap: 6px;

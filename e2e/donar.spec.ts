@@ -221,12 +221,12 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
   // Paso 2 — Sus datos. The ceremonial header stays; a small caps step label
-  // sits under the title. Focus lands on the first field; name/email are entered
-  // on Wompi's sheet, not here.
+  // sits under the title. Nothing is auto-focused: focusing the native document
+  // type select opens its picker on some mobile browsers.
   await expect(page.getByText("Paso 2 de 3")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   await expect(page.getByText("Sus datos", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Tipo de documento")).toBeFocused();
+  await expect(page.getByLabel("Tipo de documento")).not.toBeFocused();
   await expect(page.getByLabel("Nombre completo")).toHaveCount(0);
   await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
   // Wompi's hosted sheet forces both, so /donar must not ask a second time.
@@ -272,7 +272,55 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
     }, reportedHeight);
     await expect(embed).toHaveCSS("height", `${renderedHeight}px`);
   }
-  await expect(page.getByRole("button", { name: "¿No se muestra el formulario? Continúe aquí" })).toBeVisible();
+
+  // On mobile the hosted Wompi surface reaches the viewport edges so the only
+  // remaining gutter belongs to Wompi itself. The surrounding donor shell is
+  // flat and full-bleed at this size. At the tablet/desktop breakpoint the
+  // established raised-card treatment and iframe alignment remain.
+  const mobileViewport = { width: 393, height: 852 };
+  await page.setViewportSize(mobileViewport);
+  const mobileCardBox = await page.locator(".donar-card").boundingBox();
+  const mobileEmbedBox = await embed.boundingBox();
+  const mobileShellStyles = await page.evaluate(() => {
+    const screen = getComputedStyle(document.querySelector(".donar-screen")!);
+    const card = getComputedStyle(document.querySelector(".donar-card")!);
+    const iframe = getComputedStyle(document.querySelector("iframe.donar-embed")!);
+    return {
+      screenPadding: screen.padding,
+      cardBorderWidth: card.borderTopWidth,
+      cardBorderRadius: card.borderRadius,
+      cardBoxShadow: card.boxShadow,
+      iframeBorderWidth: iframe.borderTopWidth,
+      iframeBorderRadius: iframe.borderRadius
+    };
+  });
+  expect(mobileCardBox).not.toBeNull();
+  expect(mobileEmbedBox).not.toBeNull();
+  expect(mobileCardBox!.x).toBeCloseTo(0, 1);
+  expect(mobileCardBox!.x + mobileCardBox!.width).toBeCloseTo(mobileViewport.width, 1);
+  expect(mobileEmbedBox!.x).toBeCloseTo(0, 1);
+  expect(mobileEmbedBox!.x + mobileEmbedBox!.width).toBeCloseTo(mobileViewport.width, 1);
+  expect(mobileShellStyles).toEqual({
+    screenPadding: "0px",
+    cardBorderWidth: "0px",
+    cardBorderRadius: "0px",
+    cardBoxShadow: "none",
+    iframeBorderWidth: "0px",
+    iframeBorderRadius: "0px"
+  });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(mobileViewport.width);
+
+  const desktopViewport = { width: 671, height: 944 };
+  await page.setViewportSize(desktopViewport);
+  const cardBox = await page.locator(".donar-card").boundingBox();
+  const desktopEmbedBox = await embed.boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(desktopEmbedBox).not.toBeNull();
+  expect(desktopEmbedBox!.x).toBeCloseTo(cardBox!.x + 1, 1);
+  expect(desktopEmbedBox!.x + desktopEmbedBox!.width).toBeCloseTo(cardBox!.x + cardBox!.width - 1, 1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
+
+  await expect(page.getByRole("button", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/");
 });
 
