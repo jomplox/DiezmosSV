@@ -450,10 +450,9 @@ export function DonarPage() {
   // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
   // the inner scrollbar disappears — the page is the only scroller.
   const [embedHeight, setEmbedHeight] = useState<number | null>(null);
-  // Per-step focus targets: the hero amount input (Paso 1), the first Paso 2
-  // field, and the summary's Editar control (Paso 3 / the US embed step).
+  // Explicit focus targets: the hero amount input after a quick-fill and the
+  // summary's Editar control on an embedded handoff step.
   const heroInputRef = useRef<HTMLInputElement | null>(null);
-  const step2FirstFieldRef = useRef<HTMLSelectElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
 
   // When to render the Givebutter wizard instead of the SV fiscal steps: the EE.
@@ -522,6 +521,8 @@ export function DonarPage() {
 
   // Focus follows later wizard steps, but Paso 1 deliberately leaves focus
   // untouched so opening the donation flow does not summon a mobile keyboard.
+  // The SV Paso 2 select stays unfocused too: mobile browsers may open its native
+  // picker as soon as a programmatic focus lands on it.
   useEffect(() => {
     if (door === null) {
       return;
@@ -529,12 +530,11 @@ export function DonarPage() {
     if (step === 1) {
       return;
     }
-    if (step === 2 && step2FirstFieldRef.current) {
-      step2FirstFieldRef.current.focus();
+    if (step === 2 && !usDonation) {
       return;
     }
     summaryEditRef.current?.focus();
-  }, [door, step]);
+  }, [door, step, usDonation]);
 
   // Fetch the church's branding for the landing logo (name is used as alt text). Uses
   // the same unauthenticated /api/branding as the admin; a failure keeps the default vector.
@@ -1121,7 +1121,6 @@ export function DonarPage() {
               <label>
                 <span>Tipo de documento</span>
                 <select
-                  ref={step2FirstFieldRef}
                   value={form.donorDocumentType}
                   onChange={(event) => update({ donorDocumentType: event.target.value as DonorDocumentType, donorDocument: "", donorName: "" })}
                   aria-label="Tipo de documento"
@@ -1349,7 +1348,7 @@ export function DonarPage() {
                   onLoad={() => setHandoff("ready")}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
-                  ¿No se muestra el formulario? Continúe aquí
+                  ¿Problemas con el formulario? Continúe aquí
                 </button>
               </div>
             )}
