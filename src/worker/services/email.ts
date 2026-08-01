@@ -212,18 +212,17 @@ export class EmailService {
     beforeProviderDispatch?: () => void | Promise<void>
   ): Promise<EmailDeliveryResult> {
     const pdfBytes = await renderDtePdf(record);
-    // Prefer the signed JWS — the cryptographically signed, legally meaningful artifact —
-    // over the unsigned plain_json. The pipeline signs and persists a JWS before emailing
-    // accepted/transitorio receipts; only an edge document without a JWS falls back to
-    // plain_json. The recorded dteJsonSha256 evidence covers whatever was actually sent.
-    const dteAttachmentBytes = new TextEncoder().encode(record.signed_jws ?? record.plain_json);
+    const dteJsonBytes = new TextEncoder().encode(record.plain_json);
+    const signedJwsBytes = record.signed_jws
+      ? new TextEncoder().encode(record.signed_jws)
+      : null;
     const evidence = {
       emailType,
       documentStatusAtSend: record.status,
       templateVersion: await templateVersion(emailType, template),
       pdfRendererVersion: DTE_PDF_RENDERER_VERSION,
       pdfSha256: await sha256Hex(pdfBytes),
-      dteJsonSha256: await sha256Hex(dteAttachmentBytes)
+      dteJsonSha256: await sha256Hex(dteJsonBytes)
     };
     const from = this.resolveFrom();
     const pdfAttachment = {
@@ -233,9 +232,16 @@ export class EmailService {
     };
     const jsonAttachment = {
       filename: `${record.codigo_generacion}.json`,
-      contentBase64: bytesToBase64(dteAttachmentBytes),
+      contentBase64: bytesToBase64(dteJsonBytes),
       contentType: "application/json"
     };
+    const jwsAttachment = signedJwsBytes
+      ? {
+          filename: `${record.codigo_generacion}.jws`,
+          contentBase64: bytesToBase64(signedJwsBytes),
+          contentType: "application/jose"
+        }
+      : null;
     const payload = {
       from,
       to: toEmail,
@@ -258,7 +264,14 @@ export class EmailService {
           filename: jsonAttachment.filename,
           contentType: jsonAttachment.contentType,
           contentBase64: jsonAttachment.contentBase64
-        }
+        },
+        ...(jwsAttachment
+          ? [{
+              filename: jwsAttachment.filename,
+              contentType: jwsAttachment.contentType,
+              contentBase64: jwsAttachment.contentBase64
+            }]
+          : [])
       ]
     };
 
@@ -273,8 +286,16 @@ export class EmailService {
         filename: jsonAttachment.filename,
         type: jsonAttachment.contentType,
         disposition: "attachment",
-        content: dteAttachmentBytes
-      }
+        content: dteJsonBytes
+      },
+      ...(jwsAttachment && signedJwsBytes
+        ? [{
+            filename: jwsAttachment.filename,
+            type: jwsAttachment.contentType,
+            disposition: "attachment" as const,
+            content: signedJwsBytes
+          }]
+        : [])
     ], beforeProviderDispatch);
     return { providerResponse, ...evidence, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
   }
