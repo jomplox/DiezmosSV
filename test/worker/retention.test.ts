@@ -72,21 +72,59 @@ interface FakeR2Object {
 }
 
 class FakeArchiveBucket implements Partial<R2Bucket> {
+  private readonly knownLengthStreams = new WeakSet<ReadableStream>();
   readonly objects = new Map<string, FakeR2Object>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array; streamed: boolean }> = [];
   readonly deleteCalls: string[] = [];
   readonly headCalls: string[] = [];
+  readonly multipartCreateCalls: string[] = [];
+  readonly multipartPartCalls: Array<{ key: string; partNumber: number; bytes: Uint8Array }> = [];
+  readonly multipartCompleteCalls: string[] = [];
+  readonly multipartAbortCalls: string[] = [];
 
   async put(key: string, value: unknown): Promise<R2Object> {
-    const bytes =
-      value instanceof ReadableStream
-        ? new Uint8Array(await new Response(value).arrayBuffer())
-        : value instanceof Uint8Array
-          ? value
-          : utf8Bytes(String(value));
+    const bytes = await this.bytesFromValue(value);
     this.objects.set(key, { key, body: bytes });
     this.putCalls.push({ key, bytes, streamed: value instanceof ReadableStream });
     return { key } as R2Object;
+  }
+
+  async createMultipartUpload(key: string): Promise<R2MultipartUpload> {
+    this.multipartCreateCalls.push(key);
+    const parts = new Map<number, Uint8Array>();
+    const bucket = this;
+    return {
+      key,
+      uploadId: `upload-${this.multipartCreateCalls.length}`,
+      async uploadPart(partNumber: number, value: unknown): Promise<R2UploadedPart> {
+        const bytes = await bucket.bytesFromValue(value);
+        parts.set(partNumber, bytes);
+        bucket.multipartPartCalls.push({ key, partNumber, bytes });
+        return { partNumber, etag: `etag-${partNumber}` };
+      },
+      async complete(uploadedParts: R2UploadedPart[]): Promise<R2Object> {
+        const orderedParts = uploadedParts.map((part) => {
+          const value = parts.get(part.partNumber);
+          if (!value) throw new Error(`missing multipart part ${part.partNumber}`);
+          return value;
+        });
+        for (let index = 0; index < orderedParts.length - 1; index += 1) {
+          if (orderedParts[index].byteLength < 5 * 1024 * 1024) {
+            throw new Error("multipart part is below the R2 minimum size");
+          }
+          if (index > 0 && orderedParts[index].byteLength !== orderedParts[0].byteLength) {
+            throw new Error("multipart parts must have a uniform size");
+          }
+        }
+        const bytes = mergeTestChunks(orderedParts);
+        bucket.objects.set(key, { key, body: bytes });
+        bucket.multipartCompleteCalls.push(key);
+        return { key } as R2Object;
+      },
+      async abort(): Promise<void> {
+        bucket.multipartAbortCalls.push(key);
+      }
+    } as R2MultipartUpload;
   }
 
   async delete(key: string): Promise<void> {
@@ -97,12 +135,37 @@ class FakeArchiveBucket implements Partial<R2Bucket> {
   async get(key: string): Promise<R2ObjectBody | null> {
     const object = this.objects.get(key);
     if (!object) return null;
-    return { key, body: new Response(object.body).body } as R2ObjectBody;
+    const body = new Response(object.body).body!;
+    this.knownLengthStreams.add(body);
+    return { key, body } as R2ObjectBody;
   }
 
   async head(key: string): Promise<R2Object | null> {
     this.headCalls.push(key);
     return this.objects.has(key) ? ({ key } as R2Object) : null;
+  }
+
+  protected async bytesFromValue(value: unknown): Promise<Uint8Array> {
+    return value instanceof ReadableStream
+      ? new Uint8Array(await new Response(value).arrayBuffer())
+      : value instanceof Uint8Array
+        ? value
+        : utf8Bytes(String(value));
+  }
+
+  protected isKnownLengthStream(value: ReadableStream): boolean {
+    return this.knownLengthStreams.has(value);
+  }
+}
+
+class RuntimeContractArchiveBucket extends FakeArchiveBucket {
+  protected override async bytesFromValue(value: unknown): Promise<Uint8Array> {
+    if (value instanceof ReadableStream && !this.isKnownLengthStream(value)) {
+      throw new Error(
+        "Provided readable stream must have a known length (request/response body or readable half of FixedLengthStream)"
+      );
+    }
+    return super.bytesFromValue(value);
   }
 }
 
@@ -136,58 +199,55 @@ class SlowArchiveBucket extends FakeArchiveBucket {
   readonly firstChunkRead = new Deferred();
   readonly resume = new Deferred();
 
-  override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
-      return super.put(key, value);
-    }
-    const reader = value.getReader();
-    const chunks: Uint8Array[] = [];
-    let first = true;
-    for (;;) {
-      const next = await reader.read();
-      if (next.done) break;
-      chunks.push(next.value);
-      if (first) {
-        first = false;
+  override async createMultipartUpload(key: string): Promise<R2MultipartUpload> {
+    const upload = await super.createMultipartUpload(key);
+    return {
+      key: upload.key,
+      uploadId: upload.uploadId,
+      uploadPart: async (partNumber, value, options) => {
         this.firstChunkRead.resolve();
         await this.resume.promise;
-      }
-    }
-    return super.put(key, mergeTestChunks(chunks));
+        return upload.uploadPart(partNumber, value, options);
+      },
+      abort: () => upload.abort(),
+      complete: (parts) => upload.complete(parts)
+    };
   }
 }
 
 class FailingArchiveBucket extends FakeArchiveBucket {
-  override async put(key: string, value: unknown): Promise<R2Object> {
-    if (value instanceof ReadableStream && key.includes(".ndjson.tmp.")) {
-      const reader = value.getReader();
-      const first = await reader.read();
-      if (!first.done) {
-        this.objects.set(key, { key, body: first.value.slice() });
-      }
-      await reader.cancel(new Error("stream upload failed"));
-      throw new Error("stream upload failed");
-    }
-    return super.put(key, value);
+  override async createMultipartUpload(key: string): Promise<R2MultipartUpload> {
+    const upload = await super.createMultipartUpload(key);
+    return {
+      key: upload.key,
+      uploadId: upload.uploadId,
+      async uploadPart(): Promise<R2UploadedPart> {
+        throw new Error("multipart upload failed");
+      },
+      abort: () => upload.abort(),
+      complete: (parts) => upload.complete(parts)
+    };
   }
 }
 
 class SettlingArchiveBucket extends FakeArchiveBucket {
   readonly uploadSettled = new Deferred();
-  readonly uploadErrors: unknown[] = [];
 
-  override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
-      return super.put(key, value);
-    }
-    try {
-      return await super.put(key, value);
-    } catch (error) {
-      this.uploadErrors.push(error);
-      throw error;
-    } finally {
-      this.uploadSettled.resolve();
-    }
+  override async createMultipartUpload(key: string): Promise<R2MultipartUpload> {
+    const upload = await super.createMultipartUpload(key);
+    return {
+      key: upload.key,
+      uploadId: upload.uploadId,
+      uploadPart: (partNumber, value, options) => upload.uploadPart(partNumber, value, options),
+      complete: (parts) => upload.complete(parts),
+      abort: async () => {
+        try {
+          await upload.abort();
+        } finally {
+          this.uploadSettled.resolve();
+        }
+      }
+    };
   }
 }
 
@@ -195,37 +255,6 @@ class DeleteFailingArchiveBucket extends SettlingArchiveBucket {
   override async delete(key: string): Promise<void> {
     this.deleteCalls.push(key);
     throw new Error("partial delete failed");
-  }
-}
-
-class DigestPausedArchiveBucket extends FakeArchiveBucket {
-  readonly firstChunkRead = new Deferred();
-  readonly uploadSettled = new Deferred();
-  readonly release = new Deferred();
-  readonly streamErrors: unknown[] = [];
-
-  override async put(key: string, value: unknown): Promise<R2Object> {
-    if (!(value instanceof ReadableStream) || !(key.endsWith(".ndjson") || key.includes(".ndjson.tmp."))) {
-      return super.put(key, value);
-    }
-    const reader = value.getReader();
-    const first = await reader.read();
-    if (!first.done) {
-      this.objects.set(key, { key, body: first.value.slice() });
-    }
-    this.firstChunkRead.resolve();
-    try {
-      try {
-        await reader.closed;
-      } catch (error) {
-        this.streamErrors.push(error);
-        throw error;
-      }
-      await this.release.promise;
-      return { key } as R2Object;
-    } finally {
-      this.uploadSettled.resolve();
-    }
   }
 }
 
@@ -1086,7 +1115,7 @@ describe("runRetentionExport", () => {
     expect(db.appliedLimits.every((limit) => limit === 500)).toBe(true);
   });
 
-  it("puts every table as a stream and preserves exact NDJSON digests", async () => {
+  it("uploads every table through bounded multipart parts and preserves exact NDJSON digests", async () => {
     const db = new InMemoryRetentionD1();
     for (let index = 0; index < 1_200; index += 1) {
       db.dteDocuments.push(
@@ -1101,10 +1130,12 @@ describe("runRetentionExport", () => {
 
     expect(result.status).toBe("completed");
     const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
-    const tempTablePuts = archive.putCalls.filter((call) => call.key.includes(".ndjson.tmp."));
     expect(finalTablePuts).toHaveLength(12);
-    expect(tempTablePuts).toHaveLength(12);
-    expect(tempTablePuts.every((call) => call.streamed)).toBe(true);
+    expect(finalTablePuts.every((call) => call.streamed)).toBe(true);
+    expect(archive.multipartCreateCalls).toHaveLength(12);
+    expect(archive.multipartCompleteCalls).toHaveLength(12);
+    expect(archive.multipartPartCalls).toHaveLength(12);
+    expect(archive.multipartPartCalls.every((call) => call.bytes.byteLength <= 5 * 1024 * 1024)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
     const expectedBytes = utf8Bytes(db.dteDocuments.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
@@ -1116,13 +1147,28 @@ describe("runRetentionExport", () => {
     expect(manifest.tables.dte_documents.sha256).toBe(await sha256Hex(bytes));
   });
 
-  it("does not read the next D1 page while R2 backpressure is active (bounded read-ahead)", async () => {
+  it("writes retention archives without passing unknown-length streams to R2", async () => {
+    const db = new InMemoryRetentionD1();
+    db.dteDocuments.push(row({ id: "dte_known_length", created_at: "2026-06-15T12:00:00.000Z" }));
+    const archive = new RuntimeContractArchiveBucket();
+
+    const result = await runRetentionExport(
+      envWithArchive(db, archive),
+      new Date("2026-07-04T15:00:00.000Z")
+    );
+
+    expect(result).toEqual({ status: "completed", month: "2026-06", totalRows: 1 });
+    expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(true);
+  });
+
+  it("does not read the next D1 page while a full multipart part is under R2 backpressure", async () => {
     const db = new InMemoryRetentionD1();
     for (let index = 0; index < 1_200; index += 1) {
       db.dteDocuments.push(
         row({
           id: `dte_slow_${String(index).padStart(4, "0")}`,
-          created_at: "2026-06-15T12:00:00.000Z"
+          created_at: "2026-06-15T12:00:00.000Z",
+          padding: "x".repeat(12 * 1024)
         })
       );
     }
@@ -1135,7 +1181,7 @@ describe("runRetentionExport", () => {
     await expect(exportPromise).resolves.toMatchObject({ status: "completed", totalRows: 1_200 });
   });
 
-  it("deletes a partial table object after a streamed write failure and never writes the manifest", async () => {
+  it("aborts and deletes a temporary table object after a multipart part failure", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_failure" }));
     const archive = new FailingArchiveBucket();
@@ -1143,13 +1189,14 @@ describe("runRetentionExport", () => {
 
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     expect(result.status).toBe("failed");
+    expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
     expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
     expect(archive.deleteCalls).not.toContain(key);
     expect(archive.objects.has(key)).toBe(false);
     expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
   });
 
-  it("does not delete an existing canonical table object when a streamed export fails", async () => {
+  it("does not delete an existing canonical table object when a multipart upload fails", async () => {
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_failure" }));
     const archive = new FailingArchiveBucket();
@@ -1185,7 +1232,7 @@ describe("runRetentionExport", () => {
       const key = "retention/2026/2026-06/dte_documents.ndjson";
       expect(result).toMatchObject({ status: "failed", error: "page read failed" });
       expect(digest.abortReasons).toContain(primaryError);
-      expect(archive.uploadErrors).toHaveLength(1);
+      expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
       expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
       expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
@@ -1234,7 +1281,7 @@ describe("runRetentionExport", () => {
     }
   });
 
-  it("aborts a paused upload promptly when digest finalization rejects", async () => {
+  it("aborts the multipart upload when digest finalization rejects", async () => {
     const digestError = new Error("digest finalization failed");
     const digestProbe: RejectingDigestProbe = {
       finalized: new Deferred(),
@@ -1250,45 +1297,30 @@ describe("runRetentionExport", () => {
     });
     const db = new InMemoryRetentionD1();
     db.dteDocuments.push(row({ id: "dte_digest_failure" }));
-    const archive = new DigestPausedArchiveBucket();
+    const archive = new SettlingArchiveBucket();
     const unhandled = new UnhandledRejectionProbe();
     unhandled.start();
 
     try {
-      const exportPromise = runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
-      await archive.firstChunkRead.promise;
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const outcome = await Promise.race([
-        exportPromise.then((result) => ({ kind: "settled" as const, result })),
-        new Promise<{ kind: "timeout" }>((resolve) => {
-          timeout = setTimeout(() => resolve({ kind: "timeout" }), 250);
-        })
-      ]);
-      if (timeout) clearTimeout(timeout);
-      const result =
-        outcome.kind === "settled"
-          ? outcome.result
-          : await (async () => {
-              archive.release.resolve();
-              return exportPromise;
-            })();
+      const result = await runRetentionExport(
+        envWithArchive(db, archive),
+        new Date("2026-07-04T15:00:00.000Z")
+      );
       await digestProbe.finalized.promise;
       await digestProbe.settled.promise;
       await archive.uploadSettled.promise;
       await unhandled.flush();
 
       const key = "retention/2026/2026-06/dte_documents.ndjson";
-      expect(outcome.kind).toBe("settled");
       expect(result).toMatchObject({ status: "failed", error: "digest finalization failed" });
       expect(digestProbe.abortReasons).toEqual([]);
-      expect(archive.streamErrors).toContain(digestError);
+      expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
       expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
       expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has(key)).toBe(false);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
       expect(unhandled.reasons).toEqual([]);
     } finally {
-      archive.release.resolve();
       unhandled.stop();
     }
   });
