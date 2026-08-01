@@ -1,7 +1,7 @@
 import { markDonorBrandingSettled } from "./donorReady";
 import svFlag from "./assets/sv-flag.svg";
 import { AlertCircle, CheckCircle2, ShieldCheck } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DONAR_ALL_COUNTRIES_GROUP_LABEL,
   DONAR_AMOUNT_CHIPS,
@@ -519,22 +519,24 @@ export function DonarPage() {
   const municipalityOptions = getCat013Municipalities(form.departamento);
   const districtOptions = getCat008Districts(form.departamento);
 
-  // Focus follows later wizard steps, but Paso 1 deliberately leaves focus
-  // untouched so opening the donation flow does not summon a mobile keyboard.
-  // The SV Paso 2 select stays unfocused too: mobile browsers may open its native
-  // picker as soon as a programmatic focus lands on it.
-  useEffect(() => {
-    if (door === null) {
-      return;
+  // Every newly rendered donor view starts at the top instead of inheriting the
+  // scroll used to reach the previous step's CTA. Reassert on the next frame for
+  // mobile Safari, which can settle its visual viewport after the DOM commit.
+  // Later-step focus remains, but preventScroll keeps it from undoing the reset.
+  useLayoutEffect(() => {
+    const resetScroll = () => window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    resetScroll();
+
+    // Paso 1 deliberately leaves focus untouched so opening the donation flow
+    // does not summon a mobile keyboard. The SV Paso 2 select stays unfocused too:
+    // mobile browsers may open its native picker on programmatic focus.
+    if (door !== null && step !== 1 && (step !== 2 || usDonation)) {
+      summaryEditRef.current?.focus({ preventScroll: true });
     }
-    if (step === 1) {
-      return;
-    }
-    if (step === 2 && !usDonation) {
-      return;
-    }
-    summaryEditRef.current?.focus();
-  }, [door, step, usDonation]);
+
+    const resetFrame = requestAnimationFrame(resetScroll);
+    return () => cancelAnimationFrame(resetFrame);
+  }, [door, stage, step, usDonation]);
 
   // Fetch the church's branding for the landing logo (name is used as alt text). Uses
   // the same unauthenticated /api/branding as the admin; a failure keeps the default vector.

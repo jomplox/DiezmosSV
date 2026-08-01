@@ -833,11 +833,11 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain('form.amount === chip.toFixed(2) ? "donar-chip active" : "donar-chip"');
   });
 
-  it("leaves Paso 1 and Paso 2 unfocused while retaining user-initiated and Paso 3 focus", () => {
+  it("leaves Paso 1 and Paso 2 unfocused while retaining scroll-safe Paso 3 focus", () => {
     const heroFocusCalls = donarSource.match(/heroInputRef\.current\?\.focus\(\)/g) ?? [];
     expect(heroFocusCalls).toHaveLength(1);
     expect(donarSource).not.toContain("step2FirstFieldRef");
-    expect(donarSource).toContain("summaryEditRef.current?.focus()");
+    expect(donarSource).toContain("summaryEditRef.current?.focus({ preventScroll: true })");
   });
 
   it("shows a Paso 3 summary line with an Editar link back to Paso 1", () => {

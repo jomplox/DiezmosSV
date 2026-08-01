@@ -187,6 +187,10 @@ test("keeps the desktop chooser doors equal-height with the annotated U.S. paddi
 });
 
 test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) => {
+  // Keep the whole flow at a phone-height viewport. Clicking the actions near the
+  // bottom naturally scrolls the document, so each newly rendered view must
+  // explicitly return the donor to its top.
+  await page.setViewportSize({ width: 393, height: 700 });
   await page.goto("/donar");
 
   // The public page opens on the two-door chooser (renders without a session).
@@ -207,6 +211,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Diezmo is preselected on mount.
   await expect(page.getByRole("radio", { name: "Diezmo" })).toBeChecked();
   await expect(page.getByLabel("Monto")).not.toBeFocused();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
   // The old "Otro monto" afterthought field is gone: the hero input IS the monto.
   await expect(page.getByPlaceholder("Otro monto")).toHaveCount(0);
@@ -232,6 +237,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   // Wompi's hosted sheet forces both, so /donar must not ask a second time.
   await expect(page.getByLabel("Dirección")).toHaveCount(0);
   await expect(page.getByLabel("Teléfono (opcional)")).toHaveCount(0);
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
   // Default document type is DUI (13).
   await page.getByLabel("Número de documento").fill(DONOR.dui);
@@ -251,6 +257,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Diezmo · $1.00")).toBeVisible();
   await expect(page.getByRole("button", { name: "Editar" })).toBeVisible();
+  expect(await page.evaluate(() => window.scrollY)).toBe(0);
 
   // Handoff: the checkout is EMBEDDED in the wizard card — an iframe pointing at
   // the payment link with the esWidget flag — with the manual backup link below.

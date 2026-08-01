@@ -428,7 +428,7 @@ describe("document email resend", () => {
     });
   });
 
-  it("attaches the signed JWS artifact when the document has a signed JWS", async () => {
+  it("attaches valid JSON and a separately typed signed JWS when both exist", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
@@ -460,16 +460,35 @@ describe("document email resend", () => {
     );
 
     expect(response.status).toBe(200);
-    const sentMessage = sentMessages[0] as { attachments: Array<{ filename: string; content: unknown }> };
+    const sentMessage = sentMessages[0] as {
+      attachments: Array<{ filename: string; type: string; content: unknown }>;
+    };
     const jsonAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".json"));
+    const jwsAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".jws"));
+
+    // Regression note: this test previously required compact JWS bytes inside the
+    // `.json` attachment, which protected the production packaging bug. JWS is not
+    // JSON, so the contract is deliberately flipped to parseable JSON plus a
+    // separately named and typed signed artifact.
+    expect(jsonAttachment).toMatchObject({
+      filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.json",
+      type: "application/json"
+    });
     expect(jsonAttachment?.content).toBeInstanceOf(Uint8Array);
-    // The legally meaningful artifact is the signed JWS, not the unsigned plain_json.
-    expect(new TextDecoder().decode(jsonAttachment?.content as Uint8Array)).toBe(signedJws);
-    // The recorded JSON evidence hash covers the signed artifact actually sent.
+    const decodedJson = new TextDecoder().decode(jsonAttachment?.content as Uint8Array);
+    expect(JSON.parse(decodedJson)).toMatchObject({
+      receptor: expect.any(Object)
+    });
+    expect(jwsAttachment).toMatchObject({
+      filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.jws",
+      type: "application/jose"
+    });
+    expect(jwsAttachment?.content).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(jwsAttachment?.content as Uint8Array)).toBe(signedJws);
     expect(db.emailDeliveries).toContainEqual(
       expect.objectContaining({
         document_id: "doc_1",
-        dte_json_sha256: await sha256Hex(new TextEncoder().encode(signedJws))
+        dte_json_sha256: await sha256Hex(jsonAttachment?.content as Uint8Array)
       })
     );
   });
