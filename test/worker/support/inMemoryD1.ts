@@ -29,18 +29,45 @@ export class FakeArchiveBucket {
   readonly deleteCalls: string[] = [];
 
   async put(key: string, value: unknown, options?: { httpMetadata?: { contentType?: string } }): Promise<R2Object> {
-    const bytes =
-      value instanceof ReadableStream
-        ? new Uint8Array(await new Response(value).arrayBuffer())
-        : value instanceof Uint8Array
-          ? value
-          : utf8Bytes(String(value));
+    const bytes = await archiveBytes(value);
     this.objects.set(key, bytes);
     if (options?.httpMetadata?.contentType) {
       this.contentTypes.set(key, options.httpMetadata.contentType);
     }
     this.putCalls.push({ key, bytes });
     return { key } as R2Object;
+  }
+
+  async createMultipartUpload(key: string): Promise<R2MultipartUpload> {
+    const parts = new Map<number, Uint8Array>();
+    const bucket = this;
+    return {
+      key,
+      uploadId: `upload-${crypto.randomUUID()}`,
+      async uploadPart(partNumber: number, value: unknown): Promise<R2UploadedPart> {
+        parts.set(partNumber, await archiveBytes(value));
+        return { partNumber, etag: `etag-${partNumber}` };
+      },
+      async complete(uploadedParts: R2UploadedPart[]): Promise<R2Object> {
+        const chunks = uploadedParts.map((part) => {
+          const chunk = parts.get(part.partNumber);
+          if (!chunk) throw new Error(`missing multipart part ${part.partNumber}`);
+          return chunk;
+        });
+        const totalBytes = chunks.reduce((total, chunk) => total + chunk.byteLength, 0);
+        const bytes = new Uint8Array(totalBytes);
+        let offset = 0;
+        for (const chunk of chunks) {
+          bytes.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        bucket.objects.set(key, bytes);
+        return { key } as R2Object;
+      },
+      async abort(): Promise<void> {
+        parts.clear();
+      }
+    } as R2MultipartUpload;
   }
 
   async delete(key: string): Promise<void> {
@@ -79,6 +106,14 @@ export class FakeArchiveBucket {
       .map((key) => ({ key }) as R2Object);
     return { objects, truncated: false, delimitedPrefixes: [] } as unknown as R2Objects;
   }
+}
+
+async function archiveBytes(value: unknown): Promise<Uint8Array> {
+  return value instanceof ReadableStream
+    ? new Uint8Array(await new Response(value).arrayBuffer())
+    : value instanceof Uint8Array
+      ? value
+      : utf8Bytes(String(value));
 }
 
 export interface LoginRateLimitRow {
