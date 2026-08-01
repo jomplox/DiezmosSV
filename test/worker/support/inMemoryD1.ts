@@ -242,6 +242,11 @@ export class InMemoryD1 {
         statement.sql.includes("UPDATE users") &&
         statement.sql.includes("SET password_hash = ?, password_salt = ?, updated_at = ?")
     );
+    const passwordResetIssuance = statements.some(
+      (statement) =>
+        statement.sql.includes("INSERT INTO password_reset_tokens") &&
+        statement.sql.includes("auth_generation = ?")
+    );
     const guardedUserMutation = statements.some(
       (statement) =>
         statement.sql.includes("UPDATE users") &&
@@ -273,6 +278,11 @@ export class InMemoryD1 {
     if (passwordReset && this.beforePasswordResetBatch) {
       const beforeBatch = this.beforePasswordResetBatch;
       this.beforePasswordResetBatch = null;
+      await beforeBatch();
+    }
+    if (passwordResetIssuance && this.beforeCredentialGuardedResetTokenInsert) {
+      const beforeBatch = this.beforeCredentialGuardedResetTokenInsert;
+      this.beforeCredentialGuardedResetTokenInsert = null;
       await beforeBatch();
     }
     if (guardedUserMutation && this.beforeGuardedUserMutation) {
@@ -2628,8 +2638,20 @@ export class Statement {
       });
     }
     if (this.sql.includes("INSERT INTO password_reset_tokens")) {
-      const [id, userId, tokenHash, expiresAt] = this.args.map(String);
-      this.db.resetTokens.push({ id, user_id: userId, token_hash: tokenHash, expires_at: expiresAt, used_at: null });
+      const [id, tokenHash, expiresAt, userId, expectedEmail, expectedAuthGeneration, expectedPasswordHash, expectedPasswordSalt] = this.args;
+      const user = this.db.users.find(
+        (row) =>
+          row.id === userId &&
+          !row.disabled_at &&
+          row.email === expectedEmail &&
+          Number(row.auth_generation ?? 0) === Number(expectedAuthGeneration) &&
+          row.password_hash === expectedPasswordHash &&
+          row.password_salt === expectedPasswordSalt
+      );
+      if (user) {
+        this.db.resetTokens.push({ id: String(id), user_id: String(userId), token_hash: String(tokenHash), expires_at: String(expiresAt), used_at: null });
+        changes = 1;
+      }
     }
     if (
       this.sql.includes("DELETE FROM sessions") &&
@@ -2726,17 +2748,27 @@ export class Statement {
     }
     if (this.sql.includes("UPDATE password_reset_tokens") && this.sql.includes("SET used_at = ?")) {
       if (this.sql.includes("WHERE user_id = ?")) {
-        const [usedAt, userId, markerUserId, expectedValue, expectedState, expectedVersion] = this.args;
+        const [usedAt, userId, markerUserId, expectedValue, expectedState, expectedVersion, expectedSalt] = this.args;
         const marker = !this.sql.includes("EXISTS (")
           ? true
-          : this.sql.includes("AND email = ?")
+          : this.sql.includes("AND email = ?") && this.sql.includes("AND password_hash = ?")
             ? this.db.users.some(
                 (row) =>
                   row.id === markerUserId &&
                   row.email === expectedValue &&
-                  (row.disabled_at ?? null) === (expectedState ?? null) &&
-                  Number(row.auth_generation ?? 0) === Number(expectedVersion)
+                  !row.disabled_at &&
+                  Number(row.auth_generation ?? 0) === Number(expectedState) &&
+                  row.password_hash === expectedVersion &&
+                  row.password_salt === expectedSalt
               )
+            : this.sql.includes("AND email = ?")
+              ? this.db.users.some(
+                  (row) =>
+                    row.id === markerUserId &&
+                    row.email === expectedValue &&
+                    (row.disabled_at ?? null) === (expectedState ?? null) &&
+                    Number(row.auth_generation ?? 0) === Number(expectedVersion)
+                )
             : this.db.users.some(
                 (row) =>
                   row.id === markerUserId &&
