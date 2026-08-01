@@ -15,6 +15,7 @@ import { sendOperationalAlert } from "./alerts";
 import { logWorkerError } from "./observability";
 
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
+const RETENTION_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
 
 export interface RetentionExportResult {
   status: "completed" | "skipped" | "failed";
@@ -376,26 +377,45 @@ async function streamRetentionTable<Cursor>(
   cursorFrom: (row: Record<string, unknown>) => Cursor
 ): Promise<TableManifestEntry> {
   const tempKey = `${key}.tmp.${crypto.randomUUID()}`;
-  const identity = new TransformStream<Uint8Array, Uint8Array>();
   const digest = new crypto.DigestStream("SHA-256");
-  const bodyWriter = identity.writable.getWriter();
   const digestWriter = digest.getWriter();
   const digestResultPromise = digest.digest.then(
     (value) => ({ ok: true as const, value }),
     (error) => ({ ok: false as const, error })
   );
-  const putPromise = env.ARCHIVE.put(tempKey, identity.readable);
-  void putPromise.catch((error) => bodyWriter.abort(error).catch(() => undefined));
+  let multipartUpload: R2MultipartUpload | null = null;
+  let multipartCompleted = false;
+  const uploadedParts: R2UploadedPart[] = [];
+  let partNumber = 1;
+  let partBuffer = new Uint8Array(RETENTION_MULTIPART_PART_SIZE);
+  let partOffset = 0;
   let cursor: Cursor | null = null;
   let rowCount = 0;
 
   try {
+    multipartUpload = await env.ARCHIVE.createMultipartUpload(tempKey);
     for (;;) {
       const rows = await readPage(cursor);
       if (rows.length === 0) break;
       for (const row of rows) {
         const bytes = utf8Bytes(`${JSON.stringify(row)}\n`);
-        await Promise.all([bodyWriter.write(bytes), digestWriter.write(bytes)]);
+        await digestWriter.write(bytes);
+        let sourceOffset = 0;
+        while (sourceOffset < bytes.byteLength) {
+          const copyLength = Math.min(
+            bytes.byteLength - sourceOffset,
+            RETENTION_MULTIPART_PART_SIZE - partOffset
+          );
+          partBuffer.set(bytes.subarray(sourceOffset, sourceOffset + copyLength), partOffset);
+          sourceOffset += copyLength;
+          partOffset += copyLength;
+          if (partOffset === RETENTION_MULTIPART_PART_SIZE) {
+            uploadedParts.push(await multipartUpload.uploadPart(partNumber, partBuffer));
+            partNumber += 1;
+            partBuffer = new Uint8Array(RETENTION_MULTIPART_PART_SIZE);
+            partOffset = 0;
+          }
+        }
         rowCount += 1;
       }
       cursor = cursorFrom(rows[rows.length - 1]);
@@ -407,8 +427,13 @@ async function streamRetentionTable<Cursor>(
     if (!digestResult.ok) {
       throw digestResult.error;
     }
-    await bodyWriter.close();
-    await putPromise;
+    if (partOffset > 0 || uploadedParts.length === 0) {
+      uploadedParts.push(
+        await multipartUpload.uploadPart(partNumber, partBuffer.subarray(0, partOffset))
+      );
+    }
+    await multipartUpload.complete(uploadedParts);
+    multipartCompleted = true;
     const tempObject = await env.ARCHIVE.get(tempKey);
     if (!tempObject) {
       throw new Error("retention_temp_object_missing");
@@ -418,13 +443,15 @@ async function streamRetentionTable<Cursor>(
     const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
     return { rowCount, sha256 };
   } catch (error) {
-    await Promise.allSettled([bodyWriter.abort(error), digestWriter.abort(error)]);
-    await Promise.allSettled([putPromise, digestResultPromise]);
-    try {
-      await env.ARCHIVE.delete(tempKey);
-    } catch (cleanupError) {
+    await Promise.allSettled([digestWriter.abort(error), digestResultPromise]);
+    const cleanupResults = await Promise.allSettled([
+      multipartUpload && !multipartCompleted ? multipartUpload.abort() : Promise.resolve(),
+      env.ARCHIVE.delete(tempKey)
+    ]);
+    for (const cleanupResult of cleanupResults) {
+      if (cleanupResult.status !== "rejected") continue;
       try {
-        logWorkerError(env, "retention_partial_object_cleanup_failed", cleanupError);
+        logWorkerError(env, "retention_partial_object_cleanup_failed", cleanupResult.reason);
       } catch {
         // Cleanup diagnostics must never replace the primary export failure.
       }
