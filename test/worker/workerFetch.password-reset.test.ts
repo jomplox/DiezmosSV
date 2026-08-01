@@ -161,7 +161,7 @@ describe("password reset", () => {
     expect(responses.every((response) => response.status === 200)).toBe(true);
     expect(sentMessages).toHaveLength(3);
     expect(db.resetTokens).toHaveLength(3);
-    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(1);
     expect(db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset")).toHaveLength(3);
     expect(db.securityRateLimitClaims[0].key_hash).toMatch(/^[a-f0-9]{64}$/);
     expect(db.securityRateLimitClaims[0].key_hash).not.toContain("user_operator");
@@ -234,7 +234,7 @@ describe("password reset", () => {
 
     expect(responses.every((response) => response.status === 200)).toBe(true);
     expect(sentMessages).toHaveLength(3);
-    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(3);
+    expect(db.resetTokens.filter((token) => !token.used_at)).toHaveLength(1);
     const claims = db.securityRateLimitClaims.filter((claim) => claim.scope === "password_reset");
     expect(claims).toHaveLength(3);
     expect(new Set(claims.map((claim) => claim.key_hash)).size).toBe(3);
@@ -271,7 +271,7 @@ describe("password reset", () => {
     expect(db.resetTokens.every((token) => Boolean(token.used_at))).toBe(true);
   });
 
-  it("keeps earlier unused reset tokens valid until one reset succeeds", async () => {
+  it("supersedes earlier unused reset tokens when a new one is issued", async () => {
     const db = new InMemoryD1();
     db.users.push(knownUser());
     const runtime = env(db);
@@ -283,7 +283,7 @@ describe("password reset", () => {
     expect(first).not.toBeNull();
     expect(second).not.toBeNull();
     expect(db.resetTokens).toHaveLength(2);
-    expect(db.resetTokens[0].used_at).toBeNull();
+    expect(db.resetTokens[0].used_at).not.toBeNull();
     expect(db.resetTokens[1].used_at).toBeNull();
   });
 

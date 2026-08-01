@@ -380,28 +380,51 @@ export async function createPasswordResetToken(
   expectedPasswordSalt: string
 ): Promise<string | null> {
   const id = newId("reset");
-  const created = await db
-    .prepare(
-      `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
+  const issuedAt = nowIso();
+  const results = await db.batch([
+    db
+      .prepare(
+        `UPDATE password_reset_tokens
+            SET used_at = ?
+          WHERE user_id = ?
+            AND used_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM users
+               WHERE id = ? AND disabled_at IS NULL
+                 AND email = ? AND auth_generation = ?
+                 AND password_hash = ? AND password_salt = ?
+            )`
+      )
+      .bind(
+        issuedAt,
+        userId,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      ),
+    db
+      .prepare(
+        `INSERT INTO password_reset_tokens (id, user_id, token_hash, expires_at)
          SELECT ?, id, ?, ?
          FROM users
          WHERE id = ? AND disabled_at IS NULL
            AND email = ? AND auth_generation = ?
-           AND password_hash = ? AND password_salt = ?
-         RETURNING id`
-    )
-    .bind(
-      id,
-      tokenHash,
-      expiresAt,
-      userId,
-      expectedEmail,
-      expectedAuthGeneration,
-      expectedPasswordHash,
-      expectedPasswordSalt
-    )
-    .first<{ id: string }>();
-  return created?.id ?? null;
+           AND password_hash = ? AND password_salt = ?`
+      )
+      .bind(
+        id,
+        tokenHash,
+        expiresAt,
+        userId,
+        expectedEmail,
+        expectedAuthGeneration,
+        expectedPasswordHash,
+        expectedPasswordSalt
+      )
+  ]);
+  return Number(results[1]?.meta?.changes ?? 0) === 1 ? id : null;
 }
 
 export async function invalidatePasswordResetToken(
