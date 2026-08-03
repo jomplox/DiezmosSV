@@ -240,5 +240,18 @@ describe("donor explorer repository", () => {
       hasMore: true
     });
     expect(page.donors).toHaveLength(1);
+
+    const beyondLastPage = await repository.listDonors({
+      environment: "00",
+      limit: 1,
+      offset: 3
+    });
+    expect(beyondLastPage).toEqual({
+      donors: [],
+      total: 3,
+      limit: 1,
+      offset: 3,
+      hasMore: false
+    });
   });
 });

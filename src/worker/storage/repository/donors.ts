@@ -224,11 +224,21 @@ export async function listDonors(
               OR (? = 'WOMPI' AND wompi_count > 0)
               OR (? = 'MANUAL' AND manual_count > 0)
             )
+       ),
+       paged AS (
+         SELECT *
+           FROM filtered
+          ORDER BY last_gift_at DESC, donor_key ASC
+          LIMIT ? OFFSET ?
+       ),
+       counts AS (
+         SELECT COUNT(*) AS total_count
+           FROM filtered
        )
-       SELECT filtered.*, COUNT(*) OVER () AS total_count
-         FROM filtered
-        ORDER BY last_gift_at DESC, donor_key ASC
-        LIMIT ? OFFSET ?`
+       SELECT paged.*, counts.total_count
+         FROM counts
+         LEFT JOIN paged ON TRUE
+        ORDER BY paged.last_gift_at DESC, paged.donor_key ASC`
     )
     .bind(
       filters.environment,
@@ -256,36 +266,38 @@ export async function listDonors(
     .all<DonorExplorerSqlRow>();
 
   const rows = result.results ?? [];
-  const donors = rows.map((row): DonorExplorerRow => ({
-    key: row.donor_key,
-    documentType: row.document_type,
-    documentNumber: row.document_number,
-    name: row.donor_name,
-    email: row.donor_email,
-    phone: row.donor_phone,
-    department: row.department,
-    municipality: row.municipality,
-    district: row.district,
-    address: row.address,
-    country: row.country,
-    firstGiftAt: row.first_gift_at,
-    lastGiftAt: row.last_gift_at,
-    giftCount: Number(row.gift_count),
-    totalCents: Number(row.total_cents),
-    preferredGiftType:
-      Number(row.diezmo_cents) === 0 && Number(row.ofrenda_cents) === 0
-        ? null
-        : Number(row.diezmo_cents) >= Number(row.ofrenda_cents)
-          ? "DIEZMO"
-          : "OFRENDA",
-    source:
-      Number(row.wompi_count) > 0 && Number(row.manual_count) > 0
-        ? "MIXED"
-        : Number(row.wompi_count) > 0
-          ? "WOMPI"
-          : "MANUAL"
-  }));
-  const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
+  const donors = rows
+    .filter((row) => row.donor_key !== null)
+    .map((row): DonorExplorerRow => ({
+      key: row.donor_key,
+      documentType: row.document_type,
+      documentNumber: row.document_number,
+      name: row.donor_name,
+      email: row.donor_email,
+      phone: row.donor_phone,
+      department: row.department,
+      municipality: row.municipality,
+      district: row.district,
+      address: row.address,
+      country: row.country,
+      firstGiftAt: row.first_gift_at,
+      lastGiftAt: row.last_gift_at,
+      giftCount: Number(row.gift_count),
+      totalCents: Number(row.total_cents),
+      preferredGiftType:
+        Number(row.diezmo_cents) === 0 && Number(row.ofrenda_cents) === 0
+          ? null
+          : Number(row.diezmo_cents) >= Number(row.ofrenda_cents)
+            ? "DIEZMO"
+            : "OFRENDA",
+      source:
+        Number(row.wompi_count) > 0 && Number(row.manual_count) > 0
+          ? "MIXED"
+          : Number(row.wompi_count) > 0
+            ? "WOMPI"
+            : "MANUAL"
+    }));
+  const total = Number(rows[0]?.total_count ?? 0);
   return {
     donors,
     total,
