@@ -6,6 +6,12 @@ import {
   resolvePrivateWranglerConfig
 } from "./private-wrangler-config.mjs";
 
+export const DTE_DOCUMENTS_TABLE_QUERY = `
+SELECT name
+FROM sqlite_schema
+WHERE type = 'table' AND name = 'dte_documents';
+`.trim();
+
 export const DUPLICATE_WOMPI_EVENT_IDS_QUERY = `
 SELECT wompi_event_id, COUNT(*) AS document_count
 FROM dte_documents
@@ -15,13 +21,20 @@ HAVING COUNT(*) > 1
 ORDER BY wompi_event_id;
 `.trim();
 
-export function parseDuplicateWompiEventIds(stdout) {
+function parseWranglerRows(stdout) {
   const parsed = JSON.parse(String(stdout).trim());
   const envelopes = Array.isArray(parsed) ? parsed : [parsed];
-  const rows = envelopes.flatMap((envelope) =>
+  return envelopes.flatMap((envelope) =>
     Array.isArray(envelope?.results) ? envelope.results : []
   );
-  return rows.map((row) => ({
+}
+
+export function hasDteDocumentsTable(stdout) {
+  return parseWranglerRows(stdout).some((row) => row.name === "dte_documents");
+}
+
+export function parseDuplicateWompiEventIds(stdout) {
+  return parseWranglerRows(stdout).map((row) => ({
     wompiEventId: String(row.wompi_event_id),
     documentCount: Number(row.document_count)
   }));
@@ -66,9 +79,8 @@ function runPreflight(argv) {
     ".bin",
     process.platform === "win32" ? "wrangler.cmd" : "wrangler"
   );
-  let result;
-  try {
-    result = spawnSync(
+  const executeQuery = (query) => {
+    const result = spawnSync(
       executable,
       [
         `--config=${preparedConfig.configPath}`,
@@ -80,17 +92,30 @@ function runPreflight(argv) {
         "--remote",
         "--json",
         "--command",
-        DUPLICATE_WOMPI_EVENT_IDS_QUERY
+        query
       ],
       { encoding: "utf8" }
+    );
+    if (result.status !== 0) {
+      throw new Error(
+        result.stderr.trim() || "D1 migration preflight query failed"
+      );
+    }
+    return result.stdout;
+  };
+  try {
+    if (!hasDteDocumentsTable(executeQuery(DTE_DOCUMENTS_TABLE_QUERY))) {
+      process.stdout.write(
+        "D1 migration preflight skipped: fresh database has no dte_documents table.\n"
+      );
+      return;
+    }
+    assertNoDuplicateWompiEventIds(
+      parseDuplicateWompiEventIds(executeQuery(DUPLICATE_WOMPI_EVENT_IDS_QUERY))
     );
   } finally {
     preparedConfig.cleanup();
   }
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || "D1 migration preflight query failed");
-  }
-  assertNoDuplicateWompiEventIds(parseDuplicateWompiEventIds(result.stdout));
   process.stdout.write("D1 migration preflight passed: no duplicate Wompi document links.\n");
 }
 
