@@ -325,7 +325,7 @@ export function AnnualCertificatePanel({
             ))}
           </select>
         </label>
-        <button className="primary" disabled={busy || withEmail === 0} onClick={() => void onSend()}>
+        <button className="primary" disabled={anySending || withEmail === 0} onClick={() => void onSend()}>
           <Download size={16} />
           {busy ? "Enviando" : "Enviar constancias"}
         </button>
