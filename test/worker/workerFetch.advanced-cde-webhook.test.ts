@@ -15,6 +15,33 @@ import { signWompiBody } from "./support/workerFetchHelpers";
 installWorkerFetchGlobals();
 
 describe("advanced CDE generation", () => {
+  it.each(["/api/test/dte/advanced-template", "/api/test/dte/advanced"])(
+    "restricts caller-controlled CDE generation to owners at %s",
+    async (path) => {
+      const db = new InMemoryD1();
+      const send = vi.fn();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+
+      const response = await worker.fetch(
+        new Request(`https://example.org${path}`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ draft: advancedCdeDraft() })
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+          ISSUANCE_QUEUE: { send } as unknown as Queue
+        })
+      );
+
+      expect(response.status).toBe(403);
+      expect(db.documents).toHaveLength(0);
+      expect(send).not.toHaveBeenCalled();
+      expect(db.audits).toHaveLength(0);
+    }
+  );
+
   it.each([
     ["production", "/api/test/dte"],
     ["production", "/api/test/dte/advanced-template"],
@@ -25,7 +52,9 @@ describe("advanced CDE generation", () => {
   ])("blocks direct generation in %s at %s before creating or queueing a DTE", async (appEnv, path) => {
     const db = new InMemoryD1();
     const send = vi.fn();
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = path.includes("advanced")
+      ? { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" }
+      : { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
 
     const response = await worker.fetch(
       new Request(`https://example.org${path}`, {
@@ -261,7 +290,7 @@ describe("advanced CDE generation", () => {
 
   it("opens the advanced template with a default amount when quick amount is blank", async () => {
     const db = new InMemoryD1();
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
 
     const response = await worker.fetch(
       new Request("https://example.org/api/test/dte/advanced-template", {
@@ -286,7 +315,7 @@ describe("advanced CDE generation", () => {
 
   it("opens the advanced template with empty donor fields so the wizard can collect them", async () => {
     const db = new InMemoryD1();
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
 
     const response = await worker.fetch(
       new Request("https://example.org/api/test/dte/advanced-template", {
@@ -311,7 +340,7 @@ describe("advanced CDE generation", () => {
   it("stores a schema-valid advanced CDE draft and queues it for transmission", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
 
     const response = await worker.fetch(
       new Request("https://example.org/api/test/dte/advanced", {
@@ -359,7 +388,7 @@ describe("advanced CDE generation", () => {
   it("rejects an advanced CDE draft that does not match the CDE schema", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
 
     const response = await worker.fetch(
       new Request("https://example.org/api/test/dte/advanced", {
@@ -386,7 +415,7 @@ describe("advanced CDE generation", () => {
   it("rejects final generation of a template draft whose receptor was left empty", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     const baseEnv = {
       APP_ENV: "staging",
       EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
@@ -428,7 +457,7 @@ describe("advanced CDE generation", () => {
   it("rejects an advanced CDE draft with an invalid DUI check digit", async () => {
     const db = new InMemoryD1();
     const queued: unknown[] = [];
-    db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     const draft = advancedCdeDraft();
     (draft.receptor as Record<string, unknown>).tipoDocumento = "13";
     (draft.receptor as Record<string, unknown>).numDocumento = "00000000-9";

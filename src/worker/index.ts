@@ -2250,8 +2250,8 @@ const operationsRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/analytics", role: "VIEWER", handler: handleAnalytics },
   { method: "GET", pattern: "/api/contingency", role: "VIEWER", handler: handleContingency },
   { method: "POST", pattern: "/api/test/dte", role: "OPERATOR", handler: handleTestDte },
-  { method: "POST", pattern: "/api/test/dte/advanced-template", role: "OPERATOR", handler: handleAdvancedTemplate },
-  { method: "POST", pattern: "/api/test/dte/advanced", role: "OPERATOR", handler: handleAdvancedDte }
+  { method: "POST", pattern: "/api/test/dte/advanced-template", role: "OWNER", handler: handleAdvancedTemplate },
+  { method: "POST", pattern: "/api/test/dte/advanced", role: "OWNER", handler: handleAdvancedDte }
 ];
 
 const userRoutes: Array<Route<ApiRouteContext>> = [
