@@ -539,8 +539,18 @@ function validateCdeCatalogs(document: Record<string, unknown>): void {
   const direccion = isRecord(receptor.direccion) ? receptor.direccion : null;
   if (direccion) {
     assertCatalogField("receptor.direccion.departamento", "CAT-012 Departamento", direccion.departamento, isCat012DepartmentCode);
-    assertCatalogField("receptor.direccion.municipio", "CAT-013 Municipio", direccion.municipio, isCat013MunicipalityCode);
-    assertCatalogField("receptor.direccion.distrito", "CAT-008 Distrito", direccion.distrito, isCat008DistrictCode);
+    assertCatalogField(
+      "receptor.direccion.municipio",
+      "CAT-013 Municipio",
+      direccion.municipio,
+      (value) => isCat013MunicipalityCode(value, direccion.departamento)
+    );
+    assertCatalogField(
+      "receptor.direccion.distrito",
+      "CAT-008 Distrito",
+      direccion.distrito,
+      (value) => isCat008DistrictCode(value, direccion.departamento)
+    );
   }
 
   const item = firstArrayRecord(document.cuerpoDocumento);

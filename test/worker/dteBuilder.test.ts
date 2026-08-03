@@ -370,6 +370,31 @@ describe("DTE builders", () => {
     ).toThrow(/catálogo/i);
   });
 
+  it("rejects advanced CDE address codes from a different department", () => {
+    const draft = buildCdeDocument(
+      { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: "00000000-0" } } as WompiWebhook,
+      emisorConfig,
+      {
+        sequence: 1,
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      }
+    ) as Record<string, any>;
+    draft.receptor.direccion = {
+      departamento: "06",
+      municipio: "13",
+      distrito: "22",
+      complemento: "Direccion de prueba"
+    };
+
+    expect(() =>
+      buildAdvancedCdeDocument(draft, emisorConfig, {
+        sequence: 2,
+        environment: "00",
+        issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
+      })
+    ).toThrow(/catálogo/i);
+  });
+
   it("uses the intent donorOverride for the receptor with real donor-chosen catalog codes", () => {
     const document = buildCdeDocument(
       { ...wompiSample, Cliente: { ...wompiSample.Cliente, DocumentoIdentidad: undefined, Direccion: undefined } } as WompiWebhook,
