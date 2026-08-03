@@ -520,7 +520,7 @@ describe("Wompi issuance failure recovery API", () => {
     });
   });
 
-  it("returns conflict for a created event and not-found for an unknown id without queueing", async () => {
+  it("hides created events and unknown ids from the failure retry endpoint", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
     db.wompiEvents.push(failedWompiEvent({
@@ -542,10 +542,15 @@ describe("Wompi issuance failure recovery API", () => {
       workerEnv
     );
 
-    expect(created.status).toBe(409);
+    expect(created.status).toBe(404);
     expect(missing.status).toBe(404);
     expect(queued).toHaveLength(0);
-    expect(JSON.stringify(await created.json())).not.toContain("raw_body");
+    const createdBody = JSON.stringify(await created.json());
+    expect(createdBody).not.toContain("donor_name");
+    expect(createdBody).not.toContain("donor_email");
+    expect(createdBody).not.toContain("amount_cents");
+    expect(createdBody).not.toContain("reserved_numero_control");
+    expect(createdBody).not.toContain("raw_body");
     expect(JSON.stringify(await missing.json())).not.toContain("headers_json");
   });
 

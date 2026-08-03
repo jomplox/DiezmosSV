@@ -230,7 +230,14 @@ export async function getWompiIssuanceFailureById(
   wompiEventId: string
 ): Promise<WompiIssuanceFailureItem | null> {
   return db
-    .prepare(`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS} FROM wompi_events WHERE id = ?`)
+    .prepare(
+`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}
+       FROM wompi_events
+      WHERE id = ?
+        AND created_document_id IS NULL
+        AND issuance_error_message IS NOT NULL
+        AND issuance_status IN ('FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'PROCESSING')`
+    )
     .bind(wompiEventId)
     .first<WompiIssuanceFailureItem>();
 }

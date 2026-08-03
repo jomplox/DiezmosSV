@@ -1719,6 +1719,14 @@ export class Statement {
         this.db.wompiEvents.find((row) => row.id === this.args[0])
       );
       if (!event) return null;
+      if (
+        this.sql.includes("issuance_error_message IS NOT NULL") &&
+        (event.created_document_id != null ||
+          event.issuance_error_message == null ||
+          !["FAILED", "DEAD_LETTERED", "RETRY_QUEUED", "PROCESSING"].includes(String(event.issuance_status)))
+      ) {
+        return null;
+      }
       const failure = wompiIssuanceFailureProjection(event);
       if (this.sql.includes("issuance_attempt_id, issuance_claim_id")) {
         failure.issuance_attempt_id = event.issuance_attempt_id ?? null;
