@@ -551,13 +551,19 @@ export function DonarPage() {
         // that has not been fetched yet paints an empty box and reflows when it lands;
         // decoding first means the swap is a single already-painted frame. A decode
         // failure just falls through and keeps the vector.
+        let decodedLogo: { src: string; name: string } | null = null;
         if (src) {
           const image = new Image();
           image.src = src;
-          await image.decode().catch(() => {});
-          if (cancelled) return;
+          try {
+            await image.decode();
+            decodedLogo = { src, name: branding.displayName };
+          } catch {
+            decodedLogo = null;
+          }
         }
-        setBrandingLogo(src ? { src, name: branding.displayName } : null);
+        if (cancelled) return;
+        setBrandingLogo(decodedLogo);
         setSupportEmail(branding.supportEmail);
       })
       .catch(() => {
