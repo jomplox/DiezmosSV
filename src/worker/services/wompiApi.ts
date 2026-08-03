@@ -1,5 +1,5 @@
 import { CHECKOUT_WINDOW_MINUTES } from "../../shared/checkout";
-import { isMockMode, requireSecret } from "../config";
+import { getEmisorConfig, isMockMode, requireSecret } from "../config";
 import { Repository } from "../storage/repository";
 import type { DonationIntentRecord, Env, WompiPaymentLink } from "../types";
 import { addHours, addMinutes, nowIso } from "../utils/dates";
@@ -79,6 +79,11 @@ export class WompiApiService {
         urlEnlaceLargo: `https://mock.wompi.sv/enlace-largo/${intent.id}`
       };
     }
+
+    // A real link can accept an irreversible entrega before the asynchronous CDE
+    // pipeline runs. Validate the issuer now so configuration errors fail before
+    // Wompi receives a link request rather than after the donor has completed it.
+    getEmisorConfig(this.env);
 
     const start = nowIso();
     const body = {

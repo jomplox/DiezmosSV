@@ -228,6 +228,19 @@ describe("Wompi API service", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["missing", undefined],
+    ["invalid", "not-json"]
+  ])("rejects %s issuer configuration before contacting Wompi", async (_label, config) => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const env = realEnv();
+    env.EMISOR_CONFIG_JSON = config;
+
+    await expect(new WompiApiService(env).createPaymentLink(intent())).rejects.toThrow(/EMISOR_CONFIG_JSON/);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("throws a typed error with the response text on a non-2xx link response", async () => {
     const fetchMock = vi
       .fn()
