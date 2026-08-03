@@ -4863,6 +4863,9 @@ input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-
 .analytics-heatmap {
   border-collapse: collapse;
   font-size: 11px;
+}
+
+.analytics-heatmap {
   /* La tabla llena la tarjeta ancha con layout FIJO: la columna de etiquetas queda
      angosta (ver :first-child) y las 24 columnas de hora se reparten el resto por
      igual — con layout auto, la columna de etiquetas absorbía todo el sobrante. */
