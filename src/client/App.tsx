@@ -1147,6 +1147,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       if (action === "invalidate") setPendingInvalidationId(null);
       if (action !== "resend") {
         await refresh();
+        setSelectedDocumentDetailVersion((current) => current + 1);
       }
     });
     if (action === "resend") {
