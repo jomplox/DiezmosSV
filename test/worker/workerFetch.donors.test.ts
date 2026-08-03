@@ -183,6 +183,37 @@ describe("GET /api/donors", () => {
 });
 
 describe("GET /api/exports/donors.csv", () => {
+  it("rejects exports above the bounded row limit before collecting additional pages", async () => {
+    const database = migratedDatabase();
+    for (let index = 0; index <= 1000; index += 1) {
+      seedAcceptedDonor(database, {
+        id: `donor-${index}`,
+        name: `Donante ${index}`,
+        email: `donor-${index}@example.org`,
+        documentNumber: String(100000000 + index),
+        issuedAt: new Date(Date.UTC(2026, 6, 1, 18, 0, index)).toISOString()
+      });
+    }
+    await seedSession(database, { id: "admin", role: "ADMIN", token: "admin-token" });
+    const workerEnv = { ...env(new InMemoryD1()), DB: sqliteD1(database) };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/exports/donors.csv?environment=00", {
+        headers: { Authorization: "Bearer admin-token" }
+      }),
+      workerEnv
+    );
+
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toEqual({
+      error: "donor_export_too_large",
+      message: "La exportación supera el límite de 1000 donantes. Aplique filtros adicionales."
+    });
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM audit_logs WHERE action = 'DONORS_EXPORTED'"
+    ).get()).toEqual({ count: 0 });
+  });
+
   it("downloads every filtered donor row and records a PII-free audit", async () => {
     const database = migratedDatabase();
     seedAcceptedDonor(database);
