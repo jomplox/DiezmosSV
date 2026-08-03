@@ -33,6 +33,32 @@ describe("donor explorer CSV", () => {
     );
   });
 
+  it("neutralizes formulas prefixed by a line feed", () => {
+    const donor: DonorExplorerRow = {
+      key: "document:13:100000001",
+      documentType: "13",
+      documentNumber: "\n=HYPERLINK(\"https://attacker.example\",\"click\")",
+      name: "Ana",
+      email: null,
+      phone: null,
+      department: "06",
+      municipality: "23",
+      district: "01",
+      address: null,
+      country: "SV",
+      firstGiftAt: "2026-07-01T18:00:00.000Z",
+      lastGiftAt: "2026-07-02T19:30:00.000Z",
+      giftCount: 2,
+      totalCents: 2500,
+      preferredGiftType: "DIEZMO",
+      source: "WOMPI"
+    };
+
+    expect(buildDonorExplorerCsv([donor])).toContain(
+      `DUI,"'\n=HYPERLINK(""https://attacker.example"",""click"")",Ana`
+    );
+  });
+
   it("uses an environment-and-count filename that is safe for Content-Disposition", () => {
     expect(donorExplorerCsvFilename("00", 42)).toBe("donantes-00-42.csv");
   });
