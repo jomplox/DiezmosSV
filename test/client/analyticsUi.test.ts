@@ -95,6 +95,16 @@ describe("Analítica view contract (usted-form Spanish, Wompi lane)", () => {
 });
 
 describe("Analítica styles", () => {
+  it("limits the fixed table layout to the heatmap", () => {
+    const sharedTableRule = stylesSource.match(/\.analytics-cohort,\s*\.analytics-heatmap\s*\{([^}]*)\}/)?.[1] ?? "";
+    const heatmapRule = stylesSource.match(/}\s*\.analytics-heatmap\s*\{([^}]*)\}/)?.[1] ?? "";
+
+    expect(sharedTableRule).not.toContain("table-layout: fixed");
+    expect(sharedTableRule).not.toContain("width: 100%");
+    expect(heatmapRule).toContain("table-layout: fixed");
+    expect(heatmapRule).toContain("width: 100%");
+  });
+
   it("themes the charts with existing variables and defines the grid", () => {
     expect(stylesSource).toContain(".analytics-view");
     expect(stylesSource).toContain(".analytics-line");
