@@ -168,7 +168,7 @@ Expected: all tests in `test/worker/pdf.test.ts` pass.
 ### Task 2: Visual and repository verification
 
 **Files:**
-- Review: generated temporary PDF and PNG under `tmp/pdfs/`
+- Review: generated temporary PDF and PNG in approved out-of-tree private storage
 - Review: repository working-tree delta
 
 **Interfaces:**
@@ -177,16 +177,23 @@ Expected: all tests in `test/worker/pdf.test.ts` pass.
 
 - [x] **Step 1: Generate and render a representative PDF**
 
-Run the PDF suite to generate its temporary `cde.pdf`, copy the newest fixture into `tmp/pdfs/`, and render page 1:
+Create an isolated review directory in the approved private-artifact root, run the relevant
+test with that directory as its temporary root, and render its explicitly scoped PDF. The
+restrictive umask applies to both the test output and rendered image:
 
 ```bash
-rtk mkdir -p tmp/pdfs
-latest_pdf=$(ls -t /tmp/diezmos-pdf-*/cde.pdf | head -1)
-rtk cp "$latest_pdf" tmp/pdfs/dte-party-uppercase.pdf
-rtk pdftoppm -f 1 -singlefile -png tmp/pdfs/dte-party-uppercase.pdf tmp/pdfs/dte-party-uppercase
+private_root="${HOME}/Library/Application Support/DiezmosSV/private"
+umask 077
+review_dir=$(mktemp -d "${private_root}/dte/reference/pdf-review.XXXXXX")
+TMPDIR="$review_dir" rtk npx vitest run test/worker/pdf.test.ts -t "uppercases party values"
+pdf_path=$(find "$review_dir" -type f -name cde.pdf -print -quit)
+test -n "$pdf_path"
+rtk pdftoppm -f 1 -singlefile -png "$pdf_path" "$review_dir/dte-party-uppercase"
 ```
 
-Inspect `tmp/pdfs/dte-party-uppercase.png` and require: no `(0002)`, no clipping or overlap, readable uppercase address wrapping, and unchanged email presentation.
+Inspect `$review_dir/dte-party-uppercase.png` and require: no `(0002)`, no clipping or overlap,
+readable uppercase address wrapping, and unchanged email presentation. Remove `$review_dir`
+after inspection according to the retention guidance in `docs/local-private-artifacts.md`.
 
 - [x] **Step 2: Run full verification**
 
