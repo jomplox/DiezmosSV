@@ -1464,8 +1464,32 @@ async function handleDocumentReissue(ctx: ApiRouteContext): Promise<Response> {
 }
 
 async function handleDocumentList(ctx: ApiRouteContext): Promise<Response> {
+  const statusParam = ctx.url.searchParams.get("status");
+  const allowedStatuses = new Set([
+    "PENDING",
+    "SIGNED",
+    "TRANSMITTED",
+    "ACCEPTED",
+    "REJECTED",
+    "FAILED",
+    "CONTINGENCY_PENDING",
+    "TRANSMISSION_PENDING"
+  ]);
+  const statuses = statusParam?.length && statusParam.length <= 160
+    ? statusParam.split(",").map((status) => status.trim()).filter(Boolean)
+    : [];
+  if (
+    statusParam !== null &&
+    (statuses.length === 0 || statuses.length > allowedStatuses.size || statuses.some((status) => !allowedStatuses.has(status)))
+  ) {
+    return jsonResponse(
+      { error: "invalid_document_status", message: "Seleccione uno o más estados de documento válidos." },
+      { status: 400 }
+    );
+  }
+
   return jsonResponse(await ctx.repo.listDteDocuments({
-    status: ctx.url.searchParams.get("status"),
+    status: statuses.length ? [...new Set(statuses)].join(",") : null,
     attention: ctx.url.searchParams.get("attention") === "failures" ? "failures" : null,
     q: ctx.url.searchParams.get("q"),
     cursor: ctx.url.searchParams.get("cursor"),

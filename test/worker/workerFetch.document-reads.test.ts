@@ -9,6 +9,23 @@ import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 installWorkerFetchGlobals();
 
 describe("document listing", () => {
+  it("rejects unbounded or unknown document status filters", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    const request = (status: string) => worker.fetch(
+      new Request(`https://example.org/api/documents?status=${status}`, {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    for (const status of ["UNKNOWN", Array.from({ length: 150 }, () => "FAILED").join(",")]) {
+      const response = await request(status);
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: "invalid_document_status" });
+    }
+  });
+
   it("returns a bounded page with a cursor for older matching documents", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
