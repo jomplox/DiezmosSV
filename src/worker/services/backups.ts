@@ -1,4 +1,4 @@
-import { Repository } from "../storage/repository";
+import { Repository, RETENTION_SNAPSHOT_TABLES, RETENTION_WINDOWED_TABLES } from "../storage/repository";
 import type { AuthUser } from "./auth";
 import type { Env } from "../types";
 import { sha256Hex } from "../utils/encoding";
@@ -49,6 +49,22 @@ interface BackupVerifyFile {
 export interface BackupVerifyResult {
   ok: boolean;
   files: BackupVerifyFile[];
+}
+
+const RETENTION_DOWNLOAD_TABLES = new Set<string>([
+  ...RETENTION_WINDOWED_TABLES,
+  ...RETENTION_SNAPSHOT_TABLES
+]);
+
+export async function isManifestedBackupTable(env: Env, month: string, table: string): Promise<boolean> {
+  if (!RETENTION_DOWNLOAD_TABLES.has(table)) {
+    return false;
+  }
+  const manifest = await getManifest(env, month);
+  return manifest !== null
+    && typeof manifest.tables === "object"
+    && manifest.tables !== null
+    && Object.hasOwn(manifest.tables, table);
 }
 
 // Ground truth is the set of manifests in R2, never the audit log. A month is
