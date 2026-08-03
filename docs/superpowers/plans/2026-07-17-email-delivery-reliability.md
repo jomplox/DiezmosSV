@@ -26,6 +26,8 @@ Vitest 4, Wrangler 4, Vite 8.
   synthetic smoke recipients.
 - Treat `X-Idempotency-Key` as correlation only.
 - Never auto-retry an ambiguous or post-dispatch delivery outcome.
+- Never print donor PII in command output or execution transcripts; use document
+  IDs, redacted identifier suffixes, and boolean precondition checks.
 - Use no new dependency.
 - Write and observe each focused test failing before changing production code.
 - Preserve unrelated user work and keep edits limited to this design.
@@ -75,13 +77,18 @@ WITH latest AS (
    WHERE e.email_type IN ('dteReceipt', 'dteReceiptTransitorio')
 )
 SELECT d.id,
-       d.codigo_generacion,
-       d.numero_control,
-       d.donor_name,
-       d.donor_email,
+       '...' || substr(d.codigo_generacion, -6) AS codigo_suffix,
+       '...' || substr(d.numero_control, -6) AS control_suffix,
        l.id AS delivery_id,
        l.status,
-       l.provider_response_json,
+       COALESCE(l.provider_response_json LIKE
+         '%custom header ''Idempotency-Key'' is not allowed%',
+       0) AS has_expected_rejection,
+       COALESCE(lower(l.provider_response_json) LIKE '%timeout%'
+         OR lower(l.provider_response_json) LIKE '%abort%'
+         OR lower(l.provider_response_json) LIKE '%internal error%'
+         OR lower(l.provider_response_json) LIKE '%unknown outcome%',
+       0) AS has_ambiguous_outcome,
        EXISTS (
          SELECT 1
            FROM audit_logs a
@@ -116,8 +123,8 @@ For each proposed non-smoke row, verify all of:
 status = FAILED
 is_smoke = 0
 later_sent = 0
-provider_response_json contains the exact disallowed Idempotency-Key rejection
-provider_response_json contains no timeout, abort, internal error, or unknown outcome
+has_expected_rejection = 1
+has_ambiguous_outcome = 0
 ```
 
 Expected: exactly three rows qualify. Any different count or evidence stops the
@@ -125,15 +132,16 @@ recovery task without sending.
 
 - [ ] **Step 4: Resend once per qualifying document**
 
-Use the authenticated staging admin detail pane. Open each qualifying CDE, confirm
-its displayed recipient matches D1, and click `Reenviar correo` exactly once. Do
-not click fiscal `Reintentar`.
+Use the authenticated staging admin detail pane. Open each qualifying CDE by its
+document ID, confirm its displayed recipient against the separately authorized
+recovery list without copying the recipient into command output or notes, and click
+`Reenviar correo` exactly once. Do not click fiscal `Reintentar`.
 
 Expected: one success toast per document and no repeated click.
 
 - [ ] **Step 5: Prove each recovery and absence of duplicates**
 
-Run the query from Step 2 again, plus:
+Run the PII-safe query from Step 2 again, plus:
 
 ```bash
 rtk npx wrangler d1 execute diezmossv-staging-example --env staging --remote --command "
