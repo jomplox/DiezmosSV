@@ -3,7 +3,8 @@ import { inflateSync } from "node:zlib";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { PDFDocument, PDFPage } from "pdf-lib";
+import { describe, expect, it, vi } from "vitest";
 import { makeDocument } from "./fixtures";
 import {
   aggregateAnnualDonors,
@@ -188,6 +189,41 @@ describe("renderCertificatePdf", () => {
 
     expect(text).toContain("AMBIENTE DE PRUEBAS");
     expect(text).toContain("SIN VALIDEZ FISCAL");
+  });
+
+  it("paginates high-frequency donors without losing rows, the total, or issue date", async () => {
+    const donations = Array.from({ length: 40 }, (_, index) => ({
+      issuedAt: `2025-01-${String((index % 28) + 1).padStart(2, "0")}T16:00:00.000Z`,
+      dateLabel: `${String((index % 28) + 1).padStart(2, "0")}/01/2025`,
+      numeroControl: `DTE-15-${String(index + 1).padStart(4, "0")}`,
+      amountCents: 100
+    }));
+    const drawnText: Array<{ text: string; y: number }> = [];
+    const originalDrawText = PDFPage.prototype.drawText;
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText").mockImplementation(function (this: PDFPage, text, options) {
+      drawnText.push({ text, y: options?.y ?? 0 });
+      return originalDrawText.call(this, text, options);
+    });
+    let pdf: Uint8Array;
+    try {
+      pdf = await renderCertificatePdf({
+        year: 2025,
+        donor: { ...summary(), count: donations.length, totalCents: 4000, donations },
+        emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+        issuedOnLabel: "05/07/2026"
+      });
+    } finally {
+      drawText.mockRestore();
+    }
+
+    const document = await PDFDocument.load(pdf);
+    expect(document.getPageCount()).toBeGreaterThan(1);
+    for (const donation of donations) {
+      expect(drawnText.some(({ text }) => text === donation.numeroControl)).toBe(true);
+    }
+    expect(drawnText.find(({ text }) => text === "Total (40 donaciones)")?.y).toBeGreaterThan(90);
+    expect(drawnText.find(({ text }) => text === "$40.00")?.y).toBeGreaterThan(90);
+    expect(drawnText.find(({ text }) => text === "Fecha de emisión de la constancia: 05/07/2026")?.y).toBeGreaterThan(90);
   });
 });
 
