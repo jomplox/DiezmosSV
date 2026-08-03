@@ -1,11 +1,25 @@
 import { describe, expect, it } from "vitest";
 import {
   DUPLICATE_WOMPI_EVENT_IDS_QUERY,
+  DTE_DOCUMENTS_TABLE_QUERY,
   assertNoDuplicateWompiEventIds,
+  hasDteDocumentsTable,
   parseDuplicateWompiEventIds
 } from "../../scripts/d1-migration-preflight.mjs";
 
 describe("D1 migration preflight", () => {
+  it("can identify a fresh database before querying dte_documents", () => {
+    expect(DTE_DOCUMENTS_TABLE_QUERY).toContain("sqlite_schema");
+    expect(
+      hasDteDocumentsTable(JSON.stringify([{ results: [], success: true }]))
+    ).toBe(false);
+    expect(
+      hasDteDocumentsTable(
+        JSON.stringify([{ results: [{ name: "dte_documents" }], success: true }])
+      )
+    ).toBe(true);
+  });
+
   it("queries only duplicate non-null legal Wompi document links", () => {
     expect(DUPLICATE_WOMPI_EVENT_IDS_QUERY).toContain("FROM dte_documents");
     expect(DUPLICATE_WOMPI_EVENT_IDS_QUERY).toContain("wompi_event_id IS NOT NULL");
