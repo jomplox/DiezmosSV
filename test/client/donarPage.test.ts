@@ -714,7 +714,7 @@ describe("donor cold-load paints once", () => {
   // logo (a real network image), and the support line changed. Two visible reflows
   // on every cold load. The gate must also wait for branding to settle.
   it("waits for branding, not just fonts, before revealing the donor page", () => {
-    expect(mainSource).toContain("document.fonts.ready");
+    expect(mainSource).toContain("document.fonts?.ready");
     expect(mainSource).toContain("donorBrandingSettled");
   });
 
@@ -722,6 +722,13 @@ describe("donor cold-load paints once", () => {
   // so the reveal carries its own budget and fires regardless.
   it("reveals within a bounded budget even if branding never settles", () => {
     expect(mainSource).toContain("DONOR_REVEAL_BUDGET_MS");
+  });
+
+  // Some embedded browsers do not expose the Font Loading API, and a font load can
+  // remain pending indefinitely. Neither case may leave the public root hidden.
+  it("reveals without the Font Loading API and bounds stalled font loading", () => {
+    expect(mainSource).toContain("document.fonts?.ready");
+    expect(mainSource).toContain("const fontsGate = Promise.race");
   });
 
   // /donar/gracias renders no branded logo and never signals branding, so gating it on

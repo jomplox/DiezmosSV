@@ -169,7 +169,7 @@ describe("static bootstrap shell", () => {
     expect(stylesSource).toMatch(
       /html\[data-bootstrap-route="donor"\]\[data-donor-ready\]\s+#root\s*\{\s*visibility:\s*visible;/
     );
-    expect(mainSource).toContain("document.fonts.ready");
+    expect(mainSource).toContain("document.fonts?.ready");
     expect(mainSource).toContain('setAttribute("data-donor-ready", "")');
   });
 
