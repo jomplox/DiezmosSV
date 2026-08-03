@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { rejectionDetailForDocument } from "../../src/client/rejectionDetail";
 
@@ -9,6 +11,17 @@ const rejected = (overrides: Partial<{ status: string; mh_observaciones_json: st
 });
 
 describe("rejectionDetailForDocument", () => {
+  it("reloads audit evidence after a same-document mutation", () => {
+    const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+    const actionBlock = appSource.match(
+      /async function documentAction[\s\S]*?\n  async function saveDocumentEmail/
+    )?.[0] ?? "";
+
+    expect(actionBlock).toMatch(
+      /await refresh\(\);\s*setSelectedDocumentDetailVersion\(\(current\) => current \+ 1\);/
+    );
+  });
+
   it("keeps direct observations and removes duplicates", () => {
     const detail = rejectionDetailForDocument(
       rejected({ mh_observaciones_json: JSON.stringify(["Documento inválido", "Documento inválido", "Receptor incompleto"]) }),
