@@ -80,7 +80,7 @@ function sourceLabel(value: DonorExplorerRow["source"]): string {
 }
 
 function csvField(value: string): string {
-  const safeValue = /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+  const safeValue = /^[=+\-@\t\r\n]/.test(value) ? `'${value}` : value;
   return /[",\r\n]/.test(safeValue)
     ? `"${safeValue.replace(/"/g, '""')}"`
     : safeValue;
