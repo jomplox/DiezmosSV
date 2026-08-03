@@ -744,6 +744,12 @@ describe("donor cold-load paints once", () => {
     expect(donarSource).toContain("decode()");
     expect(donarSource).toContain("markDonorBrandingSettled");
   });
+
+  it("keeps the built-in vector when the branded donor logo cannot be decoded", () => {
+    expect(donarSource).not.toContain("await image.decode().catch(() => {})");
+    expect(donarSource).toMatch(/catch \{\s+decodedLogo = null;/);
+    expect(donarSource).toContain("setBrandingLogo(decodedLogo)");
+  });
 });
 
 describe("donar wizard source contract", () => {
