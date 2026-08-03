@@ -231,15 +231,18 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   );
   y -= 34;
 
-  y = drawTable(page, input.donor, regular, bold, y, brand);
+  const tableEnd = drawTable(pdf, page, input, regular, bold, y, brand);
+  y = tableEnd.y;
 
   y -= 26;
-  page.drawText(
+  tableEnd.page.drawText(
     `Fecha de emisión de la constancia: ${input.issuedOnLabel}`,
     { x: MARGIN, y, size: 9, font: regular, color: muted }
   );
 
-  drawFooter(page, input.emisor.nombre, regular);
+  for (const certificatePage of pdf.getPages()) {
+    drawFooter(certificatePage, input.emisor.nombre, regular);
+  }
   return pdf.save();
 }
 
@@ -273,22 +276,47 @@ export async function renderCertificateDossierPdf(input: RenderCertificateInput)
   return dossier.save();
 }
 
-function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFont, bold: PDFFont, top: number, accent = rgb(0.06, 0.46, 0.43)): number {
+function drawTable(
+  pdf: PDFDocument,
+  firstPage: PDFPage,
+  input: RenderCertificateInput,
+  regular: PDFFont,
+  bold: PDFFont,
+  top: number,
+  accent = rgb(0.06, 0.46, 0.43)
+): { page: PDFPage; y: number } {
   const black = rgb(0, 0, 0);
   const headerFill = accent;
   const rowHeight = 18;
+  const contentBottom = 90;
   const left = MARGIN;
   const right = PAGE_WIDTH - MARGIN;
   const controlX = left + 90;
   const amountRightX = right - 6;
 
-  page.drawRectangle({ x: left, y: top - rowHeight + 4, width: right - left, height: rowHeight, color: headerFill });
-  page.drawText("Fecha", { x: left + 6, y: top - rowHeight + 9, size: 8.5, font: bold, color: rgb(1, 1, 1) });
-  page.drawText("Número de control", { x: controlX, y: top - rowHeight + 9, size: 8.5, font: bold, color: rgb(1, 1, 1) });
-  drawRightAligned(page, "Monto (US$)", top - rowHeight + 9, 8.5, bold, amountRightX, rgb(1, 1, 1));
+  const drawHeader = (page: PDFPage, headerTop: number): number => {
+    page.drawRectangle({ x: left, y: headerTop - rowHeight + 4, width: right - left, height: rowHeight, color: headerFill });
+    page.drawText("Fecha", { x: left + 6, y: headerTop - rowHeight + 9, size: 8.5, font: bold, color: rgb(1, 1, 1) });
+    page.drawText("Número de control", { x: controlX, y: headerTop - rowHeight + 9, size: 8.5, font: bold, color: rgb(1, 1, 1) });
+    drawRightAligned(page, "Monto (US$)", headerTop - rowHeight + 9, 8.5, bold, amountRightX, rgb(1, 1, 1));
+    return headerTop - rowHeight;
+  };
 
-  let y = top - rowHeight;
-  for (const donation of donor.donations) {
+  const addContinuationPage = (): { page: PDFPage; y: number } => {
+    const page = pdf.addPage([PAGE_WIDTH, 792]);
+    drawCentered(page, `Constancia de Donaciones ${input.year} — continuación`, 724, 13, bold, 0, PAGE_WIDTH, accent);
+    if (input.donor.hasTestEnvironment) {
+      drawTestEnvironmentBanner(page, bold);
+    }
+    return { page, y: drawHeader(page, input.donor.hasTestEnvironment ? 628 : 682) };
+  };
+
+  let page = firstPage;
+  let y = drawHeader(page, top);
+  for (const donation of input.donor.donations) {
+    if (y - rowHeight < contentBottom) {
+      ({ page, y } = addContinuationPage());
+    }
     y -= rowHeight;
     page.drawText(donation.dateLabel, { x: left + 6, y: y + 5, size: 8.5, font: regular, color: black });
     page.drawText(donation.numeroControl, { x: controlX, y: y + 5, size: 8.5, font: regular, color: black });
@@ -296,11 +324,16 @@ function drawTable(page: PDFPage, donor: DonorCertificateSummary, regular: PDFFo
     page.drawLine({ start: { x: left, y: y + 2 }, end: { x: right, y: y + 2 }, thickness: 0.4, color: rgb(0.82, 0.82, 0.82) });
   }
 
+  // Keep the total and issue date together above the footer. If the final row used
+  // that reserved space, move both closing lines to a fresh continuation page.
+  if (y - rowHeight - 26 < contentBottom) {
+    ({ page, y } = addContinuationPage());
+  }
   y -= rowHeight;
   page.drawRectangle({ x: left, y: y + 4, width: right - left, height: rowHeight, color: rgb(0.93, 0.95, 0.95) });
-  page.drawText(`Total (${donor.count} ${donor.count === 1 ? "donación" : "donaciones"})`, { x: left + 6, y: y + 9, size: 9, font: bold, color: black });
-  drawRightAligned(page, formatCents(donor.totalCents), y + 9, 9.5, bold, amountRightX, black);
-  return y;
+  page.drawText(`Total (${input.donor.count} ${input.donor.count === 1 ? "donación" : "donaciones"})`, { x: left + 6, y: y + 9, size: 9, font: bold, color: black });
+  drawRightAligned(page, formatCents(input.donor.totalCents), y + 9, 9.5, bold, amountRightX, black);
+  return { page, y };
 }
 
 function drawTestEnvironmentBanner(page: PDFPage, bold: PDFFont): void {
