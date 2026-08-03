@@ -41,6 +41,10 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain("certificates-send-");
   });
 
+  it("disables the bulk send while a per-row send is in progress", () => {
+    expect(appSource).toContain('className="primary" disabled={anySending || withEmail === 0}');
+  });
+
   it("offers a debounced donor/email search that re-fetches the capped preview", () => {
     // Search input with the usted-form placeholder.
     expect(appSource).toContain('placeholder="Buscar donante o correo"');
