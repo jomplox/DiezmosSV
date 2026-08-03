@@ -1597,6 +1597,8 @@ async function handleDonorList(ctx: ApiRouteContext): Promise<Response> {
   }));
 }
 
+const DONOR_EXPORT_MAX_ROWS = 1000;
+
 async function handleDonorExport(ctx: ApiRouteContext): Promise<Response> {
   const parsed = parseDonorFilterValues(ctx.url);
   if (!parsed.ok) return parsed.response;
@@ -1609,6 +1611,15 @@ async function handleDonorExport(ctx: ApiRouteContext): Promise<Response> {
       limit: 100,
       offset
     });
+    if (page.total > DONOR_EXPORT_MAX_ROWS) {
+      return jsonResponse(
+        {
+          error: "donor_export_too_large",
+          message: `La exportación supera el límite de ${DONOR_EXPORT_MAX_ROWS} donantes. Aplique filtros adicionales.`
+        },
+        { status: 413 }
+      );
+    }
     donors.push(...page.donors);
     if (!page.hasMore || page.donors.length === 0) break;
     offset += page.donors.length;
