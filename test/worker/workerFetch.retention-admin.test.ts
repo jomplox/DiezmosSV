@@ -269,6 +269,24 @@ describe("admin backups panel", () => {
     );
   });
 
+  it("does not download an archive object omitted from the month manifest", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const archive = new FakeArchiveBucket();
+    await seedManifest(archive, "2026-04", { dte_documents: { rowCount: 1, body: "manifested\n" } });
+    await archive.put("retention/2026/2026-04/debug_dump.ndjson", "sensitive unmanifested data\n");
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/admin/backups/2026-04/download?table=debug_dump", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, { ARCHIVE: archive as unknown as R2Bucket })
+    );
+
+    expect(response.status).toBe(404);
+    expect(db.audits).not.toContainEqual(expect.objectContaining({ action: "RETENTION_DOWNLOADED" }));
+  });
+
   it("returns 404 when downloading an object that is not in the archive", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };

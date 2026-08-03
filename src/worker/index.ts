@@ -71,7 +71,7 @@ import { IssuancePipeline } from "./services/pipeline";
 import { renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
-import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, isManifestedBackupTable, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
 import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
@@ -1685,6 +1685,9 @@ async function handleBackupDownload(ctx: ApiRouteContext): Promise<Response> {
   const table = ctx.url.searchParams.get("table");
   if (!table || !/^[a-z_]+$|^manifest$/.test(table)) {
     return jsonResponse({ error: "invalid_backup_table", message: "Indique una tabla válida o 'manifest'." }, { status: 400 });
+  }
+  if (table !== "manifest" && !await isManifestedBackupTable(ctx.env, month, table)) {
+    return notFound();
   }
   const key = table === "manifest" ? retentionManifestKey(month) : retentionTableKey(month, table);
   const object = await ctx.env.ARCHIVE.get(key);
