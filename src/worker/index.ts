@@ -1828,8 +1828,11 @@ async function handleContactsExport(ctx: ApiRouteContext): Promise<Response> {
   const toParam = ctx.url.searchParams.get("to");
   let window: { startIso: string; endIso: string } | undefined;
   if (fromParam || toParam) {
-    const isDate = (value: string | null): value is string =>
-      !!value && /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(Date.parse(`${value}T00:00:00Z`));
+    const isDate = (value: string | null): value is string => {
+      if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+      const timestamp = Date.parse(`${value}T00:00:00Z`);
+      return Number.isFinite(timestamp) && new Date(timestamp).toISOString().slice(0, 10) === value;
+    };
     if (!isDate(fromParam) || !isDate(toParam) || fromParam > toParam) {
       return jsonResponse(
         { error: "invalid_export_range", message: "Use el formato YYYY-MM-DD y verifique que 'desde' no sea posterior a 'hasta'." },

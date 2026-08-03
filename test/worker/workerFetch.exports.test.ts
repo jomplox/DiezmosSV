@@ -409,5 +409,17 @@ describe("CRM contacts export", () => {
       env(db)
     );
     expect(malformed.status).toBe(400);
+
+    for (const impossibleDate of ["2025-02-29", "2025-02-31", "2025-04-31"]) {
+      const impossible = await worker.fetch(
+        new Request(
+          `https://example.org/api/exports/contacts?environment=01&from=${impossibleDate}&to=${impossibleDate}`,
+          { headers: { Authorization: "Bearer test-token" } }
+        ),
+        env(db)
+      );
+      expect(impossible.status, impossibleDate).toBe(400);
+      await expect(impossible.json()).resolves.toMatchObject({ error: "invalid_export_range" });
+    }
   });
 });
