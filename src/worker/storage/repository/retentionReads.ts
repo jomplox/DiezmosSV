@@ -244,16 +244,25 @@ export async function countAuditEntriesSince(
     .prepare(
       `WITH episode_audits AS (
          SELECT created_at,
-                CASE WHEN json_valid(metadata_json) THEN
-                  CASE WHEN json_type(metadata_json, '$.stalledRequeueEpochAt') = 'text'
-                    THEN NULLIF(json_extract(metadata_json, '$.stalledRequeueEpochAt'), '')
+                (
+                  SELECT CASE WHEN episode_member.type = 'text'
+                    THEN NULLIF(episode_member.value, '')
                     ELSE NULL
                   END
-                ELSE NULL
-                END AS episode_id
-           FROM audit_logs
-          WHERE action = ?
-            AND entity_id = ?
+                    FROM json_each(
+                      CASE WHEN json_valid(candidate_audit.metadata_json)
+                        THEN candidate_audit.metadata_json
+                        ELSE '{}'
+                      END
+                    ) AS episode_member
+                   WHERE episode_member.parent IS NULL
+                     AND episode_member.key = 'stalledRequeueEpochAt'
+                   ORDER BY episode_member.id DESC
+                   LIMIT 1
+                ) AS episode_id
+           FROM audit_logs AS candidate_audit
+          WHERE candidate_audit.action = ?
+            AND candidate_audit.entity_id = ?
        )
        SELECT COUNT(*) AS count
          FROM episode_audits

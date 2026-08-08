@@ -791,6 +791,150 @@ describe("Wompi issuance reservation migration", () => {
     }
   });
 
+  const duplicateEpisodeId = "2026-07-14T10:00:00.001Z";
+  const duplicateEpisodeFixtures = [
+    {
+      id: "string-then-current",
+      metadata: `{"stalledRequeueEpochAt":"prior","stalledRequeueEpochAt":"${duplicateEpisodeId}"}`,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      expectedCount: 1,
+      expectedStalledTotal: 1
+    },
+    {
+      id: "current-then-string",
+      metadata: `{"stalledRequeueEpochAt":"${duplicateEpisodeId}","stalledRequeueEpochAt":"prior"}`,
+      createdAt: "2026-07-14T10:00:00.002Z",
+      expectedCount: 0,
+      expectedStalledTotal: 2
+    },
+    {
+      id: "string-then-number",
+      metadata: `{"stalledRequeueEpochAt":"${duplicateEpisodeId}","stalledRequeueEpochAt":7}`,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      expectedCount: 0,
+      expectedStalledTotal: 2
+    },
+    {
+      id: "string-then-null",
+      metadata: `{"stalledRequeueEpochAt":"${duplicateEpisodeId}","stalledRequeueEpochAt":null}`,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      expectedCount: 0,
+      expectedStalledTotal: 2
+    },
+    {
+      id: "string-then-empty",
+      metadata: `{"stalledRequeueEpochAt":"${duplicateEpisodeId}","stalledRequeueEpochAt":""}`,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      expectedCount: 0,
+      expectedStalledTotal: 2
+    },
+    {
+      id: "escaped-current-last",
+      metadata: `{"stalledRequeueEpochAt":"prior","stalled\\u0052equeueEpochAt":"${duplicateEpisodeId}"}`,
+      createdAt: "2026-07-14T10:00:00.000Z",
+      expectedCount: 1,
+      expectedStalledTotal: 1
+    },
+    {
+      id: "nested-current-ignored",
+      metadata: `{"stalledRequeueEpochAt":"prior","nested":{"stalledRequeueEpochAt":"${duplicateEpisodeId}"}}`,
+      createdAt: "2026-07-14T10:00:00.002Z",
+      expectedCount: 0,
+      expectedStalledTotal: 2
+    }
+  ] as const;
+
+  it("uses the last decoded root duplicate key when counting in SQLite and memory", async () => {
+    const real = new Repository(sqliteD1(database));
+    const memoryDb = new InMemoryD1();
+    const memory = new Repository(memoryDb as unknown as D1Database);
+    const insert = database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary,
+         metadata_json, created_at
+       ) VALUES (?, 'SYSTEM', 'WOMPI_EVENT_REQUEUED', 'wompi_event', ?,
+         'duplicate episode key', ?, ?)`
+    );
+    for (const fixture of duplicateEpisodeFixtures) {
+      const audit = {
+        id: `audit_duplicate_count_${fixture.id}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_REQUEUED",
+        entity_type: "wompi_event",
+        entity_id: `wompi_duplicate_count_${fixture.id}`,
+        summary: "duplicate episode key",
+        metadata_json: fixture.metadata,
+        created_at: fixture.createdAt
+      };
+      insert.run(audit.id, audit.entity_id, audit.metadata_json, audit.created_at);
+      memoryDb.audits.push(audit);
+    }
+
+    for (const fixture of duplicateEpisodeFixtures) {
+      const entityId = `wompi_duplicate_count_${fixture.id}`;
+      await expect(real.countAuditEntriesSince(
+        "WOMPI_EVENT_REQUEUED",
+        entityId,
+        duplicateEpisodeId
+      ), `SQLite ${fixture.id}`).resolves.toBe(fixture.expectedCount);
+      await expect(memory.countAuditEntriesSince(
+        "WOMPI_EVENT_REQUEUED",
+        entityId,
+        duplicateEpisodeId
+      ), `memory ${fixture.id}`).resolves.toBe(fixture.expectedCount);
+    }
+  });
+
+  it("uses the last decoded root duplicate key for atomic stalled inserts in SQLite and memory", async () => {
+    const real = new Repository(sqliteD1(database));
+    const memoryDb = new InMemoryD1();
+    const memory = new Repository(memoryDb as unknown as D1Database);
+    const insert = database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary,
+         metadata_json, created_at
+       ) VALUES (?, 'SYSTEM', 'WOMPI_EVENT_STALLED', 'wompi_event', ?,
+         'duplicate episode key', ?, ?)`
+    );
+    for (const fixture of duplicateEpisodeFixtures) {
+      const audit = {
+        id: `audit_duplicate_stalled_${fixture.id}`,
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_STALLED",
+        entity_type: "wompi_event",
+        entity_id: `wompi_duplicate_stalled_${fixture.id}`,
+        summary: "duplicate episode key",
+        metadata_json: fixture.metadata,
+        created_at: fixture.createdAt
+      };
+      insert.run(audit.id, audit.entity_id, audit.metadata_json, audit.created_at);
+      memoryDb.audits.push(audit);
+      const current = {
+        action: "WOMPI_EVENT_STALLED",
+        entityType: "wompi_event",
+        entityId: audit.entity_id,
+        summary: "current episode",
+        metadata: { stalledRequeueEpochAt: duplicateEpisodeId }
+      };
+      await real.createAudit(current);
+      await memory.createAudit(current);
+    }
+
+    for (const fixture of duplicateEpisodeFixtures) {
+      const entityId = `wompi_duplicate_stalled_${fixture.id}`;
+      await expect(real.countAuditEntries(
+        "WOMPI_EVENT_STALLED",
+        entityId
+      ), `SQLite ${fixture.id}`).resolves.toBe(fixture.expectedStalledTotal);
+      await expect(memory.countAuditEntries(
+        "WOMPI_EVENT_STALLED",
+        entityId
+      ), `memory ${fixture.id}`).resolves.toBe(fixture.expectedStalledTotal);
+    }
+  });
+
   it("uses the same typed episode identity when atomically inserting stalled audits", async () => {
     const episodeId = "2026-07-14T10:00:00.001Z";
     const beforeBoundary = "2026-07-14T10:00:00.000Z";

@@ -1610,7 +1610,7 @@ export class Statement {
     }
     if (
       this.sql.includes("SELECT COUNT(*) AS count") &&
-      this.sql.includes("$.stalledRequeueEpochAt")
+      this.sql.includes("episode_member.key = 'stalledRequeueEpochAt'")
     ) {
       const [action, entityId, episodeId, exclusiveBoundary] = this.args.map(String);
       if (this.db.beforeAuditCount) {
@@ -2974,7 +2974,7 @@ export class Statement {
       }
     } else if (
       this.sql.includes("INSERT INTO audit_logs") &&
-      this.sql.includes("$.stalledRequeueEpochAt") &&
+      this.sql.includes("episode_member.key = 'stalledRequeueEpochAt'") &&
       this.sql.includes("WHERE NOT EXISTS")
     ) {
       const [
