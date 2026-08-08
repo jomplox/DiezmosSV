@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { AuthService, hashPassword } from "../../src/worker/services/auth";
+import { AuthService, hashForStorage, hashPassword } from "../../src/worker/services/auth";
 import { Repository } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
@@ -1052,10 +1052,8 @@ describe("credential-current session issuance", () => {
   it("does not issue or prune sessions when user is disabled after password verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
-    const passwordHash = `pbkdf2$100000$${stored.hash}`;
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
+    const passwordHash = stored.hash;
     db.users.push({
       id: "user_disabled_race",
       email: "disabled-race@example.org",
@@ -1097,9 +1095,7 @@ describe("credential-current session issuance", () => {
   it("does not issue a session when an email change wins after password verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_email_race",
       email: "before@example.org",
@@ -1128,9 +1124,7 @@ describe("credential-current session issuance", () => {
   it("does not issue a session after a disable and re-enable cycle completed post-verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_reenabled_race",
       email: "reenabled@example.org",
@@ -1159,9 +1153,7 @@ describe("credential-current session issuance", () => {
   it("keeps at most eight active session rows and evicts the oldest bearer", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_cap",
       email: "cap@example.org",
@@ -1198,15 +1190,13 @@ describe("credential-current session issuance", () => {
   it("keeps concurrent committed session rows at or below eight", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_concurrent_cap",
       email: "concurrent-cap@example.org",
       name: "Concurrent Cap",
       role: "VIEWER",
-      password_hash: `pbkdf2$100000$${stored.hash}`,
+      password_hash: stored.hash,
       password_salt: stored.salt,
       disabled_at: null
     });
