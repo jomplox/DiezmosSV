@@ -383,6 +383,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const certificateOperationClaimsRef = useRef(new Map<string, symbol>());
   const certificateSearchInputGenerationRef = useRef(0);
+  const automaticRefreshKeyRef = useRef<string | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -461,6 +462,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     };
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
+    automaticRefreshKeyRef.current = null;
     runActionOwnerRef.current = null;
   }, []);
 
@@ -547,7 +549,28 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!token) {
       return;
     }
-    void refresh().catch(handleApiFailure);
+    const refreshKey = JSON.stringify([
+      renderAccountStateVersion,
+      status,
+      debouncedQuery,
+      view,
+      exportStartDate,
+      exportEndDate,
+      certificateYear,
+      debouncedCertificateSearch,
+      certificateSearchInputGenerationRef.current
+    ]);
+    if (automaticRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+    automaticRefreshKeyRef.current = refreshKey;
+    void refresh().catch((error) => {
+      if (automaticRefreshKeyRef.current !== refreshKey) {
+        return;
+      }
+      automaticRefreshKeyRef.current = null;
+      handleApiFailure(error);
+    });
   }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch, settledCertificateSearchRevision]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
@@ -913,6 +936,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     runActionOwnerRef.current = null;
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
+    automaticRefreshKeyRef.current = null;
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
     invalidateCertificatePreview(certificateResetYear, "");

@@ -116,11 +116,34 @@ describe("annual certificate UI contract", () => {
     expect(debounceSource).toContain("const inputGeneration = certificateSearchInputGenerationRef.current");
     expect(debounceSource).toContain("setSettledCertificateSearchRevision(inputGeneration)");
 
-    const refreshEffectStart = appSource.indexOf("void refresh().catch(handleApiFailure)");
+    const refreshEffectStart = appSource.indexOf("const refreshKey = JSON.stringify");
     const refreshEffectEnd = appSource.indexOf("// Effective analytics range", refreshEffectStart);
     expect(appSource.slice(refreshEffectStart, refreshEffectEnd)).toContain(
       "settledCertificateSearchRevision"
     );
+  });
+
+  it("coalesces an automatic refresh already consumed for the current input generation", () => {
+    const keyStart = appSource.indexOf("const refreshKey = JSON.stringify");
+    const duplicateGuard = appSource.indexOf(
+      "if (automaticRefreshKeyRef.current === refreshKey)",
+      keyStart
+    );
+    const dispatch = appSource.indexOf("void refresh().catch", duplicateGuard);
+    const effectEnd = appSource.indexOf("// Effective analytics range", dispatch);
+    const keySource = appSource.slice(keyStart, duplicateGuard);
+    const refreshSource = appSource.slice(keyStart, effectEnd);
+
+    expect(keySource).toContain("certificateYear");
+    expect(keySource).toContain("debouncedCertificateSearch");
+    expect(keySource).toContain("certificateSearchInputGenerationRef.current");
+    expect(keySource).not.toContain("settledCertificateSearchRevision");
+    expect(duplicateGuard).toBeGreaterThan(keyStart);
+    expect(duplicateGuard).toBeLessThan(dispatch);
+    expect(refreshSource).toContain("automaticRefreshKeyRef.current = refreshKey");
+    expect(refreshSource).toContain("if (automaticRefreshKeyRef.current !== refreshKey)");
+    expect(refreshSource).toContain("automaticRefreshKeyRef.current = null");
+    expect(refreshSource).toContain("handleApiFailure(error)");
   });
 
   it("uses synchronous uniquely-owned claims for all certificate dispatch shapes", () => {
