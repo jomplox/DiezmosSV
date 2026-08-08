@@ -16,10 +16,11 @@ export interface IndexMetadata {
 export interface CompatibilitySnapshot {
   appliedMigrations: string[];
   tableColumns: Record<string, ColumnMetadata[]>;
+  tableSql: Record<string, string>;
   tableIndexes: Record<string, IndexMetadata[]>;
   schemaObjects: Record<string, SchemaObjectMetadata>;
   duplicateCounts: Record<string, number>;
-  sequenceNoncanonicalCount?: number;
+  sequenceNoncanonicalCount: number;
 }
 
 export interface SchemaObjectMetadata {
@@ -35,6 +36,7 @@ export interface RequiredColumn {
   type: "TEXT" | "INTEGER";
   nullable: boolean;
   defaultValue?: string;
+  checkSql?: string;
   addSql: string;
 }
 
@@ -53,6 +55,7 @@ export interface RequiredIndex {
 export interface CompatibilityPlan {
   statements: string[];
   ledgerAliases: string[];
+  reconcile0023: boolean;
   temporary0024Body?: string;
 }
 

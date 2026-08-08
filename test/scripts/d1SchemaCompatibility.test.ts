@@ -111,6 +111,12 @@ describe("legacy Wompi issuance migration compatibility", () => {
         audit_logs: []
       },
       schemaObjects: {},
+      tableSql: {
+        wompi_events: `CREATE TABLE wompi_events (
+          issuance_status TEXT CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED')),
+          issuance_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (issuance_attempt_count >= 0)
+        )`
+      },
       duplicateCounts: {
         idx_wompi_reserved_control: 0,
         idx_wompi_reserved_generation: 0
@@ -127,6 +133,7 @@ describe("legacy Wompi issuance migration compatibility", () => {
     expect(plan.ledgerAliases).toEqual([
       "0023_wompi_issuance_lifecycle.sql"
     ]);
+    expect(plan.reconcile0023).toBe(true);
   });
 
   it("reproduces the old 0019 claim failure, then converges and aliases 0023 only after repair", async () => {
@@ -392,6 +399,247 @@ describe("legacy Wompi issuance migration compatibility", () => {
     database.close();
   });
 
+  it("canonicalizes a schema-detected partial 0023 with no predecessor ledger name", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(canonicalIssuanceStatusColumnSql());
+    database.prepare(
+      `INSERT INTO document_sequences (environment, control_prefix, next_value)
+       VALUES ('00', 'm001p004', 19)`
+    ).run();
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    expect(database.prepare(
+      `SELECT environment, control_prefix, next_value
+       FROM document_sequences ORDER BY environment, control_prefix`
+    ).all()).toEqual([
+      { environment: "00", control_prefix: "M001P004", next_value: 19 }
+    ]);
+    database.close();
+  });
+
+  it("reruns sequence normalization after interruption following the last schema repair", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(initialLegacyIssuanceMigration());
+    recordMigration(database, CURRENT_0023);
+    database.prepare(
+      `INSERT INTO document_sequences (environment, control_prefix, next_value)
+       VALUES ('00', 'm001p004', 27)`
+    ).run();
+    const base = sqliteRunnerFactory(database);
+    let interrupted = false;
+    const failFirstSequenceRepair = (
+      options: { migrationsDirOverride?: string } = {}
+    ) => {
+      const runner = base.createRunner(options);
+      return {
+        async run(args: string[]) {
+          const query = args[args.indexOf("--command") + 1] ?? "";
+          if (
+            !interrupted &&
+            query.startsWith("INSERT OR IGNORE INTO document_sequences")
+          ) {
+            interrupted = true;
+            throw new Error("injected post-DDL interruption");
+          }
+          return runner.run(args);
+        },
+        cleanup: runner.cleanup
+      };
+    };
+
+    await expect(
+      runCompatibility(
+        database,
+        migrateSchemaCompatibility,
+        failFirstSequenceRepair
+      )
+    ).rejects.toThrow("injected post-DDL interruption");
+    expect(columns(database, "email_deliveries")).toEqual(
+      expect.arrayContaining([
+        "claim_attempted_at",
+        "idempotency_key",
+        "claim_token"
+      ])
+    );
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(database.prepare(
+      `SELECT control_prefix, next_value FROM document_sequences
+       WHERE environment = '00'`
+    ).all()).toEqual([{ control_prefix: "M001P004", next_value: 27 }]);
+    database.close();
+  });
+
+  it("includes canonical sequence state in the final postflight", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0031");
+    const base = sqliteRunnerFactory(database);
+    let injected = false;
+    const injectPostMigrationSequence = (
+      options: { migrationsDirOverride?: string } = {}
+    ) => {
+      const runner = base.createRunner(options);
+      return {
+        async run(args: string[]) {
+          const output = await runner.run(args);
+          if (
+            !injected &&
+            args[0] === "d1" &&
+            args[1] === "migrations"
+          ) {
+            injected = true;
+            database.prepare(
+              `INSERT INTO document_sequences (
+                 environment, control_prefix, next_value
+               ) VALUES ('00', 'm001p004', 31)`
+            ).run();
+          }
+          return output;
+        },
+        cleanup: runner.cleanup
+      };
+    };
+
+    await expect(
+      runCompatibility(
+        database,
+        migrateSchemaCompatibility,
+        injectPostMigrationSequence
+      )
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+    database.close();
+  });
+
+  it("rejects missing or altered lifecycle CHECK constraints without changing rows", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const variants = [
+      {
+        label: "missing status check",
+        sql: "ALTER TABLE wompi_events ADD COLUMN issuance_status TEXT;"
+      },
+      {
+        label: "altered status check",
+        sql: `ALTER TABLE wompi_events ADD COLUMN issuance_status TEXT
+          CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'NOT_CANONICAL'));`
+      },
+      {
+        label: "missing attempt check",
+        sql: `${canonicalIssuanceStatusColumnSql()}
+          ALTER TABLE wompi_events ADD COLUMN issuance_attempt_count INTEGER NOT NULL DEFAULT 0;`
+      },
+      {
+        label: "altered attempt check",
+        sql: `${canonicalIssuanceStatusColumnSql()}
+          ALTER TABLE wompi_events ADD COLUMN issuance_attempt_count INTEGER NOT NULL DEFAULT 0
+            CHECK (issuance_attempt_count >= -1);`
+      }
+    ];
+
+    for (const variant of variants) {
+      const database = databaseThrough("0022");
+      database.prepare(
+        `INSERT INTO wompi_events (
+           id, transaction_id, environment, result, amount_cents, raw_body
+         ) VALUES ('constraint_event', 'constraint_transaction', '00',
+           'ExitosaAprobada', 100, '{}')`
+      ).run();
+      database.exec(variant.sql);
+      const rowBefore = database.prepare(
+        `SELECT id, transaction_id, environment, result, amount_cents, raw_body
+         FROM wompi_events WHERE id = 'constraint_event'`
+      ).get();
+      const schemaBefore = database.prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+      ).get();
+
+      await expect(
+        runCompatibility(database, migrateSchemaCompatibility),
+        variant.label
+      ).rejects.toThrow("D1 schema compatibility mismatch");
+
+      expect(database.prepare(
+        `SELECT id, transaction_id, environment, result, amount_cents, raw_body
+         FROM wompi_events WHERE id = 'constraint_event'`
+      ).get()).toEqual(rowBefore);
+      expect(database.prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+      ).get()).toEqual(schemaBefore);
+      expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+      database.close();
+    }
+  });
+
+  it("rejects a behaviorally different trigger literal before aliasing", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(
+      readMigration(CURRENT_0023).replace("'DTE-15-'", "'dte-15-'")
+    );
+    recordMigration(database, LEGACY_0019);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('wrong_trigger_event', 'wrong_trigger_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    const before = database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'wrong_trigger_event'"
+    ).get();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'wrong_trigger_event'"
+    ).get()).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("accepts harmless SQL keyword and identifier case differences without changing literals", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    const cosmeticMigration = readMigration(CURRENT_0023)
+      .replace(
+        "CREATE TRIGGER reserve_wompi_document_identifiers",
+        'CREATE TRIGGER "reserve_wompi_document_identifiers"'
+      )
+      .replace(
+        "  UPDATE wompi_events\n  SET control_sequence",
+        "  UPDATE   wompi_events\n  SET   control_sequence"
+      );
+    database.exec(lowercaseSqlOutsideStringLiterals(cosmeticMigration));
+    recordMigration(database, LEGACY_0019);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('cosmetic_trigger_event', 'cosmetic_trigger_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    database.prepare(
+      `UPDATE wompi_events
+       SET control_prefix = 'M001P004',
+           reserved_codigo_generacion = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+       WHERE id = 'cosmetic_trigger_event'`
+    ).run();
+
+    expect(database.prepare(
+      `SELECT reserved_numero_control FROM wompi_events
+       WHERE id = 'cosmetic_trigger_event'`
+    ).get()).toEqual({
+      reserved_numero_control: "DTE-15-M001P004-000000000000001"
+    });
+    database.close();
+  });
+
   it("rejects duplicate reservation keys rather than choosing or rewriting a row", async () => {
     const { migrateSchemaCompatibility } = await loadCompatibility();
     const database = databaseThrough("0022");
@@ -598,6 +846,39 @@ function initialLegacyIssuanceMigration(): string {
     current.indexOf("-- Legacy sequence prefixes")
   );
   return `${core}${reservations}`;
+}
+
+function canonicalIssuanceStatusColumnSql(): string {
+  return `ALTER TABLE wompi_events ADD COLUMN issuance_status TEXT
+  CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED'));`;
+}
+
+function lowercaseSqlOutsideStringLiterals(sql: string): string {
+  let result = "";
+  let index = 0;
+  while (index < sql.length) {
+    if (sql[index] !== "'") {
+      result += sql[index].toLowerCase();
+      index += 1;
+      continue;
+    }
+    const start = index;
+    index += 1;
+    while (index < sql.length) {
+      if (sql[index] !== "'") {
+        index += 1;
+        continue;
+      }
+      index += 1;
+      if (sql[index] === "'") {
+        index += 1;
+        continue;
+      }
+      break;
+    }
+    result += sql.slice(start, index);
+  }
+  return result;
 }
 
 function appliedMigrations(database: DatabaseSync): string[] {

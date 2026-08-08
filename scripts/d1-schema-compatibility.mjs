@@ -45,6 +45,8 @@ const requiredColumns = [
     column: "issuance_status",
     type: "TEXT",
     nullable: true,
+    checkSql:
+      "CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED'))",
     addSql: [
       "ALTER TABLE wompi_events ADD COLUMN issuance_status TEXT",
       "  CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED'));"
@@ -89,6 +91,7 @@ const requiredColumns = [
     type: "INTEGER",
     nullable: false,
     defaultValue: "0",
+    checkSql: "CHECK (issuance_attempt_count >= 0)",
     addSql: [
       "ALTER TABLE wompi_events ADD COLUMN issuance_attempt_count INTEGER NOT NULL DEFAULT 0",
       "  CHECK (issuance_attempt_count >= 0);"
@@ -348,7 +351,7 @@ function findColumn(snapshot, requirement) {
   );
 }
 
-function hasRequiredColumnShape(column, requirement) {
+function hasRequiredColumnShape(snapshot, column, requirement) {
   return (
     typeof column?.type === "string" &&
     column.type.trim().toUpperCase() === requirement.type &&
@@ -357,14 +360,18 @@ function hasRequiredColumnShape(column, requirement) {
       : column.notnull === 1 || column.notnull === true) &&
     (requirement.defaultValue === undefined ||
       String(column.dflt_value).replace(/^\((.*)\)$/, "$1") ===
-        requirement.defaultValue)
+        requirement.defaultValue) &&
+    (requirement.checkSql === undefined ||
+      normalizeSchemaSql(snapshot?.tableSql?.[requirement.table]).includes(
+        normalizeSchemaSql(requirement.checkSql)
+      ))
   );
 }
 
 function assertExistingColumns(snapshot) {
   for (const requirement of REQUIRED_SCHEMA_MANIFEST.columns) {
     const column = findColumn(snapshot, requirement);
-    if (column && !hasRequiredColumnShape(column, requirement)) {
+    if (column && !hasRequiredColumnShape(snapshot, column, requirement)) {
       throw schemaMismatch();
     }
   }
@@ -433,16 +440,45 @@ function existingRequiredIndex(snapshot, requirement) {
 
 function normalizeSchemaSql(sql) {
   if (typeof sql !== "string") return "";
-  return sql
+  const literals = [];
+  let protectedSql = "";
+  for (let position = 0; position < sql.length; position += 1) {
+    if (sql[position] !== "'") {
+      protectedSql += sql[position];
+      continue;
+    }
+
+    const start = position;
+    let closed = false;
+    while (position + 1 < sql.length) {
+      position += 1;
+      if (sql[position] !== "'") continue;
+      if (sql[position + 1] === "'") {
+        position += 1;
+        continue;
+      }
+      closed = true;
+      break;
+    }
+    if (!closed) return "";
+    literals.push(sql.slice(start, position + 1));
+    protectedSql += `\u0000${literals.length - 1}\u0000`;
+  }
+
+  const normalized = protectedSql
     .trim()
     .replace(/;+\s*$/, "")
     .replace(/\[([^\]]+)\]/g, "$1")
     .replace(/["`]/g, "")
     .toLowerCase()
     .replace(/\s+/g, " ")
-    .replace(/\s*\(\s*/g, "(")
-    .replace(/\s*\)\s*/g, ")")
+    .replace(/\s*([(),;.])\s*/g, "$1")
+    .replace(/\s*(>=|<=|<>|!=|=|\|\|)\s*/g, "$1")
     .trim();
+
+  return normalized.replace(/\u0000(\d+)\u0000/g, (_match, index) =>
+    literals[Number(index)]
+  );
 }
 
 function existingRequiredTrigger(snapshot, requirement) {
@@ -548,15 +584,15 @@ export function buildCompatibilityPlan(snapshot) {
       ? [MIGRATION_0023]
       : [];
   return temporary0024Body === undefined
-    ? { statements, ledgerAliases }
-    : { statements, ledgerAliases, temporary0024Body };
+    ? { statements, ledgerAliases, reconcile0023 }
+    : { statements, ledgerAliases, reconcile0023, temporary0024Body };
 }
 
 export function assertRequiredSchema(snapshot) {
   try {
     for (const requirement of REQUIRED_SCHEMA_MANIFEST.columns) {
       const column = findColumn(snapshot, requirement);
-      if (!column || !hasRequiredColumnShape(column, requirement)) {
+      if (!column || !hasRequiredColumnShape(snapshot, column, requirement)) {
         throw schemaMismatch();
       }
     }
@@ -566,6 +602,7 @@ export function assertRequiredSchema(snapshot) {
     for (const requirement of REQUIRED_SCHEMA_MANIFEST.triggers) {
       if (!existingRequiredTrigger(snapshot, requirement)) throw schemaMismatch();
     }
+    if (snapshot.sequenceNoncanonicalCount !== 0) throw schemaMismatch();
   } catch {
     throw schemaMismatch();
   }
@@ -576,7 +613,7 @@ function assertMigrationSchema(snapshot, migration) {
     for (const requirement of REQUIRED_SCHEMA_MANIFEST.columns) {
       if (requirement.migration !== migration) continue;
       const column = findColumn(snapshot, requirement);
-      if (!column || !hasRequiredColumnShape(column, requirement)) {
+      if (!column || !hasRequiredColumnShape(snapshot, column, requirement)) {
         throw schemaMismatch();
       }
     }
@@ -588,17 +625,14 @@ function assertMigrationSchema(snapshot, migration) {
       if (requirement.migration !== migration) continue;
       if (!existingRequiredTrigger(snapshot, requirement)) throw schemaMismatch();
     }
+    if (
+      migration === MIGRATION_0023 &&
+      snapshot.sequenceNoncanonicalCount !== 0
+    ) {
+      throw schemaMismatch();
+    }
   } catch {
     throw schemaMismatch();
-  }
-}
-
-function hasMigrationSchema(snapshot, migration) {
-  try {
-    assertMigrationSchema(snapshot, migration);
-    return true;
-  } catch {
-    return false;
   }
 }
 
@@ -623,6 +657,11 @@ const APPLIED_MIGRATIONS_QUERY = `
 SELECT name
 FROM d1_migrations
 ORDER BY id;
+`.trim();
+const WOMPI_EVENTS_TABLE_SQL_QUERY = `
+SELECT name, sql
+FROM sqlite_schema
+WHERE type = 'table' AND name = 'wompi_events';
 `.trim();
 const REQUIRED_SCHEMA_OBJECTS_QUERY = `
 SELECT name, tbl_name AS table_name, sql
@@ -775,6 +814,22 @@ async function inspectCompatibilitySnapshot(runner, binding, environment) {
     );
   }
 
+  const wompiEventsTableRows = await query(WOMPI_EVENTS_TABLE_SQL_QUERY);
+  if (
+    wompiEventsTableRows.length > 1 ||
+    wompiEventsTableRows.some(
+      (row) => row.name !== "wompi_events" || typeof row.sql !== "string"
+    ) ||
+    (tableColumns.wompi_events.length > 0) !==
+      (wompiEventsTableRows.length === 1)
+  ) {
+    throw schemaMismatch();
+  }
+  const tableSql =
+    wompiEventsTableRows.length === 1
+      ? { wompi_events: wompiEventsTableRows[0].sql }
+      : {};
+
   const requiredIndexMetadata = [];
   for (const table of OWNED_TABLES) {
     for (const row of await query(pragmaQuery("index_list", table))) {
@@ -876,6 +931,7 @@ async function inspectCompatibilitySnapshot(runner, binding, environment) {
   return {
     appliedMigrations,
     tableColumns,
+    tableSql,
     tableIndexes,
     schemaObjects,
     duplicateCounts,
@@ -953,11 +1009,7 @@ export async function migrateSchemaCompatibility({
       environment
     );
     const plan = buildCompatibilityPlan(initialSnapshot);
-    const reconcile0023Sequences =
-      (isRecorded(initialSnapshot, MIGRATION_0023) ||
-        isRecorded(initialSnapshot, LEGACY_MIGRATION_0019)) &&
-      (!hasMigrationSchema(initialSnapshot, MIGRATION_0023) ||
-        plan.ledgerAliases.includes(MIGRATION_0023));
+    const reconcile0023Sequences = plan.reconcile0023;
     for (const statement of plan.statements) {
       parseWranglerRows(
         await runner.run(executeArgs(binding, environment, statement), {
