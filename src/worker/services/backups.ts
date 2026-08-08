@@ -5,6 +5,8 @@ import { sha256Hex } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { sendOperationalAlert } from "./alerts";
 import {
+  DOCUMENT_SEQUENCES_SNAPSHOT,
+  FISCAL_CORRECTION_LATEST_SNAPSHOT,
   RETENTION_KEY_ROOT,
   elSalvadorMonth,
   previousElSalvadorMonth,
@@ -53,7 +55,9 @@ export interface BackupVerifyResult {
 
 const RETENTION_DOWNLOAD_TABLES = new Set<string>([
   ...RETENTION_WINDOWED_TABLES,
-  ...RETENTION_SNAPSHOT_TABLES
+  ...RETENTION_SNAPSHOT_TABLES,
+  FISCAL_CORRECTION_LATEST_SNAPSHOT,
+  DOCUMENT_SEQUENCES_SNAPSHOT
 ]);
 
 export async function isManifestedBackupTable(env: Env, month: string, table: string): Promise<boolean> {
