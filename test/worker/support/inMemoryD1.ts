@@ -1608,8 +1608,34 @@ export class Statement {
         ).length
       } as T;
     }
+    if (
+      this.sql.includes("SELECT COUNT(*) AS count") &&
+      this.sql.includes("$.stalledRequeueEpochAt")
+    ) {
+      const [action, entityId, episodeId, exclusiveBoundary] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
+      return {
+        count: this.db.audits.filter((audit) => {
+          const metadata = auditMetadata(audit);
+          return audit.action === action &&
+            audit.entity_id === entityId &&
+            (
+              metadata.stalledRequeueEpochAt === episodeId ||
+              (
+                metadata.stalledRequeueEpochAt == null &&
+                String(audit.created_at) > exclusiveBoundary
+              )
+            );
+        }).length
+      } as T;
+    }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("created_at >= ?")) {
       const [action, entityId, sinceIso] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
       return {
         count: this.db.audits.filter(
           (audit) => audit.action === action && audit.entity_id === entityId && String(audit.created_at) >= sinceIso
@@ -1742,6 +1768,7 @@ export class Statement {
       if (this.sql.includes("issuance_attempt_id, issuance_claim_id")) {
         failure.issuance_attempt_id = event.issuance_attempt_id ?? null;
         failure.issuance_claim_id = event.issuance_claim_id ?? null;
+        failure.stalled_requeue_epoch_at = event.stalled_requeue_epoch_at ?? null;
       }
       return failure as T;
     }
@@ -2947,6 +2974,70 @@ export class Statement {
       }
     } else if (
       this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("$.stalledRequeueEpochAt") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        actorType,
+        actorId,
+        action,
+        entityType,
+        entityId,
+        summary,
+        metadataJson,
+        actorIp,
+        actorContext,
+        rateLimitClaimId,
+        guardAction,
+        guardEntityType,
+        guardEntityId,
+        rawEpisodeId,
+        ,
+        rawExclusiveBoundary
+      ] = this.args;
+      if (this.db.failNextAuditAction === action) {
+        this.db.failNextAuditAction = null;
+        throw new Error(`injected ${String(action)} audit failure`);
+      }
+      const episodeId = rawEpisodeId == null ? null : String(rawEpisodeId);
+      const exclusiveBoundary = rawExclusiveBoundary == null
+        ? null
+        : String(rawExclusiveBoundary);
+      const exists = this.db.audits.some((audit) => {
+        const metadata = auditMetadata(audit);
+        return audit.action === guardAction &&
+          audit.entity_type === guardEntityType &&
+          audit.entity_id === guardEntityId &&
+          (
+            episodeId === null ||
+            metadata.stalledRequeueEpochAt === episodeId ||
+            (
+              metadata.stalledRequeueEpochAt == null &&
+              exclusiveBoundary !== null &&
+              String(audit.created_at) > exclusiveBoundary
+            )
+          );
+      });
+      if (!exists) {
+        this.db.audits.push({
+          id,
+          actor_type: actorType,
+          actor_id: actorId,
+          action,
+          entity_type: entityType,
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: actorIp ?? null,
+          actor_context: actorContext ?? null,
+          rate_limit_claim_id: rateLimitClaimId ?? null,
+          created_at: this.db.auditCreatedAt
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
       this.sql.includes("WHERE NOT EXISTS")
     ) {
       const [
@@ -3566,7 +3657,8 @@ export class Statement {
             attemptId: this.args[6],
             claimId: this.args[7],
             errorCode: this.args[8],
-            errorMessage: this.args[9]
+            errorMessage: this.args[9],
+            stalledEpochAt: this.args[10]
           }
         : null;
       const event = this.db.wompiEvents.find(
@@ -3591,6 +3683,7 @@ export class Statement {
               && (row.issuance_claim_id ?? null) === observed.claimId
               && (row.issuance_error_code ?? null) === observed.errorCode
               && (row.issuance_error_message ?? null) === observed.errorMessage
+              && (row.stalled_requeue_epoch_at ?? null) === observed.stalledEpochAt
             )
           )
       );
@@ -4019,6 +4112,17 @@ export class Statement {
       }
     }
     return { success: true, meta: { changes }, results: [] };
+  }
+}
+
+function auditMetadata(audit: Record<string, unknown>): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(audit.metadata_json ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
   }
 }
 

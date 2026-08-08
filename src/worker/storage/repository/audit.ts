@@ -32,6 +32,54 @@ export async function createAudit(
   const actorContext = serializeAuditContext(
     input.actorContext ?? auditContext?.context
   );
+  const metadataJson = JSON.stringify(input.metadata ?? {});
+  if (input.action === "WOMPI_EVENT_STALLED") {
+    const episodeId = stalledRequeueEpisodeId(input.metadata);
+    await db
+      .prepare(
+        `INSERT INTO audit_logs (
+           id, actor_type, actor_id, action, entity_type, entity_id, summary,
+           metadata_json, actor_ip, actor_context, rate_limit_claim_id
+         )
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (
+            SELECT 1
+              FROM audit_logs
+             WHERE action = ?
+               AND entity_type = ?
+               AND entity_id = ?
+               AND (
+                 ? IS NULL
+                 OR json_extract(metadata_json, '$.stalledRequeueEpochAt') = ?
+                 OR (
+                   json_extract(metadata_json, '$.stalledRequeueEpochAt') IS NULL
+                   AND created_at > ?
+                 )
+               )
+          )`
+      )
+      .bind(
+        newId("audit"),
+        input.actorType ?? "SYSTEM",
+        input.actorId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.summary,
+        metadataJson,
+        actorIp,
+        actorContext,
+        input.rateLimitClaimId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        episodeId,
+        episodeId,
+        episodeId
+      )
+      .run();
+    return;
+  }
   await db
     .prepare(
       `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context, rate_limit_claim_id)
@@ -45,12 +93,20 @@ export async function createAudit(
       input.entityType,
       input.entityId,
       input.summary,
-      JSON.stringify(input.metadata ?? {}),
+      metadataJson,
       actorIp,
       actorContext,
       input.rateLimitClaimId ?? null
     )
     .run();
+}
+
+function stalledRequeueEpisodeId(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>).stalledRequeueEpochAt;
+  return typeof value === "string" && value ? value : null;
 }
 
 export async function ensurePostAcceptAudit(

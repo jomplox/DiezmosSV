@@ -577,7 +577,9 @@ describe("issuance dead-letter and stalled-event sweep", () => {
         entity_type: "wompi_event",
         entity_id: eventId,
         summary: "",
-        metadata_json: "{}",
+        metadata_json: JSON.stringify({
+          stalledRequeueEpochAt: "2026-06-01T00:00:00.000Z"
+        }),
         created_at: `2026-06-0${index + 1}T00:00:00.000Z`
       });
     }
@@ -687,12 +689,196 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     }
   });
 
+  it("excludes equal-timestamp prior audits and counts frozen-clock requeues in the new episode", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      const db = new InMemoryD1();
+      db.sessionUser = {
+        id: "user_operator",
+        email: "operator@example.org",
+        name: "Operator",
+        role: "OPERATOR"
+      };
+      db.settings.push({ key: "alert_email", value: "owner@example.org" });
+      const eventId = "wompi_equal_timestamp_episode";
+      db.wompiEvents.push(stalledWompiEvent({
+        id: eventId,
+        issuance_status: "FAILED",
+        issuance_attempt_id: "attempt-old-episode",
+        issuance_error_code: "ISSUANCE_ERROR",
+        issuance_error_message: "Fallo transitorio",
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: boundary
+      }));
+      for (let index = 1; index <= 3; index += 1) {
+        db.audits.push({
+          id: `audit_old_requeue_${index}`,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "WOMPI_EVENT_REQUEUED",
+          entity_type: "wompi_event",
+          entity_id: eventId,
+          summary: "old episode",
+          metadata_json: "{}",
+          created_at: boundary
+        });
+      }
+      db.audits.push({
+        id: "audit_old_stalled",
+        actor_type: "SYSTEM",
+        actor_id: null,
+        action: "WOMPI_EVENT_STALLED",
+        entity_type: "wompi_event",
+        entity_id: eventId,
+        summary: "old episode",
+        metadata_json: "{}",
+        created_at: boundary
+      });
+      const queued: IssuanceMessage[] = [];
+      const sentAlerts: unknown[] = [];
+      const scheduledEnv = env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>,
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentAlerts.push(message);
+            return { messageId: "equal-timestamp-alert" };
+          }
+        } as SendEmail
+      });
+
+      vi.setSystemTime(new Date(boundary));
+      db.auditCreatedAt = boundary;
+      const retry = await worker.fetch(
+        new Request(`https://example.org/api/wompi-events/${eventId}/retry`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        scheduledEnv
+      );
+      expect(retry.status).toBe(202);
+      const episodeId = "2026-07-14T10:00:00.001Z";
+      expect(db.wompiEvents[0].stalled_requeue_epoch_at).toBe(episodeId);
+
+      for (let index = 1; index <= 3; index += 1) {
+        db.audits.push({
+          id: `audit_current_requeue_${index}`,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "WOMPI_EVENT_REQUEUED",
+          entity_type: "wompi_event",
+          entity_id: eventId,
+          summary: "current episode",
+          metadata_json: JSON.stringify({ stalledRequeueEpochAt: episodeId }),
+          created_at: boundary
+        });
+      }
+      vi.setSystemTime(new Date("2026-07-14T12:00:00.000Z"));
+      db.auditCreatedAt = "2026-07-14T12:00:00.000Z";
+      await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+      await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+
+      expect(queued).toHaveLength(1);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId
+      )).toHaveLength(2);
+      expect(db.audits).toContainEqual(expect.objectContaining({
+        action: "WOMPI_EVENT_STALLED",
+        entity_id: eventId,
+        metadata_json: JSON.stringify({ stalledRequeueEpochAt: episodeId })
+      }));
+      expect(sentAlerts).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("atomically appends one stalled audit when capped sweeps overlap", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-14T12:00:00.000Z"));
+      const episodeId = "2026-07-14T10:00:00.000Z";
+      const eventId = "wompi_overlapping_cap_sweeps";
+      const db = new InMemoryD1();
+      db.auditCreatedAt = "2026-07-14T12:00:00.000Z";
+      db.settings.push({ key: "alert_email", value: "owner@example.org" });
+      db.wompiEvents.push(stalledWompiEvent({
+        id: eventId,
+        issuance_status: "PROCESSING",
+        issuance_attempt_id: "attempt-at-cap",
+        issuance_last_attempt_at: "2026-07-14T08:00:00.000Z",
+        stalled_requeue_epoch_at: episodeId
+      }));
+      for (let index = 1; index <= 3; index += 1) {
+        db.audits.push({
+          id: `audit_cap_requeue_${index}`,
+          actor_type: "SYSTEM",
+          actor_id: null,
+          action: "WOMPI_EVENT_REQUEUED",
+          entity_type: "wompi_event",
+          entity_id: eventId,
+          summary: "current episode",
+          metadata_json: JSON.stringify({ stalledRequeueEpochAt: episodeId }),
+          created_at: `2026-07-14T10:00:00.00${index}Z`
+        });
+      }
+      let arrivals = 0;
+      let release!: () => void;
+      const bothObserved = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      db.beforeAuditCount = async (action, entityId) => {
+        if (action !== "WOMPI_EVENT_REQUEUED" || entityId !== eventId) {
+          return;
+        }
+        arrivals += 1;
+        if (arrivals === 2) {
+          release();
+        }
+        await bothObserved;
+      };
+      const sentAlerts: unknown[] = [];
+      const scheduledEnv = env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        ISSUANCE_QUEUE: {
+          send: async () => {
+            throw new Error("capped episode must not requeue");
+          }
+        } as unknown as Queue<IssuanceMessage>,
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentAlerts.push(message);
+            return { messageId: "overlapping-cap-alert" };
+          }
+        } as SendEmail
+      });
+
+      await Promise.all([
+        new IssuancePipeline(scheduledEnv).sweepStalledWompiEvents(),
+        new IssuancePipeline(scheduledEnv).sweepStalledWompiEvents()
+      ]);
+
+      expect(arrivals).toBe(2);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId
+      )).toHaveLength(1);
+      expect(sentAlerts).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives up after three requeues and flags the event exactly once", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
     db.wompiEvents.push(stalledWompiEvent());
     for (let i = 0; i < 3; i++) {
-      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: JSON.stringify({ stalledRequeueEpochAt: "2026-01-01T00:00:00.000Z" }), created_at: "2026-01-01T00:00:00.000Z" });
     }
     const scheduledEnv = env(db, {
       ISSUANCE_QUEUE: { send: async (message: IssuanceMessage) => queued.push(message) } as unknown as Queue<IssuanceMessage>
@@ -711,7 +897,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
     db.wompiEvents.push(stalledWompiEvent());
     for (let i = 0; i < 3; i++) {
-      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: JSON.stringify({ stalledRequeueEpochAt: "2026-01-01T00:00:00.000Z" }), created_at: "2026-01-01T00:00:00.000Z" });
     }
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     const scheduledEnv = env(db, {
@@ -745,7 +931,7 @@ describe("issuance dead-letter and stalled-event sweep", () => {
       stalled_requeue_epoch_at: "2026-01-01T00:00:00.000Z"
     }));
     for (let i = 0; i < 3; i++) {
-      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
+      db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: JSON.stringify({ stalledRequeueEpochAt: "2026-01-01T00:00:00.000Z" }), created_at: "2026-01-01T00:00:00.000Z" });
     }
     const sentAlerts: Array<{ to: string; subject: string }> = [];
     let attempt = 0;

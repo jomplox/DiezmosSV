@@ -308,6 +308,56 @@ describe("Wompi issuance failure recovery API", () => {
     }
   });
 
+  it("mints a new monotonic stalled epoch for repeated OPERATOR retries in the same millisecond", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      vi.setSystemTime(new Date(boundary));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: boundary
+      }));
+      const queued: IssuanceMessage[] = [];
+      const workerEnv = env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>
+      });
+      const retry = () => worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        workerEnv
+      );
+
+      expect((await retry()).status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.001Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.001Z"
+      });
+
+      Object.assign(db.wompiEvents[0], {
+        issuance_status: "FAILED",
+        issuance_error_code: "ISSUANCE_ERROR",
+        issuance_error_message: "Fallo transitorio",
+        processed_at: null
+      });
+      expect((await retry()).status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.002Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.002Z"
+      });
+      expect(queued).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not rotate the stalled epoch when the OPERATOR retry CAS loses", async () => {
     vi.useFakeTimers();
     try {

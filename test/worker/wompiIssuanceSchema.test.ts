@@ -460,6 +460,160 @@ describe("Wompi issuance reservation migration", () => {
     }
   });
 
+  it("rotates the operator epoch monotonically when the wall clock does not advance", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      vi.setSystemTime(new Date(boundary));
+      const repo = new Repository(sqliteD1(database));
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'FAILED',
+             issuance_attempt_id = 'attempt-before-monotonic-retry',
+             issuance_error_code = 'ISSUANCE_ERROR',
+             issuance_error_message = 'Fallo transitorio',
+             issuance_last_attempt_at = ?,
+             stalled_requeue_epoch_at = ?
+         WHERE id = 'wompi_a'`
+      ).run(boundary, boundary);
+
+      const firstObserved = await repo.getWompiIssuanceRetrySnapshotById("wompi_a");
+      await expect(repo.claimWompiIssuanceRetry(
+        "wompi_a",
+        "user_operator",
+        firstObserved!
+      )).resolves.not.toBeNull();
+      expect(database.prepare(
+        `SELECT issuance_last_attempt_at, stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.001Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.001Z"
+      });
+
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'FAILED',
+             issuance_error_code = 'ISSUANCE_ERROR',
+             issuance_error_message = 'Segundo fallo transitorio'
+         WHERE id = 'wompi_a'`
+      ).run();
+      const secondObserved = await repo.getWompiIssuanceRetrySnapshotById("wompi_a");
+      await expect(repo.claimWompiIssuanceRetry(
+        "wompi_a",
+        "user_operator",
+        secondObserved!
+      )).resolves.not.toBeNull();
+      expect(database.prepare(
+        `SELECT issuance_last_attempt_at, stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.002Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.002Z"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("uses an exclusive legacy Wompi boundary without changing the inclusive auth counter", async () => {
+    const boundary = "2026-07-14T10:00:00.000Z";
+    const repo = new Repository(sqliteD1(database));
+    database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary, created_at
+       ) VALUES
+         ('audit_wompi_boundary', 'SYSTEM', 'WOMPI_EVENT_STALLED',
+          'wompi_event', 'wompi_boundary', 'old episode', ?),
+         ('audit_auth_boundary', 'SYSTEM', 'LOGIN_FAILED',
+          'auth', 'login@example.org', 'boundary login', ?)`
+    ).run(boundary, boundary);
+
+    await expect(repo.countAuditEntriesSince(
+      "WOMPI_EVENT_STALLED",
+      "wompi_boundary",
+      boundary
+    )).resolves.toBe(0);
+    await expect(repo.countAuditEntriesSinceForIp(
+      "LOGIN_FAILED",
+      "login@example.org",
+      null,
+      boundary
+    )).resolves.toBe(1);
+  });
+
+  it("counts current-episode requeues even when their audit clock is behind the epoch", async () => {
+    const auditClock = "2026-07-14T10:00:00.000Z";
+    const episodeId = "2026-07-14T10:00:00.001Z";
+    const repo = new Repository(sqliteD1(database));
+    const insert = database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary,
+         metadata_json, created_at
+       ) VALUES (?, 'SYSTEM', 'WOMPI_EVENT_REQUEUED', 'wompi_event',
+         'wompi_frozen_clock', 'new episode', ?, ?)`
+    );
+    for (let index = 1; index <= 3; index += 1) {
+      insert.run(
+        `audit_frozen_${index}`,
+        JSON.stringify({ stalledRequeueEpochAt: episodeId }),
+        auditClock
+      );
+    }
+
+    await expect(repo.countAuditEntriesSince(
+      "WOMPI_EVENT_REQUEUED",
+      "wompi_frozen_clock",
+      episodeId
+    )).resolves.toBe(3);
+  });
+
+  it("atomically records one stalled audit for concurrent observers of one episode", async () => {
+    const episodeId = "2026-07-14T10:00:00.001Z";
+    const repo = new Repository(sqliteD1(database));
+    const audit = () => repo.createAudit({
+      action: "WOMPI_EVENT_STALLED",
+      entityType: "wompi_event",
+      entityId: "wompi_atomic_stalled",
+      summary: "stalled",
+      metadata: { stalledRequeueEpochAt: episodeId }
+    });
+
+    await Promise.all([audit(), audit()]);
+
+    await expect(repo.countAuditEntriesSince(
+      "WOMPI_EVENT_STALLED",
+      "wompi_atomic_stalled",
+      episodeId
+    )).resolves.toBe(1);
+  });
+
+  it("records a new stalled audit for a later episode instead of lifetime-deduplicating", async () => {
+    const firstEpisode = "2026-07-14T10:00:00.001Z";
+    const secondEpisode = "2026-07-14T10:00:00.002Z";
+    const repo = new Repository(sqliteD1(database));
+    const createForEpisode = (episodeId: string) => repo.createAudit({
+      action: "WOMPI_EVENT_STALLED",
+      entityType: "wompi_event",
+      entityId: "wompi_later_stalled_episode",
+      summary: "stalled",
+      metadata: { stalledRequeueEpochAt: episodeId }
+    });
+
+    await createForEpisode(firstEpisode);
+    await createForEpisode(secondEpisode);
+
+    await expect(repo.countAuditEntries(
+      "WOMPI_EVENT_STALLED",
+      "wompi_later_stalled_episode"
+    )).resolves.toBe(2);
+    await expect(repo.countAuditEntriesSince(
+      "WOMPI_EVENT_STALLED",
+      "wompi_later_stalled_episode",
+      secondEpisode
+    )).resolves.toBe(1);
+  });
+
   it("leaves the stalled epoch unchanged when the operator retry CAS loses against real SQLite", async () => {
     vi.useFakeTimers();
     try {
@@ -492,6 +646,46 @@ describe("Wompi issuance reservation migration", () => {
         issuance_attempt_id: "attempt-before-lost-cas",
         issuance_last_attempt_at: "2026-07-13T22:00:00.000Z",
         stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not overwrite a concurrent epoch rotation when the other retry snapshot fields still match", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      const concurrentEpoch = "2026-07-14T10:00:00.005Z";
+      vi.setSystemTime(new Date(boundary));
+      const repo = new Repository(sqliteD1(database));
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'FAILED',
+             issuance_attempt_id = 'attempt-before-concurrent-epoch',
+             issuance_error_code = 'ISSUANCE_ERROR',
+             issuance_error_message = 'Fallo observado',
+             issuance_last_attempt_at = ?,
+             stalled_requeue_epoch_at = ?
+         WHERE id = 'wompi_a'`
+      ).run(boundary, boundary);
+      const observed = await repo.getWompiIssuanceRetrySnapshotById("wompi_a");
+      database.prepare(
+        "UPDATE wompi_events SET stalled_requeue_epoch_at = ? WHERE id = 'wompi_a'"
+      ).run(concurrentEpoch);
+
+      await expect(repo.claimWompiIssuanceRetry(
+        "wompi_a",
+        "user_operator",
+        observed!
+      )).resolves.toBeNull();
+      expect(database.prepare(
+        `SELECT issuance_attempt_id, issuance_last_attempt_at, stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_attempt_id: "attempt-before-concurrent-epoch",
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: concurrentEpoch
       });
     } finally {
       vi.useRealTimers();
