@@ -40,8 +40,9 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain("<th>Enviar</th>");
     // Single-donor send posts the donor's grouping key in the request body.
     expect(appSource).toContain("body: { donor:");
-    // Per-row busy state keyed by donor so one row spins without disabling the rest.
+    // Per-row busy state keeps the active row's truthful spinner label.
     expect(appSource).toContain("certificates-send-");
+    expect(appSource).toContain('const anySending = busy || rowBusy.startsWith("certificates-send")');
   });
 
   it("keeps preview pagination and bulk traversal in independent state", () => {
@@ -95,6 +96,10 @@ describe("annual certificate UI contract", () => {
     const searchStart = appSource.indexOf("function changeCertificateSearch");
     const searchEnd = appSource.indexOf("// Single-donor send", searchStart);
     const searchSource = appSource.slice(searchStart, searchEnd);
+    expect(searchSource).toContain("certificateSearchInputGenerationRef.current += 1");
+    expect(searchSource.indexOf("certificateSearchInputGenerationRef.current += 1")).toBeLessThan(
+      searchSource.indexOf("invalidateCertificatePreview")
+    );
     expect(searchSource).toContain(
       "invalidateCertificatePreview(certificatePreviewRequestRef.current.year, value.trim())"
     );
@@ -102,6 +107,20 @@ describe("annual certificate UI contract", () => {
       searchSource.indexOf("setCertificateSearch(value)")
     );
     expect(searchSource).not.toContain("resetCertificateBulkTraversal");
+  });
+
+  it("settles every surviving raw-search revision even when its trimmed value is unchanged", () => {
+    const debounceStart = appSource.indexOf("const nextSearch = certificateSearch.trim()");
+    const debounceEnd = appSource.indexOf("document.querySelector", debounceStart);
+    const debounceSource = appSource.slice(debounceStart, debounceEnd);
+    expect(debounceSource).toContain("const inputGeneration = certificateSearchInputGenerationRef.current");
+    expect(debounceSource).toContain("setSettledCertificateSearchRevision(inputGeneration)");
+
+    const refreshEffectStart = appSource.indexOf("void refresh().catch(handleApiFailure)");
+    const refreshEffectEnd = appSource.indexOf("// Effective analytics range", refreshEffectStart);
+    expect(appSource.slice(refreshEffectStart, refreshEffectEnd)).toContain(
+      "settledCertificateSearchRevision"
+    );
   });
 
   it("uses synchronous uniquely-owned claims for all certificate dispatch shapes", () => {
@@ -129,9 +148,17 @@ describe("annual certificate UI contract", () => {
       singleSource.indexOf("window.confirm")
     );
     expect(singleSource).toContain("releaseCertificateOperation(claimKey, claimToken)");
+
+    const singleClaimStart = singleSource.indexOf("const claimKey = JSON.stringify");
+    const singleClaimEnd = singleSource.indexOf("const claimToken", singleClaimStart);
+    const singleClaimSource = singleSource.slice(singleClaimStart, singleClaimEnd);
+    expect(singleClaimSource).toContain('"single"');
+    expect(singleClaimSource).toContain("previewRequest.generation");
+    expect(singleClaimSource).toContain("previewRequest.year");
+    expect(singleClaimSource).not.toContain("donor.groupKey");
   });
 
-  it("suppresses stale preview errors and tokenizes generic action finalizers", () => {
+  it("suppresses stale preview errors and owns generic action success, failure, and finalizers", () => {
     expect(appSource).toContain('certificateResult?.status === "rejected"');
     expect(appSource).toContain("isCurrentCertificatePreviewRequest(certificateRequest)");
     expect(appSource).toContain("throw certificateResult.reason");
@@ -140,9 +167,25 @@ describe("annual certificate UI contract", () => {
     const actionEnd = appSource.indexOf("// Appends the next audit page", actionStart);
     const actionSource = appSource.slice(actionStart, actionEnd);
     expect(actionSource).toContain("const actionToken = Symbol(name)");
-    expect(actionSource).toContain("runActionOwnerRef.current?.token === actionToken && isCurrent()");
+    expect(actionSource).toContain("action: (control: RunActionControl) => Promise<void>");
+    expect(actionSource).toContain("await runAccountOperation(() => action(control))");
+    expect(actionSource).toContain("commit(operation)");
+    expect(actionSource).toContain("if (!isOwner())");
     expect(actionSource).toContain("runActionOwnerRef.current?.token === actionToken");
+    expect(actionSource).toContain("&& isCurrent()");
     expect(actionSource).toContain("runActionOwnerRef.current = null");
+
+    const f960Start = appSource.indexOf("async function downloadF960");
+    const f960End = appSource.indexOf("async function downloadContacts", f960Start);
+    const f960Source = appSource.slice(f960Start, f960End);
+    expect(f960Source).toContain("async (control) =>");
+    expect(f960Source).toContain("control.commit(() =>");
+    expect(f960Source.indexOf("control.commit(() =>")).toBeLessThan(
+      f960Source.indexOf('setToast(format === "csv"')
+    );
+
+    expect(appSource).toContain("function commitRefreshState(control: RunActionControl | undefined");
+    expect(appSource).toContain("return control.commit(operation)");
   });
 
   it("invalidates certificate claims on account reset and unmount", () => {
