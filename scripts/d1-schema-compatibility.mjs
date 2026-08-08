@@ -439,7 +439,39 @@ function existingRequiredIndex(snapshot, requirement) {
   return matches[0].index;
 }
 
-const CHECK_EXPRESSION_KEYWORDS = new Set(["check", "in"]);
+const SCHEMA_SQL_KEYWORDS = new Set([
+  "after",
+  "and",
+  "begin",
+  "check",
+  "create",
+  "each",
+  "end",
+  "for",
+  "from",
+  "ignore",
+  "in",
+  "insert",
+  "into",
+  "is",
+  "not",
+  "null",
+  "of",
+  "on",
+  "or",
+  "row",
+  "select",
+  "set",
+  "trigger",
+  "update",
+  "values",
+  "when",
+  "where"
+]);
+const SQL_IDENTIFIER_TOKEN_TYPES = new Set([
+  "identifier",
+  "quotedIdentifier"
+]);
 const SQL_PUNCTUATION = new Set(["(", ")", ",", ";", "."]);
 const SQL_OPERATORS = new Set([
   "->>",
@@ -541,7 +573,7 @@ function tokenizeSchemaSql(sql) {
       }
       const value = sql.slice(start, position).toLowerCase();
       tokens.push({
-        type: CHECK_EXPRESSION_KEYWORDS.has(value) ? "keyword" : "identifier",
+        type: SCHEMA_SQL_KEYWORDS.has(value) ? "keyword" : "identifier",
         value
       });
       continue;
@@ -578,7 +610,8 @@ function schemaTokensMatch(actual, expected) {
   return (
     actual?.value === expected?.value &&
     (actual?.type === expected?.type ||
-      (actual?.type === "quotedIdentifier" && expected?.type === "identifier"))
+      (SQL_IDENTIFIER_TOKEN_TYPES.has(actual?.type) &&
+        SQL_IDENTIFIER_TOKEN_TYPES.has(expected?.type)))
   );
 }
 
@@ -593,82 +626,27 @@ function hasActiveSchemaTokenSequence(sql, requiredSql) {
   );
 }
 
-function normalizeSchemaSql(sql) {
-  if (typeof sql !== "string") return "";
-  const literals = [];
-  let protectedSql = "";
-  for (let position = 0; position < sql.length;) {
-    const character = sql[position];
-    if (character === "-" && sql[position + 1] === "-") {
-      position += 2;
-      while (
-        position < sql.length &&
-        sql[position] !== "\n" &&
-        sql[position] !== "\r"
-      ) {
-        position += 1;
-      }
-      protectedSql += " ";
-      continue;
-    }
-    if (character === "/" && sql[position + 1] === "*") {
-      const end = sql.indexOf("*/", position + 2);
-      if (end === -1) return "";
-      position = end + 2;
-      protectedSql += " ";
-      continue;
-    }
-    if (
-      character !== "'" &&
-      character !== '"' &&
-      character !== "`" &&
-      character !== "["
-    ) {
-      protectedSql += character;
-      position += 1;
-      continue;
-    }
-
-    const start = position;
-    const closingCharacter = character === "[" ? "]" : character;
-    position += 1;
-    let closed = false;
-    while (position < sql.length) {
-      if (sql[position] !== closingCharacter) {
-        position += 1;
-        continue;
-      }
-      if (sql[position + 1] === closingCharacter) {
-        position += 2;
-        continue;
-      }
-      position += 1;
-      closed = true;
-      break;
-    }
-    if (!closed) return "";
-    const token = sql.slice(start, position);
-    if (character === "'") {
-      literals.push(token);
-      protectedSql += `\u0000${literals.length - 1}\u0000`;
-    } else {
-      protectedSql += token;
-    }
+function schemaTokenArraysEqual(actualSql, expectedSql) {
+  const actual = tokenizeSchemaSql(actualSql);
+  const expected = tokenizeSchemaSql(expectedSql);
+  if (!actual || !expected) return false;
+  while (
+    actual.at(-1)?.type === "punctuation" &&
+    actual.at(-1)?.value === ";"
+  ) {
+    actual.pop();
   }
-
-  const normalized = protectedSql
-    .trim()
-    .replace(/;+\s*$/, "")
-    .replace(/\[([^\]]+)\]/g, "$1")
-    .replace(/["`]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/\s*([(),;.])\s*/g, "$1")
-    .replace(/\s*(>=|<=|<>|!=|=|\|\|)\s*/g, "$1")
-    .trim();
-
-  return normalized.replace(/\u0000(\d+)\u0000/g, (_match, index) =>
-    literals[Number(index)]
+  while (
+    expected.at(-1)?.type === "punctuation" &&
+    expected.at(-1)?.value === ";"
+  ) {
+    expected.pop();
+  }
+  return (
+    actual.length === expected.length &&
+    expected.every((token, position) =>
+      schemaTokensMatch(actual[position], token)
+    )
   );
 }
 
@@ -682,8 +660,7 @@ function existingRequiredTrigger(snapshot, requirement) {
   if (
     existing?.type !== "trigger" ||
     existing?.table !== requirement.table ||
-    normalizeSchemaSql(existing?.sql) !==
-      normalizeSchemaSql(requirement.createSql)
+    !schemaTokenArraysEqual(existing?.sql, requirement.createSql)
   ) {
     throw schemaMismatch();
   }
