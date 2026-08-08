@@ -442,27 +442,63 @@ function normalizeSchemaSql(sql) {
   if (typeof sql !== "string") return "";
   const literals = [];
   let protectedSql = "";
-  for (let position = 0; position < sql.length; position += 1) {
-    if (sql[position] !== "'") {
-      protectedSql += sql[position];
+  for (let position = 0; position < sql.length;) {
+    const character = sql[position];
+    if (character === "-" && sql[position + 1] === "-") {
+      position += 2;
+      while (
+        position < sql.length &&
+        sql[position] !== "\n" &&
+        sql[position] !== "\r"
+      ) {
+        position += 1;
+      }
+      protectedSql += " ";
+      continue;
+    }
+    if (character === "/" && sql[position + 1] === "*") {
+      const end = sql.indexOf("*/", position + 2);
+      if (end === -1) return "";
+      position = end + 2;
+      protectedSql += " ";
+      continue;
+    }
+    if (
+      character !== "'" &&
+      character !== '"' &&
+      character !== "`" &&
+      character !== "["
+    ) {
+      protectedSql += character;
+      position += 1;
       continue;
     }
 
     const start = position;
+    const closingCharacter = character === "[" ? "]" : character;
+    position += 1;
     let closed = false;
-    while (position + 1 < sql.length) {
-      position += 1;
-      if (sql[position] !== "'") continue;
-      if (sql[position + 1] === "'") {
+    while (position < sql.length) {
+      if (sql[position] !== closingCharacter) {
         position += 1;
         continue;
       }
+      if (sql[position + 1] === closingCharacter) {
+        position += 2;
+        continue;
+      }
+      position += 1;
       closed = true;
       break;
     }
     if (!closed) return "";
-    literals.push(sql.slice(start, position + 1));
-    protectedSql += `\u0000${literals.length - 1}\u0000`;
+    const token = sql.slice(start, position);
+    if (character === "'") {
+      literals.push(token);
+      protectedSql += `\u0000${literals.length - 1}\u0000`;
+    } else {
+      protectedSql += token;
+    }
   }
 
   const normalized = protectedSql

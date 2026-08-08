@@ -574,6 +574,49 @@ describe("legacy Wompi issuance migration compatibility", () => {
     }
   });
 
+  it.each([
+    {
+      label: "block-commented status check",
+      sql: `ALTER TABLE wompi_events ADD COLUMN issuance_status TEXT
+        /* CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED')) */;`
+    },
+    {
+      label: "block-commented attempt-count check",
+      sql: `${canonicalIssuanceStatusColumnSql()}
+        ALTER TABLE wompi_events ADD COLUMN issuance_attempt_count INTEGER NOT NULL DEFAULT 0
+          /* CHECK (issuance_attempt_count >= 0) */;`
+    }
+  ])("rejects a $label without changing rows", async ({ sql }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('commented_check_event', 'commented_check_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    database.exec(sql);
+    const rowBefore = database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'commented_check_event'"
+    ).get();
+    const schemaBefore = database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+    ).get();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'commented_check_event'"
+    ).get()).toEqual(rowBefore);
+    expect(database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+    ).get()).toEqual(schemaBefore);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
   it("rejects a behaviorally different trigger literal before aliasing", async () => {
     const { migrateSchemaCompatibility } = await loadCompatibility();
     const database = databaseThrough("0022");
@@ -602,6 +645,37 @@ describe("legacy Wompi issuance migration compatibility", () => {
     database.close();
   });
 
+  it("keeps comment-looking text inside a trigger literal", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(
+      readMigration(CURRENT_0023).replace(
+        "'DTE-15-'",
+        "'DTE-15-/*not a SQL comment*/'"
+      )
+    );
+    recordMigration(database, LEGACY_0019);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('comment_literal_event', 'comment_literal_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    const before = database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'comment_literal_event'"
+    ).get();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'comment_literal_event'"
+    ).get()).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
   it("accepts harmless SQL keyword and identifier case differences without changing literals", async () => {
     const { migrateSchemaCompatibility } = await loadCompatibility();
     const database = databaseThrough("0022");
@@ -613,6 +687,10 @@ describe("legacy Wompi issuance migration compatibility", () => {
       .replace(
         "  UPDATE wompi_events\n  SET control_sequence",
         "  UPDATE   wompi_events\n  SET   control_sequence"
+      )
+      .replace(
+        "AFTER UPDATE OF control_prefix, reserved_codigo_generacion ON wompi_events",
+        "AFTER UPDATE -- harmless schema comment\nOF control_prefix, reserved_codigo_generacion ON wompi_events"
       );
     database.exec(lowercaseSqlOutsideStringLiterals(cosmeticMigration));
     recordMigration(database, LEGACY_0019);
