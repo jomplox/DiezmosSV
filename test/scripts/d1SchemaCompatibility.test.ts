@@ -617,6 +617,145 @@ describe("legacy Wompi issuance migration compatibility", () => {
     database.close();
   });
 
+  it.each([
+    {
+      label: "double-quoted attempt-count decoy with legacy 0019",
+      requiredColumnSql:
+        "issuance_attempt_count INTEGER NOT NULL DEFAULT 0",
+      decoyIdentifier: '"CHECK (issuance_attempt_count >= 0)"',
+      invalidColumn: "issuance_attempt_count",
+      invalidValue: -1,
+      recordLegacy: true
+    },
+    {
+      label: "backtick-quoted attempt-count decoy with no predecessor ledger",
+      requiredColumnSql:
+        "issuance_attempt_count INTEGER NOT NULL DEFAULT 0",
+      decoyIdentifier: "`CHECK (issuance_attempt_count >= 0)`",
+      invalidColumn: "issuance_attempt_count",
+      invalidValue: -1,
+      recordLegacy: false
+    },
+    {
+      label: "bracket-quoted attempt-count decoy with no predecessor ledger",
+      requiredColumnSql:
+        "issuance_attempt_count INTEGER NOT NULL DEFAULT 0",
+      decoyIdentifier: "[CHECK (issuance_attempt_count >= 0)]",
+      invalidColumn: "issuance_attempt_count",
+      invalidValue: -1,
+      recordLegacy: false
+    },
+    {
+      label: "double-quoted status decoy with no predecessor ledger",
+      requiredColumnSql: "issuance_status TEXT",
+      decoyIdentifier:
+        "\"CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED'))\"",
+      invalidColumn: "issuance_status",
+      invalidValue: "NOT_A_CANONICAL_STATUS",
+      recordLegacy: false
+    }
+  ])("rejects a $label without aliasing or mutation", async ({
+    requiredColumnSql,
+    decoyIdentifier,
+    invalidColumn,
+    invalidValue,
+    recordLegacy: shouldRecordLegacy
+  }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(`
+      ALTER TABLE wompi_events ADD COLUMN ${requiredColumnSql};
+      ALTER TABLE wompi_events ADD COLUMN ${decoyIdentifier} TEXT;
+    `);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body,
+         ${invalidColumn}
+       ) VALUES ('quoted_decoy_event', 'quoted_decoy_transaction', '00',
+         'ExitosaAprobada', 100, '{}', ?)`
+    ).run(invalidValue);
+    if (shouldRecordLegacy) recordMigration(database, LEGACY_0019);
+    const rowBefore = database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'quoted_decoy_event'"
+    ).get();
+    const schemaBefore = database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+    ).get();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'quoted_decoy_event'"
+    ).get()).toEqual(rowBefore);
+    expect(database.prepare(
+      "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'wompi_events'"
+    ).get()).toEqual(schemaBefore);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("accepts active lifecycle CHECKs with legitimately quoted column references and comments", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(
+      readMigration(CURRENT_0023)
+        .replace(
+          "CHECK (issuance_status IN",
+          'CHECK /* active status constraint */ ("issuance_status" -- active expression\n  IN'
+        )
+        .replace(
+          "CHECK (issuance_attempt_count >= 0)",
+          "CHECK ([issuance_attempt_count] /* active expression */ >= 0)"
+        )
+    );
+    recordMigration(database, LEGACY_0019);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    expect(() => database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body,
+         issuance_status, issuance_attempt_count
+       ) VALUES ('quoted_check_invalid', 'quoted_check_transaction', '00',
+         'ExitosaAprobada', 100, '{}', 'NOT_A_CANONICAL_STATUS', -1)`
+    ).run()).toThrow();
+    database.close();
+  });
+
+  it.each([
+    "/* unterminated block comment",
+    "'unterminated literal",
+    '"unterminated identifier',
+    "`unterminated identifier",
+    "[unterminated identifier"
+  ])("fails closed on malformed table SQL: %s", async (malformedSql) => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    expect(() => buildCompatibilityPlan({
+      appliedMigrations: [LEGACY_0019],
+      tableColumns: {
+        wompi_events: [{
+          name: "issuance_attempt_count",
+          type: "INTEGER",
+          notnull: 1,
+          dflt_value: "0"
+        }]
+      },
+      tableSql: {
+        wompi_events: `CREATE TABLE wompi_events (
+          issuance_attempt_count INTEGER NOT NULL DEFAULT 0
+          CHECK (issuance_attempt_count >= 0)
+        ) ${malformedSql}`
+      },
+      tableIndexes: {},
+      schemaObjects: {},
+      duplicateCounts: {},
+      sequenceNoncanonicalCount: 0
+    })).toThrow("D1 schema compatibility mismatch");
+  });
+
   it("rejects a behaviorally different trigger literal before aliasing", async () => {
     const { migrateSchemaCompatibility } = await loadCompatibility();
     const database = databaseThrough("0022");
