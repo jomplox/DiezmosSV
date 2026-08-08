@@ -1,20 +1,29 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
-const root = process.cwd();
-const wrangler = resolve(root, "node_modules/.bin/wrangler");
-const ciEnvFile = resolve(root, ".dev.vars.ci");
-const databaseName = "diezmossv-local-db-example";
-const warmupsPerClass = numberOption("AUTH_TIMING_WARMUPS_PER_CLASS", 50, 1);
-const samplesPerClass = numberOption("AUTH_TIMING_SAMPLES_PER_CLASS", 500, 20);
+const repositoryRoot = process.cwd();
+const wrangler = resolve(repositoryRoot, "node_modules/.bin/wrangler");
+const workerMain = resolve(repositoryRoot, "src/worker/index.ts");
+const migrationsDirectory = resolve(repositoryRoot, "migrations");
+const databaseName = "diezmossv-auth-timing-db";
+const taskRootPrefix = "diezmossv-auth-timing-";
+const taskRootMarkerName = ".diezmossv-auth-timing-owner";
+const taskRootOwnershipToken = `diezmossv-auth-timing:${process.pid}:${randomUUID()}`;
+const warmupsPerClass = numberOption("AUTH_TIMING_WARMUPS_PER_CLASS", 50, 1, 1_000);
+const samplesPerClass = numberOption("AUTH_TIMING_SAMPLES_PER_CLASS", 500, 20, 10_000);
 // Successful requests are observational only; the invalid-class equivalence gate below
 // retains the required 500 samples per class by default.
-const successSamplesPerClass = numberOption("AUTH_TIMING_SUCCESS_SAMPLES_PER_CLASS", 100, 20);
-const resetEveryRounds = numberOption("AUTH_TIMING_RESET_EVERY_ROUNDS", 10, 1);
+const successSamplesPerClass = numberOption("AUTH_TIMING_SUCCESS_SAMPLES_PER_CLASS", 100, 20, 10_000);
+const resetEveryRounds = numberOption("AUTH_TIMING_RESET_EVERY_ROUNDS", 10, 1, 10_000);
+const commandTimeoutMs = numberOption("AUTH_TIMING_COMMAND_TIMEOUT_MS", 120_000, 1_000, 600_000);
+const requestTimeoutMs = numberOption("AUTH_TIMING_REQUEST_TIMEOUT_MS", 10_000, 250, 60_000);
+const cleanupGraceMs = numberOption("AUTH_TIMING_CLEANUP_GRACE_MS", 5_000, 250, 30_000);
+const smokeMode = smokeModeOption();
 const knownPassword = "Known#Password2026";
 const wrongPassword = "Wrong#Password2026";
 const knownSalt = "known-salt";
@@ -33,24 +42,82 @@ const successClasses = [
   { name: "legacy-upgrade-success", storedHash: `pbkdf2$100000$${knownFirst}` }
 ];
 
-let worker;
+const activityAbort = new AbortController();
+const ownedProcesses = new Set();
+let port;
+let origin;
+let taskRoot;
+let persistDir;
+let miniflareCacheDir;
+let configFile;
+let seedFile;
+let resetFile;
+let cleanupPromise;
+let workerRecord;
 let workerOutput = "";
-const taskRoot = await mkdtemp(join(tmpdir(), "diezmossv-auth-timing-"));
-const persistDir = join(taskRoot, "d1");
-const miniflareCacheDir = join(taskRoot, "miniflare-cache");
-const seedFile = join(taskRoot, "seed.sql");
-const resetFile = join(taskRoot, "reset.sql");
+let interruptedSignal;
+let resolveInterrupt;
+const interrupt = new Promise((resolveSignal) => { resolveInterrupt = resolveSignal; });
+process.exitCode = await main();
 
-try {
-  await Promise.all([
-    access(wrangler),
-    access(ciEnvFile),
-    access(resolve(root, "dist/client"))
-  ]);
+async function main() {
+  const signalHandlers = installSignalHandlers();
+  let exitCode = 0;
+  let work;
+  try {
+    port = await configuredOrAvailablePort();
+    origin = `http://127.0.0.1:${port}`;
+    taskRoot = await createTaskRoot();
+    persistDir = join(taskRoot, "d1");
+    miniflareCacheDir = join(taskRoot, "miniflare-cache");
+    configFile = join(taskRoot, "wrangler.toml");
+    seedFile = join(taskRoot, "seed.sql");
+    resetFile = join(taskRoot, "reset.sql");
+
+    work = runProbe().then(
+      (result) => ({ kind: "success", result }),
+      (error) => ({ kind: "failure", error })
+    );
+    const outcome = await Promise.race([work, interrupt]);
+    if (outcome.kind === "interrupt") {
+      exitCode = signalExitCode(outcome.signal);
+    } else if (outcome.kind === "success") {
+      console.log(JSON.stringify(outcome.result, null, 2));
+      if (!outcome.result.pass) exitCode = 1;
+    } else {
+      console.error(errorMessage(outcome.error));
+      if (workerOutput.trim()) console.error(workerOutput.trim());
+      exitCode = 1;
+    }
+  } catch (error) {
+    console.error(errorMessage(error));
+    exitCode = 1;
+  }
+
+  if (taskRoot) {
+    try {
+      await cleanup();
+    } catch (error) {
+      console.error(errorMessage(error));
+      exitCode = 1;
+    }
+  }
+  if (interruptedSignal && work) {
+    await withBoundedTimeout(work, cleanupGraceMs, () => null);
+    if (exitCode === 0) exitCode = signalExitCode(interruptedSignal);
+  }
+  removeSignalHandlers(signalHandlers);
+  return exitCode;
+}
+
+async function runProbe() {
+  assertNotInterrupted();
+  await Promise.all([access(wrangler), access(workerMain), access(migrationsDirectory)]);
   await Promise.all([
     mkdir(persistDir, { recursive: true, mode: 0o700 }),
     mkdir(miniflareCacheDir, { recursive: true, mode: 0o700 })
   ]);
+  await writeFile(configFile, syntheticWranglerConfig(), { mode: 0o600 });
 
   const commandEnv = {
     ...process.env,
@@ -58,9 +125,12 @@ try {
     WRANGLER_SEND_METRICS: "false",
     NO_COLOR: "1"
   };
-  await run(wrangler, [
-    "d1", "migrations", "apply", databaseName, "--local", "--persist-to", persistDir
-  ], commandEnv);
+  await runCommand(wrangler, [
+    "d1", "migrations", "apply", databaseName,
+    "--config", configFile,
+    "--local",
+    "--persist-to", persistDir
+  ], commandEnv, "D1 migration apply");
 
   await writeFile(seedFile, syntheticSeedSql(), { mode: 0o600 });
   await writeFile(
@@ -68,35 +138,55 @@ try {
     "DELETE FROM sessions;\nDELETE FROM login_rate_limits;\nDELETE FROM audit_logs WHERE action IN ('LOGIN', 'LOGIN_FAILED');\n",
     { mode: 0o600 }
   );
-  await run(wrangler, [
-    "d1", "execute", databaseName, "--local", "--persist-to", persistDir, "--file", seedFile
-  ], commandEnv);
+  await runCommand(wrangler, [
+    "d1", "execute", databaseName,
+    "--config", configFile,
+    "--local",
+    "--persist-to", persistDir,
+    "--file", seedFile
+  ], commandEnv, "synthetic D1 seed");
 
-  const port = await availablePort();
-  const origin = `http://127.0.0.1:${port}`;
-  worker = spawn(wrangler, [
+  assertNotInterrupted();
+  workerRecord = spawnOwned(wrangler, [
     "dev",
-    "--env-file", ciEnvFile,
+    "--config", configFile,
+    "--local",
     "--port", String(port),
     "--ip", "127.0.0.1",
     "--persist-to", persistDir
-  ], {
-    cwd: root,
-    env: {
-      ...commandEnv,
-      DIEZMOSSV_ENV_FILE: ciEnvFile
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  worker.stdout.on("data", (chunk) => appendWorkerOutput(chunk));
-  worker.stderr.on("data", (chunk) => appendWorkerOutput(chunk));
-  await waitForWorker(origin);
+  ], commandEnv, "local Wrangler/workerd");
+  workerRecord.child.stdout.on("data", (chunk) => appendWorkerOutput(chunk));
+  workerRecord.child.stderr.on("data", (chunk) => appendWorkerOutput(chunk));
+  await waitForWorker();
 
-  await runInvalidRounds(origin, "warmup", warmupsPerClass, false, commandEnv);
+  if (smokeMode === "normal" || smokeMode === "failure") {
+    // Keep the real listener observable long enough for the cleanup regression to
+    // sample its exact descendants, then exercise one real failed login.
+    await abortableDelay(750);
+    const response = await login(
+      "smoke-missing@auth-timing.invalid",
+      wrongPassword,
+      "198.18.0.1"
+    );
+    if (response.status !== 401) {
+      throw new Error(`normal smoke request returned ${response.status}, expected 401`);
+    }
+    if (smokeMode === "failure") {
+      throw new Error("controlled timing-probe smoke failure");
+    }
+    return {
+      runtime: "external local wrangler dev/workerd with isolated synthetic D1",
+      smoke: "normal-cleanup",
+      pass: true,
+      scope: "Synthetic local-runtime cleanup smoke only."
+    };
+  }
+
+  await runInvalidRounds("warmup", warmupsPerClass, false, commandEnv);
   await resetSyntheticState(commandEnv);
-  const invalidSamples = await runInvalidRounds(origin, "sample", samplesPerClass, true, commandEnv);
+  const invalidSamples = await runInvalidRounds("sample", samplesPerClass, true, commandEnv);
   await resetSyntheticState(commandEnv);
-  const successSamples = await runSuccessRounds(origin, successSamplesPerClass, commandEnv);
+  const successSamples = await runSuccessRounds(successSamplesPerClass, commandEnv);
 
   const invalidStats = Object.fromEntries(
     invalidClasses.map(({ name }) => [name, distribution(invalidSamples.get(name) ?? [])])
@@ -124,7 +214,7 @@ try {
   );
   const pass = Object.values(comparisons).every((value) => value.medianPass && value.p95Pass);
 
-  console.log(JSON.stringify({
+  return {
     runtime: "external local wrangler dev/workerd with isolated synthetic D1",
     warmupsPerInvalidClass: warmupsPerClass,
     samplesPerInvalidClass: samplesPerClass,
@@ -135,30 +225,18 @@ try {
     comparisons,
     pass,
     scope: "Relative local timing only; Cloudflare PBKDF2/CPU acceptance requires the release-stage remote probe."
-  }, null, 2));
-  if (!pass) process.exitCode = 1;
-} catch (error) {
-  const detail = workerOutput.trim();
-  console.error(error instanceof Error ? error.message : String(error));
-  if (detail) console.error(detail);
-  process.exitCode = 1;
-} finally {
-  if (worker && worker.exitCode === null) {
-    worker.kill("SIGTERM");
-    await Promise.race([waitForExit(worker), delay(5_000)]);
-    if (worker.exitCode === null) worker.kill("SIGKILL");
-  }
-  await rm(taskRoot, { recursive: true, force: true });
+  };
 }
 
-async function runInvalidRounds(origin, phase, rounds, collect, commandEnv) {
+async function runInvalidRounds(phase, rounds, collect, commandEnv) {
   const samples = new Map(invalidClasses.map(({ name }) => [name, []]));
   const random = seededRandom(phase === "warmup" ? 0x31_48_15_92 : 0x27_18_28_18);
   for (let round = 0; round < rounds; round += 1) {
+    assertNotInterrupted();
     for (const entry of shuffled(invalidClasses, random)) {
       const email = `${entry.name}-${phase}-${round}@auth-timing.invalid`;
       const started = performance.now();
-      const response = await login(origin, email, wrongPassword, syntheticIp(phase, round, entry.name));
+      const response = await login(email, wrongPassword, syntheticIp(phase, round, entry.name));
       const elapsed = performance.now() - started;
       if (response.status !== 401) {
         throw new Error(`${entry.name} ${phase} request returned ${response.status}, expected 401`);
@@ -172,14 +250,15 @@ async function runInvalidRounds(origin, phase, rounds, collect, commandEnv) {
   return samples;
 }
 
-async function runSuccessRounds(origin, rounds, commandEnv) {
+async function runSuccessRounds(rounds, commandEnv) {
   const samples = new Map(successClasses.map(({ name }) => [name, []]));
   const random = seededRandom(0x16_18_03_39);
   for (let round = 0; round < rounds; round += 1) {
+    assertNotInterrupted();
     for (const entry of shuffled(successClasses, random)) {
       const email = `${entry.name}-sample-${round}@auth-timing.invalid`;
       const started = performance.now();
-      const response = await login(origin, email, knownPassword, syntheticIp("success", round, entry.name));
+      const response = await login(email, knownPassword, syntheticIp("success", round, entry.name));
       const elapsed = performance.now() - started;
       if (response.status !== 200) {
         throw new Error(`${entry.name} request returned ${response.status}, expected 200`);
@@ -193,8 +272,8 @@ async function runSuccessRounds(origin, rounds, commandEnv) {
   return samples;
 }
 
-async function login(origin, email, password, ip) {
-  const response = await fetch(`${origin}/api/auth/login`, {
+async function login(email, password, ip) {
+  return request(`${origin}/api/auth/login`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -202,14 +281,24 @@ async function login(origin, email, password, ip) {
     },
     body: JSON.stringify({ email, password })
   });
-  await response.text();
-  return response;
+}
+
+async function request(url, init = {}, timeoutMs = requestTimeoutMs) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  const signal = AbortSignal.any([activityAbort.signal, timeoutSignal]);
+  const response = await fetch(url, { ...init, signal });
+  const body = await response.text();
+  return { status: response.status, ok: response.ok, body };
 }
 
 async function resetSyntheticState(commandEnv) {
-  await run(wrangler, [
-    "d1", "execute", databaseName, "--local", "--persist-to", persistDir, "--file", resetFile
-  ], commandEnv);
+  await runCommand(wrangler, [
+    "d1", "execute", databaseName,
+    "--config", configFile,
+    "--local",
+    "--persist-to", persistDir,
+    "--file", resetFile
+  ], commandEnv, "synthetic state reset");
 }
 
 function syntheticSeedSql() {
@@ -246,6 +335,27 @@ function syntheticSeedSql() {
 function userInsert(id, email, storedHash, disabled) {
   const disabledAt = disabled ? "'2026-08-08T00:00:00.000Z'" : "NULL";
   return `INSERT INTO users (id, email, name, role, password_hash, password_salt, disabled_at) VALUES ('${id}', '${email}', 'Synthetic timing account', 'VIEWER', '${storedHash}', '${knownSalt}', ${disabledAt});`;
+}
+
+function syntheticWranglerConfig() {
+  return [
+    'name = "diezmossv-auth-timing-local"',
+    `main = ${JSON.stringify(workerMain)}`,
+    'compatibility_date = "2026-06-02"',
+    'compatibility_flags = ["nodejs_compat"]',
+    "",
+    "[vars]",
+    'APP_ENV = "local"',
+    `APP_ORIGIN = ${JSON.stringify(origin)}`,
+    'MOCK_EXTERNAL_SERVICES = "true"',
+    "",
+    "[[d1_databases]]",
+    'binding = "DB"',
+    `database_name = ${JSON.stringify(databaseName)}`,
+    'database_id = "00000000-0000-0000-0000-000000000000"',
+    `migrations_dir = ${JSON.stringify(migrationsDirectory)}`,
+    ""
+  ].join("\n");
 }
 
 function distribution(values) {
@@ -289,67 +399,314 @@ function syntheticIp(phase, round, className) {
   return `198.${18 + Math.floor(third / 256)}.${third % 256}.${(ordinal % 254) + 1}`;
 }
 
-function numberOption(name, fallback, minimum) {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const parsed = Number(raw);
-  if (!Number.isInteger(parsed) || parsed < minimum) {
-    throw new Error(`${name} must be an integer >= ${minimum}`);
-  }
-  return parsed;
-}
-
-async function availablePort() {
-  const server = createServer();
-  await new Promise((resolveListen, rejectListen) => {
-    server.once("error", rejectListen);
-    server.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : null;
-  await new Promise((resolveClose, rejectClose) => {
-    server.close((error) => error ? rejectClose(error) : resolveClose());
-  });
-  if (port === null) throw new Error("Unable to allocate a local timing-probe port");
-  return port;
-}
-
-async function waitForWorker(origin) {
+async function waitForWorker() {
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
-    if (worker.exitCode !== null) {
-      throw new Error(`Local Worker exited before becoming ready (code ${worker.exitCode})`);
+    assertNotInterrupted();
+    if (workerRecord.child.exitCode !== null || workerRecord.child.signalCode !== null) {
+      throw new Error(`Local Worker exited before becoming ready (${exitLabel(await workerRecord.exit)})`);
     }
     try {
-      const response = await fetch(`${origin}/api/health`);
+      const response = await request(`${origin}/api/health`, {}, Math.min(1_000, requestTimeoutMs));
       if (response.ok) return;
-    } catch {
-      // Wrangler has not opened the listening socket yet.
+    } catch (error) {
+      if (activityAbort.signal.aborted) throw error;
     }
-    await delay(250);
+    await abortableDelay(250);
   }
   throw new Error("Timed out waiting for the local Worker timing target");
+}
+
+async function runCommand(command, args, env, label) {
+  assertNotInterrupted();
+  const record = spawnOwned(command, args, env, label);
+  let output = "";
+  record.child.stdout.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
+  record.child.stderr.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
+  const result = await withBoundedTimeout(
+    record.exit,
+    commandTimeoutMs,
+    () => ({ timedOut: true })
+  );
+  if (result.timedOut) {
+    await terminateOwned(record);
+    ownedProcesses.delete(record);
+    throw new Error(`${label} timed out after ${commandTimeoutMs} ms`);
+  }
+  if (result.error) {
+    ownedProcesses.delete(record);
+    throw new Error(`${label} failed to start: ${result.error.message}`);
+  }
+  if (result.code !== 0) {
+    await ensureOwnedGroupGone(record);
+    ownedProcesses.delete(record);
+    throw new Error(`${label} failed (${exitLabel(result)})\n${output.trim()}`);
+  }
+  await ensureOwnedGroupGone(record);
+  ownedProcesses.delete(record);
+}
+
+function spawnOwned(command, args, env, label) {
+  const child = spawn(command, args, {
+    cwd: repositoryRoot,
+    detached: process.platform !== "win32",
+    env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let settled = false;
+  const exit = new Promise((resolveExit) => {
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      resolveExit({ code: null, signal: null, error });
+    });
+    child.once("exit", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      resolveExit({ code, signal, error: null });
+    });
+  });
+  const record = { child, exit, label, pid: child.pid ?? null };
+  ownedProcesses.add(record);
+  return record;
+}
+
+async function ensureOwnedGroupGone(record) {
+  if (await waitUntilOwnedGone(record, 1_000)) return;
+  await terminateOwned(record);
+  throw new Error(`${record.label} left a descendant process after its wrapper exited`);
+}
+
+async function terminateOwned(record) {
+  if (!ownedProcessAlive(record)) return;
+  signalOwned(record, "SIGTERM");
+  if (await waitUntilOwnedGone(record, cleanupGraceMs)) return;
+  signalOwned(record, "SIGKILL");
+  if (await waitUntilOwnedGone(record, cleanupGraceMs)) return;
+  throw new Error(`Unable to reap the owned ${record.label} process group`);
+}
+
+async function waitUntilOwnedGone(record, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!ownedProcessAlive(record)) return true;
+    await delay(50);
+  }
+  return !ownedProcessAlive(record);
+}
+
+function ownedProcessAlive(record) {
+  if (record.pid === null) return false;
+  if (process.platform === "win32") {
+    return record.child.exitCode === null && record.child.signalCode === null;
+  }
+  try {
+    process.kill(-record.pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code !== "ESRCH";
+  }
+}
+
+function signalOwned(record, signal) {
+  if (record.pid === null) return;
+  try {
+    if (process.platform === "win32") record.child.kill(signal);
+    else process.kill(-record.pid, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+function cleanup() {
+  if (cleanupPromise) return cleanupPromise;
+  cleanupPromise = (async () => {
+    if (!activityAbort.signal.aborted) {
+      activityAbort.abort(new Error("Auth timing probe cleanup"));
+    }
+    const records = [...ownedProcesses];
+    const results = await Promise.allSettled(records.map((record) => terminateOwned(record)));
+    const failures = results.filter((result) => result.status === "rejected");
+    if (failures.length > 0) {
+      throw new Error(`Auth timing cleanup could not reap ${failures.length} owned process group(s)`);
+    }
+    ownedProcesses.clear();
+    await assertOwnedTaskRoot(taskRoot);
+    await rm(taskRoot, { recursive: true, force: true });
+  })();
+  return cleanupPromise;
+}
+
+function installSignalHandlers() {
+  const handlers = new Map();
+  for (const signal of process.platform === "win32" ? ["SIGINT", "SIGTERM"] : ["SIGHUP", "SIGINT", "SIGTERM"]) {
+    const handler = () => {
+      if (interruptedSignal) return;
+      interruptedSignal = signal;
+      if (!activityAbort.signal.aborted) {
+        activityAbort.abort(new Error(`Auth timing probe interrupted by ${signal}`));
+      }
+      resolveInterrupt({ kind: "interrupt", signal });
+    };
+    handlers.set(signal, handler);
+    process.on(signal, handler);
+  }
+  return handlers;
+}
+
+function removeSignalHandlers(handlers) {
+  for (const [signal, handler] of handlers) process.off(signal, handler);
 }
 
 function appendWorkerOutput(chunk) {
   workerOutput = `${workerOutput}${String(chunk)}`.slice(-8_000);
 }
 
-async function run(command, args, env) {
-  const child = spawn(command, args, { cwd: root, env, stdio: ["ignore", "pipe", "pipe"] });
-  let output = "";
-  child.stdout.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
-  child.stderr.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
-  const [code, signal] = await waitForExit(child);
-  if (code !== 0) {
-    throw new Error(`${command} ${args.join(" ")} failed (${signal ?? code})\n${output.trim()}`);
+function assertNotInterrupted() {
+  if (activityAbort.signal.aborted) {
+    throw activityAbort.signal.reason instanceof Error
+      ? activityAbort.signal.reason
+      : new Error("Auth timing probe interrupted");
   }
 }
 
-function waitForExit(child) {
-  if (child.exitCode !== null) return Promise.resolve([child.exitCode, null]);
-  return new Promise((resolveExit, rejectExit) => {
-    child.once("error", rejectExit);
-    child.once("exit", (code, signal) => resolveExit([code, signal]));
+async function abortableDelay(milliseconds) {
+  return delay(milliseconds, undefined, { signal: activityAbort.signal });
+}
+
+async function createTaskRoot() {
+  const configured = process.env.AUTH_TIMING_TASK_ROOT?.trim();
+  if (configured && !isAbsolute(configured)) {
+    throw new Error("AUTH_TIMING_TASK_ROOT must be absolute");
+  }
+
+  const temporaryBase = await realpath(resolve(tmpdir()));
+  let target;
+  if (configured) {
+    const configuredTarget = resolve(configured);
+    const canonicalParent = await realpath(dirname(configuredTarget));
+    target = join(canonicalParent, basename(configuredTarget));
+    await assertSafeTaskRoot(target, temporaryBase);
+    // mkdir without recursive is intentional: an existing path is never adopted.
+    await mkdir(target, { mode: 0o700 });
+  } else {
+    // Validate the destination boundary before creating anything. The final random
+    // suffix cannot change any of these parent/root safety properties.
+    await assertSafeTaskRoot(join(temporaryBase, `${taskRootPrefix}candidate`), temporaryBase);
+    target = await mkdtemp(join(temporaryBase, taskRootPrefix));
+  }
+
+  try {
+    await writeFile(join(target, taskRootMarkerName), taskRootOwnershipToken, {
+      encoding: "utf8",
+      flag: "wx",
+      mode: 0o600
+    });
+  } catch (error) {
+    // The directory was freshly created above, so this exact path is ours even if
+    // marker creation failed. No child process has been spawned at this point.
+    await rm(target, { recursive: true, force: true });
+    throw error;
+  }
+  return target;
+}
+
+async function assertSafeTaskRoot(target, temporaryBase) {
+  const canonicalTemporaryBase = temporaryBase ?? await realpath(resolve(tmpdir()));
+  const canonicalHome = await realpath(resolve(homedir()));
+  const canonicalRepository = await realpath(repositoryRoot);
+  if (!basename(target).startsWith(taskRootPrefix)) {
+    throw new Error(`AUTH_TIMING_TASK_ROOT basename must start with ${taskRootPrefix}`);
+  }
+  if (!isStrictlyInside(canonicalTemporaryBase, target)) {
+    throw new Error("AUTH_TIMING_TASK_ROOT must be strictly inside the process temporary directory");
+  }
+  if (isInside(canonicalHome, target)) {
+    throw new Error("AUTH_TIMING_TASK_ROOT must not be the home directory or one of its descendants");
+  }
+  if (isInside(canonicalRepository, target)) {
+    throw new Error("AUTH_TIMING_TASK_ROOT must be outside the repository");
+  }
+}
+
+async function assertOwnedTaskRoot(target) {
+  await assertSafeTaskRoot(target);
+  const marker = await readFile(join(target, taskRootMarkerName), "utf8");
+  if (marker !== taskRootOwnershipToken) {
+    throw new Error("Refusing to remove an auth timing root without its exact ownership marker");
+  }
+}
+
+function isInside(root, target) {
+  const path = relative(root, target);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+}
+
+function isStrictlyInside(root, target) {
+  return root !== target && isInside(root, target);
+}
+
+async function configuredOrAvailablePort() {
+  const configured = process.env.AUTH_TIMING_PORT?.trim();
+  if (configured) {
+    const parsed = Number(configured);
+    if (!Number.isInteger(parsed) || parsed < 1_024 || parsed > 65_535) {
+      throw new Error("AUTH_TIMING_PORT must be an integer from 1024 through 65535");
+    }
+    return parsed;
+  }
+  const server = createServer();
+  await new Promise((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
   });
+  const address = server.address();
+  const selected = typeof address === "object" && address ? address.port : null;
+  await new Promise((resolveClose, rejectClose) => {
+    server.close((error) => error ? rejectClose(error) : resolveClose());
+  });
+  if (selected === null) throw new Error("Unable to allocate a local timing-probe port");
+  return selected;
+}
+
+function numberOption(name, fallback, minimum, maximum) {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} through ${maximum}`);
+  }
+  return parsed;
+}
+
+function smokeModeOption() {
+  const value = process.env.AUTH_TIMING_SMOKE_MODE?.trim();
+  if (!value) return null;
+  if (value !== "normal" && value !== "failure") {
+    throw new Error("AUTH_TIMING_SMOKE_MODE supports only normal or failure");
+  }
+  return value;
+}
+
+function withBoundedTimeout(promise, milliseconds, onTimeout) {
+  let timer;
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout(onTimeout()), milliseconds);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+function signalExitCode(signal) {
+  if (signal === "SIGHUP") return 129;
+  if (signal === "SIGINT") return 130;
+  if (signal === "SIGTERM") return 143;
+  return 1;
+}
+
+function exitLabel(result) {
+  return result.signal ?? result.code ?? "unknown exit";
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
