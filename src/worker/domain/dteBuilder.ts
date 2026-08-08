@@ -405,14 +405,14 @@ export function buildInvalidacionEvent(
   emittedAt: Date = new Date()
 ): Record<string, unknown> {
   const original = JSON.parse(record.plain_json) as CdeDocumentShape;
-  const { time } = mhDateTime(emittedAt);
+  const { date, time } = mhDateTime(emittedAt);
   const eventCodes = mhEventCodes(record.numero_control, config);
   const document = {
     identificacion: {
       version: 3,
       ambiente: record.environment,
       codigoGeneracion: generationCode(),
-      fecEmi: original.identificacion.fecEmi,
+      fecEmi: date,
       horEmi: time,
       fusion: null
     },

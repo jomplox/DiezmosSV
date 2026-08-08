@@ -587,7 +587,7 @@ describe("DTE builders", () => {
     ).toThrow(/DUI.*digito verificador/i);
   });
 
-  it("uses MH control-number codes for invalidation event establishment fields", () => {
+  it("dates invalidation events at emittedAt while retaining the original CDE date", () => {
     const original = buildCdeDocument(wompiSample as WompiWebhook, emisorConfig, {
       sequence: 1,
       issuedAt: new Date("2026-06-02T14:05:20.742-06:00")
@@ -634,7 +634,8 @@ describe("DTE builders", () => {
 
     expect(event.emisor.codEstableMH).toBe("M001");
     expect(event.emisor.codPuntoVentaMH).toBe("P004");
-    expect(event.identificacion.fecEmi).toBe(original.identificacion.fecEmi);
+    expect(event.identificacion.fecEmi).toBe("2026-06-03");
+    expect(event.identificacion.horEmi).toBe("15:05:20");
     expect(event.documento.fecEmi).toBe(original.identificacion.fecEmi);
   });
 });
