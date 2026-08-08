@@ -16,12 +16,15 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain(">Donaciones</th>");
     expect(appSource).toContain(">Total</th>");
     expect(appSource).toContain("<th>Correo</th>");
-    expect(appSource).toContain("Enviar constancias");
+    expect(appSource).toContain("Enviar primera tanda");
   });
 
-  it("confirms the send and states that donors without email are skipped", () => {
+  it("confirms a bounded batch and offers truthful continuation", () => {
     expect(appSource).toContain("window.confirm");
-    expect(appSource).toContain("sin correo se omitirán");
+    expect(appSource).toContain("Se enviará una tanda de hasta 10 constancias a donantes con correo. Podrá continuar si quedan más.");
+    expect(appSource).toContain("Enviar siguiente tanda");
+    expect(appSource).toContain("Iniciar nuevo recorrido");
+    expect(appSource).toContain("Quedan donantes por procesar");
     expect(appSource).toContain("Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.");
   });
 
@@ -41,22 +44,48 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain("certificates-send-");
   });
 
-  it("disables the bulk send while a per-row send is in progress", () => {
-    expect(appSource).toContain('className="primary" disabled={anySending || withEmail === 0}');
+  it("keeps preview pagination and bulk traversal in independent state", () => {
+    expect(appSource).toContain("certificatePreviewCursor");
+    expect(appSource).toContain("bulkNextCursor");
+    expect(appSource).toContain("bulkHasMore");
+    expect(appSource).toContain("bulkTraversalStarted");
+    expect(appSource).toContain("loadMoreCertificatePreview");
+    expect(appSource).toContain("body: bulkTraversalStarted ? { after: bulkNextCursor } : {}");
+
+    const singleStart = appSource.indexOf("async function sendDonorCertificate");
+    const singleEnd = appSource.indexOf("async function createUser", singleStart);
+    const singleSendSource = appSource.slice(singleStart, singleEnd);
+    expect(singleSendSource).toContain("body: { donor: donor.groupKey }");
+    expect(singleSendSource).not.toContain("setBulkNextCursor");
+    expect(singleSendSource).not.toContain("setBulkHasMore");
+    expect(singleSendSource).not.toContain("setBulkTraversalStarted");
   });
 
-  it("offers a debounced donor/email search that re-fetches the capped preview", () => {
+  it("offers debounced search and keyset preview pagination that reset independently", () => {
     // Search input with the usted-form placeholder.
     expect(appSource).toContain('placeholder="Buscar donante o correo"');
     // Debounced search state threaded into the preview endpoint via q.
     expect(appSource).toContain("debouncedCertificateSearch");
-    expect(appSource).toContain("certificatePreviewPath(certificateYear, debouncedCertificateSearch)");
-    expect(appSource).toContain("year=${year}&q=${encodeURIComponent(trimmed)}");
-    // Truncation notice when the match set exceeds the server cap.
-    expect(appSource).toContain("Mostrando ");
-    expect(appSource).toContain("preview.matchCount");
+    expect(appSource).toContain("certificatePreviewPath(certificateYear, debouncedCertificateSearch, certificatePreviewCursor)");
+    expect(appSource).toContain("&q=${encodeURIComponent(trimmed)}");
+    expect(appSource).toContain("Ver más donantes");
+    expect(appSource).toContain("setCertificatePreviewCursor(null)");
     // Empty search result copy is distinct from the no-donations-this-year copy.
     expect(appSource).toContain("Ningún donante coincide con la búsqueda.");
     expect(stylesSource).toContain(".certificate-search");
+  });
+
+  it("shows and disables oversized dossiers before a per-row send", () => {
+    expect(appSource).toContain("dossierTooLarge");
+    expect(appSource).toContain("Demasiados comprobantes para una sola constancia");
+    expect(appSource).toContain("!donor.hasEmail || donor.dossierTooLarge");
+  });
+
+  it("does not present a bounded page as whole-year population or totals", () => {
+    expect(appSource).not.toContain("preview?.donorCount");
+    expect(appSource).not.toContain("preview?.withEmail");
+    expect(appSource).not.toContain("preview?.totalLabel");
+    expect(appSource).not.toContain("preview.matchCount");
+    expect(appSource).not.toContain("Mostrando {donors.length} de");
   });
 });

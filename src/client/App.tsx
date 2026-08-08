@@ -335,6 +335,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [certificateSearch, setCertificateSearch] = useState("");
   const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
+  const [certificatePreviewCursor, setCertificatePreviewCursor] = useState<string | null>(null);
+  const [bulkNextCursor, setBulkNextCursor] = useState<string | null>(null);
+  const [bulkHasMore, setBulkHasMore] = useState(false);
+  const [bulkTraversalStarted, setBulkTraversalStarted] = useState(false);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -451,6 +455,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [certificateSearch]);
+
+  useEffect(() => {
+    setCertificatePreviewCursor(null);
+  }, [certificateYear, debouncedCertificateSearch]);
+
+  useEffect(() => {
+    setBulkNextCursor(null);
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
+  }, [certificateYear]);
 
   useEffect(() => {
     document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
@@ -747,13 +761,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         environmentResult
       ] = await Promise.all([
         accountApi<F960Preview>(`/api/exports/f960?${params}`),
-        accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)),
+        accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch, null)),
         accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
       setExportPreview(f960Preview);
       setCertificatePreview(certificateResult);
+      setCertificatePreviewCursor(certificateResult.nextCursor);
       setDonationIntents(donationIntentResult.intents);
       setBackups(backupsResult.months);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -803,6 +818,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setCertificateSearch("");
     setDebouncedCertificateSearch("");
     setCertificatePreview(null);
+    setCertificatePreviewCursor(null);
+    setBulkNextCursor(null);
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
     setContactsPeriod("todo");
     setContactsFrom(currentMonthStartValue());
     setContactsTo(todayDateValue());
@@ -1314,23 +1333,64 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function sendAnnualCertificates() {
-    const preview = certificatePreview;
-    if (!preview || preview.withEmail === 0) {
-      setToast("No hay donantes con correo para el año seleccionado.");
+    if (bulkTraversalStarted && (!bulkHasMore || !bulkNextCursor)) {
+      setToast("El recorrido actual ya terminó. Inicie uno nuevo para volver a revisar el año.");
       return;
     }
     const confirmed = window.confirm(
-      `Se enviarán constancias del año ${preview.year} a ${preview.withEmail} donante(s) con correo. ` +
-        `${preview.withoutEmail} donante(s) sin correo se omitirán. ¿Desea continuar?`
+      "Se enviará una tanda de hasta 10 constancias a donantes con correo. Podrá continuar si quedan más. ¿Desea continuar?"
     );
     if (!confirmed) {
       return;
     }
     await runAction("certificates-send", async () => {
-      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, { method: "POST" });
-      setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
-      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
+      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${certificateYear}`, {
+        method: "POST",
+        body: bulkTraversalStarted ? { after: bulkNextCursor } : {}
+      });
+      setBulkTraversalStarted(true);
+      setBulkHasMore(result.hasMore);
+      setBulkNextCursor(result.nextCursor);
+      setToast(
+        `Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas.` +
+          (result.hasMore ? " Quedan donantes por procesar." : " Recorrido completado.")
+      );
     });
+  }
+
+  async function loadMoreCertificatePreview() {
+    if (!certificatePreview?.hasMore || !certificatePreviewCursor) {
+      return;
+    }
+    await runAction("certificates-preview-more", async () => {
+      const page = await accountApi<AnnualCertificatePreview>(
+        certificatePreviewPath(certificateYear, debouncedCertificateSearch, certificatePreviewCursor)
+      );
+      setCertificatePreview((current) => current
+        ? { ...page, donors: [...current.donors, ...page.donors] }
+        : page);
+      setCertificatePreviewCursor(page.nextCursor);
+    });
+  }
+
+  function startNewCertificateTraversal() {
+    setBulkNextCursor(null);
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
+    setToast("Recorrido de constancias reiniciado.");
+  }
+
+  function changeCertificateYear(year: string) {
+    setCertificateYear(year);
+    setCertificatePreviewCursor(null);
+    setBulkNextCursor(null);
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
+  }
+
+  function changeCertificateSearch(value: string) {
+    setCertificateSearch(value);
+    setCertificatePreviewCursor(null);
   }
 
   // Single-donor send (also the resend path): posts the donor's grouping key. Keyed by
@@ -1342,6 +1402,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
     if (!donor.hasEmail) {
       setToast("Este donante no tiene correo registrado, por lo que no se le puede enviar la constancia.");
+      return;
+    }
+    if (donor.dossierTooLarge) {
+      setToast("Demasiados comprobantes para una sola constancia.");
       return;
     }
     const confirmed = window.confirm(
@@ -1360,7 +1424,11 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           ? `Constancia ${result.year} enviada a ${donor.donorName}.`
           : `No se pudo enviar la constancia a ${donor.donorName}.`
       );
-      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
+      const refreshed = await accountApi<AnnualCertificatePreview>(
+        certificatePreviewPath(certificateYear, debouncedCertificateSearch, null)
+      );
+      setCertificatePreview(refreshed);
+      setCertificatePreviewCursor(refreshed.nextCursor);
     });
   }
 
@@ -1930,10 +1998,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               search={certificateSearch}
               busy={busy === "certificates-send"}
               rowBusy={busy}
-              onYearChange={setCertificateYear}
-              onSearchChange={setCertificateSearch}
+              bulkTraversalStarted={bulkTraversalStarted}
+              bulkHasMore={bulkHasMore}
+              onYearChange={changeCertificateYear}
+              onSearchChange={changeCertificateSearch}
               onSend={sendAnnualCertificates}
               onSendDonor={sendDonorCertificate}
+              onLoadMore={loadMoreCertificatePreview}
+              onResetBulk={startNewCertificateTraversal}
             />
             <ContactsExportPanel
               environment={emissionEnvironment?.environment ?? null}
@@ -3706,24 +3778,25 @@ export interface AnnualCertificatePreviewDonor {
   count: number;
   totalLabel: string;
   hasTestEnvironment: boolean;
+  dossierTooLarge: boolean;
 }
 
 export interface AnnualCertificatePreview {
   year: number;
-  donorCount: number;
-  withEmail: number;
-  withoutEmail: number;
-  totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
-  matchCount: number;
-  truncated: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 interface AnnualCertificateSendResult {
   year: number;
+  mode: "bulk" | "single";
+  processed: number;
   sent: number;
   skipped: number;
   failed: number;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 export interface F960PreviewRow {

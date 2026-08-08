@@ -2155,6 +2155,88 @@ export class Statement {
       lines.sort((left, right) => Number(left.line_no ?? 0) - Number(right.line_no ?? 0));
       return { results: lines as T[] };
     }
+    if (this.sql.includes("annual_certificate_targets")) {
+      let argIndex = 0;
+      const startIso = String(this.args[argIndex++]);
+      const endIso = String(this.args[argIndex++]);
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.status === "ACCEPTED" &&
+          (document.fiscal_operation_claim_id ?? null) === null &&
+          document.issued_at >= startIso &&
+          document.issued_at < endIso
+      );
+      if (this.sql.includes("dte_document_search MATCH ?")) {
+        const ftsQuery = String(this.args[argIndex++]);
+        const matchingKeys = new Set(
+          documents
+            .filter((document) => documentMatchesFtsQuery(document, ftsQuery))
+            .map(annualCertificateRecipientKey)
+        );
+        documents = documents.filter((document) => matchingKeys.has(annualCertificateRecipientKey(document)));
+      }
+      const groups = new Map<string, DteDocumentRecord[]>();
+      for (const document of documents) {
+        const key = annualCertificateRecipientKey(document);
+        const existing = groups.get(key);
+        if (existing) existing.push(document);
+        else groups.set(key, [document]);
+      }
+      let targets = [...groups.entries()].map(([groupKey, groupDocuments]) => {
+        groupDocuments.sort(
+          (left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id)
+        );
+        const earliest = groupDocuments[0];
+        const donorEmail = normalizedCertificateText(earliest.donor_email);
+        return {
+          recipient_key: groupKey,
+          donor_name: normalizedCertificateText(earliest.donor_name) ?? donorEmail ?? "(sin identificar)",
+          donor_email: donorEmail,
+          document_count: groupDocuments.length,
+          total_cents: groupDocuments.reduce((total, document) => total + document.amount_cents, 0),
+          has_test_environment: groupDocuments.some((document) => document.environment === "00") ? 1 : 0
+        };
+      });
+      if (this.sql.includes("recipient_key = ?")) {
+        const groupKey = String(this.args[argIndex++]);
+        targets = targets.filter((target) => target.recipient_key === groupKey);
+      } else if (this.sql.includes("recipient_key > ?")) {
+        const afterGroupKey = String(this.args[argIndex++]);
+        targets = targets.filter((target) => target.recipient_key > afterGroupKey);
+      }
+      if (this.sql.includes("DONOR_CERTIFICATE_SENT")) {
+        const year = String(this.args[argIndex++]);
+        targets = targets.filter(
+          (target) =>
+            target.donor_email !== null &&
+            !this.db.audits.some(
+              (audit) =>
+                audit.action === "DONOR_CERTIFICATE_SENT" &&
+                audit.entity_id === `${year}:${target.donor_email}`
+            )
+        );
+      }
+      targets.sort((left, right) => left.recipient_key.localeCompare(right.recipient_key));
+      const limit = Number(this.args.at(-1));
+      return { results: targets.slice(0, limit) as T[] };
+    }
+    if (this.sql.includes("annual_certificate_documents")) {
+      const [startIso, endIso, groupKey, rawLimit] = this.args;
+      const documents = this.db.documents
+        .filter(
+          (document) =>
+            document.status === "ACCEPTED" &&
+            (document.fiscal_operation_claim_id ?? null) === null &&
+            document.issued_at >= String(startIso) &&
+            document.issued_at < String(endIso) &&
+            annualCertificateRecipientKey(document) === String(groupKey)
+        )
+        .sort(
+          (left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id)
+        )
+        .slice(0, Number(rawLimit));
+      return { results: documents as T[] };
+    }
     if (this.sql.includes("FROM dte_documents") && this.sql.includes("ORDER BY issued_at ASC, id ASC")) {
       // Annual donor certificate aggregation (Task 4): keyset-paged ACCEPTED-in-year read.
       let documents = this.db.documents.filter(
@@ -4179,6 +4261,15 @@ export function documentMatchesFtsQuery(document: DteDocumentRecord, query: stri
   ];
   const tokens = corpus.flatMap((value) => String(value ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? []);
   return prefixes.every((prefix) => tokens.some((token) => token.startsWith(prefix)));
+}
+
+function normalizedCertificateText(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return trimmed || null;
+}
+
+function annualCertificateRecipientKey(document: DteDocumentRecord): string {
+  return normalizedCertificateText(document.donor_email) ?? normalizedCertificateText(document.donor_name) ?? "(sin identificar)";
 }
 
 export function analyticsDocumentRow(
