@@ -57,16 +57,16 @@
 
 **Checkable outcome:** fresh schemas, legacy ledgers that recorded `0019_wompi_issuance_lifecycle.sql`, current ledgers, and partially patched `0023`/`0024` schemas converge without duplicate-column crashes or loss of populated attempt, claim, idempotency, token, or rate-limit provenance. The exact old `0029` wildcard damage is corrected by new `0031`, not by editing `0029`.
 
-- [ ] Pin and test the starting hashes/names of every migration through `0029`; prove the guard fails when a historical file is temporarily changed, renamed, or removed.
-- [ ] Add canonical `0030` with exactly `ALTER TABLE wompi_events ADD COLUMN stalled_requeue_epoch_at TEXT;`.
-- [ ] Add `0031` that clears only approved Wompi rows whose stored positive `payment_link_id` equals the link ID in `raw_body`, whose commerce identifier matched old `LIKE 'di_%'`, and which does not match literal `GLOB 'di_*'`. Preserve literal `di_`, rejected, unrelated, null, and deliberately different runtime values.
-- [ ] Build an allowlisted compatibility manifest for all `0023` postconditions, both `0024` rate-limit columns, the email idempotency index, and the `0030` stalled epoch. Treat legacy `0019_wompi_issuance_lifecycle.sql` as a verified predecessor of current `0023`; add only absent fields/objects and alias a current filename in `d1_migrations` only after full postcondition verification.
-- [ ] Reject duplicate unique-key/index preconditions and wrong column/index shapes without choosing, deleting, rebuilding, or overwriting any row. Make every repair interruption-safe and idempotent.
-- [ ] For the `0024` partial case, use a private temporary migration overlay so Wrangler records `0024` without re-adding an existing column; never rebuild `donation_intents` or `audit_logs`.
-- [ ] Run compatibility before Wrangler migration apply in both staging and production package commands, entirely through the selected owner-only Wrangler config.
-- [ ] Write real-SQLite historical fixtures for: old core-only `0019`; late-mutated `0019` with populated values; recorded-current-but-missing-field `0023`; zero/one/two-column `0024` variants with populated IDs; duplicate email keys; recorded `0030` missing its column; and fresh full-chain application. Run every converged case twice and compare schema, ledger, row counts, and populated values.
-- [ ] Temporarily reproduce the attached old-`0019` crash against the current claim SQL, then show the compatibility path removes the crash and allows initial claim/recovery queries.
-- [ ] Commit this migration train as one reviewable unit so the wrapper, immutable SQL files, and guards cannot land separately.
+- [x] Pin and test the starting hashes/names of every migration through `0029`; prove the guard fails when a historical file is temporarily changed, renamed, or removed.
+- [x] Add canonical `0030` with exactly `ALTER TABLE wompi_events ADD COLUMN stalled_requeue_epoch_at TEXT;`.
+- [x] Add `0031` that clears only approved Wompi rows whose stored positive `payment_link_id` equals the link ID in `raw_body`, whose commerce identifier matched old `LIKE 'di_%'`, and which does not match literal `GLOB 'di_*'`. Preserve literal `di_`, rejected, unrelated, null, and deliberately different runtime values.
+- [x] Build an allowlisted compatibility manifest for all `0023` postconditions, both `0024` rate-limit columns, the email idempotency index, and the `0030` stalled epoch. Treat legacy `0019_wompi_issuance_lifecycle.sql` as a verified predecessor of current `0023`; add only absent fields/objects and alias a current filename in `d1_migrations` only after full postcondition verification.
+- [x] Reject duplicate unique-key/index preconditions and wrong column/index shapes without choosing, deleting, rebuilding, or overwriting any row. Make every repair interruption-safe and idempotent.
+- [x] For the `0024` partial case, use a private temporary migration overlay so Wrangler records `0024` without re-adding an existing column; never rebuild `donation_intents` or `audit_logs`.
+- [x] Run compatibility before Wrangler migration apply in both staging and production package commands, entirely through the selected owner-only Wrangler config.
+- [x] Write real-SQLite historical fixtures for: old core-only `0019`; late-mutated `0019` with populated values; recorded-current-but-missing-field `0023`; zero/one/two-column `0024` variants with populated IDs; duplicate email keys; recorded `0030` missing its column; and fresh full-chain application. Run every converged case twice and compare schema, ledger, row counts, and populated values.
+- [x] Temporarily reproduce the attached old-`0019` crash against the current claim SQL, then show the compatibility path removes the crash and allows initial claim/recovery queries.
+- [x] Commit this migration train as one reviewable unit so the wrapper, immutable SQL files, and guards cannot land separately.
 
 ## Task 4: Block the conditional `0004` evidence-loss state
 
