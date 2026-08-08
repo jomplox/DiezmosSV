@@ -1011,3 +1011,125 @@ test("serializes distinct recipient sends and permits the next row after the fir
     alpha.release();
   }
 });
+
+test("coalesces a settled-equality search with an immediate year refresh", async ({ page }) => {
+  const refreshBundlePaths = [
+    "/api/documents",
+    "/api/exports/f960",
+    "/api/donations/intents",
+    "/api/admin/backups",
+    "/api/settings/emission-environment"
+  ];
+  const previewGets: Array<{ year: string | null; search: string | null }> = [];
+  const bundleCounts = new Map<string, number>();
+  let capture = false;
+
+  const resetCapture = () => {
+    previewGets.length = 0;
+    bundleCounts.clear();
+  };
+
+  const expectSingleRefreshBundle = () => {
+    expect(previewGets).toHaveLength(1);
+    for (const path of refreshBundlePaths) {
+      expect(bundleCounts.get(path), path).toBe(1);
+    }
+  };
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (capture && refreshBundlePaths.includes(url.pathname)) {
+      bundleCounts.set(url.pathname, (bundleCounts.get(url.pathname) ?? 0) + 1);
+    }
+    if (url.pathname !== "/api/certificates/annual" || request.method() !== "GET") {
+      return false;
+    }
+    const year = url.searchParams.get("year");
+    const search = url.searchParams.get("q");
+    if (capture) {
+      previewGets.push({ year, search });
+    }
+    await fulfillJson(route, preview(Number(year), [`Coalesced ${year} ${search ?? "base"}`]));
+    return true;
+  });
+
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("A");
+  await expect(page.getByText("Coalesced 2026 A")).toBeVisible();
+  capture = true;
+
+  resetCapture();
+  await search.fill("B");
+  await search.fill("A");
+  await expect(page.getByText("Coalesced 2026 A")).toBeVisible();
+  await page.waitForTimeout(550);
+  expect(previewGets).toEqual([{ year: "2026", search: "A" }]);
+  expectSingleRefreshBundle();
+
+  resetCapture();
+  await search.fill("  A  ");
+  await expect(page.getByText("Coalesced 2026 A")).toBeVisible();
+  await page.waitForTimeout(550);
+  expect(previewGets).toEqual([{ year: "2026", search: "A" }]);
+  expectSingleRefreshBundle();
+
+  resetCapture();
+  await search.fill("B");
+  await search.fill("A");
+  await certificateYearSelect(page).selectOption("2025");
+  await expect(page.getByText("Coalesced 2025 A")).toBeVisible();
+  await page.waitForTimeout(550);
+
+  expect(previewGets).toEqual([{ year: "2025", search: "A" }]);
+  expectSingleRefreshBundle();
+});
+
+test("retries the settled year refresh after its current bundle fails", async ({ page }) => {
+  const refreshBundlePaths = [
+    "/api/documents",
+    "/api/exports/f960",
+    "/api/donations/intents",
+    "/api/admin/backups",
+    "/api/settings/emission-environment"
+  ];
+  const bundleCounts = new Map<string, number>();
+  let finalPreviewGets = 0;
+  let capture = false;
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (capture && refreshBundlePaths.includes(url.pathname)) {
+      bundleCounts.set(url.pathname, (bundleCounts.get(url.pathname) ?? 0) + 1);
+    }
+    if (url.pathname !== "/api/certificates/annual" || request.method() !== "GET") {
+      return false;
+    }
+    const year = url.searchParams.get("year");
+    const search = url.searchParams.get("q");
+    if (capture && year === "2025" && search === "A") {
+      finalPreviewGets += 1;
+      if (finalPreviewGets === 1) {
+        await fulfillError(route, "TRANSIENT SETTLED REFRESH ERROR");
+        return true;
+      }
+    }
+    await fulfillJson(route, preview(Number(year), [`Retried ${year} ${search ?? "base"}`]));
+    return true;
+  });
+
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("A");
+  await expect(page.getByText("Retried 2026 A")).toBeVisible();
+  capture = true;
+
+  await search.fill("B");
+  await search.fill("A");
+  await certificateYearSelect(page).selectOption("2025");
+  await expect(page.getByText("TRANSIENT SETTLED REFRESH ERROR")).toBeVisible();
+  await expect(page.getByText("Retried 2025 A")).toBeVisible();
+
+  expect(finalPreviewGets).toBe(2);
+  for (const path of refreshBundlePaths) {
+    expect(bundleCounts.get(path), path).toBe(2);
+  }
+});
