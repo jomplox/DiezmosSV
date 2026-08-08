@@ -815,6 +815,87 @@ describe("legacy Wompi issuance migration compatibility", () => {
     database.close();
   });
 
+  it.each([
+    {
+      label: "double-quoted printf format identifier",
+      source: "'%015d'",
+      replacement: "\"'%015d'\"",
+      provesRuntimeFailure: true
+    },
+    {
+      label: "backtick-quoted printf format identifier",
+      source: "'%015d'",
+      replacement: "`'%015d'`",
+      provesRuntimeFailure: false
+    },
+    {
+      label: "bracket-quoted printf format identifier",
+      source: "'%015d'",
+      replacement: "['%015d']",
+      provesRuntimeFailure: false
+    },
+    {
+      label: "double-quoted control-number prefix identifier",
+      source: "'DTE-15-'",
+      replacement: "\"'DTE-15-'\"",
+      provesRuntimeFailure: false
+    },
+    {
+      label: "escaped single-quoted separator literal",
+      source: "'-'",
+      replacement: "'-''-'",
+      provesRuntimeFailure: false
+    }
+  ])("rejects a $label before aliasing", async ({
+    source,
+    replacement,
+    provesRuntimeFailure
+  }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(readMigration(CURRENT_0023).replace(source, replacement));
+    recordMigration(database, LEGACY_0019);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('trigger_decoy_event', 'trigger_decoy_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    const rowBefore = database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'trigger_decoy_event'"
+    ).get();
+    const schemaBefore = database.prepare(
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    ).all();
+
+    if (provesRuntimeFailure) {
+      expect(() => database.prepare(
+        `UPDATE wompi_events
+         SET control_prefix = 'M001P004',
+             reserved_codigo_generacion = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA'
+         WHERE id = 'trigger_decoy_event'`
+      ).run()).toThrow(/no such column/i);
+      expect(database.prepare(
+        "SELECT * FROM wompi_events WHERE id = 'trigger_decoy_event'"
+      ).get()).toEqual(rowBefore);
+    }
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT * FROM wompi_events WHERE id = 'trigger_decoy_event'"
+    ).get()).toEqual(rowBefore);
+    expect(database.prepare(
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    ).all()).toEqual(schemaBefore);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
   it("accepts harmless SQL keyword and identifier case differences without changing literals", async () => {
     const { migrateSchemaCompatibility } = await loadCompatibility();
     const database = databaseThrough("0022");
@@ -830,6 +911,22 @@ describe("legacy Wompi issuance migration compatibility", () => {
       .replace(
         "AFTER UPDATE OF control_prefix, reserved_codigo_generacion ON wompi_events",
         "AFTER UPDATE -- harmless schema comment\nOF control_prefix, reserved_codigo_generacion ON wompi_events"
+      )
+      .replace(
+        "FOR EACH ROW",
+        "FOR EACH /* harmless block comment */ ROW"
+      )
+      .replace(
+        "NEW.control_prefix IS NOT NULL",
+        'NEW."control_prefix" IS NOT NULL'
+      )
+      .replace(
+        "NEW.reserved_codigo_generacion IS NOT NULL",
+        "NEW.`reserved_codigo_generacion` IS NOT NULL"
+      )
+      .replace(
+        "VALUES (NEW.environment, NEW.control_prefix, 1)",
+        "VALUES (NEW.[environment], NEW.control_prefix, 1)"
       );
     database.exec(lowercaseSqlOutsideStringLiterals(cosmeticMigration));
     recordMigration(database, LEGACY_0019);
