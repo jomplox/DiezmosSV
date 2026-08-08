@@ -119,11 +119,11 @@
 
 **Checkable outcome:** new password rows use a domain-separated two-stage `pbkdf2-chain` format with two 100,000-iteration Workers-compatible derivations; legacy/versioned/current, account-present-invalid, disabled, malformed, and account-absent verification paths all perform the same two derivations before returning; successful legacy login upgrades by compare-and-swap.
 
-- [ ] Write derivation-count tests first and prove current account-present/absent or legacy/current work differs.
-- [ ] Parse explicit `pbkdf2` and `pbkdf2-chain` formats without accepting unsupported iteration counts. Always perform two derivations: compare stage one for legacy hashes and stage two for chain hashes, using a dummy comparison when one stage is not semantically needed.
-- [ ] Keep the external invalid-credential response identical and preserve session credential fencing and opportunistic rehash behavior.
-- [ ] Benchmark repeated synthetic unknown-account, disabled-account, and wrong-password requests in the repository's workerd-equivalent test runtime; use distribution/median evidence with a documented non-flaky tolerance rather than one wall-clock sample. Record the observed numbers in the private execution ledger, not the public test output.
-- [ ] Run focused auth/infrastructure/user-administration suites and commit only auth-related changes.
+- [x] Write derivation-count tests first and prove current account-present/absent or legacy/current work differs.
+- [x] Parse explicit `pbkdf2` and `pbkdf2-chain` formats without accepting unsupported iteration counts. Always perform two derivations: compare stage one for legacy hashes and stage two for chain hashes, using a dummy comparison when one stage is not semantically needed.
+- [x] Keep the external invalid-credential response identical and preserve session credential fencing and opportunistic rehash behavior.
+- [x] Benchmark repeated synthetic unknown-account, disabled-account, and wrong-password requests in the repository's workerd-equivalent test runtime; use distribution/median evidence with a documented non-flaky tolerance rather than one wall-clock sample. Record the observed numbers in the private execution ledger, not the public test output.
+- [x] Run focused auth/infrastructure/user-administration suites and commit only auth-related changes.
 
 ## Task 7: Bound annual certificates with truthful continuation
 
