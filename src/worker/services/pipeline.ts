@@ -146,7 +146,9 @@ export class IssuancePipeline {
         }
         throw error;
       }
-      const issuanceEpoch = typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
+      const issuanceEpoch = typeof event.stalled_requeue_epoch_at === "string" && event.stalled_requeue_epoch_at
+        ? event.stalled_requeue_epoch_at
+        : typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
         ? event.issuance_last_attempt_at
         : null;
       const requeues = issuanceEpoch
@@ -154,7 +156,10 @@ export class IssuancePipeline {
         : await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
-        if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
+        const stalledAudits = issuanceEpoch
+          ? await this.repo.countAuditEntriesSince("WOMPI_EVENT_STALLED", eventId, issuanceEpoch)
+          : await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId);
+        if (stalledAudits === 0) {
           await this.repo.createAudit({
             action: "WOMPI_EVENT_STALLED",
             entityType: "wompi_event",

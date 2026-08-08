@@ -200,6 +200,7 @@ export class InMemoryD1 {
   documentLookupCount = 0;
   wompiIssuanceFailureLookupCount = 0;
   wompiIssuanceRetryClaimCount = 0;
+  auditCreatedAt = "2026-06-26T01:46:47.015Z";
   loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
@@ -2940,7 +2941,7 @@ export class Statement {
           metadata_json: metadataJson,
           actor_ip: null,
           actor_context: null,
-          created_at: "2026-06-26T01:46:47.015Z"
+          created_at: this.db.auditCreatedAt
         });
         changes = 1;
       }
@@ -3000,7 +3001,7 @@ export class Statement {
         actor_ip: actorIp ?? null,
         actor_context: actorContext ?? null,
         rate_limit_claim_id: rateLimitClaimId ?? null,
-        created_at: "2026-06-26T01:46:47.015Z"
+        created_at: this.db.auditCreatedAt
       });
     }
     if (this.sql.includes("INSERT INTO app_settings")) {
@@ -3557,15 +3558,15 @@ export class Statement {
       this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
     ) {
-      const [attemptId, queuedAt, wompiEventId] = this.args;
+      const [attemptId, queuedAt, stalledEpochAt, wompiEventId] = this.args;
       const observed = this.sql.includes("AND issuance_error_code IS ?")
         ? {
-            status: this.args[3],
-            processedAt: this.args[4],
-            attemptId: this.args[5],
-            claimId: this.args[6],
-            errorCode: this.args[7],
-            errorMessage: this.args[8]
+            status: this.args[4],
+            processedAt: this.args[5],
+            attemptId: this.args[6],
+            claimId: this.args[7],
+            errorCode: this.args[8],
+            errorMessage: this.args[9]
           }
         : null;
       const event = this.db.wompiEvents.find(
@@ -3598,6 +3599,7 @@ export class Statement {
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = String(attemptId);
         event.issuance_last_attempt_at = String(queuedAt);
+        event.stalled_requeue_epoch_at = String(stalledEpochAt);
         changes = 1;
       }
     }
@@ -3639,6 +3641,7 @@ export class Statement {
       ) {
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = attemptId;
+        event.stalled_requeue_epoch_at ??= event.issuance_last_attempt_at ?? event.received_at;
         event.issuance_last_attempt_at = queuedAt;
         changes = 1;
       }
