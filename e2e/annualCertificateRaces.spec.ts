@@ -870,3 +870,144 @@ test("invalidates a pending certificate operation when the account resets", asyn
     oldPage.release();
   }
 });
+
+test("refreshes a settled search revision when raw input returns to the same trimmed value", async ({ page }) => {
+  const previewGets: Array<{ year: string | null; search: string | null; hasSearch: boolean }> = [];
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname !== "/api/certificates/annual" || request.method() !== "GET") {
+      return false;
+    }
+    previewGets.push({
+      year: url.searchParams.get("year"),
+      search: url.searchParams.get("q"),
+      hasSearch: url.searchParams.has("q")
+    });
+    await fulfillJson(route, preview(Number(url.searchParams.get("year")), ["Restored settled search"]));
+    return true;
+  });
+
+  await expect(page.getByText("Restored settled search")).toBeVisible();
+  expect(previewGets).toEqual([{ year: "2026", search: null, hasSearch: false }]);
+  const search = page.getByPlaceholder("Buscar donante o correo");
+
+  await search.fill("temporary");
+  expect(await page.getByText("Restored settled search").count()).toBe(0);
+  await search.fill("");
+  await expect.poll(() => previewGets.length).toBe(2);
+  expect(previewGets[1]).toEqual({ year: "2026", search: null, hasSearch: false });
+  await expect(page.getByText("Restored settled search")).toBeVisible();
+
+  await search.fill("   ");
+  expect(await page.getByText("Restored settled search").count()).toBe(0);
+  await expect.poll(() => previewGets.length).toBe(3);
+  expect(previewGets[2]).toEqual({ year: "2026", search: null, hasSearch: false });
+  await expect(page.getByText("Restored settled search")).toBeVisible();
+});
+
+test("keeps a newer F960 failure authoritative when an older CSV succeeds later", async ({ page }) => {
+  const csv = deferred();
+  let csvSeen = false;
+  let csvCompleted = false;
+
+  await installAdminApp(page, async (route, url) => {
+    if (url.pathname === "/api/exports/f960.csv") {
+      csvSeen = true;
+      await csv.promise;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/csv",
+        headers: { "Content-Disposition": "attachment; filename=f960.csv" },
+        body: "fila\n"
+      });
+      csvCompleted = true;
+      return true;
+    }
+    if (url.pathname === "/api/exports/f960.xlsx") {
+      await fulfillError(route, "CURRENT XLSX ERROR");
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual") {
+      await fulfillJson(route, preview(2026, ["F960 ownership donor"]));
+      return true;
+    }
+    return false;
+  });
+
+  await expect(page.getByText("F960 ownership donor")).toBeVisible();
+  try {
+    await page.getByRole("button", { name: "Descargar CSV" }).click();
+    await expect.poll(() => csvSeen).toBe(true);
+    await page.getByRole("button", { name: "XLSX de inspección" }).click();
+    await expect(page.getByText("CURRENT XLSX ERROR")).toBeVisible();
+
+    csv.release();
+    await expect.poll(() => csvCompleted).toBe(true);
+    await settleReact(page);
+    await expect(page.getByText("CURRENT XLSX ERROR")).toBeVisible();
+    expect(await page.getByText("CSV F960 descargado").count()).toBe(0);
+  } finally {
+    csv.release();
+  }
+});
+
+test("serializes distinct recipient sends and permits the next row after the first settles", async ({ page }) => {
+  const alpha = deferred();
+  let alphaSeen = false;
+  const bodies: unknown[] = [];
+  const twoDonors = {
+    ...preview(2026, []),
+    donors: [
+      { ...donor("Alpha donor"), groupKey: "alpha@example.org", donorEmail: "alpha@example.org" },
+      { ...donor("Beta donor"), groupKey: "beta@example.org", donorEmail: "beta@example.org" }
+    ]
+  };
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/certificates/annual/send" && request.method() === "POST") {
+      const body = request.postDataJSON();
+      bodies.push(body);
+      if (body.donor === "alpha@example.org") {
+        alphaSeen = true;
+        await alpha.promise;
+      }
+      await fulfillJson(route, { ...sendResult(2026), mode: "single", hasMore: false, nextCursor: null });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual" && request.method() === "GET") {
+      await fulfillJson(route, twoDonors);
+      return true;
+    }
+    return false;
+  });
+
+  await expect(page.getByText("Alpha donor")).toBeVisible();
+  await expect(page.getByText("Beta donor")).toBeVisible();
+  try {
+    await page.locator(".certificate-table tbody button").evaluateAll((buttons) => {
+      (buttons[0] as HTMLButtonElement).click();
+      (buttons[1] as HTMLButtonElement).click();
+    });
+    await expect.poll(() => alphaSeen).toBe(true);
+    await settleReact(page);
+    expect(bodies).toEqual([{ donor: "alpha@example.org" }]);
+    await expect(page.getByRole("row", { name: /Beta donor/ }).getByRole("button", { name: "Enviar" })).toBeDisabled();
+
+    alpha.release();
+    await expect(page.getByText("Constancia 2026 enviada a Alpha donor.")).toBeVisible();
+    await expect(page.getByRole("row", { name: /Beta donor/ }).getByRole("button", { name: "Enviar" })).toBeEnabled();
+    expect(bodies).toEqual([{ donor: "alpha@example.org" }]);
+
+    await page.getByRole("row", { name: /Beta donor/ }).getByRole("button", { name: "Enviar" }).click();
+    await expect.poll(() => bodies.length).toBe(2);
+    expect(bodies).toEqual([
+      { donor: "alpha@example.org" },
+      { donor: "beta@example.org" }
+    ]);
+    await expect(page.getByText("Constancia 2026 enviada a Beta donor.")).toBeVisible();
+  } finally {
+    alpha.release();
+  }
+});
