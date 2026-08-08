@@ -116,13 +116,13 @@ describe("annual certificate bounded repository reads", () => {
       donorName: "A Sin Correo",
       issuedAt: "2025-01-02T12:00:00.000Z"
     });
-    for (let index = 0; index < 13; index += 1) {
+    for (let index = 0; index < 70; index += 1) {
       const sequence = String(index).padStart(2, "0");
       seedCertificateDocument(database, {
         id: `bulk_${sequence}`,
         donorEmail: `bulk${sequence}@example.org`,
         donorName: `Bulk ${sequence}`,
-        issuedAt: `2025-03-${String(index + 1).padStart(2, "0")}T12:00:00.000Z`
+        issuedAt: `2025-03-${String((index % 28) + 1).padStart(2, "0")}T12:00:00.000Z`
       });
     }
     database.prepare(
@@ -135,7 +135,7 @@ describe("annual certificate bounded repository reads", () => {
 
     const targets = await repository.listAnnualCertificateDonorTargets(range, {
       afterGroupKey: null,
-      limit: 10,
+      limit: 999,
       search: null,
       unsentEmailOnly: true,
       year: 2025
@@ -149,6 +149,32 @@ describe("annual certificate bounded repository reads", () => {
     expect(targets.every((target) => target.donorEmail !== null)).toBe(true);
     expect(targets.map((target) => target.groupKey)).not.toContain("bulk00@example.org");
     database.close();
+  });
+
+  it.each([
+    ["NaN", Number.NaN],
+    ["positive infinity", Number.POSITIVE_INFINITY],
+    ["negative infinity", Number.NEGATIVE_INFINITY],
+    ["a fraction", 1.5],
+    ["zero", 0],
+    ["a negative number", -1]
+  ])("rejects %s as a target limit before preparing SQL", async (_label, limit) => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const repository = new Repository(d1.database);
+
+    try {
+      await expect(repository.listAnnualCertificateDonorTargets(range, {
+        afterGroupKey: null,
+        limit,
+        search: null,
+        unsentEmailOnly: false,
+        year: 2025
+      })).rejects.toThrow("annual certificate target limit must be a positive finite integer");
+      expect(d1.statements).toHaveLength(0);
+    } finally {
+      database.close();
+    }
   });
 
   it("reads at most 26 ordered full DTE rows for one exact canonical recipient", async () => {

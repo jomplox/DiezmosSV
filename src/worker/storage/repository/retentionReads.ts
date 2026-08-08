@@ -139,9 +139,9 @@ export async function listAcceptedDocumentsInYear(
 
 // Bounded annual-certificate summary read. The caller supplies the number of rows it
 // can display/process; this reader adds exactly one sentinel and never returns more
-// than 51 grouped summaries. Search chooses matching recipient keys through the
-// existing FTS index, while `grouped` still aggregates every accepted annual row for
-// each chosen recipient.
+// than 51 preview summaries or 11 unsent-email summaries. Search chooses matching
+// recipient keys through the existing FTS index, while `grouped` still aggregates
+// every accepted annual row for each chosen recipient.
 export async function listAnnualCertificateDonorTargets(
   db: D1Database,
   range: { startIso: string; endIso: string },
@@ -154,7 +154,11 @@ export async function listAnnualCertificateDonorTargets(
     groupKey?: string | null;
   }
 ): Promise<AnnualCertificateDonorTarget[]> {
-  const pageSize = Math.min(Math.max(Math.trunc(options.limit), 1), 50);
+  if (!Number.isFinite(options.limit) || !Number.isInteger(options.limit) || options.limit <= 0) {
+    throw new RangeError("annual certificate target limit must be a positive finite integer");
+  }
+  const maximumPageSize = options.unsentEmailOnly ? 10 : 50;
+  const pageSize = Math.min(options.limit, maximumPageSize);
   const ftsQuery = buildDteSearchQuery(options.search);
   const bindings: Array<string | number> = [range.startIso, range.endIso];
   const matchingCte = ftsQuery

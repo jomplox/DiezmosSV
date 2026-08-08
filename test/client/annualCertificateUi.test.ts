@@ -46,11 +46,12 @@ describe("annual certificate UI contract", () => {
 
   it("keeps preview pagination and bulk traversal in independent state", () => {
     expect(appSource).toContain("certificatePreviewCursor");
-    expect(appSource).toContain("bulkNextCursor");
     expect(appSource).toContain("bulkHasMore");
     expect(appSource).toContain("bulkTraversalStarted");
+    expect(appSource).toContain("certificatePreviewRequestRef");
+    expect(appSource).toContain("certificateBulkTraversalRef");
     expect(appSource).toContain("loadMoreCertificatePreview");
-    expect(appSource).toContain("body: bulkTraversalStarted ? { after: bulkNextCursor } : {}");
+    expect(appSource).toContain("body: request.cursor ? { after: request.cursor } : {}");
 
     const singleStart = appSource.indexOf("async function sendDonorCertificate");
     const singleEnd = appSource.indexOf("async function createUser", singleStart);
@@ -59,6 +60,7 @@ describe("annual certificate UI contract", () => {
     expect(singleSendSource).not.toContain("setBulkNextCursor");
     expect(singleSendSource).not.toContain("setBulkHasMore");
     expect(singleSendSource).not.toContain("setBulkTraversalStarted");
+    expect(singleSendSource).not.toContain("certificateBulkTraversalRef");
   });
 
   it("offers debounced search and keyset preview pagination that reset independently", () => {
@@ -66,7 +68,7 @@ describe("annual certificate UI contract", () => {
     expect(appSource).toContain('placeholder="Buscar donante o correo"');
     // Debounced search state threaded into the preview endpoint via q.
     expect(appSource).toContain("debouncedCertificateSearch");
-    expect(appSource).toContain("certificatePreviewPath(certificateYear, debouncedCertificateSearch, certificatePreviewCursor)");
+    expect(appSource).toContain("certificatePreviewPath(request.year, request.search, request.cursor)");
     expect(appSource).toContain("&q=${encodeURIComponent(trimmed)}");
     expect(appSource).toContain("Ver más donantes");
     expect(appSource).toContain("setCertificatePreviewCursor(null)");
