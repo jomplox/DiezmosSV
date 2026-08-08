@@ -124,6 +124,25 @@ export type FiscalCorrectionTarget =
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
 const TOAST_DISMISS_MS = 6000;
+
+interface CertificatePreviewRequest {
+  generation: number;
+  year: string;
+  search: string;
+  cursor: string | null;
+}
+
+interface CertificateBulkRequest {
+  generation: number;
+  year: string;
+  cursor: string | null;
+}
+
+interface CertificateBulkTraversal extends CertificateBulkRequest {
+  started: boolean;
+  hasMore: boolean;
+}
+
 // The general Documents status picker keeps a combined fiscal failure option. The
 // dedicated Fallos view uses the server-side attention filter so it can also include
 // accepted CDEs whose latest receipt email failed.
@@ -336,9 +355,21 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
   const [certificatePreviewCursor, setCertificatePreviewCursor] = useState<string | null>(null);
-  const [bulkNextCursor, setBulkNextCursor] = useState<string | null>(null);
   const [bulkHasMore, setBulkHasMore] = useState(false);
   const [bulkTraversalStarted, setBulkTraversalStarted] = useState(false);
+  const certificatePreviewRequestRef = useRef<CertificatePreviewRequest>({
+    generation: 0,
+    year: certificateYear,
+    search: debouncedCertificateSearch,
+    cursor: null
+  });
+  const certificateBulkTraversalRef = useRef<CertificateBulkTraversal>({
+    generation: 0,
+    year: certificateYear,
+    cursor: null,
+    started: false,
+    hasMore: false
+  });
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -452,19 +483,23 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }, [view]);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
+    const nextSearch = certificateSearch.trim();
+    const handle = window.setTimeout(() => {
+      const current = certificatePreviewRequestRef.current;
+      if (current.search !== nextSearch) {
+        certificatePreviewRequestRef.current = {
+          generation: current.generation + 1,
+          year: current.year,
+          search: nextSearch,
+          cursor: null
+        };
+        setCertificatePreview(null);
+        setCertificatePreviewCursor(null);
+      }
+      setDebouncedCertificateSearch(nextSearch);
+    }, DOCUMENT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [certificateSearch]);
-
-  useEffect(() => {
-    setCertificatePreviewCursor(null);
-  }, [certificateYear, debouncedCertificateSearch]);
-
-  useEffect(() => {
-    setBulkNextCursor(null);
-    setBulkHasMore(false);
-    setBulkTraversalStarted(false);
-  }, [certificateYear]);
 
   useEffect(() => {
     document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
@@ -753,6 +788,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         return;
       }
       const params = exportParams(exportStartDate, exportEndDate);
+      const certificateRequest = beginCertificatePreviewReplacement(
+        certificateYear,
+        debouncedCertificateSearch
+      );
       const [
         f960Preview,
         certificateResult,
@@ -761,14 +800,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         environmentResult
       ] = await Promise.all([
         accountApi<F960Preview>(`/api/exports/f960?${params}`),
-        accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch, null)),
+        accountApi<AnnualCertificatePreview>(certificatePreviewPath(
+          certificateRequest.year,
+          certificateRequest.search,
+          certificateRequest.cursor
+        )),
         accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
       setExportPreview(f960Preview);
-      setCertificatePreview(certificateResult);
-      setCertificatePreviewCursor(certificateResult.nextCursor);
+      commitCertificatePreview(certificateRequest, certificateResult, false);
       setDonationIntents(donationIntentResult.intents);
       setBackups(backupsResult.months);
       setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -777,6 +819,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   function resetAccountState() {
     accountStateGuardRef.current.advance();
+    const certificateResetYear = String(new Date().getFullYear());
+    invalidateCertificatePreview(certificateResetYear, "");
+    resetCertificateBulkTraversal(certificateResetYear);
     setView("documents");
     setDocuments([]);
     clearPreCdeFailures();
@@ -814,14 +859,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setExportStartDate(currentMonthStartValue());
     setExportEndDate(todayDateValue());
     setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
-    setCertificateYear(String(new Date().getFullYear()));
+    setCertificateYear(certificateResetYear);
     setCertificateSearch("");
     setDebouncedCertificateSearch("");
-    setCertificatePreview(null);
-    setCertificatePreviewCursor(null);
-    setBulkNextCursor(null);
-    setBulkHasMore(false);
-    setBulkTraversalStarted(false);
     setContactsPeriod("todo");
     setContactsFrom(currentMonthStartValue());
     setContactsTo(todayDateValue());
@@ -1332,8 +1372,97 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     });
   }
 
+  function beginCertificatePreviewReplacement(year: string, search: string): CertificatePreviewRequest {
+    const request = {
+      generation: certificatePreviewRequestRef.current.generation + 1,
+      year,
+      search,
+      cursor: null
+    };
+    certificatePreviewRequestRef.current = request;
+    setCertificatePreviewCursor(null);
+    return request;
+  }
+
+  function isCurrentCertificatePreviewRequest(request: CertificatePreviewRequest): boolean {
+    const current = certificatePreviewRequestRef.current;
+    return current.generation === request.generation
+      && current.year === request.year
+      && current.search === request.search
+      && current.cursor === request.cursor;
+  }
+
+  function commitCertificatePreview(
+    request: CertificatePreviewRequest,
+    page: AnnualCertificatePreview,
+    append: boolean
+  ): boolean {
+    if (!isCurrentCertificatePreviewRequest(request)) {
+      return false;
+    }
+    certificatePreviewRequestRef.current = { ...request, cursor: page.nextCursor };
+    setCertificatePreview((currentPreview) => {
+      const current = certificatePreviewRequestRef.current;
+      if (
+        current.generation !== request.generation
+        || current.year !== request.year
+        || current.search !== request.search
+        || current.cursor !== page.nextCursor
+      ) {
+        return currentPreview;
+      }
+      if (append && currentPreview?.year === page.year) {
+        return { ...page, donors: [...currentPreview.donors, ...page.donors] };
+      }
+      return page;
+    });
+    setCertificatePreviewCursor((currentCursor) => {
+      const current = certificatePreviewRequestRef.current;
+      return current.generation === request.generation
+        && current.year === request.year
+        && current.search === request.search
+        && current.cursor === page.nextCursor
+        ? page.nextCursor
+        : currentCursor;
+    });
+    return true;
+  }
+
+  function invalidateCertificatePreview(year: string, search: string): void {
+    const current = certificatePreviewRequestRef.current;
+    certificatePreviewRequestRef.current = {
+      generation: current.generation + 1,
+      year,
+      search,
+      cursor: null
+    };
+    setCertificatePreview(null);
+    setCertificatePreviewCursor(null);
+  }
+
+  function resetCertificateBulkTraversal(year: string): void {
+    const current = certificateBulkTraversalRef.current;
+    certificateBulkTraversalRef.current = {
+      generation: current.generation + 1,
+      year,
+      cursor: null,
+      started: false,
+      hasMore: false
+    };
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
+  }
+
+  function isCurrentCertificateBulkRequest(request: CertificateBulkRequest): boolean {
+    const current = certificateBulkTraversalRef.current;
+    return current.generation === request.generation
+      && current.year === request.year
+      && (current.started ? current.cursor : null) === request.cursor;
+  }
+
   async function sendAnnualCertificates() {
-    if (bulkTraversalStarted && (!bulkHasMore || !bulkNextCursor)) {
+    const traversal = certificateBulkTraversalRef.current;
+    if (traversal.started && (!traversal.hasMore || !traversal.cursor)) {
       setToast("El recorrido actual ya terminó. Inicie uno nuevo para volver a revisar el año.");
       return;
     }
@@ -1343,14 +1472,28 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!confirmed) {
       return;
     }
+    const request: CertificateBulkRequest = {
+      generation: traversal.generation,
+      year: traversal.year,
+      cursor: traversal.started ? traversal.cursor : null
+    };
     await runAction("certificates-send", async () => {
-      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${certificateYear}`, {
+      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${request.year}`, {
         method: "POST",
-        body: bulkTraversalStarted ? { after: bulkNextCursor } : {}
+        body: request.cursor ? { after: request.cursor } : {}
       });
+      if (!isCurrentCertificateBulkRequest(request)) {
+        return;
+      }
+      certificateBulkTraversalRef.current = {
+        generation: request.generation,
+        year: request.year,
+        cursor: result.nextCursor,
+        started: true,
+        hasMore: result.hasMore
+      };
       setBulkTraversalStarted(true);
       setBulkHasMore(result.hasMore);
-      setBulkNextCursor(result.nextCursor);
       setToast(
         `Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas.` +
           (result.hasMore ? " Quedan donantes por procesar." : " Recorrido completado.")
@@ -1362,30 +1505,27 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!certificatePreview?.hasMore || !certificatePreviewCursor) {
       return;
     }
+    const request = { ...certificatePreviewRequestRef.current };
+    if (request.cursor !== certificatePreviewCursor) {
+      return;
+    }
     await runAction("certificates-preview-more", async () => {
       const page = await accountApi<AnnualCertificatePreview>(
-        certificatePreviewPath(certificateYear, debouncedCertificateSearch, certificatePreviewCursor)
+        certificatePreviewPath(request.year, request.search, request.cursor)
       );
-      setCertificatePreview((current) => current
-        ? { ...page, donors: [...current.donors, ...page.donors] }
-        : page);
-      setCertificatePreviewCursor(page.nextCursor);
+      commitCertificatePreview(request, page, true);
     });
   }
 
   function startNewCertificateTraversal() {
-    setBulkNextCursor(null);
-    setBulkHasMore(false);
-    setBulkTraversalStarted(false);
+    resetCertificateBulkTraversal(certificateYear);
     setToast("Recorrido de constancias reiniciado.");
   }
 
   function changeCertificateYear(year: string) {
+    invalidateCertificatePreview(year, certificatePreviewRequestRef.current.search);
+    resetCertificateBulkTraversal(year);
     setCertificateYear(year);
-    setCertificatePreviewCursor(null);
-    setBulkNextCursor(null);
-    setBulkHasMore(false);
-    setBulkTraversalStarted(false);
   }
 
   function changeCertificateSearch(value: string) {
@@ -1414,21 +1554,31 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!confirmed) {
       return;
     }
+    const previewRequest = { ...certificatePreviewRequestRef.current };
+    if (previewRequest.year !== String(preview.year)) {
+      return;
+    }
     await runAction(`certificates-send-${donor.groupKey}`, async () => {
       const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, {
         method: "POST",
         body: { donor: donor.groupKey }
       });
+      if (!isCurrentCertificatePreviewRequest(previewRequest)) {
+        return;
+      }
       setToast(
         result.sent > 0
           ? `Constancia ${result.year} enviada a ${donor.donorName}.`
           : `No se pudo enviar la constancia a ${donor.donorName}.`
       );
-      const refreshed = await accountApi<AnnualCertificatePreview>(
-        certificatePreviewPath(certificateYear, debouncedCertificateSearch, null)
+      const refreshRequest = beginCertificatePreviewReplacement(
+        previewRequest.year,
+        previewRequest.search
       );
-      setCertificatePreview(refreshed);
-      setCertificatePreviewCursor(refreshed.nextCursor);
+      const refreshed = await accountApi<AnnualCertificatePreview>(
+        certificatePreviewPath(refreshRequest.year, refreshRequest.search, refreshRequest.cursor)
+      );
+      commitCertificatePreview(refreshRequest, refreshed, false);
     });
   }
 
