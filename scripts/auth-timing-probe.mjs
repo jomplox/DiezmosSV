@@ -14,6 +14,18 @@ const databaseName = "diezmossv-auth-timing-db";
 const taskRootPrefix = "diezmossv-auth-timing-";
 const taskRootMarkerName = ".diezmossv-auth-timing-owner";
 const taskRootOwnershipToken = `diezmossv-auth-timing:${process.pid}:${randomUUID()}`;
+const childEnvironmentBlockedPrefixes = [
+  "AUTH_TIMING_",
+  "CLOUDFLARE_",
+  "CF_",
+  "DIEZMOSSV_",
+  "WRANGLER_"
+];
+const childEnvironmentBlockedBindings = new Set([
+  "APP_ENV",
+  "APP_ORIGIN",
+  "MOCK_EXTERNAL_SERVICES"
+]);
 const warmupsPerClass = numberOption("AUTH_TIMING_WARMUPS_PER_CLASS", 50, 1, 1_000);
 const samplesPerClass = numberOption("AUTH_TIMING_SAMPLES_PER_CLASS", 500, 20, 10_000);
 // Successful requests are observational only; the invalid-class equivalence gate below
@@ -119,12 +131,7 @@ async function runProbe() {
   ]);
   await writeFile(configFile, syntheticWranglerConfig(), { mode: 0o600 });
 
-  const commandEnv = {
-    ...process.env,
-    MINIFLARE_CACHE_DIR: miniflareCacheDir,
-    WRANGLER_SEND_METRICS: "false",
-    NO_COLOR: "1"
-  };
+  const commandEnv = syntheticWranglerEnvironment(process.env, miniflareCacheDir);
   await runCommand(wrangler, [
     "d1", "migrations", "apply", databaseName,
     "--config", configFile,
@@ -356,6 +363,26 @@ function syntheticWranglerConfig() {
     `migrations_dir = ${JSON.stringify(migrationsDirectory)}`,
     ""
   ].join("\n");
+}
+
+function syntheticWranglerEnvironment(sourceEnvironment, cacheDirectory) {
+  const environment = { ...sourceEnvironment };
+  for (const key of Object.keys(environment)) {
+    if (
+      childEnvironmentBlockedBindings.has(key)
+      || childEnvironmentBlockedPrefixes.some((prefix) => key.startsWith(prefix))
+    ) {
+      delete environment[key];
+    }
+  }
+  return {
+    ...environment,
+    MINIFLARE_CACHE_DIR: cacheDirectory,
+    WRANGLER_SEND_METRICS: "false",
+    CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",
+    CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",
+    NO_COLOR: "1"
+  };
 }
 
 function distribution(values) {

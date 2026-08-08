@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
 const probePath = resolve(repositoryRoot, "scripts/auth-timing-probe.mjs");
+const hostileCanary = "host-only-auth-timing-canary";
 const interruptionSignals = process.platform === "win32"
   ? [{ signal: "SIGINT" as const, exitCode: 130 }, { signal: "SIGTERM" as const, exitCode: 143 }]
   : [
@@ -76,6 +77,51 @@ describe("auth timing probe cleanup", () => {
 
       expect(result, fixture.output()).toEqual({ code: 1, signal: null });
       expect(fixture.output()).toContain("controlled timing-probe smoke failure");
+      await expectReleased(fixture, observed);
+    } finally {
+      await forceFixtureCleanup(fixture, observed);
+    }
+  }, 120_000);
+
+  it("keeps hostile inherited Wrangler dev-env flags outside the synthetic Worker", async () => {
+    const fixture = await launchProbe({
+      CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "true",
+      CLOUDFLARE_INCLUDE_PROCESS_ENV: "true",
+      APP_ENV: "production",
+      AUTH_TIMING_HOST_CANARY: hostileCanary,
+      CLOUDFLARE_API_TOKEN: hostileCanary,
+      CF_API_KEY: hostileCanary,
+      CLOUDFLARE_EMAIL: "host-canary@example.invalid",
+      CLOUDFLARE_ACCOUNT_ID: hostileCanary,
+      WRANGLER_CONFIG_FILENAME: "/host-canary/wrangler.toml",
+      DIEZMOSSV_WRANGLER_CONFIG: "/host-canary/private-wrangler.toml",
+      DIEZMOSSV_ENV_FILE: "/host-canary/private.env"
+    });
+    let observed = processTree(fixture.child.pid!);
+    try {
+      await waitForPath(fixture.taskRoot);
+      await waitForHealth(fixture);
+      observed = processTree(fixture.child.pid!);
+
+      const generatedConfig = await readFile(join(fixture.taskRoot, "wrangler.toml"), "utf8");
+      expect(generatedConfig).toContain('APP_ENV = "local"');
+      expect(generatedConfig).not.toContain(hostileCanary);
+      const response = await fetch(`http://127.0.0.1:${fixture.port}/api/health`, {
+        signal: AbortSignal.timeout(1_000)
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ ok: true, appEnv: "local" });
+
+      const probeSource = await readFile(probePath, "utf8");
+      for (const blockedPrefix of ["AUTH_TIMING_", "CLOUDFLARE_", "CF_", "DIEZMOSSV_", "WRANGLER_"]) {
+        expect(probeSource).toContain(`"${blockedPrefix}"`);
+      }
+      expect(probeSource).toContain('CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"');
+      expect(probeSource).toContain('CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"');
+
+      process.kill(fixture.child.pid!, "SIGTERM");
+      const result = await withTimeout(fixture.exit, 20_000, "hostile-env probe did not exit after SIGTERM");
+      expect(result, fixture.output()).toEqual({ code: 143, signal: null });
       await expectReleased(fixture, observed);
     } finally {
       await forceFixtureCleanup(fixture, observed);
