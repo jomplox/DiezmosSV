@@ -269,6 +269,29 @@ describe("admin backups panel", () => {
     );
   });
 
+  it.each(["fiscal_corrections_latest", "document_sequences"])(
+    "downloads the manifested restore-critical table %s",
+    async (table) => {
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+      const archive = new FakeArchiveBucket();
+      await seedManifest(archive, "2026-04", { [table]: { rowCount: 1, body: "restore row\n" } });
+
+      const response = await worker.fetch(
+        new Request(`https://example.org/api/admin/backups/2026-04/download?table=${table}`, {
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        env(db, { ARCHIVE: archive as unknown as R2Bucket })
+      );
+
+      expect(response.status).toBe(200);
+      await expect(response.text()).resolves.toBe("restore row\n");
+      expect(db.audits).toContainEqual(
+        expect.objectContaining({ action: "RETENTION_DOWNLOADED", entity_type: "retention_export", entity_id: "2026-04" })
+      );
+    }
+  );
+
   it("does not download an archive object omitted from the month manifest", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
