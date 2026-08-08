@@ -400,6 +400,52 @@ describe("Wompi issuance failure recovery API", () => {
     }
   });
 
+  it("does not queue or audit a retry when only the observed last-attempt timestamp changes", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      const concurrentAttemptAt = "2026-07-14T10:00:00.005Z";
+      vi.setSystemTime(new Date(boundary));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: boundary
+      }));
+      db.beforeWompiIssuanceRetryClaim = () => {
+        db.wompiEvents[0].issuance_last_attempt_at = concurrentAttemptAt;
+      };
+      const queued: IssuanceMessage[] = [];
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        env(db, {
+          ISSUANCE_QUEUE: {
+            send: async (message: IssuanceMessage) => queued.push(message)
+          } as unknown as Queue<IssuanceMessage>
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_status: "FAILED",
+        issuance_last_attempt_at: concurrentAttemptAt,
+        stalled_requeue_epoch_at: boundary
+      });
+      expect(queued).toHaveLength(0);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_ISSUANCE_RETRY_QUEUED"
+      )).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns correction_required when the failure becomes correctable between read and retry claim", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };

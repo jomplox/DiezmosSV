@@ -289,7 +289,8 @@ export async function claimWompiIssuanceRetry(
   const attemptId = newId("issuance_attempt");
   const retryQueuedAt = nextStalledRequeueEpoch(
     nowIso(),
-    observed.stalled_requeue_epoch_at ?? observed.issuance_last_attempt_at
+    observed.stalled_requeue_epoch_at,
+    observed.issuance_last_attempt_at
   );
   const actorIp = normalizeAuditIp(auditContext?.ip ?? null);
   const actorContext = serializeAuditContext(auditContext?.context);
@@ -311,6 +312,7 @@ export async function claimWompiIssuanceRetry(
              AND issuance_claim_id IS ?
              AND issuance_error_code IS ?
              AND issuance_error_message IS ?
+             AND issuance_last_attempt_at IS ?
              AND stalled_requeue_epoch_at IS ?
              AND (
                issuance_status IN ('FAILED', 'DEAD_LETTERED')
@@ -339,6 +341,7 @@ export async function claimWompiIssuanceRetry(
         observed.issuance_claim_id,
         observed.issuance_error_code,
         observed.issuance_error_message,
+        observed.issuance_last_attempt_at,
         observed.stalled_requeue_epoch_at
       ),
     db
@@ -369,16 +372,43 @@ export async function claimWompiIssuanceRetry(
   return Number(results[0]?.meta?.changes ?? 0) === 1 ? attemptId : null;
 }
 
-function nextStalledRequeueEpoch(candidateIso: string, previousIso: string | null): string {
-  if (!previousIso) {
+function nextStalledRequeueEpoch(
+  candidateIso: string,
+  previousEpochIso: string | null,
+  previousAttemptIso: string | null
+): string {
+  const candidateMs = isoTimestampMilliseconds(candidateIso);
+  if (candidateMs === null) {
+    throw new Error("Invalid current retry timestamp");
+  }
+  const validPredecessors = [previousEpochIso, previousAttemptIso]
+    .map(isoTimestampMilliseconds)
+    .filter((value): value is number => value !== null);
+  const latestPredecessorMs = validPredecessors.length > 0
+    ? Math.max(...validPredecessors)
+    : Number.NEGATIVE_INFINITY;
+  if (candidateMs > latestPredecessorMs) {
     return candidateIso;
   }
-  const candidateMs = Date.parse(candidateIso);
-  const previousMs = Date.parse(previousIso);
-  if (!Number.isFinite(previousMs) || candidateMs > previousMs) {
-    return candidateIso;
+  const advanced = new Date(latestPredecessorMs + 1);
+  if (!Number.isFinite(advanced.getTime())) {
+    throw new Error("Cannot advance retry timestamp");
   }
-  return new Date(previousMs + 1).toISOString();
+  const advancedIso = advanced.toISOString();
+  if (isoTimestampMilliseconds(advancedIso) === null) {
+    throw new Error("Cannot advance retry timestamp");
+  }
+  return advancedIso;
+}
+
+function isoTimestampMilliseconds(value: string | null): number | null {
+  if (!value || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value
+    ? parsed
+    : null;
 }
 
 export async function claimStalledWompiIssuanceAttempt(

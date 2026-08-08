@@ -242,17 +242,23 @@ export async function countAuditEntriesSince(
 ): Promise<number> {
   const row = await db
     .prepare(
-      `SELECT COUNT(*) AS count
-         FROM audit_logs
-        WHERE action = ?
-          AND entity_id = ?
-          AND (
-            json_extract(metadata_json, '$.stalledRequeueEpochAt') = ?
-            OR (
-              json_extract(metadata_json, '$.stalledRequeueEpochAt') IS NULL
-              AND created_at > ?
-            )
-          )`
+      `WITH episode_audits AS (
+         SELECT created_at,
+                CASE WHEN json_valid(metadata_json) THEN
+                  CASE WHEN json_type(metadata_json, '$.stalledRequeueEpochAt') = 'text'
+                    THEN NULLIF(json_extract(metadata_json, '$.stalledRequeueEpochAt'), '')
+                    ELSE NULL
+                  END
+                ELSE NULL
+                END AS episode_id
+           FROM audit_logs
+          WHERE action = ?
+            AND entity_id = ?
+       )
+       SELECT COUNT(*) AS count
+         FROM episode_audits
+        WHERE episode_id = ?
+           OR (episode_id IS NULL AND created_at > ?)`
     )
     .bind(action, entityId, sinceIso, sinceIso)
     .first<{ count: number }>();

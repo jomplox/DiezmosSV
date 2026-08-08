@@ -1618,13 +1618,13 @@ export class Statement {
       }
       return {
         count: this.db.audits.filter((audit) => {
-          const metadata = auditMetadata(audit);
+          const auditEpisodeId = auditStalledRequeueEpisodeId(audit);
           return audit.action === action &&
             audit.entity_id === entityId &&
             (
-              metadata.stalledRequeueEpochAt === episodeId ||
+              auditEpisodeId === episodeId ||
               (
-                metadata.stalledRequeueEpochAt == null &&
+                auditEpisodeId === null &&
                 String(audit.created_at) > exclusiveBoundary
               )
             );
@@ -3005,15 +3005,15 @@ export class Statement {
         ? null
         : String(rawExclusiveBoundary);
       const exists = this.db.audits.some((audit) => {
-        const metadata = auditMetadata(audit);
+        const auditEpisodeId = auditStalledRequeueEpisodeId(audit);
         return audit.action === guardAction &&
           audit.entity_type === guardEntityType &&
           audit.entity_id === guardEntityId &&
           (
             episodeId === null ||
-            metadata.stalledRequeueEpochAt === episodeId ||
+            auditEpisodeId === episodeId ||
             (
-              metadata.stalledRequeueEpochAt == null &&
+              auditEpisodeId === null &&
               exclusiveBoundary !== null &&
               String(audit.created_at) > exclusiveBoundary
             )
@@ -3658,7 +3658,8 @@ export class Statement {
             claimId: this.args[7],
             errorCode: this.args[8],
             errorMessage: this.args[9],
-            stalledEpochAt: this.args[10]
+            lastAttemptAt: this.args[10],
+            stalledEpochAt: this.args[11]
           }
         : null;
       const event = this.db.wompiEvents.find(
@@ -3683,6 +3684,7 @@ export class Statement {
               && (row.issuance_claim_id ?? null) === observed.claimId
               && (row.issuance_error_code ?? null) === observed.errorCode
               && (row.issuance_error_message ?? null) === observed.errorMessage
+              && (row.issuance_last_attempt_at ?? null) === observed.lastAttemptAt
               && (row.stalled_requeue_epoch_at ?? null) === observed.stalledEpochAt
             )
           )
@@ -4124,6 +4126,11 @@ function auditMetadata(audit: Record<string, unknown>): Record<string, unknown> 
   } catch {
     return {};
   }
+}
+
+function auditStalledRequeueEpisodeId(audit: Record<string, unknown>): string | null {
+  const value = auditMetadata(audit).stalledRequeueEpochAt;
+  return typeof value === "string" && value ? value : null;
 }
 
 export function authedDb(role: "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER", db: InMemoryD1): InMemoryD1 {

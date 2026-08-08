@@ -43,19 +43,23 @@ export async function createAudit(
          )
          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
           WHERE NOT EXISTS (
-            SELECT 1
-              FROM audit_logs
-             WHERE action = ?
-               AND entity_type = ?
-               AND entity_id = ?
-               AND (
-                 ? IS NULL
-                 OR json_extract(metadata_json, '$.stalledRequeueEpochAt') = ?
-                 OR (
-                   json_extract(metadata_json, '$.stalledRequeueEpochAt') IS NULL
-                   AND created_at > ?
-                 )
-               )
+            SELECT 1 FROM (
+              SELECT created_at,
+                     CASE WHEN json_valid(metadata_json) THEN
+                       CASE WHEN json_type(metadata_json, '$.stalledRequeueEpochAt') = 'text'
+                         THEN NULLIF(json_extract(metadata_json, '$.stalledRequeueEpochAt'), '')
+                         ELSE NULL
+                       END
+                     ELSE NULL
+                     END AS episode_id
+                FROM audit_logs
+               WHERE action = ?
+                 AND entity_type = ?
+                 AND entity_id = ?
+            ) AS existing_episode_audits
+             WHERE ? IS NULL
+                OR episode_id = ?
+                OR (episode_id IS NULL AND created_at > ?)
           )`
       )
       .bind(
