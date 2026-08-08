@@ -1,10 +1,11 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createConnection, createServer } from "node:net";
+import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const repositoryRoot = resolve(import.meta.dirname, "../..");
@@ -113,11 +114,42 @@ describe("auth timing probe cleanup", () => {
       await expect(response.json()).resolves.toMatchObject({ ok: true, appEnv: "local" });
 
       const probeSource = await readFile(probePath, "utf8");
-      for (const blockedPrefix of ["AUTH_TIMING_", "CLOUDFLARE_", "CF_", "DIEZMOSSV_", "WRANGLER_"]) {
-        expect(probeSource).toContain(`"${blockedPrefix}"`);
-      }
-      expect(probeSource).toContain('CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"');
-      expect(probeSource).toContain('CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"');
+      expect({
+        explicitAllowlist: probeSource.includes("const childEnvironmentAllowedKeys = ["),
+        inheritedEnvironmentSpread: probeSource.includes("{ ...sourceEnvironment }"),
+        nodeOptionsAllowlisted: probeSource.includes('"NODE_OPTIONS"'),
+        nodePathAllowlisted: probeSource.includes('"NODE_PATH"'),
+        dynamicLoaderAllowlisted: ["LD_PRELOAD", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH"]
+          .some((key) => probeSource.includes(`"${key}"`)),
+        proxyAllowlisted: ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"]
+          .some((key) => probeSource.includes(`"${key}"`)),
+        cloudflareCredentialAllowlisted: ["CLOUDFLARE_API_TOKEN", "CF_API_KEY"]
+          .some((key) => probeSource.includes(`"${key}"`)),
+        loadDevVarsForcedFalse: probeSource.includes(
+          'CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false"'
+        ),
+        includeProcessEnvForcedFalse: probeSource.includes(
+          'CLOUDFLARE_INCLUDE_PROCESS_ENV: "false"'
+        ),
+        metricsForcedFalse: probeSource.includes('WRANGLER_SEND_METRICS: "false"'),
+        ownedHome: probeSource.includes("HOME: directories.home"),
+        ownedTemporaryDirectory: probeSource.includes("TMPDIR: directories.temporary"),
+        ownedXdgConfiguration: probeSource.includes("XDG_CONFIG_HOME: directories.xdgConfig")
+      }).toEqual({
+        explicitAllowlist: true,
+        inheritedEnvironmentSpread: false,
+        nodeOptionsAllowlisted: false,
+        nodePathAllowlisted: false,
+        dynamicLoaderAllowlisted: false,
+        proxyAllowlisted: false,
+        cloudflareCredentialAllowlisted: false,
+        loadDevVarsForcedFalse: true,
+        includeProcessEnvForcedFalse: true,
+        metricsForcedFalse: true,
+        ownedHome: true,
+        ownedTemporaryDirectory: true,
+        ownedXdgConfiguration: true
+      });
 
       process.kill(fixture.child.pid!, "SIGTERM");
       const result = await withTimeout(fixture.exit, 20_000, "hostile-env probe did not exit after SIGTERM");
@@ -125,6 +157,151 @@ describe("auth timing probe cleanup", () => {
       await expectReleased(fixture, observed);
     } finally {
       await forceFixtureCleanup(fixture, observed);
+    }
+  }, 120_000);
+
+  it("does not execute an inherited conditional Node preload in Wrangler children", async () => {
+    const remoteTrap = await startLoopbackTrap();
+    try {
+      let preloadMarker = "";
+      const nodePathCanary = "/host-canary/node-path";
+      const environmentObservationCanary = "auth-timing-child-environment-audit";
+      const fixture = await launchProbe({
+        TERM: environmentObservationCanary,
+        NODE_PATH: nodePathCanary,
+        HOST_ONLY_PRELOAD_CANARY: hostileCanary,
+        CLOUDFLARE_API_TOKEN: hostileCanary,
+        WRANGLER_CONFIG_FILENAME: "/host-canary/wrangler.toml",
+        DIEZMOSSV_ENV_FILE: "/host-canary/private.env",
+        LD_PRELOAD: "",
+        DYLD_INSERT_LIBRARIES: "",
+        HTTPS_PROXY: remoteTrap.origin,
+        CLOUDFLARE_API_BASE_URL: remoteTrap.origin
+      }, {
+        prepare: async ({ container }) => {
+          preloadMarker = join(container, "conditional-preload-executed.txt");
+          const preloadPath = join(container, "conditional-wrangler-preload.mjs");
+          await writeFile(
+            preloadPath,
+            conditionalWranglerPreload(preloadMarker, remoteTrap.origin),
+            { encoding: "utf8", mode: 0o600 }
+          );
+          return { NODE_OPTIONS: `--import=${pathToFileURL(preloadPath).href}` };
+        }
+      });
+      let observed = processTree(fixture.child.pid!);
+      try {
+        await waitForPath(fixture.taskRoot);
+        await waitForHealth(fixture);
+        observed = processTree(fixture.child.pid!);
+
+        const generatedConfig = await readFile(join(fixture.taskRoot, "wrangler.toml"), "utf8");
+        const response = await fetch(`http://127.0.0.1:${fixture.port}/api/health`, {
+          signal: AbortSignal.timeout(1_000)
+        });
+        const health = await response.json() as { ok?: boolean; appEnv?: string };
+        expect({
+          configLocal: generatedConfig.includes('APP_ENV = "local"'),
+          preloadExecutedInWrangler: await pathExists(preloadMarker),
+          healthStatus: response.status,
+          appEnv: health.appEnv,
+          remoteAttempts: remoteTrap.connections()
+        }).toEqual({
+          configLocal: true,
+          preloadExecutedInWrangler: false,
+          healthStatus: 200,
+          appEnv: "local",
+          remoteAttempts: 0
+        });
+
+        const canonicalTaskRoot = await realpath(fixture.taskRoot);
+        const childEnvironmentRoot = join(canonicalTaskRoot, "child-environment");
+        const ownedDirectories = {
+          home: join(childEnvironmentRoot, "home"),
+          temporary: join(childEnvironmentRoot, "tmp"),
+          xdgConfig: join(childEnvironmentRoot, "xdg-config"),
+          xdgCache: join(childEnvironmentRoot, "xdg-cache"),
+          xdgData: join(childEnvironmentRoot, "xdg-data"),
+          xdgState: join(childEnvironmentRoot, "xdg-state")
+        };
+        expect(await Promise.all(
+          [...Object.values(ownedDirectories), join(canonicalTaskRoot, "miniflare-cache")]
+            .map(pathExists)
+        )).toEqual([true, true, true, true, true, true, true]);
+
+        const environmentAudit = descendantEnvironmentAudit(
+          observed,
+          fixture.child.pid!,
+          {
+            nodeOptions: "NODE_OPTIONS=",
+            nodePath: `NODE_PATH=${nodePathCanary}`,
+            hostCanary: `HOST_ONLY_PRELOAD_CANARY=${hostileCanary}`,
+            cloudflareCredential: `CLOUDFLARE_API_TOKEN=${hostileCanary}`,
+            wranglerSelector: "WRANGLER_CONFIG_FILENAME=/host-canary/wrangler.toml",
+            privateSelector: "DIEZMOSSV_ENV_FILE=/host-canary/private.env",
+            linuxDynamicLoader: "LD_PRELOAD=",
+            macDynamicLoader: "DYLD_INSERT_LIBRARIES=",
+            proxy: `HTTPS_PROXY=${remoteTrap.origin}`,
+            cloudflareApiBase: `CLOUDFLARE_API_BASE_URL=${remoteTrap.origin}`
+          },
+          {
+            home: `HOME=${ownedDirectories.home}`,
+            temporary: `TMPDIR=${ownedDirectories.temporary}`,
+            xdgConfig: `XDG_CONFIG_HOME=${ownedDirectories.xdgConfig}`,
+            xdgCache: `XDG_CACHE_HOME=${ownedDirectories.xdgCache}`,
+            xdgData: `XDG_DATA_HOME=${ownedDirectories.xdgData}`,
+            xdgState: `XDG_STATE_HOME=${ownedDirectories.xdgState}`,
+            miniflareCache: `MINIFLARE_CACHE_DIR=${join(canonicalTaskRoot, "miniflare-cache")}`
+          },
+          `TERM=${environmentObservationCanary}`
+        );
+        expect(environmentAudit.descendantCount).toBeGreaterThan(0);
+        expect(
+          environmentAudit.environmentObservedCount === 0
+            || environmentAudit.environmentObservedCount === environmentAudit.descendantCount
+        ).toBe(true);
+        const forbiddenBindingExpectation = environmentAudit.environmentObservedCount > 0
+          ? false
+          : null;
+        expect(environmentAudit.leaks).toEqual({
+          nodeOptions: forbiddenBindingExpectation,
+          nodePath: forbiddenBindingExpectation,
+          hostCanary: forbiddenBindingExpectation,
+          cloudflareCredential: forbiddenBindingExpectation,
+          wranglerSelector: forbiddenBindingExpectation,
+          privateSelector: forbiddenBindingExpectation,
+          linuxDynamicLoader: forbiddenBindingExpectation,
+          macDynamicLoader: forbiddenBindingExpectation,
+          proxy: forbiddenBindingExpectation,
+          cloudflareApiBase: forbiddenBindingExpectation
+        });
+        const ownedBindingExpectation = environmentAudit.environmentObservedCount > 0
+          ? true
+          : null;
+        expect(environmentAudit.requiredBindings).toEqual({
+          home: ownedBindingExpectation,
+          temporary: ownedBindingExpectation,
+          xdgConfig: ownedBindingExpectation,
+          xdgCache: ownedBindingExpectation,
+          xdgData: ownedBindingExpectation,
+          xdgState: ownedBindingExpectation,
+          miniflareCache: ownedBindingExpectation
+        });
+
+        process.kill(fixture.child.pid!, "SIGTERM");
+        const result = await withTimeout(
+          fixture.exit,
+          20_000,
+          "conditional-preload probe did not exit after SIGTERM"
+        );
+        expect(result, fixture.output()).toEqual({ code: 143, signal: null });
+        await expectReleased(fixture, observed);
+      } finally {
+        await forceFixtureCleanup(fixture, observed);
+      }
+    } finally {
+      await remoteTrap.close();
+      expect(await canConnect(remoteTrap.port)).toBe(false);
     }
   }, 120_000);
 
@@ -190,12 +367,14 @@ async function launchProbe(
   extraEnv: Record<string, string> = {},
   options: {
     taskRootFor?: (container: string) => string;
-    prepare?: (fixture: { container: string; taskRoot: string }) => Promise<void>;
+    prepare?: (
+      fixture: { container: string; taskRoot: string }
+    ) => Promise<Record<string, string> | void>;
   } = {}
 ) {
   const container = await mkdtemp(join(tmpdir(), "diezmossv-auth-timing-cleanup-test-"));
   const taskRoot = options.taskRootFor?.(container) ?? join(container, "diezmossv-auth-timing-owned");
-  await options.prepare?.({ container, taskRoot });
+  const preparedEnvironment = await options.prepare?.({ container, taskRoot });
   const port = await availablePort();
   let output = "";
   const child = spawn(process.execPath, [probePath], {
@@ -210,7 +389,8 @@ async function launchProbe(
       AUTH_TIMING_SAMPLES_PER_CLASS: "20",
       AUTH_TIMING_SUCCESS_SAMPLES_PER_CLASS: "20",
       AUTH_TIMING_RESET_EVERY_ROUNDS: "20",
-      ...extraEnv
+      ...extraEnv,
+      ...preparedEnvironment
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -218,6 +398,112 @@ async function launchProbe(
   child.stderr.on("data", (chunk) => { output = `${output}${String(chunk)}`.slice(-8_000); });
   const exit = childExit(child);
   return { child, container, taskRoot, port, exit, output: () => output };
+}
+
+function conditionalWranglerPreload(markerPath: string, remoteOrigin: string) {
+  return `import { appendFileSync } from "node:fs";
+if (process.argv.some((value) => value.includes("wrangler"))) {
+  appendFileSync(${JSON.stringify(markerPath)}, "wrangler child preload executed\\n", { mode: 0o600 });
+  process.env.CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV = "true";
+  process.env.CLOUDFLARE_INCLUDE_PROCESS_ENV = "true";
+  process.env.APP_ENV = "production";
+  process.env.AUTH_TIMING_PRELOAD_CANARY = ${JSON.stringify(hostileCanary)};
+  process.env.CLOUDFLARE_API_BASE_URL = ${JSON.stringify(remoteOrigin)};
+  process.env.CF_API_BASE_URL = ${JSON.stringify(remoteOrigin)};
+  process.env.HTTPS_PROXY = ${JSON.stringify(remoteOrigin)};
+}
+`;
+}
+
+async function pathExists(path: string) {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function descendantEnvironmentAudit(
+  observed: ReturnType<typeof processTree>,
+  rootPid: number,
+  forbiddenNeedles: Record<string, string>,
+  requiredNeedles: Record<string, string>,
+  observationNeedle: string
+) {
+  const environments = [...observed.pids]
+    .filter((pid) => pid !== rootPid)
+    .map((pid) => {
+      try {
+        const argumentsForPs = process.platform === "darwin"
+          ? ["-E", "-ww", "-p", String(pid)]
+          : ["eww", "-p", String(pid), "-o", "command="];
+        return execFileSync("/bin/ps", argumentsForPs, { encoding: "utf8" });
+      } catch {
+        return null;
+      }
+    })
+    .filter((value): value is string => value !== null);
+  const observedEnvironments = environments.filter((environment) =>
+    environment.includes(observationNeedle)
+  );
+  return {
+    descendantCount: environments.length,
+    environmentObservedCount: observedEnvironments.length,
+    leaks: Object.fromEntries(
+      Object.entries(forbiddenNeedles).map(([name, needle]) => [
+        name,
+        observedEnvironments.length > 0
+          ? observedEnvironments.some((environment) => environment.includes(needle))
+          : null
+      ])
+    ),
+    requiredBindings: Object.fromEntries(
+      Object.entries(requiredNeedles).map(([name, needle]) => [
+        name,
+        observedEnvironments.length > 0
+          ? observedEnvironments.every((environment) => environment.includes(needle))
+          : null
+      ])
+    )
+  };
+}
+
+async function startLoopbackTrap() {
+  let connectionCount = 0;
+  const sockets = new Set<Socket>();
+  const server = createServer((socket) => {
+    connectionCount += 1;
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    socket.end([
+      "HTTP/1.1 502 Bad Gateway",
+      "Connection: close",
+      "Content-Length: 0",
+      "",
+      ""
+    ].join("\r\n"));
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once("error", rejectListen);
+    server.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address ? address.port : null;
+  if (port === null) throw new Error("unable to allocate loopback remote-attempt trap");
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    port,
+    connections: () => connectionCount,
+    close: () => new Promise<void>((resolveClose, rejectClose) => {
+      for (const socket of sockets) socket.destroy();
+      if (!server.listening) {
+        resolveClose();
+        return;
+      }
+      server.close((error) => error ? rejectClose(error) : resolveClose());
+    })
+  };
 }
 
 async function expectReleased(
