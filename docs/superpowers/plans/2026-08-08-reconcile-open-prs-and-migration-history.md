@@ -101,10 +101,10 @@
 
 **Checkable outcome:** an automatic stalled episode is capped and alerted once; a successful operator retry atomically starts a new epoch; a later episode receives its own three automatic retries and one new audit/alert; already-sent channels are deduplicated only within the same episode.
 
-- [ ] First add a failing two-episode route/cron test that reaches the first cap, performs an operator retry, then reaches a second cap.
-- [ ] On successful operator retry CAS, rotate `stalled_requeue_epoch_at` to the new retry timestamp atomically with status/attempt changes.
-- [ ] Count both requeue and stalled audits from the current epoch and use that epoch in the incident identity. Preserve retry of failed notification channels within an episode.
-- [ ] Verify real SQLite schema/claim behavior in addition to the in-memory recognizer; run the focused Wompi recovery and sweep suites.
+- [x] First add a failing two-episode route/cron test that reaches the first cap, performs an operator retry, then reaches a second cap.
+- [x] On successful operator retry CAS, rotate `stalled_requeue_epoch_at` to the new retry timestamp atomically with status/attempt changes.
+- [x] Count both requeue and stalled audits from the current epoch and use that epoch in the incident identity. Preserve retry of failed notification channels within an episode.
+- [x] Verify real SQLite schema/claim behavior in addition to the in-memory recognizer; run the focused Wompi recovery and sweep suites.
 
 ## Task 6: Strengthen password hashing with constant verification work
 
