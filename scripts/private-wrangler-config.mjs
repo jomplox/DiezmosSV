@@ -10,6 +10,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { experimental_readRawConfig } from "wrangler";
 
 const DEFAULT_CONFIG_PATH = join(
   homedir(),
@@ -70,15 +71,29 @@ export function assertPrivateWranglerConfig(configPath, {
 }
 
 export function preparePrivateWranglerConfig(configPath, {
-  repositoryRoot = process.cwd()
+  repositoryRoot = process.cwd(),
+  migrationsDirOverride
 } = {}) {
   const sourceConfig = assertPrivateWranglerConfig(configPath, {
     repositoryRoot
   });
   const resolvedRepository = realpathSync(repositoryRoot);
+  const { rawConfig } = experimental_readRawConfig({ config: sourceConfig });
+  assertNoAllowedSenderAddresses(rawConfig);
   let contents = readFileSync(sourceConfig, "utf8");
   contents = rewriteRelativeTomlPath(contents, "main", resolvedRepository);
-  contents = rewriteRelativeTomlPath(contents, "migrations_dir", resolvedRepository);
+  if (migrationsDirOverride === undefined) {
+    contents = rewriteRelativeTomlPath(
+      contents,
+      "migrations_dir",
+      resolvedRepository
+    );
+  } else {
+    contents = rewriteMigrationsDirOverride(
+      contents,
+      assertOwnerOnlyDirectory(migrationsDirOverride)
+    );
+  }
   contents = contents.replace(
     /(\bdirectory\s*=\s*)"([^"]+)"/g,
     (match, prefix, value) =>
@@ -102,6 +117,68 @@ export function preparePrivateWranglerConfig(configPath, {
       rmSync(directory, { recursive: true, force: true });
     }
   };
+}
+
+function assertNoAllowedSenderAddresses(rawConfig) {
+  const environments =
+    rawConfig.env && typeof rawConfig.env === "object"
+      ? Object.values(rawConfig.env)
+      : [];
+  for (const config of [rawConfig, ...environments]) {
+    if (!config || typeof config !== "object") continue;
+    const bindings = Array.isArray(config.send_email) ? config.send_email : [];
+    const hasAllowlist = bindings.some(
+      (binding) =>
+        binding &&
+        typeof binding === "object" &&
+        Object.hasOwn(binding, "allowed_sender_addresses")
+    );
+    if (hasAllowlist) {
+      throw new Error(
+        "The selected private Wrangler config must not restrict the OWNER-configurable EMAIL_FROM sender"
+      );
+    }
+  }
+}
+
+function assertOwnerOnlyDirectory(directory) {
+  if (!isAbsolute(directory)) {
+    throw new Error("The migrations override must use an absolute path");
+  }
+
+  let entry;
+  let resolved;
+  try {
+    entry = lstatSync(directory);
+    resolved = realpathSync(directory);
+  } catch {
+    throw new Error("The migrations override is missing or inaccessible");
+  }
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error("The migrations override must be a regular directory");
+  }
+
+  const stat = statSync(resolved);
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error("The migrations override must have owner-only permissions (0700)");
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error("The migrations override must be owned by the current user");
+  }
+  return resolved;
+}
+
+function rewriteMigrationsDirOverride(contents, migrationsDirOverride) {
+  const assignment = /^(\s*migrations_dir\s*=\s*)"[^"]+"/gm;
+  let replacements = 0;
+  const rewritten = contents.replace(assignment, (_match, prefix) => {
+    replacements += 1;
+    return `${prefix}${JSON.stringify(migrationsDirOverride)}`;
+  });
+  if (replacements === 0) {
+    throw new Error("The private Wrangler config must declare migrations_dir");
+  }
+  return rewritten;
 }
 
 function rewriteRelativeTomlPath(contents, key, repositoryRoot) {
