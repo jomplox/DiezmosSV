@@ -272,7 +272,10 @@ type ParsedPasswordHash =
   | { kind: "legacy-countless"; hash: string }
   | { kind: "invalid" };
 
-function parseStoredHash(stored: string): ParsedPasswordHash {
+function parseStoredHash(stored: unknown): ParsedPasswordHash {
+  if (typeof stored !== "string") {
+    return { kind: "invalid" };
+  }
   if (PASSWORD_HASH_HEX_PATTERN.test(stored)) {
     return { kind: "legacy-countless", hash: stored };
   }
@@ -295,7 +298,7 @@ function parseStoredHash(stored: string): ParsedPasswordHash {
 
 // Every path performs exactly two fixed-count derivations. In particular, no iteration
 // count read from D1 is ever passed into WebCrypto.
-async function verifyPassword(password: string, salt: string, storedHash: string): Promise<{ valid: boolean; needsRehash: boolean }> {
+async function verifyPassword(password: string, salt: string, storedHash: unknown): Promise<{ valid: boolean; needsRehash: boolean }> {
   const parsed = parseStoredHash(storedHash);
   if (parsed.kind === "current-chain" || parsed.kind === "transitional-chain") {
     const first = await deriveFirst(password, salt);

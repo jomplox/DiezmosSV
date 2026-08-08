@@ -5,6 +5,7 @@ import { AuthService, hashForStorage, hashPassword } from "../../src/worker/serv
 import { Repository } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
+import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 import { makeDocument as testDocument } from "./fixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
@@ -899,6 +900,124 @@ describe("auth rate limiting", () => {
     expect(tasks).toHaveLength(1);
     await Promise.all(tasks);
     expect(db.resetTokens).toHaveLength(active ? 1 : 0);
+  });
+});
+
+describe("malformed stored password values", () => {
+  it("normalizes a real SQLite BLOB hash to canonical dummy work and the generic failed-login contract", async () => {
+    const database = migratedDatabase();
+    const nativeCrypto = crypto;
+    const iterationCounts: number[] = [];
+    const salts: string[] = [];
+    try {
+      database.exec("UPDATE users SET password_hash = 42 WHERE id = 'user_operator'");
+      expect(
+        database
+          .prepare("SELECT typeof(password_hash) AS storage_class, password_hash FROM users WHERE id = 'user_operator'")
+          .get()
+      ).toEqual({ storage_class: "text", password_hash: "42" });
+      database.exec("UPDATE users SET password_hash = 1.25 WHERE id = 'user_operator'");
+      expect(
+        database
+          .prepare("SELECT typeof(password_hash) AS storage_class, password_hash FROM users WHERE id = 'user_operator'")
+          .get()
+      ).toEqual({ storage_class: "text", password_hash: "1.25" });
+      expect(() => {
+        database.exec("UPDATE users SET password_hash = NULL WHERE id = 'user_operator'");
+      }).toThrow(/NOT NULL constraint failed: users\.password_hash/);
+
+      database.exec(
+        `UPDATE users
+            SET password_hash = X'010203', password_salt = 'blob-salt'
+          WHERE id = 'user_operator'`
+      );
+      const rowBefore = database
+        .prepare(
+          `SELECT typeof(password_hash) AS storage_class,
+                  hex(password_hash) AS password_hash_hex,
+                  password_salt
+             FROM users
+            WHERE id = 'user_operator'`
+        )
+        .get();
+      expect(rowBefore).toEqual({
+        storage_class: "blob",
+        password_hash_hex: "010203",
+        password_salt: "blob-salt"
+      });
+
+      vi.stubGlobal("crypto", {
+        getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto),
+        randomUUID: nativeCrypto.randomUUID.bind(nativeCrypto),
+        subtle: {
+          digest: nativeCrypto.subtle.digest.bind(nativeCrypto.subtle),
+          importKey: nativeCrypto.subtle.importKey.bind(nativeCrypto.subtle),
+          deriveBits: async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
+            const algorithm = args[0] as unknown as { iterations: number; salt: BufferSource };
+            iterationCounts.push(algorithm.iterations);
+            salts.push(new TextDecoder().decode(algorithm.salt));
+            return nativeCrypto.subtle.deriveBits(...args);
+          }
+        }
+      });
+
+      const runtime = { ...env(new InMemoryD1()), DB: sqliteD1(database) };
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.42"
+          },
+          body: JSON.stringify({
+            email: "operator@example.org",
+            password: "Wrong#Password2026"
+          })
+        }),
+        runtime
+      );
+
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({
+        error: "auth_error",
+        message: "Credenciales inválidas"
+      });
+      expect(iterationCounts).toEqual([100_000, 100_000]);
+      expect(salts).toEqual([
+        "diezmossv-login-dummy-v1",
+        "diezmossv-login-dummy-v1:diezmossv-pbkdf2-chain-v1"
+      ]);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+      expect(
+        database
+          .prepare(
+            `SELECT action, entity_id, summary
+               FROM audit_logs
+              WHERE action = 'LOGIN_FAILED'`
+          )
+          .all()
+      ).toEqual([
+        {
+          action: "LOGIN_FAILED",
+          entity_id: "operator@example.org",
+          summary: "Credenciales inválidas"
+        }
+      ]);
+      expect(
+        database
+          .prepare(
+            `SELECT typeof(password_hash) AS storage_class,
+                    hex(password_hash) AS password_hash_hex,
+                    password_salt
+               FROM users
+              WHERE id = 'user_operator'`
+          )
+          .get()
+      ).toEqual(rowBefore);
+    } finally {
+      vi.unstubAllGlobals();
+      database.close();
+    }
   });
 });
 
