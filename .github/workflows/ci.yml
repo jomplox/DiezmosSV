@@ -18,6 +18,7 @@ jobs:
       # The PDF tests inspect rendered output with poppler's pdftotext/pdftoppm.
       - run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - run: npm ci
+      - run: npm run migrations:check-immutability
       - run: npm run types:check
       - run: npm run typecheck
       - run: npx vitest run

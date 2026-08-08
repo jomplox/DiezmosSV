@@ -14,7 +14,9 @@ export function assertPrivateWranglerConfig(
 
 export function preparePrivateWranglerConfig(
   configPath: string,
-  options?: Pick<PrivateWranglerConfigOptions, "repositoryRoot">
+  options?: Pick<PrivateWranglerConfigOptions, "repositoryRoot"> & {
+    migrationsDirOverride?: string;
+  }
 ): {
   configPath: string;
   cleanup(): void;

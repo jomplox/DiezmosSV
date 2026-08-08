@@ -1,0 +1,864 @@
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync
+} from "node:fs";
+import { EventEmitter } from "node:events";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { PassThrough } from "node:stream";
+import { describe, expect, it } from "vitest";
+import {
+  legacyIssuanceAttemptId,
+  Repository
+} from "../../src/worker/storage/repository";
+import { sqliteD1 } from "../worker/support/sqliteD1";
+
+const scriptPath = resolve(
+  import.meta.dirname,
+  "../../scripts/d1-schema-compatibility.mjs"
+);
+const repositoryRoot = resolve(import.meta.dirname, "../..");
+const migrationsDirectory = resolve(repositoryRoot, "migrations");
+const CURRENT_0023 = "0023_wompi_issuance_lifecycle.sql";
+const LEGACY_0019 = "0019_wompi_issuance_lifecycle.sql";
+const runnerScriptPath = resolve(
+  import.meta.dirname,
+  "../../scripts/run-private-wrangler.mjs"
+);
+
+async function loadCompatibility() {
+  expect(existsSync(scriptPath), "the D1 compatibility script exists").toBe(true);
+  return import(scriptPath);
+}
+
+describe("legacy Wompi issuance migration compatibility", () => {
+  it("allowlists all 0023 columns, unique indexes, and the reservation trigger", async () => {
+    const { REQUIRED_SCHEMA_MANIFEST } = await loadCompatibility();
+    expect(
+      REQUIRED_SCHEMA_MANIFEST.columns
+        .filter((entry: { migration: string; table: string }) =>
+          entry.migration === CURRENT_0023 && entry.table === "wompi_events"
+        )
+        .map((entry: { column: string }) => entry.column)
+    ).toEqual([
+      "issuance_status",
+      "control_prefix",
+      "control_sequence",
+      "reserved_numero_control",
+      "reserved_codigo_generacion",
+      "issuance_attempt_count",
+      "issuance_attempt_id",
+      "issuance_error_code",
+      "issuance_error_message",
+      "issuance_last_attempt_at",
+      "issuance_failed_at",
+      "issuance_dead_lettered_at"
+    ]);
+    expect(
+      REQUIRED_SCHEMA_MANIFEST.indexes.map(
+        (entry: { name: string }) => entry.name
+      )
+    ).toEqual([
+      "idx_email_deliveries_idempotency_key",
+      "idx_wompi_reserved_control",
+      "idx_wompi_reserved_generation",
+      "idx_dte_documents_wompi_unique"
+    ]);
+    expect(
+      REQUIRED_SCHEMA_MANIFEST.triggers.map(
+        (entry: { name: string }) => entry.name
+      )
+    ).toEqual(["reserve_wompi_document_identifiers"]);
+  });
+
+  it("plans the missing late fields and a verified current-ledger alias for old 0019", async () => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const plan = buildCompatibilityPlan({
+      appliedMigrations: ["0019_wompi_issuance_lifecycle.sql"],
+      tableColumns: {
+        wompi_events: [
+          { name: "issuance_status", type: "TEXT", notnull: 0 },
+          { name: "control_prefix", type: "TEXT", notnull: 0 },
+          { name: "control_sequence", type: "INTEGER", notnull: 0 },
+          { name: "reserved_numero_control", type: "TEXT", notnull: 0 },
+          { name: "reserved_codigo_generacion", type: "TEXT", notnull: 0 },
+          {
+            name: "issuance_attempt_count",
+            type: "INTEGER",
+            notnull: 1,
+            dflt_value: "0"
+          },
+          { name: "issuance_error_code", type: "TEXT", notnull: 0 },
+          { name: "issuance_error_message", type: "TEXT", notnull: 0 },
+          { name: "issuance_last_attempt_at", type: "TEXT", notnull: 0 },
+          { name: "issuance_failed_at", type: "TEXT", notnull: 0 },
+          { name: "issuance_dead_lettered_at", type: "TEXT", notnull: 0 }
+        ],
+        dte_documents: [],
+        email_deliveries: [],
+        donation_intents: [],
+        audit_logs: []
+      },
+      tableIndexes: {
+        wompi_events: [],
+        dte_documents: [],
+        email_deliveries: [],
+        donation_intents: [],
+        audit_logs: []
+      },
+      schemaObjects: {},
+      duplicateCounts: {
+        idx_wompi_reserved_control: 0,
+        idx_wompi_reserved_generation: 0
+      }
+    });
+
+    expect(plan.statements).toEqual(expect.arrayContaining([
+      "ALTER TABLE wompi_events ADD COLUMN issuance_attempt_id TEXT;",
+      "ALTER TABLE dte_documents ADD COLUMN transmission_claim_id TEXT;",
+      "ALTER TABLE email_deliveries ADD COLUMN claim_attempted_at TEXT;",
+      "ALTER TABLE email_deliveries ADD COLUMN idempotency_key TEXT;",
+      "ALTER TABLE email_deliveries ADD COLUMN claim_token TEXT;"
+    ]));
+    expect(plan.ledgerAliases).toEqual([
+      "0023_wompi_issuance_lifecycle.sql"
+    ]);
+  });
+
+  it("reproduces the old 0019 claim failure, then converges and aliases 0023 only after repair", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(initialLegacyIssuanceMigration());
+    recordMigration(database, LEGACY_0019);
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('legacy_event', 'legacy_transaction', '00',
+         'ExitosaAprobada', 100, '{}')`
+    ).run();
+    const repo = new Repository(sqliteD1(database));
+    const attempt = legacyIssuanceAttemptId("legacy_event");
+
+    await expect(
+      repo.markWompiIssuanceProcessing("legacy_event", attempt, true)
+    ).rejects.toThrow(/no such column: issuance_attempt_id/i);
+    expect(() =>
+      database.exec(readMigration(CURRENT_0023))
+    ).toThrow(/duplicate column name: issuance_status/i);
+
+    const runner = sqliteRunnerFactory(database);
+    await migrateSchemaCompatibility({
+      binding: "DB",
+      environment: "staging",
+      repositoryRoot,
+      createRunner: runner.createRunner
+    });
+
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    expect(columns(database, "wompi_events")).toContain("issuance_attempt_id");
+    await expect(
+      repo.markWompiIssuanceProcessing("legacy_event", attempt, true)
+    ).resolves.toBe(true);
+
+    const afterFirstRun = compatibilityFingerprint(database);
+    await migrateSchemaCompatibility({
+      binding: "DB",
+      environment: "staging",
+      repositoryRoot,
+      createRunner: runner.createRunner
+    });
+    expect(compatibilityFingerprint(database)).toEqual(afterFirstRun);
+    expect(
+      appliedMigrations(database).filter((name) => name === CURRENT_0023)
+    ).toHaveLength(1);
+    database.close();
+  });
+
+  it("aliases the fully mutated old 0019 without changing populated fencing values", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(readMigration(CURRENT_0023));
+    recordMigration(database, LEGACY_0019);
+    seedIssuanceEvidence(database);
+    const before = issuanceEvidence(database);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(issuanceEvidence(database)).toEqual(before);
+    expect(
+      appliedMigrations(database).filter((name) => name === CURRENT_0023)
+    ).toHaveLength(1);
+    database.close();
+  });
+
+  it("repairs a current recorded 0023 whose late fields are absent", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(initialLegacyIssuanceMigration());
+    recordMigration(database, CURRENT_0023);
+    database.prepare(
+      `INSERT INTO document_sequences (environment, control_prefix, next_value)
+       VALUES ('00', 'm001p004', 12)`
+    ).run();
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(columns(database, "wompi_events")).toContain("issuance_attempt_id");
+    expect(columns(database, "dte_documents")).toContain(
+      "transmission_claim_id"
+    );
+    expect(columns(database, "email_deliveries")).toEqual(
+      expect.arrayContaining([
+        "claim_attempted_at",
+        "idempotency_key",
+        "claim_token"
+      ])
+    );
+    expect(database.prepare(
+      `SELECT control_prefix, next_value FROM document_sequences
+       WHERE environment = '00'`
+    ).all()).toEqual([{ control_prefix: "M001P004", next_value: 12 }]);
+    database.close();
+  });
+
+  it("preserves every one- and two-column email-claim partial while converging twice", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const variants = [
+      ["claim_attempted_at"],
+      ["idempotency_key"],
+      ["claim_token"],
+      ["claim_attempted_at", "idempotency_key"],
+      ["claim_attempted_at", "claim_token"],
+      ["idempotency_key", "claim_token"]
+    ];
+    for (const present of variants) {
+      const database = databaseThrough("0022");
+      database.exec(initialLegacyIssuanceMigration());
+      database.exec(
+        "ALTER TABLE wompi_events ADD COLUMN issuance_attempt_id TEXT;"
+      );
+      database.exec(
+        "ALTER TABLE dte_documents ADD COLUMN transmission_claim_id TEXT;"
+      );
+      for (const column of present) {
+        database.exec(
+          `ALTER TABLE email_deliveries ADD COLUMN ${column} TEXT;`
+        );
+      }
+      recordMigration(database, CURRENT_0023);
+      seedPartialEmailEvidence(database, present);
+      const before = partialEmailEvidence(database, present);
+
+      await runCompatibility(database, migrateSchemaCompatibility);
+      await runCompatibility(database, migrateSchemaCompatibility);
+
+      expect(partialEmailEvidence(database, present)).toEqual(before);
+      expect(columns(database, "email_deliveries")).toEqual(
+        expect.arrayContaining([
+          "claim_attempted_at",
+          "idempotency_key",
+          "claim_token"
+        ])
+      );
+      expect(database.prepare("PRAGMA index_list(email_deliveries)").all())
+        .toContainEqual(expect.objectContaining({
+          name: "idx_email_deliveries_idempotency_key",
+          unique: 1
+        }));
+      database.close();
+    }
+  });
+
+  for (const variant of ["zero", "donation", "audit", "both"] as const) {
+    it(`converges pending 0024 with ${variant} existing provenance columns without losing values`, async () => {
+      const { migrateSchemaCompatibility } = await loadCompatibility();
+      const database = databaseThrough("0023");
+      if (variant === "donation" || variant === "both") {
+        database.exec(
+          "ALTER TABLE donation_intents ADD COLUMN rate_limit_claim_id TEXT;"
+        );
+      }
+      if (variant === "audit" || variant === "both") {
+        database.exec(
+          "ALTER TABLE audit_logs ADD COLUMN rate_limit_claim_id TEXT;"
+        );
+      }
+      seedRateLimitEvidence(database, variant);
+      const before = rateLimitEvidence(database, variant);
+      const runner = sqliteRunnerFactory(database);
+
+      await runCompatibility(
+        database,
+        migrateSchemaCompatibility,
+        runner.createRunner
+      );
+      const afterFirst = compatibilityFingerprint(database);
+      await runCompatibility(
+        database,
+        migrateSchemaCompatibility,
+        runner.createRunner
+      );
+
+      expect(rateLimitEvidence(database, variant)).toEqual(before);
+      expect(compatibilityFingerprint(database)).toEqual(afterFirst);
+      expect(columns(database, "donation_intents")).toContain(
+        "rate_limit_claim_id"
+      );
+      expect(columns(database, "audit_logs")).toContain("rate_limit_claim_id");
+      if (variant !== "zero") {
+        expect(runner.migrationDirectories.some(Boolean)).toBe(true);
+      }
+      database.close();
+    });
+  }
+
+  it("repairs a recorded 0024 with only one provenance column", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0023");
+    database.exec(
+      "ALTER TABLE donation_intents ADD COLUMN rate_limit_claim_id TEXT;"
+    );
+    recordMigration(database, "0024_add_rate_limit_claim_ids.sql");
+    seedRateLimitEvidence(database, "donation");
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(rateLimitEvidence(database, "donation")).toEqual({
+      donation: "claim-donation"
+    });
+    expect(columns(database, "audit_logs")).toContain("rate_limit_claim_id");
+    database.close();
+  });
+
+  it("repairs a recorded 0030 whose canonical column is absent", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0029");
+    recordMigration(database, "0030_wompi_reconciliation_lifecycle.sql");
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(columns(database, "wompi_events")).toContain(
+      "stalled_requeue_epoch_at"
+    );
+    database.close();
+  });
+
+  it("aborts duplicate email keys before aliasing or changing rows", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(withoutEmailIdempotencyIndex(readMigration(CURRENT_0023)));
+    recordMigration(database, LEGACY_0019);
+    seedDuplicateEmailKeys(database);
+    const before = database.prepare(
+      "SELECT id, idempotency_key FROM email_deliveries ORDER BY id"
+    ).all();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      "SELECT id, idempotency_key FROM email_deliveries ORDER BY id"
+    ).all()).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("canonicalizes late lowercase sequence rows before recording the 0023 alias", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(initialLegacyIssuanceMigration());
+    recordMigration(database, LEGACY_0019);
+    database.exec(`
+      INSERT INTO document_sequences (environment, control_prefix, next_value)
+      VALUES ('00', 'M001P004', 4), ('00', 'm001p004', 23);
+    `);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(database.prepare(
+      `SELECT environment, control_prefix, next_value
+       FROM document_sequences ORDER BY environment, control_prefix`
+    ).all()).toEqual([
+      { environment: "00", control_prefix: "M001P004", next_value: 23 }
+    ]);
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("rejects duplicate reservation keys rather than choosing or rewriting a row", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(withoutIndex(
+      readMigration(CURRENT_0023),
+      "idx_wompi_reserved_control"
+    ));
+    recordMigration(database, LEGACY_0019);
+    for (const [id, generation] of [
+      ["conflict_a", "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"],
+      ["conflict_b", "BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB"]
+    ] as const) {
+      database.prepare(
+        `INSERT INTO wompi_events (
+           id, transaction_id, environment, result, amount_cents, raw_body,
+           control_prefix, control_sequence, reserved_codigo_generacion
+         ) VALUES (?, ?, '00', 'ExitosaAprobada', 100, '{}',
+           'M001P004', 7, ?)`
+      ).run(id, `${id}_transaction`, generation);
+    }
+    const before = database.prepare(
+      `SELECT id, control_prefix, control_sequence, reserved_codigo_generacion
+       FROM wompi_events ORDER BY id`
+    ).all();
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(database.prepare(
+      `SELECT id, control_prefix, control_sequence, reserved_codigo_generacion
+       FROM wompi_events ORDER BY id`
+    ).all()).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("rejects same-name index and owned-column definitions with the wrong shape", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const wrongIndex = databaseThrough("0022");
+    wrongIndex.exec(withoutEmailIdempotencyIndex(readMigration(CURRENT_0023)));
+    wrongIndex.exec(
+      "CREATE INDEX idx_email_deliveries_idempotency_key ON email_deliveries(claim_token);"
+    );
+    recordMigration(wrongIndex, LEGACY_0019);
+    await expect(
+      runCompatibility(wrongIndex, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+    expect(appliedMigrations(wrongIndex)).not.toContain(CURRENT_0023);
+    wrongIndex.close();
+
+    const wrongColumn = databaseThrough("0022");
+    wrongColumn.exec(initialLegacyIssuanceMigration());
+    wrongColumn.exec(
+      "ALTER TABLE wompi_events ADD COLUMN issuance_attempt_id INTEGER;"
+    );
+    recordMigration(wrongColumn, LEGACY_0019);
+    await expect(
+      runCompatibility(wrongColumn, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+    expect(appliedMigrations(wrongColumn)).not.toContain(CURRENT_0023);
+    wrongColumn.close();
+  });
+
+  it("resumes after an interrupted column repair without prematurely aliasing", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    database.exec(initialLegacyIssuanceMigration());
+    recordMigration(database, LEGACY_0019);
+    const base = sqliteRunnerFactory(database);
+    let alterations = 0;
+    const failSecondAlter = (options: { migrationsDirOverride?: string } = {}) => {
+      const runner = base.createRunner(options);
+      return {
+        async run(args: string[]) {
+          const query = args[args.indexOf("--command") + 1] ?? "";
+          if (query.startsWith("ALTER ") && (alterations += 1) === 2) {
+            throw new Error("injected compatibility interruption");
+          }
+          return runner.run(args);
+        },
+        cleanup: runner.cleanup
+      };
+    };
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility, failSecondAlter)
+    ).rejects.toThrow("injected compatibility interruption");
+    expect(columns(database, "wompi_events")).toContain("issuance_attempt_id");
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("lets the complete fresh chain initialize normally and remains idempotent", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys = ON");
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+    const first = compatibilityFingerprint(database);
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(compatibilityFingerprint(database)).toEqual(first);
+    expect(appliedMigrations(database)).toEqual(migrationFiles());
+    database.close();
+  });
+
+  it("captures Wrangler JSON through the private runner and cleans its temporary config", async () => {
+    const { createPrivateWranglerRunner } = await import(runnerScriptPath);
+    const isolatedRepository = mkdtempSync(join(tmpdir(), "diezmos-runner-repo-"));
+    const privateRoot = mkdtempSync(join(tmpdir(), "diezmos-runner-private-"));
+    const configPath = join(privateRoot, "wrangler.toml");
+    writeFileSync(configPath, 'name = "example"\n', { mode: 0o600 });
+    const spawnCalls: Array<{ args: string[]; stdio: unknown }> = [];
+    const spawnImpl = ((_executable: string, args: string[], options: {
+      stdio: unknown;
+    }) => {
+      const child = new EventEmitter() as EventEmitter & {
+        stdout: PassThrough;
+        stderr: PassThrough;
+        kill(signal: NodeJS.Signals): void;
+      };
+      child.stdout = new PassThrough();
+      child.stderr = new PassThrough();
+      child.kill = () => undefined;
+      spawnCalls.push({ args, stdio: options.stdio });
+      queueMicrotask(() => {
+        child.stdout.end('{"captured":true}\n');
+        child.stderr.end();
+        child.emit("close", 0, null);
+      });
+      return child;
+    }) as unknown as typeof import("node:child_process").spawn;
+    const runner = createPrivateWranglerRunner({
+      repositoryRoot: isolatedRepository,
+      configPath,
+      spawnImpl
+    });
+    const preparedConfig = runner.configPath;
+
+    await expect(runner.run(["whoami"], { capture: true })).resolves.toBe(
+      '{"captured":true}\n'
+    );
+    expect(spawnCalls).toEqual([
+      {
+        args: [`--config=${preparedConfig}`, "whoami"],
+        stdio: ["inherit", "pipe", "pipe"]
+      }
+    ]);
+    expect(existsSync(preparedConfig)).toBe(true);
+    runner.cleanup();
+    expect(existsSync(preparedConfig)).toBe(false);
+  });
+});
+
+function migrationFiles(directory = migrationsDirectory): string[] {
+  return readdirSync(directory)
+    .filter((name) => /^\d{4}_.+\.sql$/.test(name))
+    .sort();
+}
+
+function readMigration(name: string, directory = migrationsDirectory): string {
+  return readFileSync(resolve(directory, name), "utf8");
+}
+
+function createMigrationLedger(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE d1_migrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT UNIQUE,
+      applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+    );
+  `);
+}
+
+function recordMigration(database: DatabaseSync, name: string): void {
+  database.prepare("INSERT INTO d1_migrations (name) VALUES (?)").run(name);
+}
+
+function databaseThrough(prefix: string): DatabaseSync {
+  const database = new DatabaseSync(":memory:");
+  database.exec("PRAGMA foreign_keys = ON");
+  createMigrationLedger(database);
+  for (const name of migrationFiles()) {
+    if (name.slice(0, 4) > prefix) break;
+    database.exec(readMigration(name));
+    recordMigration(database, name);
+  }
+  return database;
+}
+
+function initialLegacyIssuanceMigration(): string {
+  const current = readMigration(CURRENT_0023);
+  const core = current
+    .slice(0, current.indexOf("-- Fencing token"))
+    .replace(
+      "ALTER TABLE wompi_events ADD COLUMN issuance_attempt_id TEXT;\n",
+      ""
+    );
+  const reservations = current.slice(
+    current.indexOf("-- Legacy sequence prefixes")
+  );
+  return `${core}${reservations}`;
+}
+
+function appliedMigrations(database: DatabaseSync): string[] {
+  if (!database.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'd1_migrations'"
+  ).get()) {
+    return [];
+  }
+  return database
+    .prepare("SELECT name FROM d1_migrations ORDER BY id")
+    .all()
+    .map((row) => String(row.name));
+}
+
+function columns(database: DatabaseSync, table: string): string[] {
+  return database
+    .prepare(`PRAGMA table_info(${JSON.stringify(table)})`)
+    .all()
+    .map((row) => String(row.name));
+}
+
+function compatibilityFingerprint(database: DatabaseSync): unknown {
+  return {
+    ledger: appliedMigrations(database),
+    schema: database.prepare(
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    ).all(),
+    event: database.prepare(
+      `SELECT id, issuance_status, issuance_attempt_id, processed_at
+       FROM wompi_events WHERE id = 'legacy_event'`
+    ).get()
+  };
+}
+
+async function runCompatibility(
+  database: DatabaseSync,
+  migrateSchemaCompatibility: (options: Record<string, unknown>) => Promise<void>,
+  createRunner = sqliteRunnerFactory(database).createRunner
+): Promise<void> {
+  await migrateSchemaCompatibility({
+    binding: "DB",
+    environment: "staging",
+    repositoryRoot,
+    createRunner
+  });
+}
+
+function seedIssuanceEvidence(database: DatabaseSync): void {
+  database.prepare(
+    `INSERT INTO wompi_events (
+       id, transaction_id, environment, result, amount_cents, raw_body,
+       issuance_attempt_id
+     ) VALUES ('evidence_event', 'evidence_transaction', '00',
+       'ExitosaAprobada', 100, '{}', 'attempt-preserved')`
+  ).run();
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, amount_cents, issued_at, transmission_claim_id
+     ) VALUES ('evidence_document', 'evidence_event', '00',
+       'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA',
+       'DTE-15-M001P004-000000000000001', 'PENDING', '{}', 100,
+       '2026-08-08T00:00:00.000Z', 'transmission-preserved')`
+  ).run();
+  database.prepare(
+    `INSERT INTO email_deliveries (
+       id, document_id, to_email, status, claim_attempted_at,
+       idempotency_key, claim_token
+     ) VALUES ('evidence_email', 'evidence_document', 'donor@example.org',
+       'PENDING', '2026-08-08T00:01:00.000Z', 'email-key-preserved',
+       'email-token-preserved')`
+  ).run();
+}
+
+function issuanceEvidence(database: DatabaseSync): unknown {
+  return {
+    event: database.prepare(
+      "SELECT issuance_attempt_id FROM wompi_events WHERE id = 'evidence_event'"
+    ).get(),
+    document: database.prepare(
+      "SELECT transmission_claim_id FROM dte_documents WHERE id = 'evidence_document'"
+    ).get(),
+    email: database.prepare(
+      `SELECT claim_attempted_at, idempotency_key, claim_token
+       FROM email_deliveries WHERE id = 'evidence_email'`
+    ).get()
+  };
+}
+
+function seedRateLimitEvidence(
+  database: DatabaseSync,
+  variant: "zero" | "donation" | "audit" | "both"
+): void {
+  if (variant === "donation" || variant === "both") {
+    database.prepare(
+      `INSERT INTO donation_intents (
+         id, amount_cents, donor_document_type, expires_at,
+         rate_limit_claim_id
+       ) VALUES ('intent-provenance', 100, '13',
+         '2026-08-09T00:00:00.000Z', 'claim-donation')`
+    ).run();
+  }
+  if (variant === "audit" || variant === "both") {
+    database.prepare(
+      `INSERT INTO audit_logs (
+         id, actor_type, action, entity_type, entity_id, summary,
+         rate_limit_claim_id
+       ) VALUES ('audit-provenance', 'SYSTEM', 'TEST', 'test', 'test',
+         'Preserved provenance', 'claim-audit')`
+    ).run();
+  }
+}
+
+function rateLimitEvidence(
+  database: DatabaseSync,
+  variant: "zero" | "donation" | "audit" | "both"
+): Record<string, string | null> {
+  const evidence: Record<string, string | null> = {};
+  if (variant === "donation" || variant === "both") {
+    evidence.donation = database.prepare(
+      "SELECT rate_limit_claim_id FROM donation_intents WHERE id = 'intent-provenance'"
+    ).get()?.rate_limit_claim_id as string | null;
+  }
+  if (variant === "audit" || variant === "both") {
+    evidence.audit = database.prepare(
+      "SELECT rate_limit_claim_id FROM audit_logs WHERE id = 'audit-provenance'"
+    ).get()?.rate_limit_claim_id as string | null;
+  }
+  return evidence;
+}
+
+function withoutEmailIdempotencyIndex(sql: string): string {
+  return sql.replace(
+    /CREATE UNIQUE INDEX idx_email_deliveries_idempotency_key[\s\S]*?WHERE idempotency_key IS NOT NULL;\n/,
+    ""
+  );
+}
+
+function withoutIndex(sql: string, indexName: string): string {
+  return sql.replace(
+    new RegExp(
+      `CREATE UNIQUE INDEX ${indexName}[\\s\\S]*?WHERE [^;]+;\\n`
+    ),
+    ""
+  );
+}
+
+function seedDuplicateEmailKeys(database: DatabaseSync): void {
+  database.prepare(
+    `INSERT INTO wompi_events (
+       id, transaction_id, environment, result, amount_cents, raw_body
+     ) VALUES ('duplicate_event', 'duplicate_transaction', '00',
+       'ExitosaAprobada', 100, '{}')`
+  ).run();
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, amount_cents, issued_at
+     ) VALUES ('duplicate_document', 'duplicate_event', '00',
+       'BBBBBBBB-BBBB-4BBB-8BBB-BBBBBBBBBBBB',
+       'DTE-15-M001P004-000000000000002', 'PENDING', '{}', 100,
+       '2026-08-08T00:00:00.000Z')`
+  ).run();
+  for (const id of ["duplicate_email_a", "duplicate_email_b"]) {
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, idempotency_key
+       ) VALUES (?, 'duplicate_document', 'donor@example.org', 'PENDING',
+         'duplicate-provider-key')`
+    ).run(id);
+  }
+}
+
+const PARTIAL_EMAIL_VALUES: Record<string, string> = {
+  claim_attempted_at: "2026-08-08T02:00:00.000Z",
+  idempotency_key: "partial-email-provider-key",
+  claim_token: "partial-email-claim-token"
+};
+
+function seedPartialEmailEvidence(
+  database: DatabaseSync,
+  present: string[]
+): void {
+  database.prepare(
+    `INSERT INTO wompi_events (
+       id, transaction_id, environment, result, amount_cents, raw_body
+     ) VALUES ('partial_email_event', 'partial_email_transaction', '00',
+       'ExitosaAprobada', 100, '{}')`
+  ).run();
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, amount_cents, issued_at
+     ) VALUES ('partial_email_document', 'partial_email_event', '00',
+       'CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC',
+       'DTE-15-M001P004-000000000000003', 'PENDING', '{}', 100,
+       '2026-08-08T00:00:00.000Z')`
+  ).run();
+  database.prepare(
+    `INSERT INTO email_deliveries (id, document_id, to_email, status)
+     VALUES ('partial_email', 'partial_email_document',
+       'donor@example.org', 'PENDING')`
+  ).run();
+  database.prepare(
+    `UPDATE email_deliveries SET ${present.map((column) => `${column} = ?`).join(", ")}
+     WHERE id = 'partial_email'`
+  ).run(...present.map((column) => PARTIAL_EMAIL_VALUES[column]));
+}
+
+function partialEmailEvidence(
+  database: DatabaseSync,
+  present: string[]
+): unknown {
+  return database.prepare(
+    `SELECT ${present.join(", ")} FROM email_deliveries
+     WHERE id = 'partial_email'`
+  ).get();
+}
+
+function sqliteRunnerFactory(database: DatabaseSync) {
+  const migrationDirectories: Array<string | undefined> = [];
+  const createRunner = ({
+    migrationsDirOverride
+  }: { migrationsDirOverride?: string } = {}) => {
+    migrationDirectories.push(migrationsDirOverride);
+    return {
+      async run(args: string[]): Promise<string> {
+        if (args[0] === "d1" && args[1] === "execute") {
+          const query = args[args.indexOf("--command") + 1];
+          const rows = /^\s*(?:SELECT|PRAGMA|WITH)\b/i.test(query)
+            ? database.prepare(query).all()
+            : (database.exec(query), []);
+          return JSON.stringify([{ success: true, results: rows }]);
+        }
+        if (args[0] === "d1" && args[1] === "migrations") {
+          applyPendingMigrations(database, migrationsDirOverride);
+          return "";
+        }
+        throw new Error(`Unexpected Wrangler command: ${args.join(" ")}`);
+      },
+      cleanup() {}
+    };
+  };
+  return { createRunner, migrationDirectories };
+}
+
+function applyPendingMigrations(
+  database: DatabaseSync,
+  directory = migrationsDirectory
+): void {
+  if (appliedMigrations(database).length === 0 && !database.prepare(
+    "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'd1_migrations'"
+  ).get()) {
+    createMigrationLedger(database);
+  }
+  const recorded = new Set(appliedMigrations(database));
+  for (const name of migrationFiles(directory)) {
+    if (recorded.has(name)) continue;
+    database.exec(readMigration(name, directory));
+    recordMigration(database, name);
+    recorded.add(name);
+  }
+}

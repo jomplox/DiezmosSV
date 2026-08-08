@@ -109,4 +109,52 @@ describe("private Wrangler configuration", () => {
 
     expect(existsSync(prepared.configPath)).toBe(false);
   });
+
+  it("uses a validated owner-only migrations override in the temporary config", () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "diezmos-repository-"));
+    const privateRoot = mkdtempSync(join(tmpdir(), "diezmos-private-"));
+    const migrationsDirOverride = mkdtempSync(
+      join(tmpdir(), "diezmos-migrations-")
+    );
+    chmodSync(migrationsDirOverride, 0o700);
+    const configPath = join(privateRoot, "wrangler.toml");
+    writeFileSync(
+      configPath,
+      ['name = "example"', 'migrations_dir = "migrations"'].join("\n"),
+      { mode: 0o600 }
+    );
+
+    const prepared = preparePrivateWranglerConfig(configPath, {
+      repositoryRoot,
+      migrationsDirOverride
+    });
+    try {
+      expect(readFileSync(prepared.configPath, "utf8")).toContain(
+        `migrations_dir = ${JSON.stringify(realpathSync(migrationsDirOverride))}`
+      );
+      expect(statSync(prepared.configPath).mode & 0o077).toBe(0);
+    } finally {
+      prepared.cleanup();
+    }
+  });
+
+  it("rejects a migrations override that is accessible to other users", () => {
+    const repositoryRoot = mkdtempSync(join(tmpdir(), "diezmos-repository-"));
+    const privateRoot = mkdtempSync(join(tmpdir(), "diezmos-private-"));
+    const migrationsDirOverride = mkdtempSync(
+      join(tmpdir(), "diezmos-migrations-")
+    );
+    chmodSync(migrationsDirOverride, 0o755);
+    const configPath = join(privateRoot, "wrangler.toml");
+    writeFileSync(configPath, 'migrations_dir = "migrations"\n', {
+      mode: 0o600
+    });
+
+    expect(() =>
+      preparePrivateWranglerConfig(configPath, {
+        repositoryRoot,
+        migrationsDirOverride
+      })
+    ).toThrow(/owner-only permissions/i);
+  });
 });
