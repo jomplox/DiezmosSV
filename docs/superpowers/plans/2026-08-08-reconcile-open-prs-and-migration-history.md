@@ -36,9 +36,9 @@
 
 **Checkable outcome:** `identificacion.fecEmi` and `identificacion.horEmi` both describe the actual invalidation event instant in El Salvador time, while `documento.fecEmi` remains the original CDE date. The already-correct next-month ten-business-day window remains unchanged.
 
-- [ ] First add/strengthen a regression test using different original-document and invalidation dates; run it against the fault and capture the expected failure.
-- [ ] Make `buildInvalidacionEvent` use the date and time returned by `mhDateTime(emittedAt)` for `identificacion`, preserving the original date under `documento`.
-- [ ] Run the focused builder and invalidation-route tests, then commit only these files.
+- [x] First add/strengthen a regression test using different original-document and invalidation dates; run it against the fault and capture the expected failure.
+- [x] Make `buildInvalidacionEvent` use the date and time returned by `mhDateTime(emittedAt)` for `identificacion`, preserving the original date under `documento`.
+- [x] Run the focused builder and invalidation-route tests, then commit only these files.
 
 ## Task 3: Reconcile divergent D1 histories without rewriting them
 
