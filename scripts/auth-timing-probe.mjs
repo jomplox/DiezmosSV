@@ -14,18 +14,23 @@ const databaseName = "diezmossv-auth-timing-db";
 const taskRootPrefix = "diezmossv-auth-timing-";
 const taskRootMarkerName = ".diezmossv-auth-timing-owner";
 const taskRootOwnershipToken = `diezmossv-auth-timing:${process.pid}:${randomUUID()}`;
-const childEnvironmentBlockedPrefixes = [
-  "AUTH_TIMING_",
-  "CLOUDFLARE_",
-  "CF_",
-  "DIEZMOSSV_",
-  "WRANGLER_"
+const childEnvironmentAllowedKeys = [
+  "PATH",
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_COLLATE",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_MONETARY",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "TERM",
+  "COLORTERM",
+  "SHELL",
+  "TZ"
 ];
-const childEnvironmentBlockedBindings = new Set([
-  "APP_ENV",
-  "APP_ORIGIN",
-  "MOCK_EXTERNAL_SERVICES"
-]);
+const windowsChildEnvironmentAllowedKeys = ["SystemRoot", "ComSpec", "PATHEXT"];
 const warmupsPerClass = numberOption("AUTH_TIMING_WARMUPS_PER_CLASS", 50, 1, 1_000);
 const samplesPerClass = numberOption("AUTH_TIMING_SAMPLES_PER_CLASS", 500, 20, 10_000);
 // Successful requests are observational only; the invalid-class equivalence gate below
@@ -125,13 +130,21 @@ async function main() {
 async function runProbe() {
   assertNotInterrupted();
   await Promise.all([access(wrangler), access(workerMain), access(migrationsDirectory)]);
+  const childDirectories = syntheticChildDirectories(taskRoot);
   await Promise.all([
     mkdir(persistDir, { recursive: true, mode: 0o700 }),
-    mkdir(miniflareCacheDir, { recursive: true, mode: 0o700 })
+    mkdir(miniflareCacheDir, { recursive: true, mode: 0o700 }),
+    ...Object.values(childDirectories).map((directory) =>
+      mkdir(directory, { recursive: true, mode: 0o700 })
+    )
   ]);
   await writeFile(configFile, syntheticWranglerConfig(), { mode: 0o600 });
 
-  const commandEnv = syntheticWranglerEnvironment(process.env, miniflareCacheDir);
+  const commandEnv = syntheticWranglerEnvironment(
+    process.env,
+    childDirectories,
+    miniflareCacheDir
+  );
   await runCommand(wrangler, [
     "d1", "migrations", "apply", databaseName,
     "--config", configFile,
@@ -365,20 +378,50 @@ function syntheticWranglerConfig() {
   ].join("\n");
 }
 
-function syntheticWranglerEnvironment(sourceEnvironment, cacheDirectory) {
-  const environment = { ...sourceEnvironment };
-  for (const key of Object.keys(environment)) {
-    if (
-      childEnvironmentBlockedBindings.has(key)
-      || childEnvironmentBlockedPrefixes.some((prefix) => key.startsWith(prefix))
-    ) {
-      delete environment[key];
+function syntheticChildDirectories(root) {
+  const environmentRoot = join(root, "child-environment");
+  return {
+    home: join(environmentRoot, "home"),
+    temporary: join(environmentRoot, "tmp"),
+    xdgConfig: join(environmentRoot, "xdg-config"),
+    xdgCache: join(environmentRoot, "xdg-cache"),
+    xdgData: join(environmentRoot, "xdg-data"),
+    xdgState: join(environmentRoot, "xdg-state")
+  };
+}
+
+function syntheticWranglerEnvironment(sourceEnvironment, directories, cacheDirectory) {
+  const environment = {};
+  const allowedKeys = process.platform === "win32"
+    ? [...childEnvironmentAllowedKeys, ...windowsChildEnvironmentAllowedKeys]
+    : childEnvironmentAllowedKeys;
+  for (const key of allowedKeys) {
+    const value = sourceEnvironment[key];
+    if (typeof value === "string" && value !== "") {
+      environment[key] = value;
     }
+  }
+  if (!environment.PATH) {
+    throw new Error("The auth timing probe requires PATH for the local Node/Wrangler toolchain");
   }
   return {
     ...environment,
+    HOME: directories.home,
+    USERPROFILE: directories.home,
+    TMPDIR: directories.temporary,
+    TMP: directories.temporary,
+    TEMP: directories.temporary,
+    XDG_CONFIG_HOME: directories.xdgConfig,
+    XDG_CACHE_HOME: directories.xdgCache,
+    XDG_DATA_HOME: directories.xdgData,
+    XDG_STATE_HOME: directories.xdgState,
+    ...(process.platform === "win32" ? {
+      APPDATA: directories.xdgConfig,
+      LOCALAPPDATA: directories.xdgData
+    } : {}),
     MINIFLARE_CACHE_DIR: cacheDirectory,
     WRANGLER_SEND_METRICS: "false",
+    WRANGLER_SEND_ERROR_REPORTS: "false",
     CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",
     CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",
     NO_COLOR: "1"
