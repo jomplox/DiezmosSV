@@ -80,10 +80,10 @@
 
 **Checkable outcome:** `0001_init.sql` and `0004_email_delivery_evidence.sql` remain unchanged; normal fresh/legacy/already-applied paths pass; a target with `0004` pending plus any populated evidence field is blocked before Wrangler can run the destructive rebuild, with a count-only, no-PII error.
 
-- [ ] Add pure parsers/classifiers for the exact `0004` ledger name, table existence, seven evidence-column names, and aggregate populated-evidence count.
-- [ ] Query evidence counts only when `0004` is pending and evidence columns already exist. Do not log row identifiers, addresses, provider IDs, hashes, or values.
-- [ ] Prove with real SQLite that current `0004` preserves the seven legacy/base fields and that the synthetic populated-evidence/pending-ledger state is blocked before migration.
-- [ ] Cover fresh DB, legacy pending, recorded `0004`, partial columns with all evidence null, and partial columns with populated evidence. No rescue migration is added unless an authorized target inspection later proves one is needed.
+- [x] Add pure parsers/classifiers for the exact `0004` ledger name, table existence, seven evidence-column names, and aggregate populated-evidence count.
+- [x] Query evidence counts only when `0004` is pending and evidence columns already exist. Do not log row identifiers, addresses, provider IDs, hashes, or values.
+- [x] Prove with real SQLite that current `0004` preserves the seven legacy/base fields and that the synthetic populated-evidence/pending-ledger state is blocked before migration.
+- [x] Cover fresh DB, legacy pending, recorded `0004`, partial columns with all evidence null, and partial columns with populated evidence. No rescue migration is added unless an authorized target inspection later proves one is needed.
 
 ## Task 5: Complete repeat-safe Wompi stalled episodes
 
