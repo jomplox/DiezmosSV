@@ -55,6 +55,7 @@ interface RetentionSuspendedTrigger {
 }
 
 export const FISCAL_CORRECTION_LATEST_SNAPSHOT = "fiscal_corrections_latest";
+export const DOCUMENT_SEQUENCES_SNAPSHOT = "document_sequences";
 
 const FISCAL_CORRECTION_RESTORE_UPDATE_COLUMNS = [
   "request_id",
@@ -253,7 +254,7 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       totalRows += entry.rowCount;
     }
     const sequenceEntry = await exportDocumentSequences(env, repo, prefix);
-    manifest.tables.document_sequences = sequenceEntry;
+    manifest.tables[DOCUMENT_SEQUENCES_SNAPSHOT] = sequenceEntry;
     totalRows += sequenceEntry.rowCount;
 
     // Manifest last: its existence is the idempotency/completion marker.
