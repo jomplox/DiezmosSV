@@ -31,6 +31,8 @@ const EMAIL_DELIVERY_EVIDENCE_COLUMNS = Object.freeze([
   "dte_json_sha256",
   "provider_delivery_id"
 ]);
+const INVALID_WRANGLER_RESPONSE =
+  "Migration preflight received an invalid Wrangler response.";
 
 export const D1_MIGRATIONS_TABLE_QUERY = `
 SELECT name
@@ -61,42 +63,91 @@ function parseWranglerRows(stdout) {
   try {
     parsed = JSON.parse(String(stdout).trim());
   } catch {
-    throw new Error("Migration preflight could not parse Wrangler JSON.");
+    throw new Error(INVALID_WRANGLER_RESPONSE);
   }
-  const envelopes = Array.isArray(parsed) ? parsed : [parsed];
-  return envelopes.flatMap((envelope) =>
-    Array.isArray(envelope?.results) ? envelope.results : []
+  if (!Array.isArray(parsed) || parsed.length !== 1) {
+    throw new Error(INVALID_WRANGLER_RESPONSE);
+  }
+  const [envelope] = parsed;
+  if (
+    !isNonArrayObject(envelope) ||
+    envelope.success !== true ||
+    !Array.isArray(envelope.results) ||
+    !envelope.results.every(isNonArrayObject)
+  ) {
+    throw new Error(INVALID_WRANGLER_RESPONSE);
+  }
+  return envelope.results;
+}
+
+function isNonArrayObject(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactFields(row, fields) {
+  const keys = Object.keys(row);
+  return (
+    keys.length === fields.length &&
+    fields.every((field) => Object.hasOwn(row, field))
   );
 }
 
+function parseExactNamePresence(stdout, expectedName) {
+  const rows = parseWranglerRows(stdout);
+  if (rows.length > 1) throw new Error(INVALID_WRANGLER_RESPONSE);
+  if (rows.length === 0) return false;
+  const [row] = rows;
+  if (!hasExactFields(row, ["name"]) || row.name !== expectedName) {
+    throw new Error(INVALID_WRANGLER_RESPONSE);
+  }
+  return true;
+}
+
 export function hasDteDocumentsTable(stdout) {
-  return parseWranglerRows(stdout).some((row) => row.name === "dte_documents");
+  return parseExactNamePresence(stdout, "dte_documents");
 }
 
 export function hasD1MigrationsTable(stdout) {
-  return parseWranglerRows(stdout).some((row) => row.name === "d1_migrations");
+  return parseExactNamePresence(stdout, "d1_migrations");
 }
 
 export function hasEmailDeliveriesTable(stdout) {
-  return parseWranglerRows(stdout).some((row) => row.name === "email_deliveries");
+  return parseExactNamePresence(stdout, "email_deliveries");
 }
 
 export function isMigration0004Recorded(stdout) {
-  return parseWranglerRows(stdout).some((row) => row.name === MIGRATION_0004);
+  return parseExactNamePresence(stdout, MIGRATION_0004);
 }
 
 export function parseEmailDeliveryEvidenceColumns(stdout) {
-  const names = new Set(parseWranglerRows(stdout).map((row) => row.name));
+  const names = new Set();
+  for (const row of parseWranglerRows(stdout)) {
+    if (
+      !hasExactFields(row, ["name"]) ||
+      !EMAIL_DELIVERY_EVIDENCE_COLUMNS.includes(row.name) ||
+      names.has(row.name)
+    ) {
+      throw new Error(INVALID_WRANGLER_RESPONSE);
+    }
+    names.add(row.name);
+  }
   return EMAIL_DELIVERY_EVIDENCE_COLUMNS.filter((name) => names.has(name));
 }
 
 export function parsePopulatedEmailDeliveryEvidenceCount(stdout) {
-  const [row] = parseWranglerRows(stdout);
-  const count = Number(row?.populated_evidence_count);
-  if (!Number.isSafeInteger(count) || count < 0) {
-    throw new Error(
-      "Migration preflight received an invalid populated evidence count."
-    );
+  const rows = parseWranglerRows(stdout);
+  if (rows.length !== 1) throw new Error(INVALID_WRANGLER_RESPONSE);
+  const [row] = rows;
+  if (!hasExactFields(row, ["populated_evidence_count"])) {
+    throw new Error(INVALID_WRANGLER_RESPONSE);
+  }
+  const count = row.populated_evidence_count;
+  if (
+    typeof count !== "number" ||
+    !Number.isSafeInteger(count) ||
+    count < 0
+  ) {
+    throw new Error(INVALID_WRANGLER_RESPONSE);
   }
   return count;
 }

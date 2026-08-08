@@ -4,6 +4,21 @@ import * as preflight from "../../scripts/d1-migration-preflight.mjs";
 const wranglerRows = (results: Array<Record<string, unknown>>) =>
   JSON.stringify([{ results, success: true }]);
 
+const INVALID_WRANGLER_RESPONSE =
+  "Migration preflight received an invalid Wrangler response.";
+
+function expectSanitizedWranglerFailure(
+  operation: () => unknown,
+  maliciousText: string
+): void {
+  expect(operation).toThrow(INVALID_WRANGLER_RESPONSE);
+  try {
+    operation();
+  } catch (error) {
+    expect(String(error)).not.toContain(maliciousText);
+  }
+}
+
 describe("D1 migration preflight", () => {
   it("can identify a fresh database before querying dte_documents", () => {
     expect(preflight.DTE_DOCUMENTS_TABLE_QUERY).toContain("sqlite_schema");
@@ -54,11 +69,7 @@ describe("D1 migration preflight", () => {
         wranglerRows([{ name: "0004_email_delivery_evidence.sql" }])
       )
     ).toBe(true);
-    expect(
-      preflight.isMigration0004Recorded(
-        wranglerRows([{ name: "0004_email_delivery_evidence.sql.backup" }])
-      )
-    ).toBe(false);
+    expect(preflight.isMigration0004Recorded(wranglerRows([]))).toBe(false);
   });
 
   it("recognizes only the seven evidence columns in canonical order", () => {
@@ -66,7 +77,6 @@ describe("D1 migration preflight", () => {
       preflight.parseEmailDeliveryEvidenceColumns(
         wranglerRows([
           { name: "provider_delivery_id" },
-          { name: "to_email" },
           { name: "email_type" },
           { name: "pdf_sha256" }
         ])
@@ -77,13 +87,205 @@ describe("D1 migration preflight", () => {
   it("rejects malformed Wrangler JSON without echoing its contents", () => {
     const malformed = '{"results":[{"to_email":"private@example.test"}]';
 
-    expect(() => preflight.hasEmailDeliveriesTable(malformed)).toThrow(
-      "Migration preflight could not parse Wrangler JSON."
+    expectSanitizedWranglerFailure(
+      () => preflight.hasEmailDeliveriesTable(malformed),
+      "private@example.test"
     );
-    try {
-      preflight.hasEmailDeliveriesTable(malformed);
-    } catch (error) {
-      expect(String(error)).not.toContain("private@example.test");
+  });
+
+  it.each([
+    [
+      "a provider-declared failure",
+      JSON.stringify([
+        {
+          success: false,
+          errors: [{ message: "provider-secret-id" }],
+          results: []
+        }
+      ]),
+      "provider-secret-id"
+    ],
+    [
+      "a missing results array",
+      JSON.stringify([{ success: true, provider_detail: "missing-results-secret" }]),
+      "missing-results-secret"
+    ],
+    [
+      "a non-array results value",
+      JSON.stringify([
+        {
+          success: true,
+          results: { name: "recipient@example.test" }
+        }
+      ]),
+      "recipient@example.test"
+    ],
+    ["an empty envelope collection", "[]", "empty-envelope-secret"],
+    [
+      "a bare envelope object",
+      JSON.stringify({
+        success: true,
+        results: [],
+        provider_detail: "bare-envelope-secret"
+      }),
+      "bare-envelope-secret"
+    ],
+    [
+      "multiple envelopes",
+      JSON.stringify([
+        { success: true, results: [] },
+        {
+          success: true,
+          results: [],
+          provider_detail: "second-envelope-secret"
+        }
+      ]),
+      "second-envelope-secret"
+    ],
+    ["a null envelope", JSON.stringify([null]), "null-envelope-secret"],
+    [
+      "a scalar envelope",
+      JSON.stringify(["scalar-envelope-secret"]),
+      "scalar-envelope-secret"
+    ],
+    [
+      "an array envelope",
+      JSON.stringify([[{ provider_detail: "array-envelope-secret" }]]),
+      "array-envelope-secret"
+    ],
+    [
+      "a null result row",
+      JSON.stringify([{ success: true, results: [null] }]),
+      "null-row-secret"
+    ],
+    [
+      "a scalar result row",
+      JSON.stringify([{ success: true, results: ["scalar-row-secret"] }]),
+      "scalar-row-secret"
+    ],
+    [
+      "an array result row",
+      JSON.stringify([
+        { success: true, results: [["array-row-secret"]] }
+      ]),
+      "array-row-secret"
+    ]
+  ])("fails closed on %s", (_label, response, maliciousText) => {
+    expectSanitizedWranglerFailure(
+      () => preflight.runPreflightChecks(() => response),
+      maliciousText
+    );
+  });
+
+  it.each([
+    ["d1 table", preflight.hasD1MigrationsTable, "d1_migrations"],
+    ["email table", preflight.hasEmailDeliveriesTable, "email_deliveries"],
+    ["DTE table", preflight.hasDteDocumentsTable, "dte_documents"],
+    [
+      "0004 ledger",
+      preflight.isMigration0004Recorded,
+      "0004_email_delivery_evidence.sql"
+    ]
+  ])("rejects duplicate %s rows", (_label, parser, name) => {
+    expectSanitizedWranglerFailure(
+      () => parser(wranglerRows([{ name }, { name }])),
+      name
+    );
+  });
+
+  it.each([
+    ["d1 table", preflight.hasD1MigrationsTable, "different_table"],
+    ["email table", preflight.hasEmailDeliveriesTable, "different_table"],
+    ["DTE table", preflight.hasDteDocumentsTable, "different_table"],
+    [
+      "0004 ledger",
+      preflight.isMigration0004Recorded,
+      "0004_email_delivery_evidence.sql.backup"
+    ]
+  ])("rejects an unexpected %s row", (_label, parser, name) => {
+    expectSanitizedWranglerFailure(
+      () => parser(wranglerRows([{ name }])),
+      name
+    );
+  });
+
+  it("rejects missing or additional projected table fields", () => {
+    expectSanitizedWranglerFailure(
+      () => preflight.hasEmailDeliveriesTable(wranglerRows([{}])),
+      "missing-name-secret"
+    );
+    expectSanitizedWranglerFailure(
+      () =>
+        preflight.hasEmailDeliveriesTable(
+          wranglerRows([
+            {
+              name: "email_deliveries",
+              provider_detail: "extra-field-secret"
+            }
+          ])
+        ),
+      "extra-field-secret"
+    );
+  });
+
+  it("rejects duplicate, unexpected, and malformed evidence-column rows", () => {
+    for (const rows of [
+      [{ name: "email_type" }, { name: "email_type" }],
+      [{ name: "to_email" }],
+      [{}],
+      [{ name: "email_type", provider_detail: "column-extra-secret" }]
+    ]) {
+      expectSanitizedWranglerFailure(
+        () => preflight.parseEmailDeliveryEvidenceColumns(wranglerRows(rows)),
+        "column-extra-secret"
+      );
+    }
+  });
+
+  it.each([
+    ["null", null],
+    ["boolean", false],
+    ["empty string", ""],
+    ["whitespace", "  "],
+    ["numeric string", "7"],
+    ["float", 1.5],
+    ["negative", -1],
+    ["unsafe integer", Number.MAX_SAFE_INTEGER + 1]
+  ])("rejects a noncanonical %s populated-evidence count", (_label, count) => {
+    const response = wranglerRows([{ populated_evidence_count: count }]);
+
+    expect(() =>
+      preflight.parsePopulatedEmailDeliveryEvidenceCount(response)
+    ).toThrow(
+      INVALID_WRANGLER_RESPONSE
+    );
+  });
+
+  it("rejects missing, additional, duplicate, and multi-envelope count rows", () => {
+    const invalidResponses = [
+      wranglerRows([{}]),
+      wranglerRows([
+        { populated_evidence_count: 0, provider_detail: "count-extra-secret" }
+      ]),
+      wranglerRows([
+        { populated_evidence_count: 0 },
+        { populated_evidence_count: 7 }
+      ]),
+      JSON.stringify([
+        { success: true, results: [{ populated_evidence_count: 0 }] },
+        {
+          success: true,
+          results: [{ populated_evidence_count: 7 }],
+          provider_detail: "later-count-secret"
+        }
+      ])
+    ];
+
+    for (const response of invalidResponses) {
+      expectSanitizedWranglerFailure(
+        () => preflight.parsePopulatedEmailDeliveryEvidenceCount(response),
+        "later-count-secret"
+      );
     }
   });
 
