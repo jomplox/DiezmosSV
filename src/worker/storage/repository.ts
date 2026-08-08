@@ -92,10 +92,13 @@ import {
   listAcceptedDocumentsInYear as listAcceptedDocumentsInYearRepository,
   listAcceptedDteDocumentsForExport as listAcceptedDteDocumentsForExportRepository,
   listAcceptedWompiContactRows as listAcceptedWompiContactRowsRepository,
+  listAnnualCertificateDonorDocuments as listAnnualCertificateDonorDocumentsRepository,
+  listAnnualCertificateDonorTargets as listAnnualCertificateDonorTargetsRepository,
   listAllRowsPaged as listAllRowsPagedRepository,
   listDocumentSequencesPaged as listDocumentSequencesPagedRepository,
   listRowsCreatedBetween as listRowsCreatedBetweenRepository,
   listStalledApprovedWompiEvents as listStalledApprovedWompiEventsRepository,
+  type AnnualCertificateDonorTarget,
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
@@ -225,6 +228,7 @@ export {
   RETENTION_WINDOWED_TABLES
 } from "./repository/retentionReads";
 export type {
+  AnnualCertificateDonorTarget,
   DocumentSequenceRetentionCursor,
   RetentionCursor,
   RetentionSnapshotTable,
@@ -822,6 +826,28 @@ export class Repository {
     limit = RETENTION_PAGE_SIZE
   ): Promise<DteDocumentRecord[]> {
     return listAcceptedDocumentsInYearRepository(this.db, range, cursor, limit);
+  }
+
+  async listAnnualCertificateDonorTargets(
+    range: { startIso: string; endIso: string },
+    options: {
+      afterGroupKey: string | null;
+      limit: number;
+      search: string | null;
+      unsentEmailOnly: boolean;
+      year: number;
+      groupKey?: string | null;
+    }
+  ): Promise<AnnualCertificateDonorTarget[]> {
+    return listAnnualCertificateDonorTargetsRepository(this.db, range, options);
+  }
+
+  async listAnnualCertificateDonorDocuments(
+    range: { startIso: string; endIso: string },
+    groupKey: string,
+    limit: number
+  ): Promise<DteDocumentRecord[]> {
+    return listAnnualCertificateDonorDocumentsRepository(this.db, range, groupKey, limit);
   }
 
   async listAcceptedWompiContactRows(

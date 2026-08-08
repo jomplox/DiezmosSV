@@ -60,7 +60,14 @@ import {
   parseBrandingLogoMeta,
   parseBrandingSettings
 } from "./services/branding";
-import { buildAnnualCertificatePreview, certificateYearError, sendAnnualCertificates, SingleDonorSendError } from "./services/certificate";
+import {
+  buildAnnualCertificatePreview,
+  CertificateDossierLimitError,
+  certificateYearError,
+  sendAnnualCertificates,
+  SingleDonorSendError,
+  type AnnualCertificateSendRequest
+} from "./services/certificate";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
@@ -1893,7 +1900,12 @@ async function handleAnnualCertificatePreview(ctx: ApiRouteContext): Promise<Res
   if (yearError) {
     return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
   }
-  return jsonResponse(await buildAnnualCertificatePreview(ctx.repo, Number(yearParam), ctx.url.searchParams.get("q")));
+  return jsonResponse(await buildAnnualCertificatePreview(
+    ctx.repo,
+    Number(yearParam),
+    ctx.url.searchParams.get("q"),
+    ctx.url.searchParams.get("after")
+  ));
 }
 
 async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Response> {
@@ -1903,14 +1915,42 @@ async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Respon
     return jsonResponse({ error: "invalid_certificate_year", message: yearError }, { status: 400 });
   }
   const year = Number(yearParam);
-  // Optional body: `{ donor: "<groupKey>" }` targets one donor (also the resend path);
-  // an absent/empty body runs the full bulk batch as before.
-  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "empty-object" })) as { donor?: unknown };
-  const donorGroupKey = typeof body.donor === "string" && body.donor.trim() ? body.donor : undefined;
+  const rawBody = (await readBodyText(ctx.request, AUTHENTICATED_JSON_BODY_LIMIT_BYTES)).trim();
+  let body: Record<string, unknown> = {};
+  if (rawBody) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new InvalidJsonBodyError();
+    }
+    if (!isRecord(parsed)) {
+      return jsonResponse({ error: "invalid_certificate_send_request" }, { status: 400 });
+    }
+    body = parsed;
+  }
+  if (Object.keys(body).some((key) => key !== "donor" && key !== "after")) {
+    return jsonResponse({ error: "invalid_certificate_send_request" }, { status: 400 });
+  }
+  const hasDonor = Object.hasOwn(body, "donor");
+  const hasAfter = Object.hasOwn(body, "after");
+  const donor = hasDonor && typeof body.donor === "string" ? body.donor.trim() : "";
+  const after = hasAfter && typeof body.after === "string" ? body.after.trim() : "";
+  if (
+    (hasDonor && (!donor || donor.length > 320)) ||
+    (hasAfter && (!after || after.length > 320)) ||
+    (donor && after)
+  ) {
+    return jsonResponse({ error: "invalid_certificate_send_request" }, { status: 400 });
+  }
+  const sendRequest: AnnualCertificateSendRequest = donor ? { donor } : after ? { after } : {};
   let result;
   try {
-    result = await sendAnnualCertificates(ctx.env, ctx.repo, year, ctx.actor!.id, donorGroupKey);
+    result = await sendAnnualCertificates(ctx.env, ctx.repo, year, ctx.actor!.id, sendRequest);
   } catch (error) {
+    if (error instanceof CertificateDossierLimitError) {
+      return jsonResponse({ error: "certificate_dossier_too_large", message: error.message }, { status: 422 });
+    }
     if (error instanceof SingleDonorSendError) {
       return jsonResponse({ error: "single_donor_send_error", message: error.message }, { status: error.status });
     }
@@ -1922,10 +1962,17 @@ async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Respon
     action: "DONOR_CERTIFICATES_RUN",
     entityType: "donor_certificate_run",
     entityId: String(year),
-    summary: donorGroupKey
+    summary: result.mode === "single"
       ? `Constancia ${year} enviada individualmente: ${result.sent} enviada, ${result.failed} fallida`
-      : `Constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`,
-    metadata: { ...result, ...(donorGroupKey ? { mode: "single", donorGroupKey } : {}) }
+      : `Tanda de constancias ${year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas; ${result.hasMore ? "quedan donantes por procesar" : "no quedan donantes por procesar"}`,
+    metadata: {
+      mode: result.mode,
+      processed: result.processed,
+      sent: result.sent,
+      skipped: result.skipped,
+      failed: result.failed,
+      hasMore: result.hasMore
+    }
   });
   return jsonResponse(result);
 }
