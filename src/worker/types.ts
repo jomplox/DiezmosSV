@@ -345,6 +345,7 @@ export interface WompiIssuanceFailureItem {
 export interface WompiIssuanceRetrySnapshot extends WompiIssuanceFailureItem {
   issuance_attempt_id: string | null;
   issuance_claim_id: string | null;
+  stalled_requeue_epoch_at: string | null;
 }
 
 export interface WompiDocumentIdentifiers {

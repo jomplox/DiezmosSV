@@ -230,9 +230,10 @@ export async function countAuditEntries(
   return Number(row?.count ?? 0);
 }
 
-// Windowed variant for the auth rate limiter: counts (action, entity_id) audits
-// whose created_at is at or after `sinceIso`. Reads use the (action, entity_id,
-// created_at) index added in migration 0008.
+// Wompi stalled-episode count. New audits carry their durable episode identity,
+// so a frozen or regressing database clock cannot hide them. Legacy audits have
+// no identity and use an exclusive timestamp boundary, keeping an audit written
+// exactly at operator rotation in the prior episode.
 export async function countAuditEntriesSince(
   db: D1Database,
   action: string,
@@ -240,8 +241,20 @@ export async function countAuditEntriesSince(
   sinceIso: string
 ): Promise<number> {
   const row = await db
-    .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ? AND created_at >= ?")
-    .bind(action, entityId, sinceIso)
+    .prepare(
+      `SELECT COUNT(*) AS count
+         FROM audit_logs
+        WHERE action = ?
+          AND entity_id = ?
+          AND (
+            json_extract(metadata_json, '$.stalledRequeueEpochAt') = ?
+            OR (
+              json_extract(metadata_json, '$.stalledRequeueEpochAt') IS NULL
+              AND created_at > ?
+            )
+          )`
+    )
+    .bind(action, entityId, sinceIso, sinceIso)
     .first<{ count: number }>();
   return Number(row?.count ?? 0);
 }

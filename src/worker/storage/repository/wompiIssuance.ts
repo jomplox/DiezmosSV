@@ -248,7 +248,8 @@ export async function getWompiIssuanceRetrySnapshotById(
 ): Promise<WompiIssuanceRetrySnapshot | null> {
   return db
     .prepare(
-`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}, issuance_attempt_id, issuance_claim_id
+`SELECT ${WOMPI_ISSUANCE_FAILURE_COLUMNS}, issuance_attempt_id, issuance_claim_id,
+           stalled_requeue_epoch_at
            FROM wompi_events
           WHERE id = ?`
     )
@@ -286,7 +287,10 @@ export async function claimWompiIssuanceRetry(
   observed: WompiIssuanceRetrySnapshot
 ): Promise<string | null> {
   const attemptId = newId("issuance_attempt");
-  const retryQueuedAt = nowIso();
+  const retryQueuedAt = nextStalledRequeueEpoch(
+    nowIso(),
+    observed.stalled_requeue_epoch_at ?? observed.issuance_last_attempt_at
+  );
   const actorIp = normalizeAuditIp(auditContext?.ip ?? null);
   const actorContext = serializeAuditContext(auditContext?.context);
   const results = await db.batch([
@@ -307,6 +311,7 @@ export async function claimWompiIssuanceRetry(
              AND issuance_claim_id IS ?
              AND issuance_error_code IS ?
              AND issuance_error_message IS ?
+             AND stalled_requeue_epoch_at IS ?
              AND (
                issuance_status IN ('FAILED', 'DEAD_LETTERED')
                OR (
@@ -333,7 +338,8 @@ export async function claimWompiIssuanceRetry(
         observed.issuance_attempt_id,
         observed.issuance_claim_id,
         observed.issuance_error_code,
-        observed.issuance_error_message
+        observed.issuance_error_message,
+        observed.stalled_requeue_epoch_at
       ),
     db
       .prepare(
@@ -361,6 +367,18 @@ export async function claimWompiIssuanceRetry(
       )
   ]);
   return Number(results[0]?.meta?.changes ?? 0) === 1 ? attemptId : null;
+}
+
+function nextStalledRequeueEpoch(candidateIso: string, previousIso: string | null): string {
+  if (!previousIso) {
+    return candidateIso;
+  }
+  const candidateMs = Date.parse(candidateIso);
+  const previousMs = Date.parse(previousIso);
+  if (!Number.isFinite(previousMs) || candidateMs > previousMs) {
+    return candidateIso;
+  }
+  return new Date(previousMs + 1).toISOString();
 }
 
 export async function claimStalledWompiIssuanceAttempt(
