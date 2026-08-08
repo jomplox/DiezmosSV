@@ -90,4 +90,66 @@ describe("annual certificate UI contract", () => {
     expect(appSource).not.toContain("preview.matchCount");
     expect(appSource).not.toContain("Mostrando {donors.length} de");
   });
+
+  it("invalidates raw search synchronously without resetting bulk traversal", () => {
+    const searchStart = appSource.indexOf("function changeCertificateSearch");
+    const searchEnd = appSource.indexOf("// Single-donor send", searchStart);
+    const searchSource = appSource.slice(searchStart, searchEnd);
+    expect(searchSource).toContain(
+      "invalidateCertificatePreview(certificatePreviewRequestRef.current.year, value.trim())"
+    );
+    expect(searchSource.indexOf("invalidateCertificatePreview")).toBeLessThan(
+      searchSource.indexOf("setCertificateSearch(value)")
+    );
+    expect(searchSource).not.toContain("resetCertificateBulkTraversal");
+  });
+
+  it("uses synchronous uniquely-owned claims for all certificate dispatch shapes", () => {
+    expect(appSource).toContain("const token = Symbol(key)");
+    expect(appSource).toContain("certificateOperationClaimsRef.current.get(key) === token");
+
+    const bulkStart = appSource.indexOf("async function sendAnnualCertificates");
+    const bulkEnd = appSource.indexOf("async function loadMoreCertificatePreview", bulkStart);
+    const bulkSource = appSource.slice(bulkStart, bulkEnd);
+    expect(bulkSource.indexOf("claimCertificateOperation(claimKey)")).toBeLessThan(
+      bulkSource.indexOf("window.confirm")
+    );
+
+    const pageStart = bulkEnd;
+    const pageEnd = appSource.indexOf("function startNewCertificateTraversal", pageStart);
+    const pageSource = appSource.slice(pageStart, pageEnd);
+    expect(pageSource.indexOf("claimCertificateOperation(claimKey)")).toBeLessThan(
+      pageSource.indexOf("await runAction")
+    );
+
+    const singleStart = appSource.indexOf("async function sendDonorCertificate");
+    const singleEnd = appSource.indexOf("async function createUser", singleStart);
+    const singleSource = appSource.slice(singleStart, singleEnd);
+    expect(singleSource.indexOf("claimCertificateOperation(claimKey)")).toBeLessThan(
+      singleSource.indexOf("window.confirm")
+    );
+    expect(singleSource).toContain("releaseCertificateOperation(claimKey, claimToken)");
+  });
+
+  it("suppresses stale preview errors and tokenizes generic action finalizers", () => {
+    expect(appSource).toContain('certificateResult?.status === "rejected"');
+    expect(appSource).toContain("isCurrentCertificatePreviewRequest(certificateRequest)");
+    expect(appSource).toContain("throw certificateResult.reason");
+
+    const actionStart = appSource.indexOf("async function runAction");
+    const actionEnd = appSource.indexOf("// Appends the next audit page", actionStart);
+    const actionSource = appSource.slice(actionStart, actionEnd);
+    expect(actionSource).toContain("const actionToken = Symbol(name)");
+    expect(actionSource).toContain("runActionOwnerRef.current?.token === actionToken && isCurrent()");
+    expect(actionSource).toContain("runActionOwnerRef.current?.token === actionToken");
+    expect(actionSource).toContain("runActionOwnerRef.current = null");
+  });
+
+  it("invalidates certificate claims on account reset and unmount", () => {
+    const resetStart = appSource.indexOf("function resetAccountState");
+    const resetEnd = appSource.indexOf("async function loadMoreDocuments", resetStart);
+    expect(appSource.slice(resetStart, resetEnd)).toContain("certificateOperationClaimsRef.current.clear()");
+    expect(appSource).toContain("generation: previewRequest.generation + 1");
+    expect(appSource).toContain("generation: bulkTraversal.generation + 1");
+  });
 });
