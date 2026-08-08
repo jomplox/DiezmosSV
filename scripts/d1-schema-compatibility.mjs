@@ -362,8 +362,9 @@ function hasRequiredColumnShape(snapshot, column, requirement) {
       String(column.dflt_value).replace(/^\((.*)\)$/, "$1") ===
         requirement.defaultValue) &&
     (requirement.checkSql === undefined ||
-      normalizeSchemaSql(snapshot?.tableSql?.[requirement.table]).includes(
-        normalizeSchemaSql(requirement.checkSql)
+      hasActiveSchemaTokenSequence(
+        snapshot?.tableSql?.[requirement.table],
+        requirement.checkSql
       ))
   );
 }
@@ -436,6 +437,160 @@ function existingRequiredIndex(snapshot, requirement) {
     throw schemaMismatch();
   }
   return matches[0].index;
+}
+
+const CHECK_EXPRESSION_KEYWORDS = new Set(["check", "in"]);
+const SQL_PUNCTUATION = new Set(["(", ")", ",", ";", "."]);
+const SQL_OPERATORS = new Set([
+  "->>",
+  ">=",
+  "<=",
+  "<>",
+  "!=",
+  "==",
+  "||",
+  "->",
+  "<<",
+  ">>",
+  "+",
+  "-",
+  "*",
+  "/",
+  "%",
+  "=",
+  "<",
+  ">",
+  "!",
+  "|",
+  "&",
+  "~"
+]);
+
+function tokenizeSchemaSql(sql) {
+  if (typeof sql !== "string") return undefined;
+  const tokens = [];
+  for (let position = 0; position < sql.length;) {
+    const character = sql[position];
+    if (/\s/u.test(character)) {
+      position += 1;
+      continue;
+    }
+    if (character === "-" && sql[position + 1] === "-") {
+      position += 2;
+      while (
+        position < sql.length &&
+        sql[position] !== "\n" &&
+        sql[position] !== "\r"
+      ) {
+        position += 1;
+      }
+      continue;
+    }
+    if (character === "/" && sql[position + 1] === "*") {
+      const end = sql.indexOf("*/", position + 2);
+      if (end === -1) return undefined;
+      position = end + 2;
+      continue;
+    }
+    if (
+      character === "'" ||
+      character === '"' ||
+      character === "`" ||
+      character === "["
+    ) {
+      const start = position;
+      const closingCharacter = character === "[" ? "]" : character;
+      position += 1;
+      let closed = false;
+      while (position < sql.length) {
+        if (sql[position] !== closingCharacter) {
+          position += 1;
+          continue;
+        }
+        if (sql[position + 1] === closingCharacter) {
+          position += 2;
+          continue;
+        }
+        position += 1;
+        closed = true;
+        break;
+      }
+      if (!closed) return undefined;
+      const token = sql.slice(start, position);
+      if (character === "'") {
+        tokens.push({ type: "literal", value: token });
+      } else {
+        tokens.push({
+          type: "quotedIdentifier",
+          value: token
+            .slice(1, -1)
+            .replaceAll(closingCharacter + closingCharacter, closingCharacter)
+            .toLowerCase()
+        });
+      }
+      continue;
+    }
+    if (/[A-Za-z_\u0080-\uFFFF]/u.test(character)) {
+      const start = position;
+      position += 1;
+      while (
+        position < sql.length &&
+        /[A-Za-z0-9_$\u0080-\uFFFF]/u.test(sql[position])
+      ) {
+        position += 1;
+      }
+      const value = sql.slice(start, position).toLowerCase();
+      tokens.push({
+        type: CHECK_EXPRESSION_KEYWORDS.has(value) ? "keyword" : "identifier",
+        value
+      });
+      continue;
+    }
+    if (/\d/u.test(character)) {
+      const numeric = sql.slice(position).match(
+        /^(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/iu
+      )?.[0];
+      if (!numeric) return undefined;
+      tokens.push({ type: "number", value: numeric.toLowerCase() });
+      position += numeric.length;
+      continue;
+    }
+
+    const operator = [3, 2, 1]
+      .map((length) => sql.slice(position, position + length))
+      .find((candidate) => SQL_OPERATORS.has(candidate));
+    if (operator) {
+      tokens.push({ type: "operator", value: operator });
+      position += operator.length;
+      continue;
+    }
+    if (SQL_PUNCTUATION.has(character)) {
+      tokens.push({ type: "punctuation", value: character });
+      position += 1;
+      continue;
+    }
+    return undefined;
+  }
+  return tokens;
+}
+
+function schemaTokensMatch(actual, expected) {
+  return (
+    actual?.value === expected?.value &&
+    (actual?.type === expected?.type ||
+      (actual?.type === "quotedIdentifier" && expected?.type === "identifier"))
+  );
+}
+
+function hasActiveSchemaTokenSequence(sql, requiredSql) {
+  const tokens = tokenizeSchemaSql(sql);
+  const requiredTokens = tokenizeSchemaSql(requiredSql);
+  if (!tokens || !requiredTokens || requiredTokens.length === 0) return false;
+  return tokens.some((_token, start) =>
+    requiredTokens.every((expected, offset) =>
+      schemaTokensMatch(tokens[start + offset], expected)
+    )
+  );
 }
 
 function normalizeSchemaSql(sql) {
