@@ -183,7 +183,7 @@ export async function listStalledApprovedWompiEvents(
   // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
   const rows = await db
     .prepare(
-      `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at FROM wompi_events
+      `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at, stalled_requeue_epoch_at FROM wompi_events
        WHERE created_document_id IS NULL
          AND result = 'ExitosaAprobada'
          AND NOT EXISTS (

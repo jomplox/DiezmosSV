@@ -296,7 +296,8 @@ export async function claimWompiIssuanceRetry(
            SET processed_at = NULL,
                issuance_status = 'RETRY_QUEUED',
                issuance_attempt_id = ?,
-               issuance_last_attempt_at = ?
+               issuance_last_attempt_at = ?,
+               stalled_requeue_epoch_at = ?
            WHERE id = ?
              AND created_document_id IS NULL
              AND issuance_claim_id IS NULL
@@ -324,6 +325,7 @@ export async function claimWompiIssuanceRetry(
       )
       .bind(
         attemptId,
+        retryQueuedAt,
         retryQueuedAt,
         wompiEventId,
         observed.issuance_status,
@@ -376,6 +378,7 @@ export async function claimStalledWompiIssuanceAttempt(
 `UPDATE wompi_events
            SET issuance_status = 'RETRY_QUEUED',
                issuance_attempt_id = ?,
+               stalled_requeue_epoch_at = COALESCE(stalled_requeue_epoch_at, issuance_last_attempt_at, received_at),
                issuance_last_attempt_at = ?
            WHERE id = ?
              AND created_document_id IS NULL
@@ -401,6 +404,7 @@ export async function claimStalledWompiIssuanceAttempt(
 `UPDATE wompi_events
            SET issuance_status = 'RETRY_QUEUED',
                issuance_attempt_id = ?,
+               stalled_requeue_epoch_at = COALESCE(stalled_requeue_epoch_at, issuance_last_attempt_at, received_at),
                issuance_last_attempt_at = ?
            WHERE id = ?
              AND created_document_id IS NULL

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { legacyIssuanceAttemptId, Repository } from "../../src/worker/storage/repository";
 import { applyMigrations } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
@@ -48,7 +48,10 @@ describe("Wompi issuance reservation migration", () => {
       .prepare("PRAGMA table_info(wompi_events)")
       .all() as Array<{ name: string }>;
 
-    expect(columns.map((column) => column.name)).toContain("issuance_attempt_id");
+    expect(columns.map((column) => column.name)).toEqual(expect.arrayContaining([
+      "issuance_attempt_id",
+      "stalled_requeue_epoch_at"
+    ]));
   });
 
   it("persists constrained fiscal correction history and per-target attempts", () => {
@@ -378,6 +381,121 @@ describe("Wompi issuance reservation migration", () => {
       "wompi_a",
       "attempt-stalled"
     )).resolves.toBe(false);
+  });
+
+  it("establishes the stalled epoch from the pre-claim attempt against real SQLite", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-13T20:00:00.000Z"));
+      const repo = new Repository(sqliteD1(database));
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'PROCESSING',
+             issuance_attempt_id = 'attempt-stalled-epoch',
+             issuance_last_attempt_at = '2026-07-13T18:00:00.000Z',
+             stalled_requeue_epoch_at = NULL
+         WHERE id = 'wompi_a'`
+      ).run();
+
+      const attemptId = await repo.claimStalledWompiIssuanceAttempt(
+        "wompi_a",
+        "attempt-stalled-epoch",
+        "2026-07-13T19:00:00.000Z"
+      );
+
+      expect(database.prepare(
+        `SELECT issuance_attempt_id, issuance_last_attempt_at, stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_attempt_id: attemptId,
+        issuance_last_attempt_at: "2026-07-13T20:00:00.000Z",
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      });
+      await expect(repo.listStalledApprovedWompiEvents(
+        "2026-07-13T21:00:00.000Z"
+      )).resolves.toContainEqual(expect.objectContaining({
+        id: "wompi_a",
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      }));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rotates the stalled epoch with a successful operator retry against real SQLite", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-14T10:00:00.000Z"));
+      const repo = new Repository(sqliteD1(database));
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'FAILED',
+             issuance_attempt_id = 'attempt-before-operator',
+             issuance_error_code = 'ISSUANCE_ERROR',
+             issuance_error_message = 'Fallo transitorio',
+             issuance_last_attempt_at = '2026-07-13T22:00:00.000Z',
+             stalled_requeue_epoch_at = '2026-07-13T18:00:00.000Z'
+         WHERE id = 'wompi_a'`
+      ).run();
+      const observed = await repo.getWompiIssuanceRetrySnapshotById("wompi_a");
+
+      const attemptId = await repo.claimWompiIssuanceRetry(
+        "wompi_a",
+        "user_operator",
+        observed!
+      );
+
+      expect(database.prepare(
+        `SELECT issuance_status, issuance_attempt_id, issuance_last_attempt_at,
+                stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_status: "RETRY_QUEUED",
+        issuance_attempt_id: attemptId,
+        issuance_last_attempt_at: "2026-07-14T10:00:00.000Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.000Z"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the stalled epoch unchanged when the operator retry CAS loses against real SQLite", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-14T10:00:00.000Z"));
+      const repo = new Repository(sqliteD1(database));
+      database.prepare(
+        `UPDATE wompi_events
+         SET issuance_status = 'FAILED',
+             issuance_attempt_id = 'attempt-before-lost-cas',
+             issuance_error_code = 'ISSUANCE_ERROR',
+             issuance_error_message = 'Fallo observado',
+             issuance_last_attempt_at = '2026-07-13T22:00:00.000Z',
+             stalled_requeue_epoch_at = '2026-07-13T18:00:00.000Z'
+         WHERE id = 'wompi_a'`
+      ).run();
+      const observed = await repo.getWompiIssuanceRetrySnapshotById("wompi_a");
+      database.prepare(
+        "UPDATE wompi_events SET issuance_error_message = 'Fallo concurrente' WHERE id = 'wompi_a'"
+      ).run();
+
+      await expect(repo.claimWompiIssuanceRetry(
+        "wompi_a",
+        "user_operator",
+        observed!
+      )).resolves.toBeNull();
+      expect(database.prepare(
+        `SELECT issuance_attempt_id, issuance_last_attempt_at, stalled_requeue_epoch_at
+         FROM wompi_events WHERE id = 'wompi_a'`
+      ).get()).toEqual({
+        issuance_attempt_id: "attempt-before-lost-cas",
+        issuance_last_attempt_at: "2026-07-13T22:00:00.000Z",
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not revive a current attempt after its DLQ wins the stalled-sweep race", async () => {

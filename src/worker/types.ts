@@ -379,6 +379,7 @@ export interface WompiEventRecord {
   issuance_error_code: string | null;
   issuance_error_message: string | null;
   issuance_last_attempt_at: string | null;
+  stalled_requeue_epoch_at?: string | null;
   issuance_failed_at: string | null;
   issuance_dead_lettered_at: string | null;
 }

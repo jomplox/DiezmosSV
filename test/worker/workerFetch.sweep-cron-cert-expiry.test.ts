@@ -593,6 +593,100 @@ describe("issuance dead-letter and stalled-event sweep", () => {
     }));
   });
 
+  it("starts a fresh capped stalled episode after an operator retry", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = new InMemoryD1();
+      db.sessionUser = {
+        id: "user_operator",
+        email: "operator@example.org",
+        name: "Operator",
+        role: "OPERATOR"
+      };
+      db.settings.push({ key: "alert_email", value: "owner@example.org" });
+      const eventId = "wompi_two_stalled_episodes";
+      db.wompiEvents.push(stalledWompiEvent({
+        id: eventId,
+        issuance_status: "PROCESSING",
+        issuance_attempt_id: "attempt-original",
+        issuance_last_attempt_at: "2026-06-01T00:00:00.000Z"
+      }));
+      const queued: IssuanceMessage[] = [];
+      const sentAlerts: Array<{ to: string; subject: string }> = [];
+      const scheduledEnv = env(db, {
+        MOCK_EXTERNAL_SERVICES: "false",
+        EMAIL_FROM: "alerts@example.org",
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>,
+        EMAIL: {
+          send: async (message: unknown) => {
+            sentAlerts.push(message as { to: string; subject: string });
+            return { messageId: `stalled-${sentAlerts.length}` };
+          }
+        } as SendEmail
+      });
+      const runSweepAt = async (iso: string) => {
+        vi.setSystemTime(new Date(iso));
+        db.auditCreatedAt = iso;
+        await worker.scheduled({} as ScheduledEvent, scheduledEnv);
+      };
+
+      for (const hour of [2, 4, 6, 8]) {
+        await runSweepAt(`2026-06-01T${String(hour).padStart(2, "0")}:00:00.000Z`);
+      }
+      await runSweepAt("2026-06-01T08:00:00.000Z");
+
+      expect(queued).toHaveLength(3);
+      expect(sentAlerts).toHaveLength(1);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId
+      )).toHaveLength(1);
+
+      Object.assign(db.wompiEvents[0], {
+        issuance_status: "FAILED",
+        issuance_error_code: "ISSUANCE_ERROR",
+        issuance_error_message: "Fallo transitorio",
+        processed_at: null
+      });
+      vi.setSystemTime(new Date("2026-06-01T10:00:00.000Z"));
+      db.auditCreatedAt = "2026-06-01T10:00:00.000Z";
+      const retry = await worker.fetch(
+        new Request(`https://example.org/api/wompi-events/${eventId}/retry`, {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token" }
+        }),
+        scheduledEnv
+      );
+
+      expect(retry.status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        stalled_requeue_epoch_at: "2026-06-01T10:00:00.000Z",
+        issuance_last_attempt_at: "2026-06-01T10:00:00.000Z"
+      });
+
+      for (const hour of [12, 14, 16, 18]) {
+        await runSweepAt(`2026-06-01T${hour}:00:00.000Z`);
+      }
+      await runSweepAt("2026-06-01T18:00:00.000Z");
+
+      expect(queued).toHaveLength(7);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_EVENT_REQUEUED" && audit.entity_id === eventId
+      )).toHaveLength(6);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_EVENT_STALLED" && audit.entity_id === eventId
+      )).toHaveLength(2);
+      expect(sentAlerts).toHaveLength(2);
+      expect(sentAlerts.every((alert) => alert.to === "owner@example.org")).toBe(true);
+      expect(db.audits.filter(
+        (audit) => audit.action === "ALERT_SENT:WOMPI_EVENT_STALLED" && audit.entity_id === eventId
+      )).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives up after three requeues and flags the event exactly once", async () => {
     const db = new InMemoryD1();
     const queued: IssuanceMessage[] = [];
@@ -647,7 +741,9 @@ describe("issuance dead-letter and stalled-event sweep", () => {
   it("retries the operational alert on a later tick after the first send attempt fails", async () => {
     const db = new InMemoryD1();
     db.settings.push({ key: "alert_email", value: "owner@example.org" });
-    db.wompiEvents.push(stalledWompiEvent());
+    db.wompiEvents.push(stalledWompiEvent({
+      stalled_requeue_epoch_at: "2026-01-01T00:00:00.000Z"
+    }));
     for (let i = 0; i < 3; i++) {
       db.audits.push({ id: `audit_rq_${i}`, actor_type: "SYSTEM", actor_id: null, action: "WOMPI_EVENT_REQUEUED", entity_type: "wompi_event", entity_id: "wompi_stalled", summary: "", metadata_json: "{}", created_at: "2026-01-01T00:00:00.000Z" });
     }
