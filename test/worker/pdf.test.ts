@@ -74,8 +74,22 @@ describe("DTE PDF rendering", () => {
     expect(record.plain_json).toBe(originalJson);
   });
 
-  it("versions the uppercase party renderer as PDF evidence v3", () => {
-    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v3");
+  it("versions the black currency renderer as PDF evidence v4", () => {
+    expect(DTE_PDF_RENDERER_VERSION).toBe("cde-pdf:v4");
+  });
+
+  it("renders the currency code in black like the surrounding label", async () => {
+    const pdf = await renderDtePdf(testDocument());
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-currency-"));
+    const pdfPath = join(dir, "cde-currency.pdf");
+    const ppmPrefix = join(dir, "cde-currency");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftoppm", ["-r", "72", "-singlefile", pdfPath, ppmPrefix]);
+    const image = readPpm(`${ppmPrefix}.ppm`);
+    const currencyCrop = { left: 460, right: 490, top: 88, bottom: 108 };
+
+    expect(pixelCount(image, currencyCrop, (red, green, blue) => red - green > 18 && red - blue > 18)).toBe(0);
+    expect(pixelCount(image, currencyCrop, (red, green, blue) => red < 100 && green < 100 && blue < 100)).toBeGreaterThan(8);
   });
 
   it("labels the receptor document by CAT-022 type and renders the full geographic address", async () => {
@@ -297,6 +311,23 @@ function redPixelBounds(
     width: maxX >= minX ? maxX - minX + 1 : 0,
     height: maxY >= minY ? maxY - minY + 1 : 0
   };
+}
+
+function pixelCount(
+  image: { width: number; height: number; pixels: Buffer },
+  crop: { left: number; right: number; top: number; bottom: number },
+  matches: (red: number, green: number, blue: number) => boolean
+): number {
+  let count = 0;
+  for (let y = crop.top; y < Math.min(crop.bottom, image.height); y += 1) {
+    for (let x = crop.left; x < Math.min(crop.right, image.width); x += 1) {
+      const index = (y * image.width + x) * 3;
+      if (matches(image.pixels[index], image.pixels[index + 1], image.pixels[index + 2])) {
+        count += 1;
+      }
+    }
+  }
+  return count;
 }
 
 describe("renderDtePdf unicode sanitization", () => {

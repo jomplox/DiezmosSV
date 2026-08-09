@@ -9,6 +9,51 @@ import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 installWorkerFetchGlobals();
 
 describe("user administration", () => {
+  it.each([
+    ["blank name", { email: "fresh@example.org", name: "   ", role: "VIEWER" }],
+    ["blank email", { email: "   ", name: "Fresh User", role: "VIEWER" }],
+    ["malformed email", { email: "not-an-email", name: "Fresh User", role: "VIEWER" }],
+    ["unknown role", { email: "fresh@example.org", name: "Fresh User", role: "SUPERADMIN" }]
+  ])("rejects a new user with %s before creating credentials or an audit", async (_label, invalidIdentity) => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ ...invalidIdentity, password: "Fresh#Pass2026" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: expect.stringMatching(/^invalid_user_/)
+    });
+    expect(db.users).toHaveLength(0);
+    expect(db.audits.some((row) => row.action === "USER_CREATED")).toBe(false);
+  });
+
+  it("returns a validation error for a weak initial password without creating a user", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/users", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ email: "fresh@example.org", name: "Fresh User", role: "VIEWER", password: "weak" })
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: "invalid_user_password" });
+    expect(db.users).toHaveLength(0);
+    expect(db.audits.some((row) => row.action === "USER_CREATED")).toBe(false);
+  });
+
   it("stores newly created passwords in the versioned format that carries the iteration count", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -17,13 +62,14 @@ describe("user administration", () => {
       new Request("https://example.org/api/users", {
         method: "POST",
         headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
-        body: JSON.stringify({ email: "fresh@example.org", name: "Fresh", role: "ADMIN", password: "Fresh#Pass2026" })
+        body: JSON.stringify({ email: "  Fresh@Example.ORG  ", name: "  Fresh User  ", role: "ADMIN", password: "Fresh#Pass2026" })
       }),
       env(db)
     );
 
     expect(response.status).toBe(201);
     const created = db.users.find((row) => row.email === "fresh@example.org");
+    expect(created?.name).toBe("Fresh User");
     expect(String(created?.password_hash)).toMatch(/^pbkdf2-chain-v1\$100000\$[0-9a-f]{64}$/);
   });
 

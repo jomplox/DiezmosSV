@@ -40,17 +40,14 @@ function BootstrappedApp() {
     // branding settled (no logo/support-line swap). Waiting on fonts alone still let the
     // branded logo pop in after the donor could already see the page.
     //
-    // ONLY the wizard waits on branding — it is the only donor route that fetches it.
-    // /donar/gracias renders no branded logo and never signals, so gating it here would
-    // leave the post-payment thank-you blank for the whole budget.
+    // Both donor routes fetch branding: the wizard resolves its logo and support line,
+    // while /donar/gracias resolves the configured support contact.
     const budget = new Promise<void>((resolve) => {
       budgetTimer = window.setTimeout(resolve, DONOR_REVEAL_BUDGET_MS);
     });
     const fontsReady = document.fonts?.ready ?? Promise.resolve();
     const fontsGate = Promise.race([fontsReady, budget]);
-    const brandingGate = isDonarPath(window.location.pathname)
-      ? Promise.race([donorBrandingSettled, budget])
-      : Promise.resolve();
+    const brandingGate = Promise.race([donorBrandingSettled, budget]);
     void Promise.all([fontsGate, brandingGate]).then(() => {
       if (cancelled) {
         return;

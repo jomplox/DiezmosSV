@@ -370,7 +370,7 @@ describe("document email resend", () => {
       email_type: "dteReceipt",
       document_status_at_send: "ACCEPTED",
       template_version: expect.stringMatching(/^dteReceipt:sha256:[a-f0-9]{64}$/),
-      pdf_renderer_version: "cde-pdf:v3",
+      pdf_renderer_version: "cde-pdf:v4",
       pdf_sha256: pdfSha256,
       dte_json_sha256: await sha256Hex(dteJsonBytes),
       provider_delivery_id: providerDeliveryId,
@@ -428,7 +428,7 @@ describe("document email resend", () => {
     });
   });
 
-  it("attaches valid JSON and a separately typed signed JWS when both exist", async () => {
+  it("attaches only the PDF representation and JSON document even when a signed JWS exists", async () => {
     const db = new InMemoryD1();
     const sentMessages: unknown[] = [];
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
@@ -463,13 +463,17 @@ describe("document email resend", () => {
     const sentMessage = sentMessages[0] as {
       attachments: Array<{ filename: string; type: string; content: unknown }>;
     };
-    const jsonAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".json"));
-    const jwsAttachment = sentMessage.attachments.find((attachment) => attachment.filename.endsWith(".jws"));
-
-    // Regression note: this test previously required compact JWS bytes inside the
-    // `.json` attachment, which protected the production packaging bug. JWS is not
-    // JSON, so the contract is deliberately flipped to parseable JSON plus a
-    // separately named and typed signed artifact.
+    expect(sentMessage.attachments.map(({ filename, type }) => ({ filename, type }))).toEqual([
+      {
+        filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.pdf",
+        type: "application/pdf"
+      },
+      {
+        filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.json",
+        type: "application/json"
+      }
+    ]);
+    const jsonAttachment = sentMessage.attachments[1];
     expect(jsonAttachment).toMatchObject({
       filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.json",
       type: "application/json"
@@ -479,12 +483,7 @@ describe("document email resend", () => {
     expect(JSON.parse(decodedJson)).toMatchObject({
       receptor: expect.any(Object)
     });
-    expect(jwsAttachment).toMatchObject({
-      filename: "6CAE5F7E-A590-4573-8EF2-FE48B14796C4.jws",
-      type: "application/jose"
-    });
-    expect(jwsAttachment?.content).toBeInstanceOf(Uint8Array);
-    expect(new TextDecoder().decode(jwsAttachment?.content as Uint8Array)).toBe(signedJws);
+    expect(sentMessage.attachments.some((attachment) => attachment.filename.endsWith(".jws"))).toBe(false);
     expect(db.emailDeliveries).toContainEqual(
       expect.objectContaining({
         document_id: "doc_1",

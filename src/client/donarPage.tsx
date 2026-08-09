@@ -26,7 +26,6 @@ import {
   DONAR_INTENT_PATH,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
-  DONAR_LANDING_UNIFIER_CHURCH,
   DONAR_LANDING_UNIFIER_LEAD,
   DONAR_POLL_INTERVAL_MS,
   DONAR_POLL_TIMEOUT_MS,
@@ -50,7 +49,6 @@ import {
   GIVEBUTTER_FALLBACK_HINT,
   GIVEBUTTER_FREQ_MONTHLY_LABEL,
   GIVEBUTTER_FREQ_ONCE_LABEL,
-  GIVEBUTTER_INTRO,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   DONATION_STEP1_FIELD_ORDER,
@@ -58,6 +56,7 @@ import {
   clearDonationFieldErrors,
   donarAmountDisplay,
   donarDatosPath,
+  donarLandingUnifierChurch,
   donarStepIndicator,
   donationAmountValidationMessage,
   donationDatosBody,
@@ -69,6 +68,7 @@ import {
   doorFromSearch,
   draftMatchesForm,
   givebutterEmbedUrl,
+  givebutterIntro,
   givebutterHostedUrl,
   graciasDisplayFromSearch,
   isUsDonation,
@@ -257,13 +257,13 @@ interface DonarDraftIntent {
 
 // The default logo, reusing the vector paths shared with the worker's PDF renderer
 // (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
-function OrganizationLogo() {
+function OrganizationLogo({ organizationName }: { organizationName: string | null }) {
   return (
     <svg
       className="donar-logo"
       viewBox={`0 0 ${ORG_LOGO_VIEW_BOX.width} ${ORG_LOGO_VIEW_BOX.height}`}
       role="img"
-      aria-label="Misión ExampleOrganization"
+      aria-label={organizationName ?? "Logo de la iglesia"}
       xmlns="http://www.w3.org/2000/svg"
     >
       {ORG_LOGO_PATHS.map((d, index) => (
@@ -433,6 +433,10 @@ export function DonarPage() {
   // fallback. The accent color is deliberately NOT applied here — the donor wizard's
   // monochrome Gotham brand is a design decision, so only the logo is branded.
   const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
+  // Donor-facing organization copy must come from the public branding response.
+  // Keep it neutral until a valid configured name arrives instead of exposing the
+  // admin client's historical build placeholder on the public donation page.
+  const [organizationName, setOrganizationName] = useState<string | null>(null);
   // The church's configured support contact, shown by DonarSupport at the bottom of every
   // donor card. Seeded with the client-side default so the line renders before (and if)
   // the /api/branding fetch resolves; replaced with the configured value when it does.
@@ -545,6 +549,11 @@ export function DonarPage() {
     void donarApi<unknown>("/api/branding")
       .then(async (data) => {
         if (cancelled) return;
+        const brandingRecord = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+        const configuredName =
+          typeof brandingRecord.displayName === "string" && brandingRecord.displayName.trim()
+            ? brandingRecord.displayName.trim()
+            : null;
         const branding = parseBrandingResponse(data);
         const src = brandingDonorLogoSrc(branding.donorLogoVersion);
         // Decode BEFORE committing to state. Swapping the built-in vector for an <img>
@@ -557,17 +566,18 @@ export function DonarPage() {
           image.src = src;
           try {
             await image.decode();
-            decodedLogo = { src, name: branding.displayName };
+            decodedLogo = { src, name: configuredName ?? "Logo de la iglesia" };
           } catch {
             decodedLogo = null;
           }
         }
         if (cancelled) return;
         setBrandingLogo(decodedLogo);
+        setOrganizationName(configuredName);
         setSupportEmail(branding.supportEmail);
       })
       .catch(() => {
-        // Keep the built-in default vector.
+        // Keep the built-in vector and neutral organization wording.
       })
       .finally(() => {
         // Success, failure, or a malformed payload — the branded form is now final, so
@@ -915,7 +925,7 @@ export function DonarPage() {
   }
 
   if (stage === "thanks") {
-    return <DonarThankYou monto={form.amount.trim()} />;
+    return <DonarThankYou monto={form.amount.trim()} supportEmail={supportEmail} />;
   }
 
   // The chooser is the first sight of /donar: no door picked yet and no payment
@@ -927,7 +937,7 @@ export function DonarPage() {
           {brandingLogo ? (
             <img className="donar-logo" src={brandingLogo.src} alt={brandingLogo.name} />
           ) : (
-            <OrganizationLogo />
+            <OrganizationLogo organizationName={organizationName} />
           )}
           <h1>{DONAR_LANDING_HEADING}</h1>
           {/* Unifying line: both doors fund the same mother church in El Salvador —
@@ -936,7 +946,7 @@ export function DonarPage() {
               box, leaving an orphaned period). */}
           <p className="donar-landing-unifier">
             <span>{DONAR_LANDING_UNIFIER_LEAD}</span>{" "}
-            <span className="donar-landing-unifier-church">{DONAR_LANDING_UNIFIER_CHURCH} <DonarFlagBadge country="sv" />.</span>
+            <span className="donar-landing-unifier-church">{donarLandingUnifierChurch(organizationName)} <DonarFlagBadge country="sv" />.</span>
           </p>
           <p className="donar-landing-subtitle">{DONAR_LANDING_SUBTITLE}</p>
           <div className="donar-doors">
@@ -1277,7 +1287,7 @@ export function DonarPage() {
         {step === 2 && usDonation && (
           <div className="donar-givebutter donar-step">
             {summary}
-            <p className="donar-intro">{GIVEBUTTER_INTRO}</p>
+            <p className="donar-intro">{givebutterIntro(organizationName)}</p>
             <p className="donar-english-notice">{GIVEBUTTER_ENGLISH_NOTICE}</p>
 
             <iframe
@@ -1371,7 +1381,7 @@ export function DonarPage() {
   );
 }
 
-function DonarThankYou({ monto }: { monto?: string }) {
+function DonarThankYou({ monto, supportEmail }: { monto?: string; supportEmail: string }) {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks">
@@ -1380,7 +1390,7 @@ function DonarThankYou({ monto }: { monto?: string }) {
         </div>
         <h1>{DONAR_THANK_YOU_TITLE}</h1>
         {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
-        <DonarSupport />
+        <DonarSupport supportEmail={supportEmail} />
         <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
       </div>
     </div>
@@ -1389,7 +1399,7 @@ function DonarThankYou({ monto }: { monto?: string }) {
 
 type GraciasVerification = "checking" | "verified" | "unverified";
 
-function DonarGraciasNeutral({ checking }: { checking: boolean }) {
+function DonarGraciasNeutral({ checking, supportEmail }: { checking: boolean; supportEmail: string }) {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks">
@@ -1398,7 +1408,7 @@ function DonarGraciasNeutral({ checking }: { checking: boolean }) {
         </div>
         <h1>{checking ? "Verificando su entrega…" : "No pudimos verificar su entrega todavía."}</h1>
         <p className="donar-intro">{DONAR_FALLBACK_MESSAGE}</p>
-        <DonarSupport />
+        <DonarSupport supportEmail={supportEmail} />
       </div>
     </div>
   );
@@ -1409,6 +1419,26 @@ function DonarGraciasNeutral({ checking }: { checking: boolean }) {
 export function DonarGraciasPage() {
   const display = useMemo(() => graciasDisplayFromSearch(window.location.search), []);
   const [verification, setVerification] = useState<GraciasVerification>("checking");
+  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
+
+  useEffect(() => {
+    let cancelled = false;
+    void donarApi<unknown>("/api/branding")
+      .then((data) => {
+        if (!cancelled) {
+          setSupportEmail(parseBrandingResponse(data).supportEmail);
+        }
+      })
+      .catch(() => {
+        // Keep the compiled fallback when branding is unavailable.
+      })
+      .finally(() => {
+        markDonorBrandingSettled();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const intentId = display.identificadorEnlaceComercio;
@@ -1456,6 +1486,6 @@ export function DonarGraciasPage() {
     }
   }, [verification]);
 
-  if (verification === "verified") return <DonarThankYou />;
-  return <DonarGraciasNeutral checking={verification === "checking"} />;
+  if (verification === "verified") return <DonarThankYou supportEmail={supportEmail} />;
+  return <DonarGraciasNeutral checking={verification === "checking"} supportEmail={supportEmail} />;
 }

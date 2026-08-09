@@ -64,6 +64,43 @@ test("a clean donor load reveals only the fully styled page", async ({ page }) =
   await expect(page.getByText("Elija según su lugar de residencia.")).toBeVisible();
 });
 
+test("keeps the ceremonial browser title across every donor entry route", async ({ page }) => {
+  for (const path of ["/", "/donar", "/donar?ruta=sv"]) {
+    await page.goto(path);
+    await expect(page).toHaveTitle("Diezmos y Ofrendas");
+
+    await page.reload();
+    await expect(page).toHaveTitle("Diezmos y Ofrendas");
+  }
+});
+
+test("uses neutral donor attribution when public branding has no configured name", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "   ",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
+
+  await page.goto("/donar");
+  await expect(page.locator(".donar-landing-unifier")).toContainText("esta iglesia en El Salvador");
+  await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "EE. UU." }).click();
+  await page.getByLabel("Monto").fill("100.00");
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
+  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501c3");
+  await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
+});
+
 test("the direct SV route leaves the amount unfocused until the donor taps it", async ({ page }) => {
   await page.goto("/donar?ruta=sv");
 
@@ -356,6 +393,10 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
   await expect(page.locator("iframe.donar-embed")).toBeVisible({ timeout: 15_000 });
 
+  // The iframe can become visible before React has flushed the effects that install
+  // both status polling and the Wompi message listener. Wait for the first poll so a
+  // synthetic close cannot race ahead of the listener in headed Chromium.
+  await expect.poll(() => statusChecks).toBeGreaterThan(0);
   statusChecks = 0;
   await page.evaluate(() => {
     window.dispatchEvent(
@@ -417,8 +458,23 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
 });
 
 test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "MISION EXAMPLEORGANIZATION",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.goto("/donar");
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(page.getByText("MISION EXAMPLEORGANIZATION en El Salvador", { exact: false })).toBeVisible();
+  await expect(page.getByText(/ExampleOrganization/)).toHaveCount(0);
 
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
   await page.getByRole("button", { name: "EE. UU." }).click();
@@ -455,7 +511,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Única · $100.00")).toBeVisible();
-  await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
+  await expect(page.getByText("Friends of MISION EXAMPLEORGANIZATION")).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
   const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
   await expect(givebutterFrame).toBeVisible();
@@ -518,15 +574,42 @@ test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns
 });
 
 test("thank-you page does not trust unverified redirect parameters", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "Iglesia Configurada",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.goto("/donar/gracias?idTransaccion=TEST&monto=4999.99");
 
   await expect(page.getByRole("heading", { name: "No pudimos verificar su entrega todavía." })).toBeVisible();
   await expect(page.getByText("Si completó su entrega, recibirá su comprobante de donación por correo electrónico.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "support@example.org" })).toHaveAttribute("href", "mailto:support@example.org");
   await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toHaveCount(0);
   await expect(page.getByText("4999.99")).toHaveCount(0);
 });
 
 test("thank-you page shows the webhook-driven CDE copy after server verification", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "Iglesia Configurada",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.route("**/api/donations/intent/di_verified/status", (route) =>
     route.fulfill({
       status: 200,
@@ -540,5 +623,17 @@ test("thank-you page shows the webhook-driven CDE copy after server verification
   await expect(
     page.getByText("Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme.")
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: "support@example.org" })).toHaveAttribute("href", "mailto:support@example.org");
   await expect(page.getByText("Monto: $1.00")).toHaveCount(0);
+});
+
+test("SV quick amounts preserve the previously verified donor anchors", async ({ page }) => {
+  await page.goto("/donar?ruta=sv");
+
+  for (const amount of ["$50", "$150", "$250", "$500"]) {
+    await expect(page.getByRole("button", { name: amount, exact: true })).toBeVisible();
+  }
+  for (const staleAmount of ["$5", "$10", "$25"]) {
+    await expect(page.getByRole("button", { name: staleAmount, exact: true })).toHaveCount(0);
+  }
 });

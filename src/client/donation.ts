@@ -43,7 +43,7 @@ export const DONAR_VERIFYING_NOTICE_DELAY_MS = 20_000;
 // re-mints on the next Paso 1→2 crossing. 45 min keeps a 15-min margin under the hour.
 export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
 
-export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
+export const DONAR_AMOUNT_CHIPS = [50, 150, 250, 500] as const;
 // The US door's quick amounts bridge toward the Givebutter campaign's own presets
 // ($100–$2,000): the chip prefills the embed, so wildly different anchors on two
 // consecutive screens read as a mistake. $50 keeps an accessible low option.
@@ -82,7 +82,7 @@ export function donarAmountDisplay(amount: string): string {
   return formatCents(Math.round((Number.isFinite(parsed) ? parsed : 0) * 100));
 }
 
-// ── US donors → Givebutter / Friends of Misión ExampleOrganization (FMCE) ────────────
+// ── US donors → Givebutter / configured US nonprofit ───────────────
 //
 // A US-resident donor gets NO Salvadoran CDE (useless to a US taxpayer); their
 // gift belongs on the US 501c3's books and yields a US-deductible receipt from
@@ -104,10 +104,16 @@ export const GIVEBUTTER_US_COUNTRY_CODE = "US";
 // within this window, show the hosted-page fallback.
 export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
 
-// The US door funds the SAME mother church as the SV door — FMCE is only the US
-// giving vehicle, never a different beneficiary. The copy says so explicitly.
-export const GIVEBUTTER_INTRO =
-  "Su diezmo u ofrenda apoya a Misión ExampleOrganization en El Salvador. Se procesa en EE. UU. a través de Friends of Misión ExampleOrganization (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+// The US door funds the SAME mother church as the SV door — the 501c3 is only the
+// US giving vehicle, never a different beneficiary. Build the attribution from the
+// public branding record so a reusable build never ships a demo organization name.
+export function givebutterIntro(organizationName: string | null): string {
+  const name = organizationName?.trim();
+  if (!name) {
+    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+  }
+  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
+}
 // "GiveButter" is the brand style (capital G, capital B) and is the anchor text — no
 // raw URL is ever shown to the donor.
 export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done en GiveButter";
@@ -133,13 +139,15 @@ export const DONAR_LANDING_HEADING = "Diezmos y Ofrendas";
 // as a discreet mailto line at the bottom of every donor screen and in email footers.
 export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
-// tax receipt, NEVER by beneficiary. Both fund Misión ExampleOrganization in El Salvador.
+// tax receipt, NEVER by beneficiary. Both fund the configured church in El Salvador.
 export const DONAR_LANDING_SUBTITLE = "Elija según su lugar de residencia.";
 // The SV flag is rendered as an inline SVG badge after the church name (flag EMOJI
 // are unreliable: Windows renders them as bare letters, other platforms as a blank
 // box — the landing showed "El Salvador  ." with an orphaned period).
 export const DONAR_LANDING_UNIFIER_LEAD = "Todos los diezmos y ofrendas apoyan la obra de";
-export const DONAR_LANDING_UNIFIER_CHURCH = "Misión ExampleOrganization en El Salvador";
+export function donarLandingUnifierChurch(organizationName: string | null): string {
+  return `${organizationName?.trim() || "esta iglesia"} en El Salvador`;
+}
 export const DONAR_DOOR_SV_LABEL = "El Salvador y el mundo";
 // Per-door descriptor: the real differentiator is the tax receipt, not the destination.
 export const DONAR_DOOR_SV_DESC = "Comprobante de donación DTE salvadoreño";

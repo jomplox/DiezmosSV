@@ -155,6 +155,10 @@ describe("App boots branding before the session (source contract)", () => {
 });
 
 describe("static bootstrap shell", () => {
+  it("uses the donor ceremony name as the initial browser title", () => {
+    expect(indexSource).toContain("<title>Diezmos y Ofrendas</title>");
+  });
+
   it("does not paint a donor-shaped placeholder before the public React page mounts", () => {
     expect(indexSource).toMatch(
       /html\[data-bootstrap-route="donor"\]\s+#app-bootstrap\s*\{\s*display:\s*none;/
@@ -239,8 +243,10 @@ describe("BrandingEditor renders a live Vista previa block (source contract)", (
     const previewStart = credentialsPanelSource.indexOf("branding-preview");
     const previewRegion = credentialsPanelSource.slice(previewStart, previewStart + 3000);
     expect(previewRegion).toContain("colorForPicker");
-    expect(previewRegion).toContain("displayName");
-    expect(previewRegion).toContain("supportEmail");
+    expect(previewRegion).toContain("previewDisplayName");
+    expect(previewRegion).toContain("previewSupportEmail");
+    expect(credentialsPanelSource).toContain('const previewDisplayName = displayName.trim() || "Su organización"');
+    expect(credentialsPanelSource).toContain('const previewSupportEmail = supportEmail.trim() || "Correo de soporte"');
     expect(previewRegion).toContain("previewUrl");
     expect(previewRegion).toContain("currentLogoSrc");
     expect(previewRegion).toContain("currentDonorLogoSrc");
@@ -326,10 +332,9 @@ describe("BrandingEditor preview styles are namespaced and theme-driven (source 
     expect(previewCss).not.toMatch(/#[0-9a-fA-F]{3,6}\b/);
   });
 
-  it("the donor-page preview mark follows the draft name, not a hardcoded default", () => {
-    // Without a logo, the donor mock's placeholder mark must show the DRAFT organization
-    // name (like the email mock) so both previews stay consistent while editing.
+  it("keeps empty branding drafts neutral instead of reviving the historical demo identity", () => {
     const panelSource = readFileSync(resolve(import.meta.dirname, "../../src/client/credentialsPanel.tsx"), "utf8");
-    expect(panelSource).toContain('className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}');
+    expect(panelSource).not.toContain('placeholder="ExamplePerson1"');
+    expect(panelSource).not.toContain('placeholder="legacy-contact-1@example.com"');
   });
 });
