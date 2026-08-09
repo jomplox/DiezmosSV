@@ -570,15 +570,42 @@ test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns
 });
 
 test("thank-you page does not trust unverified redirect parameters", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "Iglesia Configurada",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.goto("/donar/gracias?idTransaccion=TEST&monto=4999.99");
 
   await expect(page.getByRole("heading", { name: "No pudimos verificar su entrega todavía." })).toBeVisible();
   await expect(page.getByText("Si completó su entrega, recibirá su comprobante de donación por correo electrónico.")).toBeVisible();
+  await expect(page.getByRole("link", { name: "support@example.org" })).toHaveAttribute("href", "mailto:support@example.org");
   await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toHaveCount(0);
   await expect(page.getByText("4999.99")).toHaveCount(0);
 });
 
 test("thank-you page shows the webhook-driven CDE copy after server verification", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "Iglesia Configurada",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.route("**/api/donations/intent/di_verified/status", (route) =>
     route.fulfill({
       status: 200,
@@ -592,5 +619,17 @@ test("thank-you page shows the webhook-driven CDE copy after server verification
   await expect(
     page.getByText("Recibirá su comprobante de donación por correo electrónico cuando el Ministerio de Hacienda lo confirme.")
   ).toBeVisible();
+  await expect(page.getByRole("link", { name: "support@example.org" })).toHaveAttribute("href", "mailto:support@example.org");
   await expect(page.getByText("Monto: $1.00")).toHaveCount(0);
+});
+
+test("SV quick amounts preserve the previously verified donor anchors", async ({ page }) => {
+  await page.goto("/donar?ruta=sv");
+
+  for (const amount of ["$50", "$150", "$250", "$500"]) {
+    await expect(page.getByRole("button", { name: amount, exact: true })).toBeVisible();
+  }
+  for (const staleAmount of ["$5", "$10", "$25"]) {
+    await expect(page.getByRole("button", { name: staleAmount, exact: true })).toHaveCount(0);
+  }
 });

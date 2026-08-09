@@ -925,7 +925,7 @@ export function DonarPage() {
   }
 
   if (stage === "thanks") {
-    return <DonarThankYou monto={form.amount.trim()} />;
+    return <DonarThankYou monto={form.amount.trim()} supportEmail={supportEmail} />;
   }
 
   // The chooser is the first sight of /donar: no door picked yet and no payment
@@ -1381,7 +1381,7 @@ export function DonarPage() {
   );
 }
 
-function DonarThankYou({ monto }: { monto?: string }) {
+function DonarThankYou({ monto, supportEmail }: { monto?: string; supportEmail: string }) {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks">
@@ -1390,7 +1390,7 @@ function DonarThankYou({ monto }: { monto?: string }) {
         </div>
         <h1>{DONAR_THANK_YOU_TITLE}</h1>
         {monto && <p className="donar-thanks-amount">Monto: ${monto}</p>}
-        <DonarSupport />
+        <DonarSupport supportEmail={supportEmail} />
         <p className="donar-intro">{DONAR_THANK_YOU_BODY}</p>
       </div>
     </div>
@@ -1399,7 +1399,7 @@ function DonarThankYou({ monto }: { monto?: string }) {
 
 type GraciasVerification = "checking" | "verified" | "unverified";
 
-function DonarGraciasNeutral({ checking }: { checking: boolean }) {
+function DonarGraciasNeutral({ checking, supportEmail }: { checking: boolean; supportEmail: string }) {
   return (
     <div className="donar-screen">
       <div className="donar-card card donar-thanks">
@@ -1408,7 +1408,7 @@ function DonarGraciasNeutral({ checking }: { checking: boolean }) {
         </div>
         <h1>{checking ? "Verificando su entrega…" : "No pudimos verificar su entrega todavía."}</h1>
         <p className="donar-intro">{DONAR_FALLBACK_MESSAGE}</p>
-        <DonarSupport />
+        <DonarSupport supportEmail={supportEmail} />
       </div>
     </div>
   );
@@ -1419,6 +1419,26 @@ function DonarGraciasNeutral({ checking }: { checking: boolean }) {
 export function DonarGraciasPage() {
   const display = useMemo(() => graciasDisplayFromSearch(window.location.search), []);
   const [verification, setVerification] = useState<GraciasVerification>("checking");
+  const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
+
+  useEffect(() => {
+    let cancelled = false;
+    void donarApi<unknown>("/api/branding")
+      .then((data) => {
+        if (!cancelled) {
+          setSupportEmail(parseBrandingResponse(data).supportEmail);
+        }
+      })
+      .catch(() => {
+        // Keep the compiled fallback when branding is unavailable.
+      })
+      .finally(() => {
+        markDonorBrandingSettled();
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     const intentId = display.identificadorEnlaceComercio;
@@ -1466,6 +1486,6 @@ export function DonarGraciasPage() {
     }
   }, [verification]);
 
-  if (verification === "verified") return <DonarThankYou />;
-  return <DonarGraciasNeutral checking={verification === "checking"} />;
+  if (verification === "verified") return <DonarThankYou supportEmail={supportEmail} />;
+  return <DonarGraciasNeutral checking={verification === "checking"} supportEmail={supportEmail} />;
 }

@@ -272,8 +272,8 @@ describe("donar form validation", () => {
 });
 
 describe("donar amount chips", () => {
-  it("offers the $5 / $10 / $25 / $50 quick amounts", () => {
-    expect(DONAR_AMOUNT_CHIPS).toEqual([5, 10, 25, 50]);
+  it("offers the $50 / $150 / $250 / $500 quick amounts", () => {
+    expect(DONAR_AMOUNT_CHIPS).toEqual([50, 150, 250, 500]);
   });
 
   it("the US door bridges toward the Givebutter campaign presets", () => {
@@ -736,11 +736,16 @@ describe("donor cold-load paints once", () => {
     expect(mainSource).toContain("const fontsGate = Promise.race");
   });
 
-  // /donar/gracias renders no branded logo and never signals branding, so gating it on
-  // the branding promise would leave the post-payment thank-you blank for the whole
-  // budget. Only the wizard path waits.
-  it("does not make the thank-you page wait on branding it never fetches", () => {
-    expect(mainSource).toContain("isDonarPath(window.location.pathname)");
+  // Regression: /donar/gracias used to skip /api/branding and visibly render the
+  // compiled fallback contact. Both donor routes must settle branding before reveal.
+  it("waits for configured branding before revealing the thank-you page", () => {
+    const graciasStart = donarSource.indexOf("export function DonarGraciasPage");
+    expect(graciasStart).toBeGreaterThan(-1);
+    const graciasBlock = donarSource.slice(graciasStart);
+    expect(graciasBlock).toContain('/api/branding');
+    expect(graciasBlock).toContain("markDonorBrandingSettled");
+    expect(mainSource).toContain("isDonarGraciasPath");
+    expect(mainSource).not.toContain("const brandingGate = isDonarPath(window.location.pathname)");
   });
 
   // Swapping in an <img> that has not been fetched yet paints an empty box and then
