@@ -649,7 +649,7 @@ describe("donation intents", () => {
             CodigoPais: "SV",
             CodigoRegion: "06"
           },
-          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          fechaTransaccion: "2026-01-15T10:00:00-06:00",
           idTransaccion: "tx-recovered",
           esReal: true,
           esAprobada: true,
