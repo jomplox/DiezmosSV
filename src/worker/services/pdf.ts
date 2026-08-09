@@ -6,7 +6,7 @@ import { formatDocument } from "../../shared/documentFormat";
 import { onlyDigits } from "../utils/guards";
 import type { DteDocumentRecord } from "../types";
 
-export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v3";
+export const DTE_PDF_RENDERER_VERSION = "cde-pdf:v4";
 
 type PdfColor = ReturnType<typeof rgb>;
 
@@ -43,7 +43,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   drawTextSafe(page, `TIPO DE TRANSMISIÓN: ${transmissionLabel(document.identificacion?.tipoOperacion)}`, { x: 318, y: 704, size: 7.7, font: regular, color: black });
   drawTextSafe(page, `FECHA: ${formatDate(document.identificacion?.fecEmi)}`, { x: 318, y: 692, size: 7.7, font: bold, color: black });
   drawTextSafe(page, "Moneda:", { x: 424, y: 692, size: 7.7, font: regular, color: black });
-  drawTextSafe(page, document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 692, size: 7.7, font: regular, color: rgb(0.7, 0, 0) });
+  drawTextSafe(page, document.identificacion?.tipoMoneda ?? "USD", { x: 464, y: 692, size: 7.7, font: regular, color: black });
 
   drawCentered(page, "EMISOR:", 675, 7.5, bold, 18, 294);
   drawCentered(page, "RECEPTOR:", 675, 7.5, bold, 318, 276);
