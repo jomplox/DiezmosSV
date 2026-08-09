@@ -18,6 +18,12 @@ jobs:
       # The PDF tests inspect rendered output with poppler's pdftotext/pdftoppm.
       - run: sudo apt-get update && sudo apt-get install -y poppler-utils
       - run: npm ci
+      # Runs against the checkout before any build/tooling artifacts exist. The host
+      # list is optional: without the secret the generic checks still run and the
+      # script only warns that host checks are inactive.
+      - run: npm run security:check-private-boundary
+        env:
+          PRIVATE_BOUNDARY_FORBIDDEN_HOSTS: ${{ secrets.PRIVATE_BOUNDARY_FORBIDDEN_HOSTS }}
       - run: npm run migrations:check-immutability
       - run: npm run types:check
       - run: npm run typecheck

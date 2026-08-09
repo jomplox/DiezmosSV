@@ -30,6 +30,18 @@ describe("remote deploy and migration scripts", () => {
     }
   });
 
+  it("checks the donation lane build configuration before the production build only", () => {
+    expect(packageJson.scripts["cf:deploy:prod"]).toContain(
+      "node scripts/assert-donation-lane-config.mjs && npm run build"
+    );
+    expect(packageJson.scripts["cf:deploy:staging"]).not.toContain(
+      "assert-donation-lane-config"
+    );
+    expect(
+      existsSync(resolve(import.meta.dirname, "../../scripts/assert-donation-lane-config.mjs"))
+    ).toBe(true);
+  });
+
   it("guards the explicit staging cutover before migration and deployment", () => {
     expect(packageJson.scripts["cf:cutover:staging"]).toBe(
       "node scripts/assert-fiscal-cutover.mjs && npm run cf:migrate:staging && npm run cf:deploy:staging"
