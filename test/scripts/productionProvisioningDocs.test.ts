@@ -31,6 +31,40 @@ const rejectedWranglerDocumentationCases = [
   ["continued npm exec", `npm exec -- \\
 wrangler secret put X --env staging`],
   [
+    "versioned npx",
+    "npx wrangler@latest secret put X --env staging"
+  ],
+  [
+    "flagged versioned npx",
+    "npx --yes wrangler@4.115.0 secret put X --env staging"
+  ],
+  [
+    "versioned npm exec",
+    "npm exec wrangler@latest -- secret put X --env staging"
+  ],
+  [
+    "delimited versioned npm exec",
+    "npm exec -- wrangler@4.115.0 secret put X --env staging"
+  ],
+  ["npm x", "npm x wrangler secret put X --env staging"],
+  [
+    "delimited versioned npm x",
+    "npm x -- wrangler@latest secret put X --env staging"
+  ],
+  [
+    "alternate local binary",
+    "node_modules/.bin/wrangler secret put X --env staging"
+  ],
+  [
+    "quoted versioned npx",
+    'npx --yes "wrangler@4.115.0" secret put X --env staging'
+  ],
+  [
+    "continued versioned npx",
+    `npx --yes \\
+  wrangler@4.115.0 secret put X --env staging`
+  ],
+  [
     "environment flag before the operation",
     "npx wrangler --env staging secret put X"
   ],
@@ -77,6 +111,34 @@ wrangler secret put X --env staging`],
   [
     "local migration with comment-only local flag",
     "npx wrangler d1 migrations apply diezmossv-local-db-example # --local"
+  ],
+  [
+    "versioned npx local lookalike",
+    "npx wrangler@latest d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "flagged versioned npx local lookalike",
+    "npx --yes wrangler@4.115.0 d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "versioned npm exec local lookalike",
+    "npm exec wrangler@latest -- d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "delimited versioned npm exec local lookalike",
+    "npm exec -- wrangler@4.115.0 d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "npm x local lookalike",
+    "npm x wrangler d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "versioned npm x local lookalike",
+    "npm x -- wrangler@latest d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  [
+    "alternate local binary local lookalike",
+    "node_modules/.bin/wrangler d1 migrations apply diezmossv-local-db-example --local"
   ]
 ] as const;
 const allowedWranglerDocumentationCases = [
@@ -99,6 +161,27 @@ const allowedWranglerDocumentationCases = [
   [
     "local migration with quoted arguments",
     `npx wrangler d1 migrations apply "diezmossv-local-db-example" '--local'`
+  ],
+  ["empty version", "npx wrangler@ secret put X --env staging"],
+  ["package lookalike", "npx wrangler-cli secret put X --env staging"],
+  ["token substring", "npx notwrangler@latest secret put X --env staging"],
+  ["bare version token", "wrangler@latest secret put X --env staging"],
+  ["npx echo text", "npx echo wrangler secret put X --env staging"],
+  [
+    "flagged npx echo text",
+    "npx --yes echo wrangler@latest secret put X --env staging"
+  ],
+  [
+    "npm exec echo text",
+    "npm exec echo wrangler secret put X --env staging"
+  ],
+  [
+    "npm x echo text",
+    "npm x echo wrangler@latest secret put X --env staging"
+  ],
+  [
+    "local binary lookalike",
+    "node_modules/.bin/wrangler-extra secret put X --env staging"
   ]
 ] as const;
 
@@ -168,21 +251,34 @@ const directWranglerRecognizers: Array<{
   { family: "wrangler", matches: (tokens) => tokens[0] === "wrangler" },
   {
     family: "local-binary",
-    matches: (tokens) => tokens[0] === "./node_modules/.bin/wrangler"
+    matches: (tokens) =>
+      tokens[0] === "./node_modules/.bin/wrangler" ||
+      tokens[0] === "node_modules/.bin/wrangler"
   },
   {
     family: "npx",
     matches: (tokens) =>
-      tokens[0] === "npx" && tokens.indexOf("wrangler", 1) !== -1
+      tokens[0] === "npx" && isWranglerToken(launcherToken(tokens, 1))
   },
   {
     family: "npm-exec",
     matches: (tokens) =>
       tokens[0] === "npm" &&
-      tokens[1] === "exec" &&
-      tokens.indexOf("wrangler", 2) !== -1
+      (tokens[1] === "exec" || tokens[1] === "x") &&
+      isWranglerToken(launcherToken(tokens, 2))
   }
 ];
+
+function launcherToken(tokens: string[], startIndex: number): string | undefined {
+  let index = startIndex;
+  while (tokens[index]?.startsWith("-") && tokens[index] !== "--") index += 1;
+  if (tokens[index] === "--") index += 1;
+  return tokens[index];
+}
+
+function isWranglerToken(token: string | undefined): boolean {
+  return token === "wrangler" || /^wrangler@.+$/.test(token ?? "");
+}
 
 function logicalShellCommands(
   document: string
