@@ -79,7 +79,7 @@ export function preparePrivateWranglerConfig(configPath, {
   });
   const resolvedRepository = realpathSync(repositoryRoot);
   const { rawConfig } = experimental_readRawConfig({ config: sourceConfig });
-  assertNoAllowedSenderAddresses(rawConfig);
+  assertPrivateWranglerEmailBindings(rawConfig);
   let contents = readFileSync(sourceConfig, "utf8");
   contents = rewriteRelativeTomlPath(contents, "main", resolvedRepository);
   if (migrationsDirOverride === undefined) {
@@ -119,26 +119,50 @@ export function preparePrivateWranglerConfig(configPath, {
   };
 }
 
-function assertNoAllowedSenderAddresses(rawConfig) {
-  const environments =
-    rawConfig.env && typeof rawConfig.env === "object"
-      ? Object.values(rawConfig.env)
-      : [];
-  for (const config of [rawConfig, ...environments]) {
-    if (!config || typeof config !== "object") continue;
-    const bindings = Array.isArray(config.send_email) ? config.send_email : [];
-    const hasAllowlist = bindings.some(
-      (binding) =>
-        binding &&
-        typeof binding === "object" &&
-        Object.hasOwn(binding, "allowed_sender_addresses")
-    );
-    if (hasAllowlist) {
+export function assertPrivateWranglerEmailBindings(rawConfig) {
+  const environments = isObject(rawConfig?.env) ? rawConfig.env : {};
+  for (const config of [rawConfig, ...Object.values(environments)]) {
+    if (!isObject(config)) continue;
+    const bindings = Array.isArray(config.send_email)
+      ? config.send_email
+      : [config.send_email];
+    if (
+      bindings.some(
+        (binding) =>
+          isObject(binding) && Object.hasOwn(binding, "allowed_sender_addresses")
+      )
+    ) {
       throw new Error(
         "The selected private Wrangler config must not restrict the OWNER-configurable EMAIL_FROM sender"
       );
     }
   }
+
+  const scopes = [
+    ["root", rawConfig],
+    ["staging", environments.staging],
+    ["production", environments.production]
+  ];
+
+  for (const [scope, config] of scopes) {
+    const bindings = isObject(config) ? config.send_email : undefined;
+    if (!Array.isArray(bindings) || bindings.length !== 1 || !isObject(bindings[0])) {
+      throw new Error(
+        "The selected private Wrangler config must declare exactly one EMAIL binding in root, staging, and production"
+      );
+    }
+
+    const binding = bindings[0];
+    if (binding.name !== "EMAIL") {
+      throw new Error(
+        `The selected private Wrangler config Email Service binding in ${scope} must be named EMAIL`
+      );
+    }
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function assertOwnerOnlyDirectory(directory) {

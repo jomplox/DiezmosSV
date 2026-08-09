@@ -1069,7 +1069,19 @@ describe("legacy Wompi issuance migration compatibility", () => {
     const isolatedRepository = mkdtempSync(join(tmpdir(), "diezmos-runner-repo-"));
     const privateRoot = mkdtempSync(join(tmpdir(), "diezmos-runner-private-"));
     const configPath = join(privateRoot, "wrangler.toml");
-    writeFileSync(configPath, 'name = "example"\n', { mode: 0o600 });
+    writeFileSync(
+      configPath,
+      [
+        'name = "example"',
+        "[[send_email]]",
+        'name = "EMAIL"',
+        "[[env.staging.send_email]]",
+        'name = "EMAIL"',
+        "[[env.production.send_email]]",
+        'name = "EMAIL"'
+      ].join("\n"),
+      { mode: 0o600 }
+    );
     const spawnCalls: Array<{ args: string[]; stdio: unknown }> = [];
     const spawnImpl = ((_executable: string, args: string[], options: {
       stdio: unknown;
