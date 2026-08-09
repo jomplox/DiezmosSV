@@ -30,6 +30,51 @@ const runnerScriptPath = resolve(
   "../../scripts/run-private-wrangler.mjs"
 );
 
+const REQUIRED_INDEX_FIXTURES = [
+  {
+    name: "idx_email_deliveries_idempotency_key",
+    table: "email_deliveries",
+    columns: ["idempotency_key"],
+    predicate: "idempotency_key IS NOT NULL",
+    createSql: `CREATE UNIQUE INDEX idx_email_deliveries_idempotency_key
+  ON email_deliveries(idempotency_key)
+  WHERE idempotency_key IS NOT NULL;`
+  },
+  {
+    name: "idx_wompi_reserved_control",
+    table: "wompi_events",
+    columns: ["environment", "control_prefix", "control_sequence"],
+    predicate: "control_sequence IS NOT NULL",
+    createSql: `CREATE UNIQUE INDEX idx_wompi_reserved_control
+  ON wompi_events(environment, control_prefix, control_sequence)
+  WHERE control_sequence IS NOT NULL;`
+  },
+  {
+    name: "idx_wompi_reserved_generation",
+    table: "wompi_events",
+    columns: ["reserved_codigo_generacion"],
+    predicate: "reserved_codigo_generacion IS NOT NULL",
+    createSql: `CREATE UNIQUE INDEX idx_wompi_reserved_generation
+  ON wompi_events(reserved_codigo_generacion)
+  WHERE reserved_codigo_generacion IS NOT NULL;`
+  },
+  {
+    name: "idx_dte_documents_wompi_unique",
+    table: "dte_documents",
+    columns: ["wompi_event_id"],
+    predicate: "wompi_event_id IS NOT NULL",
+    createSql: `CREATE UNIQUE INDEX idx_dte_documents_wompi_unique
+  ON dte_documents(wompi_event_id)
+  WHERE wompi_event_id IS NOT NULL;`
+  }
+] as const;
+
+const INDEX_QUOTE_PATHS = [
+  { quote: "double", ledger: "legacy" },
+  { quote: "backtick", ledger: "current" },
+  { quote: "bracket", ledger: "fresh-partial" }
+] as const;
+
 async function loadCompatibility() {
   expect(existsSync(scriptPath), "the D1 compatibility script exists").toBe(true);
   return import(scriptPath);
@@ -375,6 +420,303 @@ describe("legacy Wompi issuance migration compatibility", () => {
     ).all()).toEqual(before);
     expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
     database.close();
+  });
+
+  it.each(REQUIRED_INDEX_FIXTURES.flatMap((fixture) =>
+    INDEX_QUOTE_PATHS.map((path) => ({
+      label: `${fixture.name} ${path.quote} ${path.ledger}`,
+      fixture,
+      ...path
+    }))
+  ))("rejects quoted whole-predicate index decoy $label", async ({
+    fixture,
+    quote,
+    ledger
+  }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    prepareRequiredIndexFixture(database, fixture.name);
+    const quotedPredicate = quoteSqlIdentifier(fixture.predicate, quote);
+    database.exec(
+      `ALTER TABLE ${fixture.table} ADD COLUMN ${quotedPredicate} INTEGER;`
+    );
+    const canonicalMigration = readMigration(CURRENT_0023);
+    const decoyMigration = canonicalMigration.replace(
+      fixture.createSql,
+      fixture.createSql.replace(
+        `WHERE ${fixture.predicate}`,
+        `WHERE ${quotedPredicate}`
+      )
+    );
+    expect(decoyMigration).not.toBe(canonicalMigration);
+    database.exec(decoyMigration);
+    if (ledger === "legacy") recordMigration(database, LEGACY_0019);
+    if (ledger === "current") recordMigration(database, CURRENT_0023);
+    seedRequiredIndexDuplicates(database, fixture.name);
+    const before = indexCompatibilityEvidence(database, fixture.table);
+    expect(before.rows).toHaveLength(2);
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(indexCompatibilityEvidence(database, fixture.table)).toEqual(before);
+    if (ledger !== "current") {
+      expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    }
+    database.close();
+  });
+
+  it("rejects a whole-predicate quoted identifier with zero canonical duplicates", async () => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const fixture = REQUIRED_INDEX_FIXTURES[0];
+    const quotedPredicate = quoteSqlIdentifier(fixture.predicate, "double");
+    const snapshot = singleRequiredIndexSnapshot(
+      fixture,
+      fixture.table,
+      {
+        sql: fixture.createSql.replace(
+          `WHERE ${fixture.predicate}`,
+          `WHERE ${quotedPredicate}`
+        )
+      }
+    );
+
+    expect(() => buildCompatibilityPlan(snapshot)).toThrow(
+      "D1 schema compatibility mismatch"
+    );
+  });
+
+  it.each([
+    {
+      label: "single-quoted literal predicate",
+      predicateSql: "'idempotency_key IS NOT NULL'"
+    },
+    {
+      label: "line-comment-hidden predicate",
+      predicateSql: "-- idempotency_key IS NOT NULL\n  0"
+    },
+    {
+      label: "block-comment-hidden predicate",
+      predicateSql: "/* idempotency_key IS NOT NULL */ 0"
+    },
+    {
+      label: "changed predicate",
+      predicateSql: "idempotency_key IS NULL"
+    }
+  ])("rejects an email index with $label", async ({ predicateSql }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const fixture = REQUIRED_INDEX_FIXTURES[0];
+    const database = databaseThrough("0022");
+    const migration = readMigration(CURRENT_0023).replace(
+      fixture.createSql,
+      fixture.createSql.replace(
+        `WHERE ${fixture.predicate}`,
+        `WHERE ${predicateSql}`
+      )
+    );
+    database.exec(migration);
+    recordMigration(database, LEGACY_0019);
+    const before = indexCompatibilityEvidence(database, fixture.table);
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(indexCompatibilityEvidence(database, fixture.table)).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("keeps comment-looking text inside an index identifier", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const fixture = REQUIRED_INDEX_FIXTURES[0];
+    const database = databaseThrough("0022");
+    const decoy = quoteSqlIdentifier(
+      "idempotency_key/*not-a-comment*/",
+      "double"
+    );
+    database.exec(
+      `ALTER TABLE email_deliveries ADD COLUMN ${decoy} INTEGER;`
+    );
+    database.exec(readMigration(CURRENT_0023).replace(
+      fixture.createSql,
+      fixture.createSql.replace(
+        `WHERE ${fixture.predicate}`,
+        `WHERE ${decoy} IS NOT NULL`
+      )
+    ));
+    recordMigration(database, LEGACY_0019);
+    const before = indexCompatibilityEvidence(database, fixture.table);
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(indexCompatibilityEvidence(database, fixture.table)).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("rejects a required index with a missing predicate", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const fixture = REQUIRED_INDEX_FIXTURES[0];
+    const database = databaseThrough("0022");
+    database.exec(readMigration(CURRENT_0023).replace(
+      fixture.createSql,
+      fixture.createSql.replace(`\n  WHERE ${fixture.predicate}`, "")
+    ));
+    recordMigration(database, LEGACY_0019);
+    const before = indexCompatibilityEvidence(database, fixture.table);
+
+    await expect(
+      runCompatibility(database, migrateSchemaCompatibility)
+    ).rejects.toThrow("D1 schema compatibility mismatch");
+
+    expect(indexCompatibilityEvidence(database, fixture.table)).toEqual(before);
+    expect(appliedMigrations(database)).not.toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it.each(REQUIRED_INDEX_FIXTURES.map((fixture, position) => ({
+    fixture,
+    quote: INDEX_QUOTE_PATHS[position % INDEX_QUOTE_PATHS.length].quote
+  })))("accepts a cosmetic typed index $fixture.name and enforces uniqueness", async ({
+    fixture,
+    quote
+  }) => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0022");
+    prepareRequiredIndexFixture(database, fixture.name);
+    const quotedName = quoteSqlIdentifier(fixture.name, quote);
+    const quotedTable = quoteSqlIdentifier(fixture.table, quote);
+    const quotedColumns = fixture.columns
+      .map((column) => quoteSqlIdentifier(column, quote))
+      .join(" ,  ");
+    const predicateColumn = fixture.predicate.split(" ")[0];
+    const quotedPredicateColumn = quoteSqlIdentifier(predicateColumn, quote);
+    const cosmeticSql = [
+      `cReAtE UnIqUe InDeX IF NOT EXISTS ${quotedName}`,
+      `  /* between grammar tokens */ ON ${quotedTable} ( ${quotedColumns} )`,
+      `  WHERE ${quotedPredicateColumn} IS -- active predicate\n    NOT /* active predicate */ NULL;`
+    ].join("\n");
+    database.exec(readMigration(CURRENT_0023).replace(
+      fixture.createSql,
+      cosmeticSql
+    ));
+    recordMigration(database, LEGACY_0019);
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    seedRequiredIndexRow(database, fixture.name, "a");
+    expect(() => seedRequiredIndexRow(database, fixture.name, "b")).toThrow();
+    expect(appliedMigrations(database)).toContain(CURRENT_0023);
+    database.close();
+  });
+
+  it("rejects positive duplicate counts at planning and final postflight", async () => {
+    const { REQUIRED_SCHEMA_MANIFEST, assertRequiredSchema, buildCompatibilityPlan } =
+      await loadCompatibility();
+    const snapshot = canonicalCompatibilitySnapshot(REQUIRED_SCHEMA_MANIFEST);
+    snapshot.duplicateCounts.idx_email_deliveries_idempotency_key = 1;
+
+    expect(() => buildCompatibilityPlan(snapshot)).toThrow(
+      "D1 schema compatibility mismatch"
+    );
+    expect(() => assertRequiredSchema(snapshot)).toThrow(
+      "D1 schema compatibility mismatch"
+    );
+  });
+
+  it.each([
+    {
+      label: "wrong owning table",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "wompi_events",
+      overrides: {}
+    },
+    {
+      label: "wrong indexed column",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "email_deliveries",
+      overrides: { columns: ["claim_token"] }
+    },
+    {
+      label: "wrong SQL-declared name",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "email_deliveries",
+      overrides: {
+        sql: REQUIRED_INDEX_FIXTURES[0].createSql.replace(
+          REQUIRED_INDEX_FIXTURES[0].name,
+          "idx_wrong_name"
+        )
+      }
+    },
+    {
+      label: "wrong composite-column order",
+      fixture: REQUIRED_INDEX_FIXTURES[1],
+      ownerTable: "wompi_events",
+      overrides: {
+        columns: ["control_prefix", "environment", "control_sequence"]
+      }
+    },
+    {
+      label: "non-unique index",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "email_deliveries",
+      overrides: { unique: 0 }
+    },
+    {
+      label: "non-partial index",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "email_deliveries",
+      overrides: { partial: 0 }
+    },
+    {
+      label: "IF NOT EXISTS outside its grammar position",
+      fixture: REQUIRED_INDEX_FIXTURES[0],
+      ownerTable: "email_deliveries",
+      overrides: {
+        sql: `CREATE UNIQUE INDEX idx_email_deliveries_idempotency_key
+          IF NOT EXISTS ON email_deliveries(idempotency_key)
+          WHERE idempotency_key IS NOT NULL;`
+      }
+    }
+  ])("rejects a required index with $label", async ({
+    fixture,
+    ownerTable,
+    overrides
+  }) => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const snapshot = singleRequiredIndexSnapshot(
+      fixture,
+      ownerTable,
+      overrides
+    );
+
+    expect(() => buildCompatibilityPlan(snapshot)).toThrow(
+      "D1 schema compatibility mismatch"
+    );
+  });
+
+  it("plans the canonical index alongside a differently named extra index", async () => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const fixture = REQUIRED_INDEX_FIXTURES[0];
+    const snapshot = singleRequiredIndexSnapshot(
+      fixture,
+      fixture.table,
+      {
+        name: "idx_wrong_name",
+        sql: fixture.createSql.replace(
+          fixture.name,
+          "idx_wrong_name"
+        )
+      }
+    );
+
+    expect(buildCompatibilityPlan(snapshot).statements).toContain(
+      fixture.createSql
+    );
   });
 
   it("canonicalizes late lowercase sequence rows before recording the 0023 alias", async () => {
@@ -1351,6 +1693,278 @@ function withoutIndex(sql: string, indexName: string): string {
     ),
     ""
   );
+}
+
+function quoteSqlIdentifier(
+  value: string,
+  quote: "double" | "backtick" | "bracket"
+): string {
+  if (quote === "double") return `"${value.replaceAll('"', '""')}"`;
+  if (quote === "backtick") return `\`${value.replaceAll("`", "``")}\``;
+  return `[${value.replaceAll("]", "]]")}]`;
+}
+
+function seedRequiredIndexDuplicates(
+  database: DatabaseSync,
+  indexName: (typeof REQUIRED_INDEX_FIXTURES)[number]["name"]
+): void {
+  if (indexName === "idx_email_deliveries_idempotency_key") {
+    seedDuplicateEmailKeys(database);
+    return;
+  }
+  if (indexName === "idx_wompi_reserved_control") {
+    for (const suffix of ["a", "b"]) {
+      database.prepare(
+        `INSERT INTO wompi_events (
+           id, transaction_id, environment, result, amount_cents, raw_body,
+           control_prefix, control_sequence, reserved_codigo_generacion
+         ) VALUES (?, ?, '00', 'ExitosaAprobada', 100, '{}',
+           'M001P004', 17, ?)`
+      ).run(
+        `index_control_${suffix}`,
+        `index_control_transaction_${suffix}`,
+        `${suffix.toUpperCase().repeat(8)}-${suffix.toUpperCase().repeat(4)}-4AAA-8AAA-${suffix.toUpperCase().repeat(12)}`
+      );
+    }
+    return;
+  }
+  if (indexName === "idx_wompi_reserved_generation") {
+    for (const suffix of ["a", "b"]) {
+      database.prepare(
+        `INSERT INTO wompi_events (
+           id, transaction_id, environment, result, amount_cents, raw_body,
+           reserved_codigo_generacion
+         ) VALUES (?, ?, '00', 'ExitosaAprobada', 100, '{}',
+           'CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC')`
+      ).run(
+        `index_generation_${suffix}`,
+        `index_generation_transaction_${suffix}`
+      );
+    }
+    return;
+  }
+
+  database.prepare(
+    `INSERT INTO wompi_events (
+       id, transaction_id, environment, result, amount_cents, raw_body
+     ) VALUES ('index_document_event', 'index_document_transaction', '00',
+       'ExitosaAprobada', 100, '{}')`
+  ).run();
+  for (const [suffix, generation, control] of [
+    ["a", "DDDDDDDD-DDDD-4DDD-8DDD-DDDDDDDDDDDD", "000000000000021"],
+    ["b", "EEEEEEEE-EEEE-4EEE-8EEE-EEEEEEEEEEEE", "000000000000022"]
+  ] as const) {
+    database.prepare(
+      `INSERT INTO dte_documents (
+         id, wompi_event_id, environment, codigo_generacion, numero_control,
+         status, plain_json, amount_cents, issued_at
+       ) VALUES (?, 'index_document_event', '00', ?, ?, 'PENDING', '{}', 100,
+         '2026-08-08T00:00:00.000Z')`
+    ).run(
+      `index_document_${suffix}`,
+      generation,
+      `DTE-15-M001P004-${control}`
+    );
+  }
+}
+
+function prepareRequiredIndexFixture(
+  database: DatabaseSync,
+  indexName: (typeof REQUIRED_INDEX_FIXTURES)[number]["name"]
+): void {
+  if (indexName === "idx_dte_documents_wompi_unique") {
+    database.exec("DROP INDEX idx_dte_documents_unique_wompi_event;");
+  }
+}
+
+function seedRequiredIndexRow(
+  database: DatabaseSync,
+  indexName: (typeof REQUIRED_INDEX_FIXTURES)[number]["name"],
+  suffix: "a" | "b"
+): void {
+  if (indexName === "idx_email_deliveries_idempotency_key") {
+    if (suffix === "a") {
+      database.prepare(
+        `INSERT INTO wompi_events (
+           id, transaction_id, environment, result, amount_cents, raw_body
+         ) VALUES ('cosmetic_email_event', 'cosmetic_email_transaction', '00',
+           'ExitosaAprobada', 100, '{}')`
+      ).run();
+      database.prepare(
+        `INSERT INTO dte_documents (
+           id, wompi_event_id, environment, codigo_generacion, numero_control,
+           status, plain_json, amount_cents, issued_at
+         ) VALUES ('cosmetic_email_document', 'cosmetic_email_event', '00',
+           'FFFFFFFF-FFFF-4FFF-8FFF-FFFFFFFFFFFF',
+           'DTE-15-M001P004-000000000000031', 'PENDING', '{}', 100,
+           '2026-08-08T00:00:00.000Z')`
+      ).run();
+    }
+    database.prepare(
+      `INSERT INTO email_deliveries (
+         id, document_id, to_email, status, idempotency_key
+       ) VALUES (?, 'cosmetic_email_document', 'donor@example.org', 'PENDING',
+         'same-cosmetic-key')`
+    ).run(`cosmetic_email_${suffix}`);
+    return;
+  }
+  if (indexName === "idx_wompi_reserved_control") {
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body,
+         control_prefix, control_sequence, reserved_codigo_generacion
+       ) VALUES (?, ?, '00', 'ExitosaAprobada', 100, '{}',
+         'M001P004', 37, ?)`
+    ).run(
+      `cosmetic_control_${suffix}`,
+      `cosmetic_control_transaction_${suffix}`,
+      suffix === "a"
+        ? "11111111-1111-4111-8111-111111111111"
+        : "22222222-2222-4222-8222-222222222222"
+    );
+    return;
+  }
+  if (indexName === "idx_wompi_reserved_generation") {
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body,
+         reserved_codigo_generacion
+       ) VALUES (?, ?, '00', 'ExitosaAprobada', 100, '{}',
+         '33333333-3333-4333-8333-333333333333')`
+    ).run(
+      `cosmetic_generation_${suffix}`,
+      `cosmetic_generation_transaction_${suffix}`
+    );
+    return;
+  }
+
+  if (suffix === "a") {
+    database.prepare(
+      `INSERT INTO wompi_events (
+         id, transaction_id, environment, result, amount_cents, raw_body
+       ) VALUES ('cosmetic_document_event', 'cosmetic_document_transaction',
+         '00', 'ExitosaAprobada', 100, '{}')`
+    ).run();
+  }
+  database.prepare(
+    `INSERT INTO dte_documents (
+       id, wompi_event_id, environment, codigo_generacion, numero_control,
+       status, plain_json, amount_cents, issued_at
+     ) VALUES (?, 'cosmetic_document_event', '00', ?, ?, 'PENDING', '{}', 100,
+       '2026-08-08T00:00:00.000Z')`
+  ).run(
+    `cosmetic_document_${suffix}`,
+    suffix === "a"
+      ? "44444444-4444-4444-8444-444444444444"
+      : "55555555-5555-4555-8555-555555555555",
+    suffix === "a"
+      ? "DTE-15-M001P004-000000000000041"
+      : "DTE-15-M001P004-000000000000042"
+  );
+}
+
+function indexCompatibilityEvidence(
+  database: DatabaseSync,
+  table: string
+): { ledger: string[]; schema: unknown[]; rows: unknown[] } {
+  return {
+    ledger: appliedMigrations(database),
+    schema: database.prepare(
+      `SELECT type, name, tbl_name, sql FROM sqlite_schema
+       WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name`
+    ).all(),
+    rows: database.prepare(
+      `SELECT * FROM ${table} ORDER BY id`
+    ).all()
+  };
+}
+
+function canonicalCompatibilitySnapshot(manifest: {
+  columns: ReadonlyArray<Record<string, unknown>>;
+  indexes: ReadonlyArray<Record<string, unknown>>;
+  triggers: ReadonlyArray<Record<string, unknown>>;
+}) {
+  const tableColumns: Record<string, Array<Record<string, unknown>>> = {};
+  for (const entry of manifest.columns) {
+    const table = String(entry.table);
+    (tableColumns[table] ??= []).push({
+      name: entry.column,
+      type: entry.type,
+      notnull: entry.nullable ? 0 : 1,
+      dflt_value: entry.defaultValue ?? null
+    });
+  }
+  const tableIndexes: Record<string, Array<Record<string, unknown>>> = {};
+  for (const entry of manifest.indexes) {
+    const table = String(entry.table);
+    (tableIndexes[table] ??= []).push({
+      name: entry.name,
+      unique: 1,
+      partial: 1,
+      columns: entry.columns,
+      sql: entry.createSql
+    });
+  }
+  const trigger = manifest.triggers[0];
+  return {
+    appliedMigrations: [
+      CURRENT_0023,
+      "0024_add_rate_limit_claim_ids.sql",
+      "0030_wompi_reconciliation_lifecycle.sql"
+    ],
+    tableColumns,
+    tableSql: {
+      wompi_events: `CREATE TABLE wompi_events (
+        issuance_status TEXT CHECK (issuance_status IN ('PROCESSING', 'FAILED', 'DEAD_LETTERED', 'RETRY_QUEUED', 'DOCUMENT_CREATED', 'IGNORED')),
+        issuance_attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (issuance_attempt_count >= 0)
+      )`
+    },
+    tableIndexes,
+    schemaObjects: {
+      [String(trigger.name)]: {
+        type: "trigger",
+        table: trigger.table,
+        sql: trigger.createSql
+      }
+    },
+    duplicateCounts: Object.fromEntries(
+      manifest.indexes.map((entry) => [String(entry.duplicateCountKey), 0])
+    ),
+    sequenceNoncanonicalCount: 0
+  };
+}
+
+function singleRequiredIndexSnapshot(
+  fixture: (typeof REQUIRED_INDEX_FIXTURES)[number],
+  ownerTable: string,
+  overrides: Record<string, unknown>
+) {
+  const tableColumns = {
+    [fixture.table]: fixture.columns.map((name) => ({
+      name,
+      type: name === "control_sequence" ? "INTEGER" : "TEXT",
+      notnull: 0,
+      dflt_value: null
+    }))
+  };
+  return {
+    appliedMigrations: [CURRENT_0023],
+    tableColumns,
+    tableSql: {},
+    tableIndexes: {
+      [ownerTable]: [{
+        name: fixture.name,
+        unique: 1,
+        partial: 1,
+        columns: [...fixture.columns],
+        sql: fixture.createSql,
+        ...overrides
+      }]
+    },
+    schemaObjects: {},
+    duplicateCounts: { [fixture.name]: 0 },
+    sequenceNoncanonicalCount: 0
+  };
 }
 
 function seedDuplicateEmailKeys(database: DatabaseSync): void {
