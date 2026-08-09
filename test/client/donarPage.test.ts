@@ -36,7 +36,7 @@ import {
   GIVEBUTTER_FALLBACK_HINT,
   GIVEBUTTER_FREQ_MONTHLY_LABEL,
   GIVEBUTTER_FREQ_ONCE_LABEL,
-  GIVEBUTTER_INTRO,
+  givebutterIntro,
   GIVEBUTTER_MONTHLY_LABEL,
   GIVEBUTTER_RENDER_TIMEOUT_MS,
   GIVEBUTTER_US_COUNTRY_CODE,
@@ -48,7 +48,7 @@ import {
   DONAR_GIFT_TYPE_LABEL,
   DONAR_LANDING_HEADING,
   DONAR_LANDING_SUBTITLE,
-  DONAR_LANDING_UNIFIER_CHURCH,
+  donarLandingUnifierChurch,
   DONAR_LANDING_UNIFIER_LEAD,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
@@ -85,6 +85,7 @@ import {
 // App.tsx keeps only the thin path branch that mounts it. Source-contract
 // assertions read whichever file now owns the markup.
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
+const donationSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donation.ts"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
@@ -393,6 +394,10 @@ describe("donar step labels", () => {
     for (const forbidden of ["al pagar", "Pagar", "su pago", "Su pago", "el pago", "comprar", "compra"]) {
       expect(donarSource).not.toContain(forbidden);
     }
+  });
+
+  it("keeps deployment placeholder organization names out of donor-facing source", () => {
+    expect(`${donationSource}\n${donarSource}`).not.toContain("ExampleOrganization");
   });
 });
 
@@ -1205,7 +1210,7 @@ describe("donar responsive donor layout", () => {
 
     expect(landingBlock).toContain("{DONAR_LANDING_UNIFIER_LEAD}");
     expect(landingBlock).toMatch(
-      /<span className="donar-landing-unifier-church">\s*\{DONAR_LANDING_UNIFIER_CHURCH\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
+      /<span className="donar-landing-unifier-church">\s*\{donarLandingUnifierChurch\(organizationName\)\}\s*<DonarFlagBadge country="sv" \/>\.\s*<\/span>/
     );
     expect(landingBlock).not.toContain("<br");
     expect(stylesSource).toMatch(
@@ -1344,16 +1349,23 @@ describe("givebutter donar page source contract", () => {
   });
 
   it("shows the FMCE explanation and the example-campaign iframe", () => {
-    expect(donarSource).toContain("GIVEBUTTER_INTRO");
-    expect(GIVEBUTTER_INTRO).toContain("Friends of Misión ExampleOrganization");
-    expect(GIVEBUTTER_INTRO).toContain("501c3");
+    const intro = givebutterIntro("MISION EXAMPLEORGANIZATION");
+    expect(donarSource).toContain("givebutterIntro(organizationName)");
+    expect(intro).toContain("Friends of MISION EXAMPLEORGANIZATION");
+    expect(intro).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
-    expect(GIVEBUTTER_INTRO).toContain("apoya a Misión ExampleOrganization en El Salvador");
+    expect(intro).toContain("apoya a MISION EXAMPLEORGANIZATION en El Salvador");
     // The embedded iframe targets the frameable Givebutter embed URL.
     expect(pageSource).toContain("donar-givebutter-frame");
     expect(pageSource).toContain("givebutterFrameUrl");
     expect(pageSource).toContain("givebutterEmbedUrl({ amount: form.amount, monthly })");
+  });
+
+  it("uses neutral donor copy when public branding has no configured organization", () => {
+    expect(givebutterIntro(null)).toContain("apoya a esta iglesia en El Salvador");
+    expect(givebutterIntro("   ")).toContain("una organización estadounidense 501c3");
+    expect(givebutterIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
   it("uses human GiveButter anchor text, never a raw URL, in the fallback CTA and hint", () => {
@@ -1438,10 +1450,11 @@ describe("two-door landing copy", () => {
     // The SV flag (an inline SVG badge) and the closing period are appended in
     // JSX — the emoji rendered as a blank box, leaving an orphaned period.
     expect(DONAR_LANDING_UNIFIER_LEAD).toBe("Todos los diezmos y ofrendas apoyan la obra de");
-    expect(DONAR_LANDING_UNIFIER_CHURCH).toBe("Misión ExampleOrganization en El Salvador");
-    expect(`${DONAR_LANDING_UNIFIER_LEAD} ${DONAR_LANDING_UNIFIER_CHURCH}`).toBe(
-      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador"
+    expect(donarLandingUnifierChurch("MISION EXAMPLEORGANIZATION")).toBe("MISION EXAMPLEORGANIZATION en El Salvador");
+    expect(`${DONAR_LANDING_UNIFIER_LEAD} ${donarLandingUnifierChurch("MISION EXAMPLEORGANIZATION")}`).toBe(
+      "Todos los diezmos y ofrendas apoyan la obra de MISION EXAMPLEORGANIZATION en El Salvador"
     );
+    expect(donarLandingUnifierChurch(null)).toBe("esta iglesia en El Salvador");
   });
 
   it("labels the two doors, their tax-receipt descriptors, and the change-option link", () => {
@@ -1466,7 +1479,7 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_LANDING_HEADING");
     expect(donarSource).toContain("DONAR_LANDING_SUBTITLE");
     expect(donarSource).toContain("DONAR_LANDING_UNIFIER_LEAD");
-    expect(donarSource).toContain("DONAR_LANDING_UNIFIER_CHURCH");
+    expect(donarSource).toContain("donarLandingUnifierChurch(organizationName)");
     expect(donarSource).toContain("DONAR_DOOR_SV_LABEL");
     expect(donarSource).toContain("DONAR_DOOR_SV_DESC");
     expect(donarSource).toContain("DONAR_DOOR_EEUU_LABEL");

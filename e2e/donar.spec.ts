@@ -64,6 +64,43 @@ test("a clean donor load reveals only the fully styled page", async ({ page }) =
   await expect(page.getByText("Elija según su lugar de residencia.")).toBeVisible();
 });
 
+test("keeps the ceremonial browser title across every donor entry route", async ({ page }) => {
+  for (const path of ["/", "/donar", "/donar?ruta=sv"]) {
+    await page.goto(path);
+    await expect(page).toHaveTitle("Diezmos y Ofrendas");
+
+    await page.reload();
+    await expect(page).toHaveTitle("Diezmos y Ofrendas");
+  }
+});
+
+test("uses neutral donor attribution when public branding has no configured name", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "   ",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
+
+  await page.goto("/donar");
+  await expect(page.locator(".donar-landing-unifier")).toContainText("esta iglesia en El Salvador");
+  await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
+
+  await page.getByRole("button", { name: "EE. UU." }).click();
+  await page.getByLabel("Monto").fill("100.00");
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
+  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501c3");
+  await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
+});
+
 test("the direct SV route leaves the amount unfocused until the donor taps it", async ({ page }) => {
   await page.goto("/donar?ruta=sv");
 
@@ -417,8 +454,23 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
 });
 
 test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", async ({ page }) => {
+  await page.route("**/api/branding", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        displayName: "MISION EXAMPLEORGANIZATION",
+        accentColor: "#000000",
+        supportEmail: "support@example.org",
+        logoVersion: null,
+        donorLogoVersion: null
+      })
+    })
+  );
   await page.goto("/donar");
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(page.getByText("MISION EXAMPLEORGANIZATION en El Salvador", { exact: false })).toBeVisible();
+  await expect(page.getByText(/ExampleOrganization/)).toHaveCount(0);
 
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
   await page.getByRole("button", { name: "EE. UU." }).click();
@@ -455,7 +507,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Única · $100.00")).toBeVisible();
-  await expect(page.getByText("Friends of Misión ExampleOrganization")).toBeVisible();
+  await expect(page.getByText("Friends of MISION EXAMPLEORGANIZATION")).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
   const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
   await expect(givebutterFrame).toBeVisible();
