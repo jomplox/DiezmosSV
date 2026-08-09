@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { DONAR_VERIFYING_NOTICE_DELAY_MS } from "../src/client/donation";
+import { DONAR_VERIFYING_NOTICE_DELAY_MS, GIVEBUTTER_CAMPAIGN } from "../src/client/donation";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -27,6 +27,13 @@ const DONOR = {
   amount: "1.00",
   dui: "10000001-9"
 };
+
+// The Givebutter campaign slug is build configuration (VITE_GIVEBUTTER_CAMPAIGN), so the
+// URL-shape assertions below interpolate whatever the app under test was built with.
+const CAMPAIGN_PATTERN = GIVEBUTTER_CAMPAIGN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// A configured display name for the branding stub: distinct from the seeded demo
+// organization, so "the stub was honored" stays a real assertion.
+const BRANDING_DISPLAY_NAME = "Iglesia Ejemplo Central";
 
 async function renderedSvFlagDiameter(icon: Locator): Promise<number> {
   return icon.evaluate((element) => {
@@ -461,13 +468,13 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
   await expect(page.getByText("Seleccione un municipio.")).toBeVisible();
 });
 
-test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", async ({ page }) => {
+test("the EE. UU. door shares Paso 1 and reveals the Givebutter embed", async ({ page }) => {
   await page.route("**/api/branding", (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json",
       body: JSON.stringify({
-        displayName: "MISION EXAMPLEORGANIZATION",
+        displayName: BRANDING_DISPLAY_NAME,
         accentColor: "#000000",
         supportEmail: "support@example.org",
         logoVersion: null,
@@ -477,7 +484,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   );
   await page.goto("/donar");
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
-  await expect(page.getByText("MISION EXAMPLEORGANIZATION en El Salvador", { exact: false })).toBeVisible();
+  await expect(page.getByText(`${BRANDING_DISPLAY_NAME} en El Salvador`, { exact: false })).toBeVisible();
   await expect(page.getByText(/ExampleOrganization/)).toHaveCount(0);
 
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
@@ -511,15 +518,15 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
   // Paso 2 — the donor's real Paso 2/3 is the Givebutter giving form. A summary
-  // line with Editar sits above the FMCE explanation and the embed.
+  // line with Editar sits above the 501c3 explanation and the embed.
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Única · $100.00")).toBeVisible();
-  await expect(page.getByText("Friends of MISION EXAMPLEORGANIZATION")).toBeVisible();
+  await expect(page.getByText(`Friends of ${BRANDING_DISPLAY_NAME}`)).toBeVisible();
   await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
   const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
   await expect(givebutterFrame).toBeVisible();
-  await expect(givebutterFrame).toHaveAttribute("src", /givebutter\.com\/embed\/c\/example-campaign/);
+  await expect(givebutterFrame).toHaveAttribute("src", new RegExp(`^https://givebutter\\.com/embed/c/${CAMPAIGN_PATTERN}\\?`));
   await expect(givebutterFrame).toHaveAttribute("src", /amount=100/);
   await expect(givebutterFrame).toHaveAttribute("src", /goalBar=false/);
 
@@ -529,7 +536,7 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter (FMCE) embed", a
   // The always-visible hint uses the human "GiveButter" anchor text (no raw URL),
   // carrying the Paso 1 amount as the prefill.
   const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done en GiveButter" });
-  await expect(hint).toHaveAttribute("href", /givebutter\.com\/example-campaign/);
+  await expect(hint).toHaveAttribute("href", new RegExp(`^https://givebutter\\.com/${CAMPAIGN_PATTERN}\\?`));
   await expect(hint).toHaveAttribute("href", /amount=100/);
 
   // The direct iframe loaded, so the slow-load CTA is not shown.
