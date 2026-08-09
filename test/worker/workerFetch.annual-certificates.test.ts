@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { makeDocument as testDocument } from "./fixtures";
@@ -610,6 +611,60 @@ describe("annual donor certificates", () => {
     expect(response.status).toBe(400);
     const body = (await response.json()) as { message: string };
     expect(body.message).toMatch(/correo/i);
+  });
+
+  it("returns one sanitized 409 when an explicit donor dossier changes before its bounded read", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    db.documents.push(testDocument({
+      id: "single_changed",
+      donor_email: "single-changed@example.org",
+      donor_name: "Single Changed",
+      amount_cents: 100,
+      issued_at: "2025-02-01T16:00:00.000Z"
+    }));
+    const originalPrepare = db.prepare.bind(db);
+    let documentReads = 0;
+    db.prepare = ((sql: string) => {
+      if (sql.includes("annual_certificate_documents")) {
+        documentReads += 1;
+        db.documents[0].amount_cents = 200;
+      }
+      return originalPrepare(sql);
+    }) as typeof db.prepare;
+    const sent: unknown[] = [];
+    const pdfCreate = vi.spyOn(PDFDocument, "create");
+    let response: Response;
+
+    try {
+      response = await worker.fetch(
+        new Request("https://example.org/api/certificates/annual/send?year=2025", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ donor: "single-changed@example.org" })
+        }),
+        env(db, {
+          MOCK_EXTERNAL_SERVICES: "false",
+          EMAIL_FROM: "legacy-contact-6@example.com",
+          EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+          EMAIL: { send: async (message: unknown) => { sent.push(message); return { messageId: "unexpected" }; } } as SendEmail
+        })
+      );
+
+      expect(pdfCreate).not.toHaveBeenCalled();
+    } finally {
+      pdfCreate.mockRestore();
+    }
+
+    expect(response.status).toBe(409);
+    const body = (await response.json()) as { error: string; message: string };
+    expect(body.error).toBe("certificate_dossier_changed");
+    expect(body.message).toMatch(/constancia.*cambi/i);
+    expect(JSON.stringify(body)).not.toContain("single-changed@example.org");
+    expect(sent).toHaveLength(0);
+    expect(documentReads).toBe(1);
+    expect(db.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(1);
+    expect(db.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_SENT")).toHaveLength(0);
   });
 
   it("returns the exact 422 before PDF/email for an oversized explicit dossier", async () => {

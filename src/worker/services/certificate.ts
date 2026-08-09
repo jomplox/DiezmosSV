@@ -353,10 +353,23 @@ export interface AnnualCertificateSendRequest {
   after?: string;
 }
 
+interface CertificateDossierSnapshot {
+  count: number;
+  totalCents: number;
+  hasTestEnvironment: boolean;
+}
+
 export class CertificateDossierLimitError extends Error {
   constructor(readonly groupKey: string, readonly documentCount: number) {
     super(`La constancia del donante supera el límite de ${ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT} comprobantes.`);
     this.name = "CertificateDossierLimitError";
+  }
+}
+
+export class CertificateDossierChangedError extends Error {
+  constructor() {
+    super("La constancia cambió mientras se preparaba. Intente enviarla nuevamente.");
+    this.name = "CertificateDossierChangedError";
   }
 }
 
@@ -445,7 +458,16 @@ export async function sendAnnualCertificates(
       if (documents.length > ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT) {
         throw new CertificateDossierLimitError(target.groupKey, documents.length);
       }
-      const donor = donorSummary(target, documents);
+      const snapshot = dossierSnapshot(documents);
+      if (
+        snapshot.count === 0 ||
+        snapshot.count !== target.count ||
+        snapshot.totalCents !== target.totalCents ||
+        snapshot.hasTestEnvironment !== target.hasTestEnvironment
+      ) {
+        throw new CertificateDossierChangedError();
+      }
+      const donor = donorSummary(target, documents, snapshot);
       const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
       const totalLabel = formatCents(donor.totalCents);
       await email.sendDonorCertificate({
@@ -490,7 +512,10 @@ export async function sendAnnualCertificates(
         metadata: single ? { mode: "single" } : undefined
       });
       result.failed += 1;
-      if (single && error instanceof CertificateDossierLimitError) {
+      if (
+        single &&
+        (error instanceof CertificateDossierLimitError || error instanceof CertificateDossierChangedError)
+      ) {
         throw error;
       }
     }
@@ -513,16 +538,17 @@ function previewDonor(target: AnnualCertificateDonorTarget): AnnualCertificatePr
 
 function donorSummary(
   target: AnnualCertificateDonorTarget,
-  documents: DteDocumentRecord[]
+  documents: DteDocumentRecord[],
+  snapshot: CertificateDossierSnapshot
 ): DonorCertificateSummary {
   const ordered = [...documents].sort(compareDossierDocuments);
   return {
     groupKey: target.groupKey,
     donorName: target.donorName,
     donorEmail: target.donorEmail,
-    count: target.count,
-    totalCents: target.totalCents,
-    hasTestEnvironment: target.hasTestEnvironment,
+    count: snapshot.count,
+    totalCents: snapshot.totalCents,
+    hasTestEnvironment: snapshot.hasTestEnvironment,
     donations: ordered.map((document) => ({
       issuedAt: document.issued_at,
       dateLabel: formatElSalvadorDate(document.issued_at),
@@ -530,5 +556,13 @@ function donorSummary(
       amountCents: document.amount_cents
     })),
     documents: ordered
+  };
+}
+
+function dossierSnapshot(documents: DteDocumentRecord[]): CertificateDossierSnapshot {
+  return {
+    count: documents.length,
+    totalCents: documents.reduce((total, document) => total + document.amount_cents, 0),
+    hasTestEnvironment: documents.some((document) => document.environment === "00")
   };
 }

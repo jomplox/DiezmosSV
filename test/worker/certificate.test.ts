@@ -166,6 +166,103 @@ describe("sendAnnualCertificates dossier bound", () => {
   });
 });
 
+describe("sendAnnualCertificates dossier snapshot", () => {
+  it.each([
+    {
+      label: "the bounded read becomes empty",
+      aggregate: { count: 0, totalCents: 0, hasTestEnvironment: false },
+      documents: []
+    },
+    {
+      label: "only the document count changes",
+      aggregate: { count: 1, totalCents: 100, hasTestEnvironment: false },
+      documents: [
+        dteRecord({ id: "count-1", amount_cents: 40 }),
+        dteRecord({ id: "count-2", amount_cents: 60 })
+      ]
+    },
+    {
+      label: "only the amount total changes",
+      aggregate: { count: 1, totalCents: 100, hasTestEnvironment: false },
+      documents: [dteRecord({ id: "amount-1", amount_cents: 101 })]
+    },
+    {
+      label: "only the environment flag changes",
+      aggregate: { count: 1, totalCents: 100, hasTestEnvironment: false },
+      documents: [dteRecord({ id: "environment-1", environment: "00" })]
+    }
+  ])("fails closed before PDF/email when $label", async ({ aggregate, documents }) => {
+    const harness = certificateSendHarness([
+      target("snapshot@example.org", { donorName: "Snapshot", ...aggregate })
+    ], new Map([["snapshot@example.org", documents]]));
+    const pdfCreate = vi.spyOn(PDFDocument, "create");
+    let result;
+
+    try {
+      result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+
+      expect(pdfCreate).not.toHaveBeenCalled();
+    } finally {
+      pdfCreate.mockRestore();
+    }
+
+    expect(result).toMatchObject({ processed: 1, sent: 0, skipped: 0, failed: 1 });
+    expect(harness.emailSend).not.toHaveBeenCalled();
+    expect(harness.listDocuments).toHaveBeenCalledTimes(1);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(1);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_SENT")).toHaveLength(0);
+  });
+
+  it("keeps an unchanged dossier on the successful send path", async () => {
+    const harness = certificateSendHarness([
+      target("stable@example.org", { donorName: "Stable", count: 1, totalCents: 100, hasTestEnvironment: false })
+    ], new Map([["stable@example.org", [dteRecord({ id: "stable-1", donor_email: "stable@example.org" })]]]));
+
+    const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, skipped: 0, failed: 0 });
+    expect(harness.emailSend).toHaveBeenCalledTimes(1);
+    expect(harness.listDocuments).toHaveBeenCalledTimes(1);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_SENT")).toHaveLength(1);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(0);
+  });
+
+  it("audits one changed dossier once and continues to a later bulk target without retrying", async () => {
+    const harness = certificateSendHarness([
+      target("a-race@example.org", { donorName: "A Race", count: 1, totalCents: 100 }),
+      target("b-next@example.org", { donorName: "B Next", count: 1, totalCents: 100 })
+    ], new Map([
+      ["a-race@example.org", [dteRecord({ id: "race-amount", donor_email: "a-race@example.org", amount_cents: 200 })]],
+      ["b-next@example.org", [dteRecord({ id: "next-stable", donor_email: "b-next@example.org" })]]
+    ]));
+    const drawnText: string[] = [];
+    const originalDrawText = PDFPage.prototype.drawText;
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText").mockImplementation(function (this: PDFPage, text, options) {
+      drawnText.push(text);
+      return originalDrawText.call(this, text, options);
+    });
+    let result;
+
+    try {
+      result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+    } finally {
+      drawText.mockRestore();
+    }
+
+    expect(result).toMatchObject({ processed: 2, sent: 1, skipped: 0, failed: 1 });
+    expect(harness.emailSend).toHaveBeenCalledTimes(1);
+    expect(harness.emailSend.mock.calls[0]?.[0]).toMatchObject({ to: "b-next@example.org" });
+    expect(drawnText).not.toContain("A Race");
+    expect(drawnText).toContain("B Next");
+    expect(harness.listDocuments.mock.calls.map((call) => call[1])).toEqual([
+      "a-race@example.org",
+      "b-next@example.org"
+    ]);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(1);
+    expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_SENT")).toHaveLength(1);
+  });
+});
+
 describe("renderCertificatePdf", () => {
   it("renders the annual certificate content without any MH seal claim", async () => {
     const pdf = await renderCertificatePdf({
@@ -433,4 +530,32 @@ class PreviewRepositoryFake {
     this.documentReads += 1;
     return [];
   }
+}
+
+function certificateSendHarness(
+  targets: AnnualCertificateDonorTarget[],
+  documentsByGroup: Map<string, DteDocumentRecord[]>
+) {
+  const audits: Array<Record<string, unknown>> = [];
+  const listDocuments = vi.fn(async (
+    _range: { startIso: string; endIso: string },
+    groupKey: string
+  ) => documentsByGroup.get(groupKey) ?? []);
+  const repo = {
+    listAnnualCertificateDonorTargets: vi.fn().mockResolvedValue(targets),
+    listAnnualCertificateDonorDocuments: listDocuments,
+    countAuditEntries: vi.fn().mockResolvedValue(0),
+    getSetting: vi.fn().mockResolvedValue(null),
+    createAudit: vi.fn().mockImplementation(async (audit: Record<string, unknown>) => {
+      audits.push(audit);
+    })
+  } as unknown as Repository;
+  const emailSend = vi.fn(async (_message: unknown) => ({ messageId: "certificate-snapshot-test" }));
+  const workerEnv = env(new InMemoryD1(), {
+    MOCK_EXTERNAL_SERVICES: "false",
+    EMAIL_FROM: "sender@example.org",
+    EMISOR_CONFIG_JSON: JSON.stringify(emisorConfig()),
+    EMAIL: { send: emailSend } as unknown as SendEmail
+  });
+  return { audits, emailSend, listDocuments, repo, workerEnv };
 }
