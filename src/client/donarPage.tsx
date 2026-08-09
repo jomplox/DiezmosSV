@@ -94,7 +94,7 @@ import { formatNit, isValidNitFormat } from "../shared/nit";
 // a session (App.tsx keeps only the thin path branch that mounts them).
 //
 // Layout: a 3-step wizard in Givebutter's structural language — one concern per
-// screen inside a soft-shadowed 16px card — skinned in Elim's monochrome Gotham.
+// screen inside a soft-shadowed 16px card — skinned in the monochrome Gotham brand.
 // SV door:  Paso 1 monto (segmented Diezmo|Ofrenda + hero amount input),
 //           Paso 2 datos (documento + geografía), Paso 3 entrega (Wompi handoff).
 // US door:  Paso 1 monto (segmented Única|Mensual + the same hero input),
@@ -255,8 +255,8 @@ interface DonarDraftIntent {
   mintedAt: number;
 }
 
-// The default logo, reusing the vector paths shared with the worker's PDF renderer
-// (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
+// The built-in default logo, reusing the vector paths shared with the worker's PDF
+// renderer (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
 function OrganizationLogo({ organizationName }: { organizationName: string | null }) {
   return (
     <svg
@@ -429,7 +429,7 @@ export function DonarPage() {
   // the Givebutter wizard directly, skipping the extranjero mechanics.
   const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
   // White-label logo for the landing chooser. When a church has uploaded a logo the
-  // donor page shows it in place of the built-in default vector; the vector stays as the
+  // donor page shows it in place of the built-in vector logo; the vector stays as the
   // fallback. The accent color is deliberately NOT applied here — the donor wizard's
   // monochrome Gotham brand is a design decision, so only the logo is branded.
   const [brandingLogo, setBrandingLogo] = useState<{ src: string; name: string } | null>(null);
@@ -543,7 +543,7 @@ export function DonarPage() {
   }, [door, stage, step, usDonation]);
 
   // Fetch the church's branding for the landing logo (name is used as alt text). Uses
-  // the same unauthenticated /api/branding as the admin; a failure keeps the default vector.
+  // the same unauthenticated /api/branding as the admin; a failure keeps the built-in vector.
   useEffect(() => {
     let cancelled = false;
     void donarApi<unknown>("/api/branding")
