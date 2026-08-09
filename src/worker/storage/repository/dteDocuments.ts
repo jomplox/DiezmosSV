@@ -1115,7 +1115,7 @@ function parseDocumentCursor(value: string | null | undefined): DteDocumentCurso
   }
 }
 
-function buildDteSearchQuery(value: string | null | undefined): string | null {
+export function buildDteSearchQuery(value: string | null | undefined): string | null {
   const tokens = Array.from((value ?? "").toLowerCase().matchAll(/[\p{L}\p{N}]+/gu), (match) => match[0])
     .filter((token) => token.length > 0)
     .slice(0, 8)

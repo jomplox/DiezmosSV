@@ -59,7 +59,9 @@ describe("visual consistency pack", () => {
   });
 
   it("guards async pre-CDE commits and invalidates every clearing path", () => {
-    const fetchBlock = appSource.match(/async function fetchPreCdeFailures\(\) \{[\s\S]*?\n  \}\n\n  async function refresh/)?.[0] ?? "";
+    const fetchBlock = appSource.match(
+      /async function fetchPreCdeFailures\(control\?: RunActionControl\) \{[\s\S]*?\n  \}\n\n  async function refresh/
+    )?.[0] ?? "";
     const clearBlock = appSource.match(/function clearPreCdeFailures\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
     const resetBlock = appSource.match(/function resetAccountState\(\) \{[\s\S]*?\n  \}/)?.[0] ?? "";
     const changeViewBlock = appSource.match(/function changeView\(nextView: View\) \{[\s\S]*?\n  \}/)?.[0] ?? "";

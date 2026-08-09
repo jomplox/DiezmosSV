@@ -277,6 +277,175 @@ describe("Wompi issuance failure recovery API", () => {
     }));
   });
 
+  it("atomically rotates the stalled epoch when an OPERATOR retry claim succeeds", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-14T10:00:00.000Z"));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      }));
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        env(db)
+      );
+
+      expect(response.status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_status: "RETRY_QUEUED",
+        issuance_last_attempt_at: "2026-07-14T10:00:00.000Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.000Z"
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("mints a new monotonic stalled epoch for repeated OPERATOR retries in the same millisecond", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      vi.setSystemTime(new Date(boundary));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: boundary
+      }));
+      const queued: IssuanceMessage[] = [];
+      const workerEnv = env(db, {
+        ISSUANCE_QUEUE: {
+          send: async (message: IssuanceMessage) => queued.push(message)
+        } as unknown as Queue<IssuanceMessage>
+      });
+      const retry = () => worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        workerEnv
+      );
+
+      expect((await retry()).status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.001Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.001Z"
+      });
+
+      Object.assign(db.wompiEvents[0], {
+        issuance_status: "FAILED",
+        issuance_error_code: "ISSUANCE_ERROR",
+        issuance_error_message: "Fallo transitorio",
+        processed_at: null
+      });
+      expect((await retry()).status).toBe(202);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_last_attempt_at: "2026-07-14T10:00:00.002Z",
+        stalled_requeue_epoch_at: "2026-07-14T10:00:00.002Z"
+      });
+      expect(queued).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not rotate the stalled epoch when the OPERATOR retry CAS loses", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-07-14T10:00:00.000Z"));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      }));
+      db.beforeWompiIssuanceRetryClaim = () => {
+        db.wompiEvents[0].issuance_error_message = "Otro proceso cambió el fallo";
+      };
+      const queued: IssuanceMessage[] = [];
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        env(db, {
+          ISSUANCE_QUEUE: {
+            send: async (message: IssuanceMessage) => queued.push(message)
+          } as unknown as Queue<IssuanceMessage>
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
+        stalled_requeue_epoch_at: "2026-07-13T18:00:00.000Z"
+      });
+      expect(queued).toHaveLength(0);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_ISSUANCE_RETRY_QUEUED"
+      )).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not queue or audit a retry when only the observed last-attempt timestamp changes", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = "2026-07-14T10:00:00.000Z";
+      const concurrentAttemptAt = "2026-07-14T10:00:00.005Z";
+      vi.setSystemTime(new Date(boundary));
+      const db = new InMemoryD1();
+      db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };
+      db.wompiEvents.push(failedWompiEvent({
+        issuance_status: "FAILED",
+        processed_at: null,
+        issuance_last_attempt_at: boundary,
+        stalled_requeue_epoch_at: boundary
+      }));
+      db.beforeWompiIssuanceRetryClaim = () => {
+        db.wompiEvents[0].issuance_last_attempt_at = concurrentAttemptAt;
+      };
+      const queued: IssuanceMessage[] = [];
+
+      const response = await worker.fetch(
+        new Request("https://example.org/api/wompi-events/wompi_failed/retry", {
+          method: "POST",
+          headers: authorization
+        }),
+        env(db, {
+          ISSUANCE_QUEUE: {
+            send: async (message: IssuanceMessage) => queued.push(message)
+          } as unknown as Queue<IssuanceMessage>
+        })
+      );
+
+      expect(response.status).toBe(409);
+      expect(db.wompiEvents[0]).toMatchObject({
+        issuance_status: "FAILED",
+        issuance_last_attempt_at: concurrentAttemptAt,
+        stalled_requeue_epoch_at: boundary
+      });
+      expect(queued).toHaveLength(0);
+      expect(db.audits.filter(
+        (audit) => audit.action === "WOMPI_ISSUANCE_RETRY_QUEUED"
+      )).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("returns correction_required when the failure becomes correctable between read and retry claim", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_operator", email: "operator@example.org", name: "Operator", role: "OPERATOR" };

@@ -146,22 +146,25 @@ export class IssuancePipeline {
         }
         throw error;
       }
-      const issuanceEpoch = typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
+      const issuanceEpoch = typeof event.stalled_requeue_epoch_at === "string" && event.stalled_requeue_epoch_at
+        ? event.stalled_requeue_epoch_at
+        : typeof event.issuance_last_attempt_at === "string" && event.issuance_last_attempt_at
         ? event.issuance_last_attempt_at
+        : typeof event.received_at === "string" && event.received_at
+        ? event.received_at
         : null;
       const requeues = issuanceEpoch
         ? await this.repo.countAuditEntriesSince("WOMPI_EVENT_REQUEUED", eventId, issuanceEpoch)
         : await this.repo.countAuditEntries("WOMPI_EVENT_REQUEUED", eventId);
       if (requeues >= MAX_WOMPI_EVENT_REQUEUES) {
         const summary = `Donación aprobada sin CDE tras ${MAX_WOMPI_EVENT_REQUEUES} reencolados; requiere revisión manual`;
-        if ((await this.repo.countAuditEntries("WOMPI_EVENT_STALLED", eventId)) === 0) {
-          await this.repo.createAudit({
-            action: "WOMPI_EVENT_STALLED",
-            entityType: "wompi_event",
-            entityId: eventId,
-            summary
-          });
-        }
+        await this.repo.createAudit({
+          action: "WOMPI_EVENT_STALLED",
+          entityType: "wompi_event",
+          entityId: eventId,
+          summary,
+          metadata: issuanceEpoch ? { stalledRequeueEpochAt: issuanceEpoch } : undefined
+        });
         // Retried on every tick regardless of the WOMPI_EVENT_STALLED audit above:
         // a failed alert channel does not suppress a later attempt. Successful
         // channels dedupe on this stable issuance epoch.
@@ -188,7 +191,8 @@ export class IssuancePipeline {
         wompiEventId: eventId,
         attemptId,
         action: "WOMPI_EVENT_REQUEUED",
-        summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora"
+        summary: "Reencolado por barrido: donación aprobada sin CDE después de una hora",
+        metadata: issuanceEpoch ? { stalledRequeueEpochAt: issuanceEpoch } : undefined
       });
     }
   }

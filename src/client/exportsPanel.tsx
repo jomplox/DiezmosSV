@@ -268,13 +268,13 @@ export function contactsPeriodRange(period: ContactsPeriod, from: string, to: st
   return null;
 }
 
-// Preview endpoint path for a year + optional donor/email search. The search is sent
-// as `q`; the server caps and reports matchCount/truncated.
-export function certificatePreviewPath(year: string, search: string): string {
+// Preview endpoint path for a bounded recipient page. Search and continuation are
+// independent inputs; changing the search starts again without `after`.
+export function certificatePreviewPath(year: string, search: string, after?: string | null): string {
   const trimmed = search.trim();
-  return trimmed
-    ? `/api/certificates/annual?year=${year}&q=${encodeURIComponent(trimmed)}`
-    : `/api/certificates/annual?year=${year}`;
+  const searchParam = trimmed ? `&q=${encodeURIComponent(trimmed)}` : "";
+  const afterParam = after ? `&after=${encodeURIComponent(after)}` : "";
+  return `/api/certificates/annual?year=${year}${searchParam}${afterParam}`;
 }
 
 export function AnnualCertificatePanel({
@@ -284,10 +284,14 @@ export function AnnualCertificatePanel({
   search,
   busy,
   rowBusy,
+  bulkTraversalStarted,
+  bulkHasMore,
   onYearChange,
   onSearchChange,
   onSend,
-  onSendDonor
+  onSendDonor,
+  onLoadMore,
+  onResetBulk
 }: {
   year: string;
   yearOptions: number[];
@@ -296,15 +300,19 @@ export function AnnualCertificatePanel({
   busy: boolean;
   // The raw busy key so a single row can show its own spinner (certificates-send-<groupKey>).
   rowBusy: string;
+  bulkTraversalStarted: boolean;
+  bulkHasMore: boolean;
   onYearChange: (year: string) => void;
   onSearchChange: (value: string) => void;
   onSend: () => Promise<void>;
   onSendDonor: (donor: AnnualCertificatePreviewDonor) => Promise<void>;
+  onLoadMore: () => Promise<void>;
+  onResetBulk: () => void;
 }) {
   const donors = preview?.donors ?? [];
-  const withEmail = preview?.withEmail ?? 0;
-  // Any in-flight send (bulk or a per-row send) disables the other send buttons.
-  const anySending = busy || rowBusy.startsWith("certificates-send");
+  // Certificate actions are serialized so a preview append cannot race a send refresh.
+  const anySending = busy || rowBusy.startsWith("certificates-send") || rowBusy === "certificates-preview-more";
+  const bulkComplete = bulkTraversalStarted && !bulkHasMore;
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -325,22 +333,20 @@ export function AnnualCertificatePanel({
             ))}
           </select>
         </label>
-        <button className="primary" disabled={anySending || withEmail === 0} onClick={() => void onSend()}>
+        <button className="primary" disabled={anySending || bulkComplete} onClick={() => void onSend()}>
           <Download size={16} />
-          {busy ? "Enviando" : "Enviar constancias"}
+          {busy ? "Enviando" : bulkTraversalStarted ? "Enviar siguiente tanda" : "Enviar primera tanda"}
         </button>
-      </div>
-      <div className="export-summary">
-        <strong>{preview?.donorCount ?? 0}</strong>
-        <span>donantes</span>
-        <strong>{withEmail}</strong>
-        <span>con correo</span>
-        <strong>{preview?.totalLabel ?? "$0.00"}</strong>
-        <span>total</span>
+        {bulkTraversalStarted && (
+          <button className="ghost" disabled={anySending} onClick={onResetBulk}>
+            Iniciar nuevo recorrido
+          </button>
+        )}
       </div>
       <p className="hint">
         Se enviará a los donantes con correo. Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.
       </p>
+      {bulkTraversalStarted && bulkHasMore && <p className="hint">Quedan donantes por procesar.</p>}
       <div className="certificate-search">
         <input
           type="search"
@@ -349,11 +355,6 @@ export function AnnualCertificatePanel({
           onChange={(event) => onSearchChange(event.target.value)}
         />
       </div>
-      {preview?.truncated && (
-        <p className="hint certificate-truncated">
-          Mostrando {donors.length} de {preview.matchCount} donantes. Afine la búsqueda para ver el resto.
-        </p>
-      )}
       <div className="table-scroll export-table certificate-table">
         <table>
           <thead>
@@ -369,7 +370,7 @@ export function AnnualCertificatePanel({
             {donors.map((donor) => {
               const rowSending = rowBusy === `certificates-send-${donor.groupKey}`;
               return (
-                <tr key={donor.donorName + (donor.donorEmail ?? "")}>
+                <tr key={donor.groupKey}>
                   <td>
                     <StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} />
                   </td>
@@ -379,12 +380,15 @@ export function AnnualCertificatePanel({
                   <td>
                     <button
                       className="ghost"
-                      disabled={!donor.hasEmail || rowSending || anySending}
+                      disabled={!donor.hasEmail || donor.dossierTooLarge || rowSending || anySending}
                       onClick={() => void onSendDonor(donor)}
                     >
                       <Download size={14} />
                       {rowSending ? "Enviando" : "Enviar"}
                     </button>
+                    {donor.dossierTooLarge && (
+                      <span className="hint">Demasiados comprobantes para una sola constancia</span>
+                    )}
                   </td>
                 </tr>
               );
@@ -399,6 +403,15 @@ export function AnnualCertificatePanel({
           </tbody>
         </table>
       </div>
+      {preview?.hasMore && (
+        <button
+          className="ghost"
+          disabled={anySending}
+          onClick={() => void onLoadMore()}
+        >
+          {rowBusy === "certificates-preview-more" ? "Cargando" : "Ver más donantes"}
+        </button>
+      )}
     </section>
   );
 }

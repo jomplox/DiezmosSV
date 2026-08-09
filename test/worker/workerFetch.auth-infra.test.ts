@@ -1,10 +1,11 @@
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
-import { AuthService, hashPassword } from "../../src/worker/services/auth";
+import { AuthService, hashForStorage, hashPassword } from "../../src/worker/services/auth";
 import { Repository } from "../../src/worker/storage/repository";
 import { utf8Bytes } from "../../src/worker/utils/encoding";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
+import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 import { makeDocument as testDocument } from "./fixtures";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
@@ -398,7 +399,7 @@ describe("auth rate limiting", () => {
       expect([...db.loginRateLimits.keys()]).toHaveLength(1);
       expect([...db.loginRateLimits.keys()][0]).toMatch(/^[a-f0-9]{64}$/);
       expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.70");
-    });
+    }, 30_000);
 
     it("resets an expired aggregate login bucket before normal credential handling", async () => {
       const db = new InMemoryD1();
@@ -685,7 +686,7 @@ describe("auth rate limiting", () => {
       expect(denied.status).toBe(429);
       await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
       expect([...db.loginRateLimits.keys()]).toHaveLength(1);
-    });
+    }, 30_000);
   });
 
   it("blocks the sixth failed login within 15 minutes without attempting authentication", async () => {
@@ -902,6 +903,124 @@ describe("auth rate limiting", () => {
   });
 });
 
+describe("malformed stored password values", () => {
+  it("normalizes a real SQLite BLOB hash to canonical dummy work and the generic failed-login contract", async () => {
+    const database = migratedDatabase();
+    const nativeCrypto = crypto;
+    const iterationCounts: number[] = [];
+    const salts: string[] = [];
+    try {
+      database.exec("UPDATE users SET password_hash = 42 WHERE id = 'user_operator'");
+      expect(
+        database
+          .prepare("SELECT typeof(password_hash) AS storage_class, password_hash FROM users WHERE id = 'user_operator'")
+          .get()
+      ).toEqual({ storage_class: "text", password_hash: "42" });
+      database.exec("UPDATE users SET password_hash = 1.25 WHERE id = 'user_operator'");
+      expect(
+        database
+          .prepare("SELECT typeof(password_hash) AS storage_class, password_hash FROM users WHERE id = 'user_operator'")
+          .get()
+      ).toEqual({ storage_class: "text", password_hash: "1.25" });
+      expect(() => {
+        database.exec("UPDATE users SET password_hash = NULL WHERE id = 'user_operator'");
+      }).toThrow(/NOT NULL constraint failed: users\.password_hash/);
+
+      database.exec(
+        `UPDATE users
+            SET password_hash = X'010203', password_salt = 'blob-salt'
+          WHERE id = 'user_operator'`
+      );
+      const rowBefore = database
+        .prepare(
+          `SELECT typeof(password_hash) AS storage_class,
+                  hex(password_hash) AS password_hash_hex,
+                  password_salt
+             FROM users
+            WHERE id = 'user_operator'`
+        )
+        .get();
+      expect(rowBefore).toEqual({
+        storage_class: "blob",
+        password_hash_hex: "010203",
+        password_salt: "blob-salt"
+      });
+
+      vi.stubGlobal("crypto", {
+        getRandomValues: nativeCrypto.getRandomValues.bind(nativeCrypto),
+        randomUUID: nativeCrypto.randomUUID.bind(nativeCrypto),
+        subtle: {
+          digest: nativeCrypto.subtle.digest.bind(nativeCrypto.subtle),
+          importKey: nativeCrypto.subtle.importKey.bind(nativeCrypto.subtle),
+          deriveBits: async (...args: Parameters<SubtleCrypto["deriveBits"]>) => {
+            const algorithm = args[0] as unknown as { iterations: number; salt: BufferSource };
+            iterationCounts.push(algorithm.iterations);
+            salts.push(new TextDecoder().decode(algorithm.salt));
+            return nativeCrypto.subtle.deriveBits(...args);
+          }
+        }
+      });
+
+      const runtime = { ...env(new InMemoryD1()), DB: sqliteD1(database) };
+      const response = await worker.fetch(
+        new Request("https://example.org/api/auth/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "CF-Connecting-IP": "198.51.100.42"
+          },
+          body: JSON.stringify({
+            email: "operator@example.org",
+            password: "Wrong#Password2026"
+          })
+        }),
+        runtime
+      );
+
+      expect(response.status).toBe(401);
+      await expect(response.json()).resolves.toEqual({
+        error: "auth_error",
+        message: "Credenciales inválidas"
+      });
+      expect(iterationCounts).toEqual([100_000, 100_000]);
+      expect(salts).toEqual([
+        "diezmossv-login-dummy-v1",
+        "diezmossv-login-dummy-v1:diezmossv-pbkdf2-chain-v1"
+      ]);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM sessions").get()).toEqual({ count: 0 });
+      expect(
+        database
+          .prepare(
+            `SELECT action, entity_id, summary
+               FROM audit_logs
+              WHERE action = 'LOGIN_FAILED'`
+          )
+          .all()
+      ).toEqual([
+        {
+          action: "LOGIN_FAILED",
+          entity_id: "operator@example.org",
+          summary: "Credenciales inválidas"
+        }
+      ]);
+      expect(
+        database
+          .prepare(
+            `SELECT typeof(password_hash) AS storage_class,
+                    hex(password_hash) AS password_hash_hex,
+                    password_salt
+               FROM users
+              WHERE id = 'user_operator'`
+          )
+          .get()
+      ).toEqual(rowBefore);
+    } finally {
+      vi.unstubAllGlobals();
+      database.close();
+    }
+  });
+});
+
 describe("session logout", () => {
   it("revokes the presented bearer on the server and remains idempotent", async () => {
     const db = new InMemoryD1();
@@ -1052,10 +1171,8 @@ describe("credential-current session issuance", () => {
   it("does not issue or prune sessions when user is disabled after password verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
-    const passwordHash = `pbkdf2$100000$${stored.hash}`;
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
+    const passwordHash = stored.hash;
     db.users.push({
       id: "user_disabled_race",
       email: "disabled-race@example.org",
@@ -1097,9 +1214,7 @@ describe("credential-current session issuance", () => {
   it("does not issue a session when an email change wins after password verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_email_race",
       email: "before@example.org",
@@ -1128,9 +1243,7 @@ describe("credential-current session issuance", () => {
   it("does not issue a session after a disable and re-enable cycle completed post-verification", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_reenabled_race",
       email: "reenabled@example.org",
@@ -1159,9 +1272,7 @@ describe("credential-current session issuance", () => {
   it("keeps at most eight active session rows and evicts the oldest bearer", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_cap",
       email: "cap@example.org",
@@ -1198,15 +1309,13 @@ describe("credential-current session issuance", () => {
   it("keeps concurrent committed session rows at or below eight", async () => {
     const db = new InMemoryD1();
     const runtime = env(db);
-    const stored = await hashPassword("Valid#Password2026", "fixed-salt", {
-      enforcePolicy: false
-    });
+    const stored = await hashForStorage("Valid#Password2026", { enforcePolicy: false });
     db.users.push({
       id: "user_concurrent_cap",
       email: "concurrent-cap@example.org",
       name: "Concurrent Cap",
       role: "VIEWER",
-      password_hash: `pbkdf2$100000$${stored.hash}`,
+      password_hash: stored.hash,
       password_salt: stored.salt,
       disabled_at: null
     });

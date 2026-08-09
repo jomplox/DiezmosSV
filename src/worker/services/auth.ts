@@ -19,17 +19,21 @@ const ROLE_RANK: Record<Role, number> = {
   ADMIN: 3,
   OWNER: 4
 };
-// Current PBKDF2 work factor. Cloudflare Workers rejects counts above 100k, so the
-// versioned storage format keeps the count explicit without asking workerd for an
-// unsupported derivation.
+// Each stage stays within the Workers-compatible PBKDF2 ceiling. Current hashes use
+// two domain-separated stages, while legacy verification pads its first-stage compare
+// with the same second stage so account state does not change invalid-login KDF work.
 const PASSWORD_PBKDF2_ITERATIONS = 100_000;
-// Historic counts used by pre-versioning ("countless") rows. The surviving staging
-// owners were bootstrapped at the current Workers-compatible count, so no additional
-// deployed fallback count is safe to try.
-const LEGACY_PASSWORD_PBKDF2_ITERATIONS: number[] = [];
-const PASSWORD_HASH_SCHEME = "pbkdf2";
+const PASSWORD_HASH_LEGACY_SCHEME = "pbkdf2";
+const PASSWORD_HASH_CHAIN_SCHEME = "pbkdf2-chain-v1";
+const PASSWORD_HASH_TRANSITIONAL_CHAIN_SCHEME = "pbkdf2-chain";
+const PASSWORD_CHAIN_SALT_SUFFIX = ":diezmossv-pbkdf2-chain-v1";
+const PASSWORD_HASH_HEX_PATTERN = /^[0-9a-f]{64}$/;
 const DUMMY_PASSWORD_SALT = "diezmossv-login-dummy-v1";
-const DUMMY_PASSWORD_HASH = "pbkdf2$100000$0ddb41b59abcc01d672e58d326a2a4462301ea4f27009e0cb9e9b7c67a8947cb";
+// Golden vector for "diezmossv-login-dummy-password-v1" at DUMMY_PASSWORD_SALT.
+// The submitted password is still derived for missing/disabled accounts; this record
+// supplies a valid current-format comparison target without carrying a real credential.
+const DUMMY_PASSWORD_RAW_HASH = "1368814a801077a2ccf4976bdedac3410ffb14c6c3193bbbdf203c6ae0c277db";
+const DUMMY_PASSWORD_HASH = `${PASSWORD_HASH_CHAIN_SCHEME}$${PASSWORD_PBKDF2_ITERATIONS}$${DUMMY_PASSWORD_RAW_HASH}`;
 export const PASSWORD_RESET_TTL_MINUTES = 45;
 
 export class PasswordResetError extends Error {}
@@ -214,13 +218,17 @@ export async function hashPassword(
       throw new PasswordPolicyError(policyError);
     }
   }
+  const iterations = options.iterations ?? PASSWORD_PBKDF2_ITERATIONS;
+  if (!Number.isInteger(iterations) || iterations < 1 || iterations > PASSWORD_PBKDF2_ITERATIONS) {
+    throw new RangeError("PBKDF2 iteration count is outside the Workers-compatible range");
+  }
   const effectiveSalt = salt ?? base64UrlFromBytes(crypto.getRandomValues(new Uint8Array(16)));
   const key = await crypto.subtle.importKey("raw", utf8Bytes(password), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
       salt: utf8Bytes(effectiveSalt),
-      iterations: options.iterations ?? PASSWORD_PBKDF2_ITERATIONS,
+      iterations,
       hash: "SHA-256"
     },
     key,
@@ -229,48 +237,89 @@ export async function hashPassword(
   return { hash: hexFromBytes(new Uint8Array(bits)), salt: effectiveSalt };
 }
 
+async function deriveFirst(password: string, salt: string): Promise<{ hash: string; salt: string }> {
+  return hashPassword(password, salt, {
+    enforcePolicy: false,
+    iterations: PASSWORD_PBKDF2_ITERATIONS
+  });
+}
+
+async function deriveSecond(firstHash: string, salt: string): Promise<{ hash: string; salt: string }> {
+  return hashPassword(firstHash, `${salt}${PASSWORD_CHAIN_SALT_SUFFIX}`, {
+    enforcePolicy: false,
+    iterations: PASSWORD_PBKDF2_ITERATIONS
+  });
+}
+
 // Derives a password at the current work factor and returns it in the versioned stored
 // format. Used everywhere a password is written (create/bootstrap/reset/rehash).
-async function hashForStorage(password: string, options: { enforcePolicy?: boolean } = {}): Promise<{ hash: string; salt: string }> {
-  const derived = await hashPassword(password, undefined, {
+export async function hashForStorage(password: string, options: { enforcePolicy?: boolean } = {}): Promise<{ hash: string; salt: string }> {
+  const first = await hashPassword(password, undefined, {
     enforcePolicy: options.enforcePolicy ?? true,
     iterations: PASSWORD_PBKDF2_ITERATIONS
   });
-  return { hash: `${PASSWORD_HASH_SCHEME}$${PASSWORD_PBKDF2_ITERATIONS}$${derived.hash}`, salt: derived.salt };
+  const second = await deriveSecond(first.hash, first.salt);
+  return {
+    hash: `${PASSWORD_HASH_CHAIN_SCHEME}$${PASSWORD_PBKDF2_ITERATIONS}$${second.hash}`,
+    salt: first.salt
+  };
 }
 
-// Splits a stored hash into its iteration count and raw hex. A value without the
-// `pbkdf2$<n>$` marker is a pre-versioning (countless) hash and reports iterations=null.
-function parseStoredHash(stored: string): { iterations: number | null; hash: string } {
-  const parts = stored.split("$");
-  if (parts.length === 3 && parts[0] === PASSWORD_HASH_SCHEME) {
-    const iterations = Number(parts[1]);
-    if (Number.isInteger(iterations) && iterations > 0) {
-      return { iterations, hash: parts[2] };
-    }
+type ParsedPasswordHash =
+  | { kind: "current-chain"; hash: string }
+  | { kind: "transitional-chain"; hash: string }
+  | { kind: "legacy-versioned"; hash: string }
+  | { kind: "legacy-countless"; hash: string }
+  | { kind: "invalid" };
+
+function parseStoredHash(stored: unknown): ParsedPasswordHash {
+  if (typeof stored !== "string") {
+    return { kind: "invalid" };
   }
-  return { iterations: null, hash: stored };
+  if (PASSWORD_HASH_HEX_PATTERN.test(stored)) {
+    return { kind: "legacy-countless", hash: stored };
+  }
+
+  const [scheme, count, hash, extra] = stored.split("$");
+  if (extra !== undefined || count !== String(PASSWORD_PBKDF2_ITERATIONS) || !PASSWORD_HASH_HEX_PATTERN.test(hash ?? "")) {
+    return { kind: "invalid" };
+  }
+  if (scheme === PASSWORD_HASH_CHAIN_SCHEME) {
+    return { kind: "current-chain", hash };
+  }
+  if (scheme === PASSWORD_HASH_TRANSITIONAL_CHAIN_SCHEME) {
+    return { kind: "transitional-chain", hash };
+  }
+  if (scheme === PASSWORD_HASH_LEGACY_SCHEME) {
+    return { kind: "legacy-versioned", hash };
+  }
+  return { kind: "invalid" };
 }
 
-// Verifies a password against a stored hash, honouring an embedded iteration count and
-// falling back to the historic legacy counts for countless hashes. needsRehash signals
-// that a successful match should be re-stored at the current work factor/format.
-async function verifyPassword(password: string, salt: string, storedHash: string): Promise<{ valid: boolean; needsRehash: boolean }> {
+// Every path performs exactly two fixed-count derivations. In particular, no iteration
+// count read from D1 is ever passed into WebCrypto.
+async function verifyPassword(password: string, salt: string, storedHash: unknown): Promise<{ valid: boolean; needsRehash: boolean }> {
   const parsed = parseStoredHash(storedHash);
-  if (parsed.iterations !== null) {
-    const computed = await hashPassword(password, salt, { enforcePolicy: false, iterations: parsed.iterations });
-    if (timingSafeEqual(computed.hash, parsed.hash)) {
-      return { valid: true, needsRehash: parsed.iterations !== PASSWORD_PBKDF2_ITERATIONS };
-    }
-    return { valid: false, needsRehash: false };
+  if (parsed.kind === "current-chain" || parsed.kind === "transitional-chain") {
+    const first = await deriveFirst(password, salt);
+    const second = await deriveSecond(first.hash, salt);
+    const valid = timingSafeEqual(second.hash, parsed.hash);
+    return {
+      valid,
+      needsRehash: valid && parsed.kind === "transitional-chain"
+    };
   }
-  for (const iterations of [PASSWORD_PBKDF2_ITERATIONS, ...LEGACY_PASSWORD_PBKDF2_ITERATIONS]) {
-    const computed = await hashPassword(password, salt, { enforcePolicy: false, iterations });
-    if (timingSafeEqual(computed.hash, parsed.hash)) {
-      // Countless hashes always upgrade so they gain an explicit iteration marker.
-      return { valid: true, needsRehash: true };
-    }
+
+  if (parsed.kind === "legacy-versioned" || parsed.kind === "legacy-countless") {
+    const first = await deriveFirst(password, salt);
+    const valid = timingSafeEqual(first.hash, parsed.hash);
+    await deriveSecond(first.hash, salt);
+    return { valid, needsRehash: valid };
   }
+
+  const first = await deriveFirst(password, DUMMY_PASSWORD_SALT);
+  const second = await deriveSecond(first.hash, DUMMY_PASSWORD_SALT);
+  timingSafeEqual(second.hash, DUMMY_PASSWORD_RAW_HASH);
   return { valid: false, needsRehash: false };
 }
 

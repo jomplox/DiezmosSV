@@ -18,7 +18,7 @@ describe("rejectionDetailForDocument", () => {
     )?.[0] ?? "";
 
     expect(actionBlock).toMatch(
-      /await refresh\(\);\s*setSelectedDocumentDetailVersion\(\(current\) => current \+ 1\);/
+      /await refresh\(control\);\s*control\.commit\(\(\) => setSelectedDocumentDetailVersion\(\(current\) => current \+ 1\)\);/
     );
   });
 
