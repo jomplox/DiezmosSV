@@ -1473,6 +1473,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function downloadF960(format: "csv" | "xlsx") {
+    if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
+      setToast("Revise el rango de fechas");
+      return;
+    }
     await runAction(`export-${format}`, async (control) => {
       const { blob, contentDisposition } = await fetchAccountDownload(`/api/exports/f960.${format}?${exportParams(exportStartDate, exportEndDate)}`);
       const href = URL.createObjectURL(blob);
@@ -1885,13 +1889,26 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function createUser() {
+    const name = newUser.name.trim();
+    const email = newUser.email.trim().toLowerCase();
+    if (!name || !email) {
+      setToast("Ingrese nombre y correo del usuario");
+      return;
+    }
+    if (!isValidEmail(email)) {
+      setToast("Ingrese un correo válido");
+      return;
+    }
     const passwordError = passwordPolicyMessage(newUser.password);
     if (passwordError) {
       setToast(passwordError);
       return;
     }
     await runAction("create-user", async (control) => {
-      const created = await accountApi<{ user: User }>("/api/users", { method: "POST", body: newUser });
+      const created = await accountApi<{ user: User }>("/api/users", {
+        method: "POST",
+        body: { ...newUser, name, email }
+      });
       if (!control.commit(() => {
         setToast(`Usuario creado: ${created.user.email}`);
         setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
@@ -2284,7 +2301,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                   />
                 </label>
                 {view !== "failures" && (
-                  <select value={status} onChange={(event) => setStatus(event.target.value)}>
+                  <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Estado del documento">
                     <option value="">Todos</option>
                     <option value="ACCEPTED">Aceptados</option>
                     <option value="TRANSMISSION_PENDING">En trámite</option>
@@ -2390,6 +2407,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                   placeholder="Filtrar por acción, documento o usuario"
                   value={auditQuery}
                   onChange={(event) => setAuditQuery(event.target.value)}
+                  aria-label="Filtrar auditoría"
                 />
               </label>
               <button onClick={() => void refresh()}>

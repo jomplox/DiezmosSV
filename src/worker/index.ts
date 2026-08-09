@@ -2166,13 +2166,28 @@ async function handleUserList(ctx: ApiRouteContext): Promise<Response> {
 
 async function handleUserCreate(ctx: ApiRouteContext): Promise<Response> {
   const actor = ctx.actor!;
-  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as unknown as { email: string; name: string; role: Role; password: string };
+  const body = (await readJsonObject(ctx.request, { limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES, malformed: "throw" })) as {
+    email?: unknown;
+    name?: unknown;
+    role?: unknown;
+    password?: unknown;
+  };
+  const input = userCreateInput(body);
+  if (input instanceof Response) return input;
   // Only an OWNER may mint another OWNER; otherwise an ADMIN could self-escalate by
   // creating an OWNER account and then using the OWNER-only credential routes.
-  if (body.role === "OWNER" && actor.role !== "OWNER") {
+  if (input.role === "OWNER" && actor.role !== "OWNER") {
     return jsonResponse({ error: "owner_role_required", message: "Solo un propietario puede asignar el rol de propietario" }, { status: 403 });
   }
-  const created = await ctx.auth.createUser(body);
+  let created;
+  try {
+    created = await ctx.auth.createUser(input);
+  } catch (error) {
+    if (error instanceof PasswordPolicyError) {
+      return jsonResponse({ error: "invalid_user_password", message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
   await ctx.repo.createAudit({ actorType: "USER", actorId: actor.id, action: "USER_CREATED", entityType: "user", entityId: created.id, summary: created.email });
   return jsonResponse({ user: created }, { status: 201 });
 }
@@ -2835,6 +2850,33 @@ function userPatchInput(body: { role?: unknown; disabled?: unknown; name?: unkno
     patch.disabled = body.disabled;
   }
   return patch;
+}
+
+function userCreateInput(body: {
+  role?: unknown;
+  name?: unknown;
+  email?: unknown;
+  password?: unknown;
+}): Response | { role: Role; name: string; email: string; password: string } {
+  if (typeof body.name !== "string" || !body.name.trim()) {
+    return jsonResponse({ error: "invalid_user_name", message: "Ingrese nombre del usuario" }, { status: 400 });
+  }
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  if (!email || !isValidEmail(email)) {
+    return jsonResponse({ error: "invalid_user_email", message: "Ingrese correo válido" }, { status: 400 });
+  }
+  if (!isRole(body.role)) {
+    return jsonResponse({ error: "invalid_user_role", message: "Seleccione un rol válido" }, { status: 400 });
+  }
+  if (typeof body.password !== "string" || !body.password) {
+    return jsonResponse({ error: "invalid_user_password", message: "Ingrese contraseña inicial" }, { status: 400 });
+  }
+  return {
+    name: body.name.trim(),
+    email,
+    role: body.role,
+    password: body.password
+  };
 }
 
 function isRole(value: unknown): value is Role {
