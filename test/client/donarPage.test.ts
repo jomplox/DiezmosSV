@@ -714,8 +714,8 @@ describe("donar thank-you page", () => {
 describe("donor cold-load paints once", () => {
   // The donor route hides #root until data-donor-ready. That gate waited only on
   // document.fonts.ready, so branding-dependent content still swapped in AFTER the
-  // page was visible: the built-in default vector was replaced by the church's donor
-  // logo (a real network image), and the support line changed. Two visible reflows
+  // page was visible: the built-in default vector was replaced by the configured
+  // donor logo (a real network image), and the support line changed. Two visible reflows
   // on every cold load. The gate must also wait for branding to settle.
   it("waits for branding, not just fonts, before revealing the donor page", () => {
     expect(mainSource).toContain("document.fonts?.ready");
@@ -1468,9 +1468,9 @@ describe("two-door landing copy", () => {
     // The SV flag (an inline SVG badge) and the closing period are appended in
     // JSX — the emoji rendered as a blank box, leaving an orphaned period.
     expect(DONAR_LANDING_UNIFIER_LEAD).toBe("Todos los diezmos y ofrendas apoyan la obra de");
-    expect(donarLandingUnifierChurch("MISION EXAMPLEORGANIZATION")).toBe("MISION EXAMPLEORGANIZATION en El Salvador");
-    expect(`${DONAR_LANDING_UNIFIER_LEAD} ${donarLandingUnifierChurch("MISION EXAMPLEORGANIZATION")}`).toBe(
-      "Todos los diezmos y ofrendas apoyan la obra de MISION EXAMPLEORGANIZATION en El Salvador"
+    expect(donarLandingUnifierChurch("Misión ExampleOrganization")).toBe("Misión ExampleOrganization en El Salvador");
+    expect(`${DONAR_LANDING_UNIFIER_LEAD} ${donarLandingUnifierChurch("Misión ExampleOrganization")}`).toBe(
+      "Todos los diezmos y ofrendas apoyan la obra de Misión ExampleOrganization en El Salvador"
     );
     expect(donarLandingUnifierChurch(null)).toBe("esta iglesia en El Salvador");
   });
@@ -1538,8 +1538,8 @@ describe("two-door landing source contract", () => {
     expect(landingSource).toContain('stroke="#595959"');
   });
 
-  it("reuses the default logo vector paths on the landing", () => {
-    // The landing shows the default logo. Its vector paths come from orgLogo.ts.
+  it("reuses the org logo vector paths on the landing", () => {
+    // The landing shows the org logo. Its vector paths come from orgLogo.ts.
     expect(donarSource).toContain("ORG_LOGO_PATHS");
   });
 
