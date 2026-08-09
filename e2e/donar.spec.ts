@@ -302,9 +302,9 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   const embed = page.locator("iframe.donar-embed");
   await expect(embed).toBeVisible({ timeout: 15_000 });
   await expect(embed).toHaveAttribute("src", /mock\.wompi\.sv.*esWidget=1/);
-  for (const { reportedHeight, renderedHeight } of [
-    { reportedHeight: 430, renderedHeight: 465 },
-    { reportedHeight: 710, renderedHeight: 745 }
+  for (const { reportedHeight, renderedHeight, inlineHeight } of [
+    { reportedHeight: 430, renderedHeight: 465, inlineHeight: 465 },
+    { reportedHeight: 710, renderedHeight: 546, inlineHeight: 745 }
   ]) {
     await page.evaluate((height) => {
       window.dispatchEvent(
@@ -315,6 +315,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
       );
     }, reportedHeight);
     await expect(embed).toHaveCSS("height", `${renderedHeight}px`);
+    await expect(embed).toHaveAttribute("style", `height: ${inlineHeight}px;`);
   }
 
   // On mobile the hosted Wompi surface reaches the viewport edges so the only
@@ -344,6 +345,8 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(mobileCardBox!.x + mobileCardBox!.width).toBeCloseTo(mobileViewport.width, 1);
   expect(mobileEmbedBox!.x).toBeCloseTo(0, 1);
   expect(mobileEmbedBox!.x + mobileEmbedBox!.width).toBeCloseTo(mobileViewport.width, 1);
+  expect(mobileEmbedBox!.height).toBeCloseTo(mobileViewport.height * 0.78, 1);
+  expect(await embed.getAttribute("scrolling")).toBeNull();
   expect(mobileShellStyles).toEqual({
     screenPadding: "0px",
     cardBorderWidth: "0px",
@@ -362,6 +365,7 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
   expect(desktopEmbedBox).not.toBeNull();
   expect(desktopEmbedBox!.x).toBeCloseTo(cardBox!.x + 1, 1);
   expect(desktopEmbedBox!.x + desktopEmbedBox!.width).toBeCloseTo(cardBox!.x + cardBox!.width - 1, 1);
+  expect(desktopEmbedBox!.height).toBeCloseTo(745, 1);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
 
   await expect(page.getByRole("button", { name: "¿Problemas con el formulario? Continúe aquí" })).toBeVisible();
