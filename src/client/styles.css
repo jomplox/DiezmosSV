@@ -4142,7 +4142,7 @@ pre {
   border-color: transparent;
 }
 
-/* US-donor Givebutter block: the FMCE explanation + embedded giving form. */
+/* US-donor Givebutter block: the US partner explanation + embedded giving form. */
 .donar-givebutter {
   display: grid;
   gap: 14px;

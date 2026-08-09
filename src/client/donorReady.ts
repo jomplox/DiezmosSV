@@ -3,8 +3,8 @@
 // index.html hides #root on the donor route and React reveals it by setting
 // data-donor-ready. That gate originally waited only on document.fonts.ready, which
 // stopped the unstyled-text flash but not the branded one: /api/branding resolves after
-// the page is already visible, so the built-in default vector was swapped for the church's
-// donor logo (a real network image) and the support line changed — two visible reflows
+// the page is already visible, so the built-in default vector was swapped for the
+// configured donor logo (a real network image) and the support line changed — two visible reflows
 // on every cold load.
 //
 // donarPage owns the branding fetch, so it signals here when branding has settled

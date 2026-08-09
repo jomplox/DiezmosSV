@@ -17,7 +17,7 @@ describe("credential status", () => {
       MH_CERT_XML_PART_1: "<CertificadoMH>",
       MH_CERT_XML_PART_2: "</CertificadoMH>",
       MH_CERT_PASSWORD: "cert-password",
-      EMISOR_CONFIG_JSON: "{\"nombre\":\"Iglesia Ejemplo\"}",
+      EMISOR_CONFIG_JSON: "{\"nombre\":\"MISION EXAMPLEORGANIZATION\"}",
       WOMPI_API_SECRET: "wompi-secret",
       EMAIL: { send: async () => ({ messageId: "message-1" }) } as SendEmail,
       EMAIL_PROVIDER_URL: "https://mail.example/send",
@@ -69,7 +69,7 @@ describe("credential status", () => {
     expect(JSON.stringify(status)).not.toContain("wompi-secret");
     expect(JSON.stringify(status)).not.toContain("email-key");
     expect(JSON.stringify(status)).not.toContain("0614");
-    expect(JSON.stringify(status)).not.toContain("Iglesia Ejemplo");
+    expect(JSON.stringify(status)).not.toContain("MISION EXAMPLEORGANIZATION");
   });
 
   it.each([

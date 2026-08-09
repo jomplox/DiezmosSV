@@ -163,7 +163,7 @@ function emailDocument(
   logoUrl: string | null | undefined,
   blocks: string[]
 ): string {
-  // A configured church contact wins; otherwise fall back to the historical fmce default.
+  // A configured church contact wins; otherwise fall back to the historical default.
   const contact = escapeHtml(supportEmail?.trim() || DEFAULT_SUPPORT_EMAIL);
   const logo = headerLogo(logoUrl, organizationName);
   // The logo is centered above the name; without one, the header keeps its historical

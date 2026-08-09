@@ -74,7 +74,7 @@ describe("Wompi API reconciliation", () => {
   const intent = {
     id: "di_recover",
     wompi_id_enlace: 9000001,
-    amount_cents: 17800
+    amount_cents: 12500
   };
 
   function approvedLink(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -94,12 +94,12 @@ describe("Wompi API reconciliation", () => {
           CodigoPais: "SV",
           CodigoRegion: "06"
         },
-        fechaTransaccion: "2026-07-29T18:21:14-06:00",
+        fechaTransaccion: "2026-01-15T10:00:00-06:00",
         idTransaccion: "TEST-TXN-0000000001",
         esReal: true,
         esAprobada: true,
         codigoAutorizacion: "000001",
-        monto: 178,
+        monto: 125,
         idExterno: null
       }],
       ...overrides
@@ -114,11 +114,11 @@ describe("Wompi API reconciliation", () => {
       ): ReturnType<typeof normalizeWompiWebhook> | null;
     };
     const recovered = (wompiDomain as unknown as Reconciler).wompiWebhookFromPaymentLink(
-      { id: "di_recover", wompi_id_enlace: 9000001, amount_cents: 17800 },
+      { id: "di_recover", wompi_id_enlace: 9000001, amount_cents: 12500 },
       {
         idAplicativo: "app-1",
         nombreEnlace: "di_recover",
-        monto: 178,
+        monto: 125,
         nombreProducto: "Diezmos y Ofrendas",
         usable: false,
         transaccionCompra: null,
@@ -158,23 +158,23 @@ describe("Wompi API reconciliation", () => {
             CodigoRegion: "06"
           },
           resultadoTransaccion: 0,
-          fechaTransaccion: "2026-07-29T18:21:14-06:00",
-          montoOriginal: 178,
+          fechaTransaccion: "2026-01-15T10:00:00-06:00",
+          montoOriginal: 125,
           idTransaccion: "TEST-TXN-0000000001",
           esReal: true,
           esAprobada: true,
           codigoAutorizacion: "000001",
           mensaje: null,
           formaPago: 0,
-          monto: 178,
+          monto: 125,
           idExterno: null
         }],
         nombreAplicativo: "Misión ExampleOrganization",
         cantidadPagosExitosos: 1,
         imagenes: [],
         vigencia: {
-          fechaInicio: "2026-07-29T18:17:44-06:00",
-          fechaFin: "2026-07-29T19:17:44-06:00"
+          fechaInicio: "2026-01-15T09:00:00-06:00",
+          fechaFin: "2026-01-15T11:00:00-06:00"
         },
         limitesDeUso: {
           cantidadMaximaPagosExitosos: 1,
@@ -192,8 +192,8 @@ describe("Wompi API reconciliation", () => {
 
     expect(recovered).toEqual({
       IdCuenta: "",
-      FechaTransaccion: "2026-07-29T18:21:14-06:00",
-      Monto: "178",
+      FechaTransaccion: "2026-01-15T10:00:00-06:00",
+      Monto: "125",
       IdTransaccion: "TEST-TXN-0000000001",
       ResultadoTransaccion: "ExitosaAprobada",
       CodigoAutorizacion: "000001",
@@ -239,7 +239,7 @@ describe("Wompi API reconciliation", () => {
   it("rejects an approved transaction whose amount differs from the immutable intent", () => {
     const link = approvedLink();
     const [transaction] = link.transacciones as Array<Record<string, unknown>>;
-    transaction.monto = 177.99;
+    transaction.monto = 124.99;
 
     expect(() => wompiDomain.wompiWebhookFromPaymentLink(intent, link)).toThrow(/monto/i);
   });

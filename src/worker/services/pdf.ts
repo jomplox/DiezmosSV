@@ -1,6 +1,7 @@
-import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
-import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
+import { BRANDING_DONOR_LOGO_OBJECT_KEY } from "./branding";
+import { ORG_LOGO_INK_VIEW_HEIGHT, ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import { formatDocument } from "../../shared/documentFormat";
 import { onlyDigits } from "../utils/guards";
@@ -14,7 +15,115 @@ const LOGO_X = 28;
 const LOGO_BOTTOM_Y = 729;
 const LOGO_HEIGHT = 42;
 
-export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Array> {
+// The deployment's Marca logo, already fetched and in a raster format pdf-lib can
+// embed. The donor slot is the one these documents use: a receipt/constancia is a
+// donor-facing sheet printed on white, which is exactly what that slot is uploaded
+// for, while the other slot dresses the admin panel and email chrome.
+export interface PdfBrandingLogo {
+  bytes: Uint8Array;
+  format: "png" | "jpeg";
+}
+
+// Only the ARCHIVE binding is needed; kept structural so callers (and tests) can pass
+// a bare object, mirroring branding.ts's BrandingOriginEnv.
+export interface BrandingLogoArchiveEnv {
+  ARCHIVE?: R2Bucket;
+}
+
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+const JPEG_SIGNATURE = [0xff, 0xd8, 0xff];
+
+// Reads the stored donor branding logo once, for the caller to hand to every document
+// it renders in that request. Returns null for every unusable case — no logo stored,
+// R2 unavailable or erroring, or a format pdf-lib cannot embed (SVG is accepted by the
+// upload form for the web chrome, but pdf-lib embeds PNG and JPEG only) — and the
+// documents then draw the built-in vector. A misconfigured logo must never be able to
+// fail a receipt, so nothing here throws.
+export async function loadPdfBrandingLogo(env: BrandingLogoArchiveEnv): Promise<PdfBrandingLogo | null> {
+  try {
+    const object = await env.ARCHIVE?.get(BRANDING_DONOR_LOGO_OBJECT_KEY);
+    if (!object) {
+      return null;
+    }
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    const format = embeddableLogoFormat(bytes);
+    return format ? { bytes, format } : null;
+  } catch {
+    return null;
+  }
+}
+
+// Sniffs the bytes instead of trusting the recorded content type: the upload stores
+// whatever Content-Type the browser sent, and a mislabelled file would only surface as
+// a throw in the middle of rendering a receipt.
+function embeddableLogoFormat(bytes: Uint8Array): PdfBrandingLogo["format"] | null {
+  if (startsWith(bytes, PNG_SIGNATURE)) {
+    return "png";
+  }
+  return startsWith(bytes, JPEG_SIGNATURE) ? "jpeg" : null;
+}
+
+function startsWith(bytes: Uint8Array, signature: number[]): boolean {
+  return bytes.length >= signature.length && signature.every((byte, index) => bytes[index] === byte);
+}
+
+// The fixed slot the logo occupies on a document: `height` tall, anchored with its
+// bottom edge at `bottomY`, as wide as the built-in artwork's view box at that height.
+export interface OrgLogoSlot {
+  x: number;
+  bottomY: number;
+  height: number;
+  // Centre a narrower raster inside the slot (the constancia) instead of aligning it
+  // to the slot's left edge (the CDE).
+  centered: boolean;
+}
+
+// Draws the configured branding logo into the slot, falling back to the built-in
+// vector whenever there is none or it cannot be embedded. The raster keeps its own
+// aspect ratio and is fitted inside the slot's width and the artwork's reserved ink
+// band (see orgLogo.ts), so neighbouring text keeps the clearance the layout assumes.
+export async function drawOrganizationLogo(
+  pdf: PDFDocument,
+  page: PDFPage,
+  slot: OrgLogoSlot,
+  logo?: PdfBrandingLogo | null
+): Promise<void> {
+  const scale = slot.height / ORG_LOGO_VIEW_BOX.height;
+  const slotWidth = ORG_LOGO_VIEW_BOX.width * scale;
+  const topY = slot.bottomY + slot.height;
+  const image = await embedBrandingLogo(pdf, logo);
+  if (image) {
+    const maxHeight = slot.height * (ORG_LOGO_INK_VIEW_HEIGHT / ORG_LOGO_VIEW_BOX.height);
+    const fit = Math.min(slotWidth / image.width, maxHeight / image.height);
+    const width = image.width * fit;
+    const height = image.height * fit;
+    page.drawImage(image, {
+      x: slot.centered ? slot.x + (slotWidth - width) / 2 : slot.x,
+      y: topY - height,
+      width,
+      height
+    });
+    return;
+  }
+  for (const path of ORG_LOGO_PATHS) {
+    page.drawSvgPath(path, { x: slot.x, y: topY, scale, color: rgb(0, 0, 0) });
+  }
+}
+
+async function embedBrandingLogo(pdf: PDFDocument, logo: PdfBrandingLogo | null | undefined): Promise<PDFImage | null> {
+  if (!logo) {
+    return null;
+  }
+  try {
+    return logo.format === "png" ? await pdf.embedPng(logo.bytes) : await pdf.embedJpg(logo.bytes);
+  } catch {
+    // Truncated, corrupt, or a variant pdf-lib rejects (e.g. interlaced PNG): the
+    // document still has to be issued, so fall through to the built-in vector.
+    return null;
+  }
+}
+
+export async function renderDtePdf(record: DteDocumentRecord, logo?: PdfBrandingLogo | null): Promise<Uint8Array> {
   const document = JSON.parse(record.plain_json) as CdePdfJson;
   const emisor = document.emisor ?? document.donatario ?? {};
   const receptor = document.receptor ?? document.donante ?? {};
@@ -28,7 +137,7 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   const grayFill = rgb(0.88, 0.88, 0.88);
   const green = rgb(0.0, 0.46, 0.07);
 
-  drawOrganizationLogo(page);
+  await drawOrganizationLogo(pdf, page, { x: LOGO_X, bottomY: LOGO_BOTTOM_Y, height: LOGO_HEIGHT, centered: false }, logo);
   drawCentered(page, "DOCUMENTO TRIBUTARIO ELECTRÓNICO", 769, 9, bold, 190, 230);
   drawCentered(page, "COMPROBANTE DE DONACIÓN", 744, 14, bold, 170, 275);
   drawQr(page, buildDteQrPayload(record), 508, 690, 82);
@@ -85,14 +194,6 @@ export async function renderDtePdf(record: DteDocumentRecord): Promise<Uint8Arra
   }
 
   return pdf.save();
-}
-
-function drawOrganizationLogo(page: PDFPage): void {
-  const scale = LOGO_HEIGHT / ORG_LOGO_VIEW_BOX.height;
-  const topY = LOGO_BOTTOM_Y + LOGO_HEIGHT;
-  for (const path of ORG_LOGO_PATHS) {
-    page.drawSvgPath(path, { x: LOGO_X, y: topY, scale, color: rgb(0, 0, 0) });
-  }
 }
 
 function drawRoundedRectangle(

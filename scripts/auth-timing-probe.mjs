@@ -9,6 +9,7 @@ import { setTimeout as delay } from "node:timers/promises";
 const repositoryRoot = process.cwd();
 const wrangler = resolve(repositoryRoot, "node_modules/.bin/wrangler");
 const workerMain = resolve(repositoryRoot, "src/worker/index.ts");
+const authImplementation = resolve(repositoryRoot, "src/worker/services/auth.ts");
 const migrationsDirectory = resolve(repositoryRoot, "migrations");
 const databaseName = "diezmossv-auth-timing-db";
 const taskRootPrefix = "diezmossv-auth-timing-";
@@ -44,19 +45,25 @@ const smokeMode = smokeModeOption();
 const knownPassword = "Known#Password2026";
 const wrongPassword = "Wrong#Password2026";
 const knownSalt = "known-salt";
-const knownFirst = "2a48b73a4b58947ff6b4a5a9535702d5cc2a43e524c7d71b6bb89353147fc467";
-const knownSecond = "e2943461247a19a80553d387e3bdd3430becc228e3375d09b651c3e0bf59dd31";
+// The stored-credential format and its work factor are deliberately not restated in
+// this script. They are read from the implementation at runtime so this file carries
+// no copy that can drift from the application or outlive it.
+const storedFormat = await loadStoredPasswordFormat();
+const knownFirst = await derivedDigest(knownPassword, knownSalt);
+const knownSecond = await derivedDigest(knownFirst, `${knownSalt}${storedFormat.chainSaltSuffix}`);
+const currentStoredHash = storedFormat.format(storedFormat.chainScheme, knownSecond);
+const legacyStoredHash = storedFormat.format(storedFormat.legacyScheme, knownFirst);
 
 const invalidClasses = [
   { name: "missing", storedHash: null, disabled: false },
-  { name: "disabled", storedHash: `pbkdf2-chain-v1$100000$${knownSecond}`, disabled: true },
-  { name: "current", storedHash: `pbkdf2-chain-v1$100000$${knownSecond}`, disabled: false },
-  { name: "versioned-legacy", storedHash: `pbkdf2$100000$${knownFirst}`, disabled: false },
+  { name: "disabled", storedHash: currentStoredHash, disabled: true },
+  { name: "current", storedHash: currentStoredHash, disabled: false },
+  { name: "versioned-legacy", storedHash: legacyStoredHash, disabled: false },
   { name: "countless-legacy", storedHash: knownFirst, disabled: false }
 ];
 const successClasses = [
-  { name: "current-success", storedHash: `pbkdf2-chain-v1$100000$${knownSecond}` },
-  { name: "legacy-upgrade-success", storedHash: `pbkdf2$100000$${knownFirst}` }
+  { name: "current-success", storedHash: currentStoredHash },
+  { name: "legacy-upgrade-success", storedHash: legacyStoredHash }
 ];
 
 const activityAbort = new AbortController();
@@ -737,6 +744,55 @@ async function configuredOrAvailablePort() {
   });
   if (selected === null) throw new Error("Unable to allocate a local timing-probe port");
   return selected;
+}
+
+// Reads the stored-credential parameters straight from the implementation instead of
+// duplicating them here. A rename or a work-factor change fails loudly rather than
+// leaving the probe measuring a shape the application no longer writes.
+async function loadStoredPasswordFormat() {
+  const source = await readFile(authImplementation, "utf8");
+  const iterations = sourceNumberConstant(source, "PASSWORD_PBKDF2_ITERATIONS");
+  return {
+    iterations,
+    chainScheme: sourceStringConstant(source, "PASSWORD_HASH_CHAIN_SCHEME"),
+    legacyScheme: sourceStringConstant(source, "PASSWORD_HASH_LEGACY_SCHEME"),
+    chainSaltSuffix: sourceStringConstant(source, "PASSWORD_CHAIN_SALT_SUFFIX"),
+    format: (scheme, digest) => [scheme, iterations, digest].join("$")
+  };
+}
+
+function sourceStringConstant(source, name) {
+  const match = new RegExp(`\\bconst ${name} = "([^"\\n]*)";`).exec(source);
+  if (!match) {
+    throw new Error(`Unable to read ${name} from ${authImplementation}`);
+  }
+  return match[1];
+}
+
+function sourceNumberConstant(source, name) {
+  const match = new RegExp(`\\bconst ${name} = ([0-9_]+);`).exec(source);
+  const parsed = match ? Number(match[1].replaceAll("_", "")) : Number.NaN;
+  if (!Number.isInteger(parsed) || parsed < 1) {
+    throw new Error(`Unable to read ${name} from ${authImplementation}`);
+  }
+  return parsed;
+}
+
+async function derivedDigest(secret, salt) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const bits = await crypto.subtle.deriveBits(
+    { name: "PBKDF2", salt: encoder.encode(salt), iterations: storedFormat.iterations, hash: "SHA-256" },
+    key,
+    256
+  );
+  return [...new Uint8Array(bits)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function numberOption(name, fallback, minimum, maximum) {

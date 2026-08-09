@@ -2,14 +2,20 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { formatDocument } from "../../shared/documentFormat";
 import { EL_SALVADOR_TIME_ZONE, formatElSalvadorDate } from "../../shared/legalWindows";
 import { formatCents } from "../../shared/money";
-import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import type { AnnualCertificateDonorTarget, Repository } from "../storage/repository";
 import { getEmisorConfig } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { loadEmailBranding } from "./branding";
 import { EmailService } from "./email";
 import { certificateEmailHtml } from "./emailHtml";
-import { renderDtePdf } from "./pdf";
+import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
+import {
+  drawOrganizationLogo,
+  loadPdfBrandingLogo,
+  renderDtePdf,
+  type OrgLogoSlot,
+  type PdfBrandingLogo
+} from "./pdf";
 
 const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
 const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
@@ -109,9 +115,12 @@ export interface RenderCertificateInput {
   // Branding accent (hex #rrggbb) painting the title + table header; the historical
   // teal remains the default so an unbranded deployment renders unchanged.
   accentColor?: string;
+  // The deployment's Marca logo, loaded once by the caller and reused by the summary
+  // page and every appended CDE. Absent/unusable keeps the built-in vector.
+  logo?: PdfBrandingLogo | null;
 }
 
-// Renders the annual donor certificate. Reuses the CDE branding (default vector logo,
+// Renders the annual donor certificate. Reuses the CDE branding (vector logo,
 // Helvetica) but is deliberately NOT a DTE: it makes no Ministerio de Hacienda seal
 // claim. The individual CDE remain the fiscal vouchers; this is informational.
 // Converts the branding accent (#rrggbb) into pdf-lib color space; falls back to the
@@ -134,7 +143,7 @@ export async function renderCertificatePdf(input: RenderCertificateInput): Promi
   const muted = rgb(0.32, 0.32, 0.32);
   const brand = accentRgb(input.accentColor);
 
-  drawOrganizationLogo(page);
+  await drawOrganizationLogo(pdf, page, certificateLogoSlot(), input.logo);
   drawCentered(page, input.emisor.nombre.toUpperCase(), 724, 11, bold, 0, PAGE_WIDTH, black);
   drawCentered(page, `NIT: ${formatDocument(input.emisor.numDocumento)}`, 710, 8.5, regular, 0, PAGE_WIDTH, muted);
   drawCentered(page, `Constancia de Donaciones ${input.year}`, 682, 17, bold, 0, PAGE_WIDTH, brand);
@@ -189,7 +198,7 @@ export async function renderCertificateDossierPdf(input: RenderCertificateInput)
   for (const record of ordered) {
     let dteBytes: Uint8Array;
     try {
-      dteBytes = await renderDtePdf(record);
+      dteBytes = await renderDtePdf(record, input.logo);
     } catch (error) {
       const cause = error instanceof Error ? error.message : String(error);
       throw new Error(`No se pudo generar el comprobante ${record.numero_control} para la constancia: ${cause}`);
@@ -278,14 +287,11 @@ function drawFooter(page: PDFPage, emisorNombre: string, regular: PDFFont): void
   page.drawText("Los CDE individuales constituyen los comprobantes fiscales.", { x: MARGIN, y: 46, size: 8, font: regular, color: muted });
 }
 
-function drawOrganizationLogo(page: PDFPage): void {
-  const scale = LOGO_HEIGHT / ORG_LOGO_VIEW_BOX.height;
-  const topY = LOGO_BOTTOM_Y + LOGO_HEIGHT;
-  const width = ORG_LOGO_VIEW_BOX.width * scale;
-  const x = (PAGE_WIDTH - width) / 2;
-  for (const path of ORG_LOGO_PATHS) {
-    page.drawSvgPath(path, { x, y: topY, scale, color: rgb(0, 0, 0) });
-  }
+// The logo slot, centred on the page. Its width is the built-in artwork's at
+// LOGO_HEIGHT; a narrower branding raster is centred inside it.
+function certificateLogoSlot(): OrgLogoSlot {
+  const width = ORG_LOGO_VIEW_BOX.width * (LOGO_HEIGHT / ORG_LOGO_VIEW_BOX.height);
+  return { x: (PAGE_WIDTH - width) / 2, bottomY: LOGO_BOTTOM_Y, height: LOGO_HEIGHT, centered: true };
 }
 
 function drawCentered(page: PDFPage, text: string, y: number, size: number, font: PDFFont, x = 0, width = PAGE_WIDTH, color = rgb(0, 0, 0)): void {
@@ -427,6 +433,8 @@ export async function sendAnnualCertificates(
   const emisorConfig = getEmisorConfig(env);
   const emisor: CertificateEmisor = { nombre: emisorConfig.nombreComercial || emisorConfig.nombre, numDocumento: emisorConfig.numDocumento };
   const branding = await loadEmailBranding(repo, env);
+  // One R2 read for the whole batch: every donor's summary page and appended CDE reuse it.
+  const logo = await loadPdfBrandingLogo(env);
   const email = new EmailService(env, undefined, {
     organizationName: emisor.nombre,
     senderName: branding.senderName,
@@ -476,7 +484,7 @@ export async function sendAnnualCertificates(
         throw new CertificateDossierChangedError();
       }
       const donor = donorSummary(documents, snapshot);
-      const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
+      const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor, logo });
       const totalLabel = formatCents(donor.totalCents);
       await email.sendDonorCertificate({
         toEmail: currentDonorEmail,

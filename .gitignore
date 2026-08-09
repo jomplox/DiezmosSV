@@ -11,6 +11,9 @@ dist/
 !.dev.vars.example
 .DS_Store
 
+# Local forbidden-host list for scripts/check-private-boundary.mjs. Never commit it.
+.private-boundary-hosts
+
 # Playwright e2e artifacts.
 /test-results/
 /playwright-report/
