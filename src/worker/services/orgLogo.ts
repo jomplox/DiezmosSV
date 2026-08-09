@@ -12,6 +12,10 @@ export const ORG_LOGO_VIEW_BOX = { width: 704, height: 228 } as const;
 // The ink deliberately stops at y=186 of the 228-unit box. The certificate prints
 // the organisation name immediately under the logo box, so artwork that reaches the
 // full box height collides with it; the reserved bottom band keeps them clear.
+// A deployment's own (raster) logo is fitted into the same 186-unit ink band for
+// exactly that reason — see drawOrganizationLogo in pdf.ts.
+export const ORG_LOGO_INK_VIEW_HEIGHT = 186;
+
 export const ORG_LOGO_PATHS = [
   "M 97 8 C 146.15 8 186 47.85 186 97 C 186 146.15 146.15 186 97 186 C 47.85 186 8 146.15 8 97 C 8 47.85 47.85 8 97 8 Z M 97 42 C 66.62 42 42 66.62 42 97 C 42 127.38 66.62 152 97 152 C 127.38 152 152 127.38 152 97 C 152 66.62 127.38 42 97 42 Z",
   "M 97 74 L 120 97 L 97 120 L 74 97 Z",

@@ -5,7 +5,7 @@ import { isRecord } from "../utils/guards";
 import { dteEmailHtml, passwordResetEmailHtml } from "./emailHtml";
 import { resolveEmailReplyToAddress, resolveEmailSenderName } from "./emailSender";
 import { assertSafeEmailSubject, DEFAULT_EMAIL_TEMPLATES, renderEmailTemplate, TRANSITORIO_RECEIPT_TEMPLATE, type EmailEvidenceType, type EmailTemplateSettings, type EmailTemplateValue } from "./emailTemplates";
-import { DTE_PDF_RENDERER_VERSION, renderDtePdf } from "./pdf";
+import { DTE_PDF_RENDERER_VERSION, loadPdfBrandingLogo, renderDtePdf } from "./pdf";
 
 export interface EmailDeliveryResult {
   providerResponse: unknown;
@@ -211,7 +211,9 @@ export class EmailService {
     idempotencyKey?: string,
     beforeProviderDispatch?: () => void | Promise<void>
   ): Promise<EmailDeliveryResult> {
-    const pdfBytes = await renderDtePdf(record);
+    // The attached comprobante carries the same configured logo as the email chrome
+    // around it; loadPdfBrandingLogo yields null (built-in vector) on any problem.
+    const pdfBytes = await renderDtePdf(record, await loadPdfBrandingLogo(this.env));
     const dteJsonBytes = new TextEncoder().encode(record.plain_json);
     const evidence = {
       emailType,
