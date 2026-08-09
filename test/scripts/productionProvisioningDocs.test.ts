@@ -56,6 +56,69 @@ wrangler secret put X --env staging`],
     "node_modules/.bin/wrangler secret put X --env staging"
   ],
   [
+    "npx launcher after package value",
+    "npx --package other wrangler secret put X --env staging"
+  ],
+  [
+    "npx short-package launcher after value",
+    "npx -p other wrangler secret put X --env staging"
+  ],
+  [
+    "npm exec launcher after package value",
+    "npm exec --package other -- wrangler secret put X --env staging"
+  ],
+  [
+    "npm x versioned launcher after package value",
+    "npm x -p other -- wrangler@latest secret put X --env staging"
+  ],
+  [
+    "npx launcher after package assignment",
+    "npx --package=other wrangler@latest secret put X --env staging"
+  ],
+  [
+    "npm exec launcher after short-package assignment",
+    "npm exec -p=other -- wrangler secret put X --env staging"
+  ],
+  [
+    "npm x launcher after attached short package",
+    "npm x -pother -- wrangler@latest secret put X --env staging"
+  ],
+  [
+    "launcher after multiple package options",
+    "npx --package first -p second wrangler secret put X --env staging"
+  ],
+  [
+    "launcher after boolean flags around package",
+    "npx --yes --package other -y wrangler@latest secret put X --env staging"
+  ],
+  [
+    "npx launcher after separator",
+    "npx --yes -- wrangler secret put X --env staging"
+  ],
+  [
+    "quoted launcher after quoted package value",
+    'npx --package "other" "wrangler@latest" secret put X --env staging'
+  ],
+  [
+    "continued launcher after package value",
+    `npm x --package \\
+  other -- \\
+  wrangler secret put X --env staging`
+  ],
+  [
+    "commented launcher after package value",
+    "npx --package other wrangler secret put X --env staging # guarded"
+  ],
+  [
+    "package-option local lookalike",
+    "npx --package other wrangler d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  ["missing long package value", "npx --package"],
+  ["missing short package value", "npm exec -p -- wrangler secret put X"],
+  ["empty package assignment", "npm x --package= echo safe"],
+  ["unknown npx option", "npx --mystery echo safe"],
+  ["unknown npm-exec option", "npm exec --mystery echo safe"],
+  [
     "quoted versioned npx",
     'npx --yes "wrangler@4.115.0" secret put X --env staging'
   ],
@@ -182,6 +245,38 @@ const allowedWranglerDocumentationCases = [
   [
     "local binary lookalike",
     "node_modules/.bin/wrangler-extra secret put X --env staging"
+  ],
+  [
+    "npx Wrangler package with echo launcher",
+    "npx --package wrangler echo safe"
+  ],
+  [
+    "npm exec Wrangler package with echo launcher",
+    "npm exec --package wrangler -- echo safe"
+  ],
+  [
+    "npx versioned Wrangler package with echo launcher",
+    "npx --package wrangler@latest echo safe"
+  ],
+  [
+    "npx Wrangler package assignment with echo launcher",
+    "npx --package=wrangler echo safe"
+  ],
+  [
+    "npm exec Wrangler short-package assignment with echo launcher",
+    "npm exec -p=wrangler -- echo safe"
+  ],
+  [
+    "npm x Wrangler attached package with echo launcher",
+    "npm x -pwrangler -- echo safe"
+  ],
+  [
+    "multiple Wrangler packages with echo launcher",
+    "npx --package wrangler -p wrangler@latest --yes echo safe"
+  ],
+  [
+    "quoted Wrangler package with quoted echo launcher",
+    'npm exec --package "wrangler@latest" -- "echo" safe'
   ]
 ] as const;
 
@@ -258,22 +353,57 @@ const directWranglerRecognizers: Array<{
   {
     family: "npx",
     matches: (tokens) =>
-      tokens[0] === "npx" && isWranglerToken(launcherToken(tokens, 1))
+      tokens[0] === "npx" && isPotentialWranglerLauncher(scanLauncher(tokens, 1))
   },
   {
     family: "npm-exec",
     matches: (tokens) =>
       tokens[0] === "npm" &&
       (tokens[1] === "exec" || tokens[1] === "x") &&
-      isWranglerToken(launcherToken(tokens, 2))
+      isPotentialWranglerLauncher(scanLauncher(tokens, 2))
   }
 ];
 
-function launcherToken(tokens: string[], startIndex: number): string | undefined {
+type LauncherScan =
+  | { status: "launcher"; token: string | undefined }
+  | { status: "ambiguous" };
+
+const booleanLauncherOptions = new Set(["--yes", "-y"]);
+
+function scanLauncher(tokens: string[], startIndex: number): LauncherScan {
   let index = startIndex;
-  while (tokens[index]?.startsWith("-") && tokens[index] !== "--") index += 1;
-  if (tokens[index] === "--") index += 1;
-  return tokens[index];
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "--") {
+      return { status: "launcher", token: tokens[index + 1] };
+    }
+    if (booleanLauncherOptions.has(token)) {
+      index += 1;
+      continue;
+    }
+    if (token === "--package" || token === "-p") {
+      const value = tokens[index + 1];
+      if (!value || value.startsWith("-")) return { status: "ambiguous" };
+      index += 2;
+      continue;
+    }
+    if (token.startsWith("--package=") || token.startsWith("-p=")) {
+      if (token.endsWith("=")) return { status: "ambiguous" };
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-p") && token.length > 2) {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("-")) return { status: "ambiguous" };
+    return { status: "launcher", token };
+  }
+  return { status: "launcher", token: undefined };
+}
+
+function isPotentialWranglerLauncher(scan: LauncherScan): boolean {
+  return scan.status === "ambiguous" || isWranglerToken(scan.token);
 }
 
 function isWranglerToken(token: string | undefined): boolean {
