@@ -28,7 +28,6 @@ import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
-  GIVEBUTTER_ACCOUNT_ID,
   GIVEBUTTER_CAMPAIGN,
   GIVEBUTTER_EMBED_BASE_URL,
   GIVEBUTTER_ENGLISH_NOTICE,
@@ -1130,7 +1129,7 @@ describe("donar wizard source contract", () => {
     expect(donarSource).toContain("¿Problemas con el formulario? Continúe aquí");
   });
 
-  it("shows the configured support contact on the donor screens, defaulting to fmce", () => {
+  it("shows the configured support contact on the donor screens, with a built-in default", () => {
     // The support contact is per-church branding now: DonarSupport renders the FETCHED
     // branding supportEmail, with DONAR_SUPPORT_EMAIL as the client-side default/fallback.
     // It stays a discreet mailto line at the bottom of the donor card.
@@ -1264,14 +1263,26 @@ describe("donar responsive donor layout", () => {
 });
 
 describe("givebutter constants", () => {
-  it("pins the FMCE account id and example-campaign campaign", () => {
-    expect(GIVEBUTTER_ACCOUNT_ID).toBe("EXAMPLEACCT00001");
-    expect(GIVEBUTTER_CAMPAIGN).toBe("example-campaign");
+  it("takes the campaign slug from build configuration, never from a source literal", () => {
+    // The deployment supplies its own campaign via VITE_GIVEBUTTER_CAMPAIGN at build
+    // time; the checked-in default is the neutral placeholder.
+    expect(donationSource).toContain("VITE_GIVEBUTTER_CAMPAIGN");
+    expect(donationSource).toContain('"example-campaign"');
+    // Whatever the build supplies must still be a single usable URL path segment.
+    expect(GIVEBUTTER_CAMPAIGN).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+    // Reading the env bag must survive a non-Vite consumer (vitest, Playwright), where
+    // `import.meta.env` is undefined — a bare property access would throw on import.
+    expect(donationSource).not.toMatch(/\bimport\.meta\.env\./);
   });
 
-  it("pins the frameable Givebutter embed URL", () => {
-    expect(GIVEBUTTER_EMBED_BASE_URL).toBe("https://givebutter.com/embed/c/example-campaign");
-    expect(GIVEBUTTER_EMBED_BASE_URL).toContain(GIVEBUTTER_CAMPAIGN);
+  it("pins the frameable Givebutter embed URL to the configured campaign", () => {
+    expect(GIVEBUTTER_EMBED_BASE_URL).toBe(`https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`);
+    const embed = new URL(GIVEBUTTER_EMBED_BASE_URL);
+    expect(embed.protocol).toBe("https:");
+    expect(embed.host).toBe("givebutter.com");
+    // The frameable embed path — NOT the hosted campaign page, which refuses framing.
+    expect(embed.pathname).toBe(`/embed/c/${GIVEBUTTER_CAMPAIGN}`);
+    expect(embed.search).toBe("");
   });
 
   it("routes only US residents to Givebutter (CAT-020 código US)", () => {
@@ -1307,27 +1318,29 @@ describe("givebutter prefill and URL helpers", () => {
     expect(givebutterPrefillParams({ amount: "12.50", monthly: false })).toEqual({ amount: "12.5" });
   });
 
-  it("builds the frameable iframe URL with the slug and embed-only goalBar flag", () => {
+  it("builds the frameable iframe URL with the configured slug and embed-only goalBar flag", () => {
     expect(givebutterEmbedUrl({ amount: "25.00", monthly: false })).toBe(
-      "https://givebutter.com/embed/c/example-campaign?amount=25&goalBar=false"
+      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?amount=25&goalBar=false`
     );
     expect(givebutterEmbedUrl({ amount: "25", monthly: true })).toBe(
-      "https://givebutter.com/embed/c/example-campaign?amount=25&frequency=monthly&goalBar=false"
+      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?amount=25&frequency=monthly&goalBar=false`
     );
     expect(givebutterEmbedUrl({ amount: "", monthly: false })).toBe(
-      "https://givebutter.com/embed/c/example-campaign?goalBar=false"
+      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?goalBar=false`
     );
   });
 
-  it("builds the hosted-page fallback link with the slug and prefill query", () => {
+  it("builds the hosted-page fallback link with the configured slug and prefill query", () => {
     expect(givebutterHostedUrl({ amount: "25.00", monthly: false })).toBe(
-      "https://givebutter.com/example-campaign?amount=25"
+      `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?amount=25`
     );
     expect(givebutterHostedUrl({ amount: "25", monthly: true })).toBe(
-      "https://givebutter.com/example-campaign?amount=25&frequency=monthly"
+      `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?amount=25&frequency=monthly`
     );
     // No amount yet → bare slug URL (still valid).
-    expect(givebutterHostedUrl({ amount: "", monthly: false })).toBe("https://givebutter.com/example-campaign");
+    expect(givebutterHostedUrl({ amount: "", monthly: false })).toBe(`https://givebutter.com/${GIVEBUTTER_CAMPAIGN}`);
+    // The hosted link is the campaign PAGE, not the embed endpoint.
+    expect(new URL(givebutterHostedUrl({ amount: "10", monthly: false })).pathname).toBe(`/${GIVEBUTTER_CAMPAIGN}`);
     // The slug is used in the hosted URL (definitely works per Givebutter share URLs).
     expect(givebutterHostedUrl({ amount: "10", monthly: false })).toContain(GIVEBUTTER_CAMPAIGN);
   });
@@ -1353,14 +1366,14 @@ describe("givebutter donar page source contract", () => {
     expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
   });
 
-  it("shows the FMCE explanation and the example-campaign iframe", () => {
-    const intro = givebutterIntro("MISION EXAMPLEORGANIZATION");
+  it("shows the 501c3 explanation and the configured-campaign iframe", () => {
+    const intro = givebutterIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("givebutterIntro(organizationName)");
-    expect(intro).toContain("Friends of MISION EXAMPLEORGANIZATION");
+    expect(intro).toContain("Friends of Iglesia Ejemplo Central");
     expect(intro).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
-    expect(intro).toContain("apoya a MISION EXAMPLEORGANIZATION en El Salvador");
+    expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
     // The embedded iframe targets the frameable Givebutter embed URL.
     expect(pageSource).toContain("donar-givebutter-frame");
     expect(pageSource).toContain("givebutterFrameUrl");
