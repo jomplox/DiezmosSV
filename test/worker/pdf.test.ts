@@ -40,7 +40,7 @@ describe("DTE PDF rendering", () => {
     plain.emisor.nombre = "Misión ExampleOrganization";
     plain.emisor.nombreComercial = "Misión ExampleOrganization";
     plain.emisor.descActividad = "Actividades de organizaciones religiosas";
-    plain.emisor.direccion.complemento = "Avenida Ejemplo 100";
+    plain.emisor.direccion.complemento = "Avenida ejemplo 100";
     plain.emisor.correo = "legacy-email-107@example.com";
     plain.emisor.codEstable = "0002";
     plain.receptor.nombre = "José Pérez";
@@ -118,8 +118,8 @@ describe("DTE PDF rendering", () => {
 
     // The emisor address (complemento + AGUILARES, SAN SALVADOR ESTE, SAN SALVADOR + phone)
     // is far too wide for the 294pt box, so it must wrap onto multiple rendered lines: the head
-    // ("SOYAPANGO.") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
-    const head = lines.findIndex((line) => line.includes("SOYAPANGO."));
+    // ("AVENIDA EJEMPLO 100") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
+    const head = lines.findIndex((line) => line.includes("AVENIDA EJEMPLO 100"));
     const tail = lines.findIndex((line) => line.includes("SAN SALVADOR ESTE"));
     expect(head).toBeGreaterThanOrEqual(0);
     expect(tail).toBeGreaterThanOrEqual(0);
@@ -130,18 +130,18 @@ describe("DTE PDF rendering", () => {
     // Overlap symptom (the live bug): the entire emisor address rendered as ONE over-wide line
     // — complemento + every geographic segment + the emisor phone — that ran straight through the
     // emisor box's right edge into the receptor column. Assert that single-line pattern (head
-    // "SOYAPANGO." AND tail "SAN SALVADOR ESTE" AND emisor phone "7000-0004" together) is gone.
+    // "AVENIDA EJEMPLO 100" AND tail "SAN SALVADOR ESTE" AND emisor phone "7000-0004" together) is gone.
     // (pdftotext -layout legitimately places the emisor and receptor columns on the same y, so
     // co-occurrence of the two columns on one extracted line is NOT the symptom — the symptom is
     // the whole address collapsed onto a single over-wide emisor line.)
     const overrun = lines.filter(
-      (line) => line.includes("SOYAPANGO.") && line.includes("SAN SALVADOR ESTE") && line.includes("7000-0004")
+      (line) => line.includes("AVENIDA EJEMPLO 100") && line.includes("SAN SALVADOR ESTE") && line.includes("7000-0004")
     );
     expect(overrun).toEqual([]);
   });
 
   it("keeps the emisor correo visible even when the wrapped address takes two lines", async () => {
-    // The emisor box clamps at 3 rendered lines. With the real church address the
+    // The emisor box clamps at 3 rendered lines. With the fixture emisor address the
     // wrapped address needs two of them, so the correo must ride on the (short)
     // establishment line instead of occupying a fourth line that would be clamped.
     const text = await renderToText(testDocument());
@@ -194,7 +194,7 @@ describe("DTE PDF rendering", () => {
     expect(text).not.toMatch(/DUI:\s+0614-280390-112-1/);
   });
 
-  it("draws the default logo as vector paths instead of an embedded raster image", async () => {
+  it("draws the built-in logo as vector paths instead of an embedded raster image", async () => {
     const pdf = await renderDtePdf(testDocument());
     const pdfBody = Buffer.from(pdf).toString("latin1");
 
@@ -413,7 +413,7 @@ function testDocument(): DteDocumentRecord {
           departamento: "06",
           municipio: "22",
           distrito: "01",
-          complemento: "AVENIDA EJEMPLO 100,  COLONIA EJEMPLO #1 SOYAPANGO."
+          complemento: "AVENIDA EJEMPLO 100, COLONIA EJEMPLO, SAN SALVADOR."
         },
         telefono: "7000-0004",
         correo: "legacy-contact-4@example.com",

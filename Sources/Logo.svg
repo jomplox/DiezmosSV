@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Neutral placeholder logotype shipped as the built-in default mark.
+     Hand-authored geometry: a ring emblem plus wordmark bars. The 704x228
+     view box is a layout contract - the PDF renderers and the donor landing
+     scale against it, so keep these dimensions when swapping in real art.
+     The ink stops at y=186 so the certificate's organisation name, printed
+     directly under the logo box, stays clear of it.
+     Path data is mirrored in src/worker/services/orgLogo.ts. -->
+<svg width="704" height="228" viewBox="0 0 704 228" xmlns="http://www.w3.org/2000/svg">
+    <g id="placeholder-mark" fill="#000000" stroke="none">
+        <path id="ring" d="M 97 8 C 146.15 8 186 47.85 186 97 C 186 146.15 146.15 186 97 186 C 47.85 186 8 146.15 8 97 C 8 47.85 47.85 8 97 8 Z M 97 42 C 66.62 42 42 66.62 42 97 C 42 127.38 66.62 152 97 152 C 127.38 152 152 127.38 152 97 C 152 66.62 127.38 42 97 42 Z"/>
+        <path id="pip" d="M 97 74 L 120 97 L 97 120 L 74 97 Z"/>
+        <path id="wordmark-1" d="M 226 20 L 704 20 L 704 58 L 226 58 Z"/>
+        <path id="wordmark-2" d="M 226 72 L 590 72 L 590 110 L 226 110 Z"/>
+        <path id="rule" d="M 226 138 L 704 138 L 704 144 L 226 144 Z"/>
+        <path id="wordmark-3" d="M 226 160 L 438 160 L 438 186 L 226 186 Z"/>
+    </g>
+</svg>
