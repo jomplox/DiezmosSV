@@ -569,11 +569,12 @@ telephone prefers the intent's phone, falling back to the webhook's `Celular`.
 
 **Two new secrets** are required to call the Wompi API for the single-use link (the legacy static-link
 flow does not need them). Obtain `client_id` / `client_secret` from the Wompi merchant panel under
-**Datos del negocio**, then set them per environment:
+**Datos del negocio**, then set them per environment through the private wrapper after selecting the
+absolute owner-only config with `DIEZMOSSV_WRANGLER_CONFIG`:
 
 ```bash
-npx wrangler secret put WOMPI_CLIENT_ID --env staging      # or --env production
-npx wrangler secret put WOMPI_CLIENT_SECRET --env staging   # or --env production
+node scripts/run-private-wrangler.mjs secret put WOMPI_CLIENT_ID --env staging      # or --env production
+node scripts/run-private-wrangler.mjs secret put WOMPI_CLIENT_SECRET --env staging   # or --env production
 ```
 
 **Intent lifecycle** (`donation_intents.status`):

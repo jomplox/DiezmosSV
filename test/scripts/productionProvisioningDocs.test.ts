@@ -7,16 +7,13 @@ const stagingRunbook = readFileSync(
   resolve(import.meta.dirname, "../../docs/cloudflare-staging-uat.md"),
   "utf8"
 );
-const deploymentGuide = readme.slice(
-  readme.indexOf("## 📦 Deploy to Cloudflare"),
-  readme.indexOf("## ⚙️ Configuration reference")
-);
+const provisioningDocuments = [
+  ["README", readme],
+  ["staging UAT runbook", stagingRunbook]
+] as const;
 
 describe("remote provisioning documentation", () => {
-  it.each([
-    ["README deployment guide", deploymentGuide],
-    ["staging UAT runbook", stagingRunbook]
-  ])(
+  it.each(provisioningDocuments)(
     "requires the selected owner-only external config in the %s",
     (_name, document) => {
       expect(document).toContain("DIEZMOSSV_WRANGLER_CONFIG");
@@ -27,16 +24,14 @@ describe("remote provisioning documentation", () => {
     }
   );
 
-  it.each([
-    ["README deployment guide", deploymentGuide],
-    ["staging UAT runbook", stagingRunbook]
-  ])(
+  it.each(provisioningDocuments)(
     "routes every documented remote Wrangler command through the private wrapper in the %s",
     (_name, document) => {
       const directRemoteCommands = document
         .split("\n")
         .map((line) => line.trim())
-        .filter((line) => /^(?:npx )?wrangler\b/.test(line));
+        .filter((line) => /^(?:npx )?wrangler\b/.test(line))
+        .filter((line) => !/(?:^|\s)--local(?:\s|$)/.test(line));
 
       expect(directRemoteCommands).toEqual([]);
       expect(document).toContain("scripts/run-private-wrangler.mjs");
@@ -44,7 +39,9 @@ describe("remote provisioning documentation", () => {
   );
 
   it("keeps live resource identifiers and routing data out of the public config workflow", () => {
-    const documents = `${deploymentGuide}\n${stagingRunbook}`;
+    const documents = provisioningDocuments
+      .map(([_name, document]) => document)
+      .join("\n");
 
     expect(documents).not.toMatch(/copy the returned D1 id into\s+wrangler\.toml/i);
     expect(documents).not.toMatch(/ids are already committed in wrangler\.toml/i);
