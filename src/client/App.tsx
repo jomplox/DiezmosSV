@@ -152,6 +152,14 @@ interface RunActionControl {
   commit: (operation: () => void) => boolean;
 }
 
+interface AutomaticRefreshFlight {
+  key: string;
+  token: symbol;
+  state: "pending" | "completed";
+  followerQueued: boolean;
+  retryUsed: boolean;
+}
+
 // The general Documents status picker keeps a combined fiscal failure option. The
 // dedicated Fallos view uses the server-side attention filter so it can also include
 // accepted CDEs whose latest receipt email failed.
@@ -383,7 +391,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const certificateOperationClaimsRef = useRef(new Map<string, symbol>());
   const certificateSearchInputGenerationRef = useRef(0);
-  const automaticRefreshKeyRef = useRef<string | null>(null);
+  const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -462,7 +470,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     };
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
-    automaticRefreshKeyRef.current = null;
+    automaticRefreshFlightRef.current = null;
     runActionOwnerRef.current = null;
   }, []);
 
@@ -560,17 +568,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       debouncedCertificateSearch,
       certificateSearchInputGenerationRef.current
     ]);
-    if (automaticRefreshKeyRef.current === refreshKey) {
+    const currentFlight = automaticRefreshFlightRef.current;
+    if (currentFlight?.key === refreshKey) {
+      if (currentFlight.state === "pending" && !currentFlight.followerQueued) {
+        automaticRefreshFlightRef.current = {
+          ...currentFlight,
+          followerQueued: true
+        };
+      }
       return;
     }
-    automaticRefreshKeyRef.current = refreshKey;
-    void refresh().catch((error) => {
-      if (automaticRefreshKeyRef.current !== refreshKey) {
-        return;
-      }
-      automaticRefreshKeyRef.current = null;
-      handleApiFailure(error);
-    });
+    dispatchAutomaticRefresh(refreshKey, false);
   }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch, settledCertificateSearchRevision]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
@@ -931,12 +939,69 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
   }
 
+  function automaticRefreshControl(token: symbol): RunActionControl {
+    const isOwner = () => (
+      accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
+      && automaticRefreshFlightRef.current?.token === token
+    );
+    return {
+      isOwner,
+      commit(operation) {
+        if (!isOwner()) {
+          return false;
+        }
+        operation();
+        return true;
+      }
+    };
+  }
+
+  function dispatchAutomaticRefresh(refreshKey: string, retryUsed: boolean) {
+    const token = Symbol(refreshKey);
+    automaticRefreshFlightRef.current = {
+      key: refreshKey,
+      token,
+      state: "pending",
+      followerQueued: false,
+      retryUsed
+    };
+    const control = automaticRefreshControl(token);
+    void refresh(control)
+      .then(() => {
+        const currentFlight = automaticRefreshFlightRef.current;
+        if (!currentFlight || currentFlight.token !== token) {
+          return;
+        }
+        automaticRefreshFlightRef.current = {
+          ...currentFlight,
+          state: "completed",
+          followerQueued: false
+        };
+      })
+      .catch((error) => {
+        const currentFlight = automaticRefreshFlightRef.current;
+        if (!currentFlight || currentFlight.token !== token) {
+          return;
+        }
+        const shouldRetry = currentFlight.followerQueued && !currentFlight.retryUsed;
+        handleApiFailure(error);
+        if (automaticRefreshFlightRef.current?.token !== token) {
+          return;
+        }
+        if (shouldRetry) {
+          dispatchAutomaticRefresh(refreshKey, true);
+          return;
+        }
+        automaticRefreshFlightRef.current = null;
+      });
+  }
+
   function resetAccountState() {
     accountStateGuardRef.current.advance();
     runActionOwnerRef.current = null;
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
-    automaticRefreshKeyRef.current = null;
+    automaticRefreshFlightRef.current = null;
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
     invalidateCertificatePreview(certificateResetYear, "");
