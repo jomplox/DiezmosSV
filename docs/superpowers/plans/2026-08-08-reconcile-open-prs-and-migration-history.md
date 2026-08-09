@@ -186,14 +186,14 @@
 - Modify: `src/worker/services/certificate.ts`, `src/worker/index.ts`
 - Modify/add focused tests: `test/worker/certificate.test.ts`, `test/worker/workerFetch.annual-certificates.test.ts`, and one real-Repository/SQLite certificate-race fixture if required
 
-**Checkable outcome:** after the bounded dossier document read and before any PDF or email work, the service derives the current document count, amount total, and test-environment flag from the returned records. A zero-document dossier or any mismatch with the earlier target aggregate fails closed. Bulk records one failed audit and continues; explicit single sends return sanitized HTTP 409 `certificate_dossier_changed`. Neither path renders a PDF, calls the provider, writes a SENT audit, or loops/retries automatically.
+**Checkable outcome:** after the bounded dossier document read and before any PDF or email work, the service derives the current document count, amount total, test-environment flag, and canonical earliest-row donor identity from the returned records. A zero-document dossier or any mismatch with the earlier target aggregate fails closed. Bulk records one failed audit and continues; explicit single sends return sanitized HTTP 409 `certificate_dossier_changed`. Neither path renders a PDF, calls the provider, writes a SENT audit, or loops/retries automatically.
 
-- [ ] Preserve the whole-review real-SQLite RED for a two-row target that becomes zero after both rows are claimed, proving the current code emails a stale nonempty summary.
-- [ ] Preserve the whole-review real-SQLite RED for a one-row target that gains a second accepted row under the 25-document cap, proving the current code emails stale count/total with both CDE pages.
-- [ ] Derive the post-read snapshot from `documents` and require nonzero count plus exact equality with `target.count`, `target.totalCents`, and `target.hasTestEnvironment` before `donorSummary`, PDF rendering, or email dispatch.
-- [ ] Keep the existing over-25 `CertificateDossierLimitError`/HTTP 422 contract unchanged. Add a separate sanitized changed-dossier error mapped to HTTP 409 for explicit single sends; bulk audits failure and continues to later targets.
-- [ ] Test downward-to-zero, under-cap insertion, amount-only drift, environment-only drift, unchanged success, bulk continuation, single 409, zero PDF/provider/SENT side effects, one FAILED audit, and mutation removal of each comparison.
-- [ ] Run focused certificate/repository/route/browser contracts, full test/build/type/migration/privacy gates, and commit only Task 10 files. Do not deploy, migrate remotely, push, or mutate GitHub in this task.
+- [x] Preserve the whole-review real-SQLite RED for a two-row target that becomes zero after both rows are claimed, proving the current code emails a stale nonempty summary.
+- [x] Preserve the whole-review real-SQLite RED for a one-row target that gains a second accepted row under the 25-document cap, proving the current code emails stale count/total with both CDE pages.
+- [x] Derive the post-read snapshot from `documents` and require nonzero count plus exact equality with the target count, total, environment, group/email, and canonical donor identity before `donorSummary`, PDF rendering, or email dispatch. Build the successful summary from the current snapshot rather than stale target fields.
+- [x] Keep the existing over-25 `CertificateDossierLimitError`/HTTP 422 contract unchanged. Add a separate sanitized changed-dossier error mapped to HTTP 409 for explicit single sends; bulk audits failure and continues to later targets.
+- [x] Test downward-to-zero, under-cap insertion, amount-only drift, environment-only drift, same-aggregate identity replacement, unchanged success, bulk continuation, single 409, zero PDF/provider/SENT side effects, one FAILED audit, and mutation removal of each comparison.
+- [x] Run focused certificate/repository/route/browser contracts, full test/build/type/migration/privacy gates, and commit only Task 10 files. Do not deploy, migrate remotely, push, or mutate GitHub in this task.
 
 ## Required handoff evidence
 
