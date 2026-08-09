@@ -177,6 +177,24 @@
 - [ ] Verify the merged `main` SHA and source files through GitHub. Close each superseded PR with a concise comment that cites its preserved head SHA and merged successor, and verify the repository has no remaining open PR from this inventory.
 - [ ] Do not deploy or migrate a remote environment. Report source verification separately from the remaining controlled deployment/migration validation.
 
+## Task 10: Fail closed when annual-certificate source rows change mid-send
+
+**Authorization:** after the Task 7 five-round breaker exposed this race during whole-branch review, the user explicitly authorized a new follow-on task on 2026-08-08.
+
+**Files:**
+
+- Modify: `src/worker/services/certificate.ts`, `src/worker/index.ts`
+- Modify/add focused tests: `test/worker/certificate.test.ts`, `test/worker/workerFetch.annual-certificates.test.ts`, and one real-Repository/SQLite certificate-race fixture if required
+
+**Checkable outcome:** after the bounded dossier document read and before any PDF or email work, the service derives the current document count, amount total, and test-environment flag from the returned records. A zero-document dossier or any mismatch with the earlier target aggregate fails closed. Bulk records one failed audit and continues; explicit single sends return sanitized HTTP 409 `certificate_dossier_changed`. Neither path renders a PDF, calls the provider, writes a SENT audit, or loops/retries automatically.
+
+- [ ] Preserve the whole-review real-SQLite RED for a two-row target that becomes zero after both rows are claimed, proving the current code emails a stale nonempty summary.
+- [ ] Preserve the whole-review real-SQLite RED for a one-row target that gains a second accepted row under the 25-document cap, proving the current code emails stale count/total with both CDE pages.
+- [ ] Derive the post-read snapshot from `documents` and require nonzero count plus exact equality with `target.count`, `target.totalCents`, and `target.hasTestEnvironment` before `donorSummary`, PDF rendering, or email dispatch.
+- [ ] Keep the existing over-25 `CertificateDossierLimitError`/HTTP 422 contract unchanged. Add a separate sanitized changed-dossier error mapped to HTTP 409 for explicit single sends; bulk audits failure and continues to later targets.
+- [ ] Test downward-to-zero, under-cap insertion, amount-only drift, environment-only drift, unchanged success, bulk continuation, single 409, zero PDF/provider/SENT side effects, one FAILED audit, and mutation removal of each comparison.
+- [ ] Run focused certificate/repository/route/browser contracts, full test/build/type/migration/privacy gates, and commit only Task 10 files. Do not deploy, migrate remotely, push, or mutate GitHub in this task.
+
 ## Required handoff evidence
 
 - Exact merged `main` SHA and GitHub reconciliation PR URL.
