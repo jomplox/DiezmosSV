@@ -8,14 +8,21 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   assertPrivateWranglerConfig,
+  assertPrivateWranglerEmailBindings,
   preparePrivateWranglerConfig,
   resolvePrivateWranglerConfig
 } from "../../scripts/private-wrangler-config.mjs";
+
+const privateWranglerConfigModule = resolve(
+  import.meta.dirname,
+  "../../scripts/private-wrangler-config.mjs"
+);
 
 const namedEmailBindings = [
   "[[send_email]]",
@@ -305,7 +312,161 @@ describe("private Wrangler configuration", () => {
       preparePrivateWranglerConfig(configPath, { repositoryRoot })
     ).toThrow();
   });
+
+  it("rejects inherited send_email for missing required bindings", () => {
+    expect(
+      isolatedPrototypeValidation(
+        ["[env.staging]", "[env.production]"].join("\n"),
+        "send_email"
+      )
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("rejects inherited name for empty binding objects", () => {
+    expect(
+      isolatedPrototypeValidation([
+        "send_email = [{}]",
+        "[env.staging]",
+        "send_email = [{}]",
+        "[env.production]",
+        "send_email = [{}]"
+      ].join("\n"), "name")
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("rejects inherited env for missing named environments", () => {
+    expect(
+      isolatedPrototypeValidation(
+        ["[[send_email]]", 'name = "EMAIL"'].join("\n"),
+        "env"
+      )
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("rejects inherited staging for a missing own staging environment", () => {
+    expect(
+      isolatedPrototypeValidation([
+        "[[send_email]]",
+        'name = "EMAIL"',
+        "[[env.production.send_email]]",
+        'name = "EMAIL"'
+      ].join("\n"), "staging")
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("rejects inherited production for a missing own production environment", () => {
+    expect(
+      isolatedPrototypeValidation([
+        "[[send_email]]",
+        'name = "EMAIL"',
+        "[[env.staging.send_email]]",
+        'name = "EMAIL"'
+      ].join("\n"), "production")
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("ignores inherited send_email values while scanning sender allowlists", () => {
+    expect(
+      isolatedPrototypeValidation(
+        [namedEmailBindings, "[env.preview]"].join("\n"),
+        "send_email_allowlist"
+      )
+    ).toEqual({ accepted: true, preparedCreated: true });
+  });
+
+  it("ignores inherited allowed_sender_addresses on own bindings", () => {
+    expect(
+      isolatedPrototypeValidation(
+        namedEmailBindings,
+        "allowed_sender_addresses"
+      )
+    ).toEqual({ accepted: true, preparedCreated: true });
+  });
+
+  it("rejects an own allowlist in a __proto__ named environment", () => {
+    expect(
+      isolatedPrototypeValidation([
+        namedEmailBindings,
+        "[[env.__proto__.send_email]]",
+        'name = "EXTRA_EMAIL"',
+        "allowed_sender_addresses = []"
+      ].join("\n"), "none")
+    ).toEqual({ accepted: false, preparedCreated: false });
+  });
+
+  it("accepts valid null-prototype config objects", () => {
+    const root = Object.create(null) as Record<string, unknown>;
+    const environments = Object.create(null) as Record<string, unknown>;
+    root.env = environments;
+    root.send_email = [nullPrototypeEmailBinding()];
+    environments.staging = nullPrototypeEmailScope();
+    environments.production = nullPrototypeEmailScope();
+
+    expect(() => assertPrivateWranglerEmailBindings(root)).not.toThrow();
+  });
 });
+
+const isolatedValidationProgram = String.raw`
+  import { existsSync, readdirSync } from "node:fs";
+  import { pathToFileURL } from "node:url";
+
+  const [modulePath, configPath, repositoryRoot, pollution] = process.argv.slice(1);
+  const emailBinding = () => ({ name: "EMAIL" });
+  const emailScope = () => ({ send_email: [emailBinding()] });
+  const definePollution = (key, value) => {
+    Object.defineProperty(Object.prototype, key, {
+      configurable: true,
+      writable: true,
+      value
+    });
+  };
+
+  if (pollution === "send_email") {
+    definePollution("send_email", [emailBinding()]);
+  } else if (pollution === "send_email_allowlist") {
+    definePollution("send_email", [{
+      name: "INHERITED_EMAIL",
+      allowed_sender_addresses: []
+    }]);
+  } else if (pollution === "name") {
+    definePollution("name", "EMAIL");
+  } else if (pollution === "env") {
+    definePollution("env", {
+      staging: emailScope(),
+      production: emailScope()
+    });
+  } else if (pollution === "staging") {
+    definePollution("staging", emailScope());
+  } else if (pollution === "production") {
+    definePollution("production", emailScope());
+  } else if (pollution === "allowed_sender_addresses") {
+    definePollution("allowed_sender_addresses", []);
+  }
+
+  const { preparePrivateWranglerConfig } = await import(pathToFileURL(modulePath).href);
+  let prepared;
+  let accepted = false;
+  let preparedCreated = false;
+  try {
+    prepared = preparePrivateWranglerConfig(configPath, { repositoryRoot });
+    accepted = true;
+    preparedCreated = existsSync(prepared.configPath);
+  } catch (error) {
+    accepted = false;
+    preparedCreated = readdirSync(process.env.TMPDIR).some((name) =>
+      name.startsWith("diezmos-wrangler-config-")
+    );
+    const message = error instanceof Error ? error.message : "";
+    const sanitized =
+      message === "The selected private Wrangler config must declare exactly one EMAIL binding in root, staging, and production" ||
+      message === "The selected private Wrangler config must not restrict the OWNER-configurable EMAIL_FROM sender" ||
+      /^The selected private Wrangler config Email Service binding in (?:root|staging|production) must be named EMAIL$/.test(message);
+    if (!sanitized) process.exitCode = 2;
+  } finally {
+    prepared?.cleanup();
+  }
+  console.log(JSON.stringify({ accepted, preparedCreated }));
+`;
 
 function privateConfig(contents: string): {
   repositoryRoot: string;
@@ -329,4 +490,62 @@ function withSenderAllowlist(
     `${header}\nname = "EMAIL"`,
     `${header}\nname = "EMAIL"\nallowed_sender_addresses = ["sender@example.invalid"]`
   );
+}
+
+function isolatedPrototypeValidation(
+  contents: string,
+  pollution:
+    | "none"
+    | "send_email"
+    | "send_email_allowlist"
+    | "allowed_sender_addresses"
+    | "name"
+    | "env"
+    | "staging"
+    | "production"
+): { accepted: boolean; preparedCreated: boolean } {
+  const caseRoot = mkdtempSync(join(tmpdir(), "diezmos-prototype-config-"));
+  const repositoryRoot = join(caseRoot, "repository");
+  const privateRoot = join(caseRoot, "private");
+  const childTmp = join(caseRoot, "tmp");
+  mkdirSync(repositoryRoot, { mode: 0o700 });
+  mkdirSync(privateRoot, { mode: 0o700 });
+  mkdirSync(childTmp, { mode: 0o700 });
+  const configPath = join(privateRoot, "wrangler.toml");
+  writeFileSync(configPath, contents, { mode: 0o600 });
+  chmodSync(configPath, 0o600);
+
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--input-type=module",
+      "--eval",
+      isolatedValidationProgram,
+      privateWranglerConfigModule,
+      configPath,
+      repositoryRoot,
+      pollution
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, TMPDIR: childTmp }
+    }
+  );
+  expect(result.status, result.stderr).toBe(0);
+  return JSON.parse(result.stdout) as {
+    accepted: boolean;
+    preparedCreated: boolean;
+  };
+}
+
+function nullPrototypeEmailBinding(): Record<string, unknown> {
+  const binding = Object.create(null) as Record<string, unknown>;
+  binding.name = "EMAIL";
+  return binding;
+}
+
+function nullPrototypeEmailScope(): Record<string, unknown> {
+  const scope = Object.create(null) as Record<string, unknown>;
+  scope.send_email = [nullPrototypeEmailBinding()];
+  return scope;
 }

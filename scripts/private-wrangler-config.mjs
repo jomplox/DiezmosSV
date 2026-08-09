@@ -120,12 +120,13 @@ export function preparePrivateWranglerConfig(configPath, {
 }
 
 export function assertPrivateWranglerEmailBindings(rawConfig) {
-  const environments = isObject(rawConfig?.env) ? rawConfig.env : {};
-  for (const config of [rawConfig, ...Object.values(environments)]) {
+  const rawEnvironments = ownValue(rawConfig, "env");
+  const environments = isObject(rawEnvironments) ? rawEnvironments : undefined;
+  const namedEnvironments = environments ? Object.values(environments) : [];
+  for (const config of [rawConfig, ...namedEnvironments]) {
     if (!isObject(config)) continue;
-    const bindings = Array.isArray(config.send_email)
-      ? config.send_email
-      : [config.send_email];
+    const rawBindings = ownValue(config, "send_email");
+    const bindings = Array.isArray(rawBindings) ? rawBindings : [rawBindings];
     if (
       bindings.some(
         (binding) =>
@@ -140,12 +141,12 @@ export function assertPrivateWranglerEmailBindings(rawConfig) {
 
   const scopes = [
     ["root", rawConfig],
-    ["staging", environments.staging],
-    ["production", environments.production]
+    ["staging", ownValue(environments, "staging")],
+    ["production", ownValue(environments, "production")]
   ];
 
   for (const [scope, config] of scopes) {
-    const bindings = isObject(config) ? config.send_email : undefined;
+    const bindings = ownValue(config, "send_email");
     if (!Array.isArray(bindings) || bindings.length !== 1 || !isObject(bindings[0])) {
       throw new Error(
         "The selected private Wrangler config must declare exactly one EMAIL binding in root, staging, and production"
@@ -153,7 +154,7 @@ export function assertPrivateWranglerEmailBindings(rawConfig) {
     }
 
     const binding = bindings[0];
-    if (binding.name !== "EMAIL") {
+    if (ownValue(binding, "name") !== "EMAIL") {
       throw new Error(
         `The selected private Wrangler config Email Service binding in ${scope} must be named EMAIL`
       );
@@ -163,6 +164,10 @@ export function assertPrivateWranglerEmailBindings(rawConfig) {
 
 function isObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function ownValue(value, key) {
+  return isObject(value) && Object.hasOwn(value, key) ? value[key] : undefined;
 }
 
 function assertOwnerOnlyDirectory(directory) {
