@@ -111,7 +111,7 @@ export interface RenderCertificateInput {
   accentColor?: string;
 }
 
-// Renders the annual donor certificate. Reuses the CDE branding (default vector logo,
+// Renders the annual donor certificate. Reuses the CDE branding (vector logo,
 // Helvetica) but is deliberately NOT a DTE: it makes no Ministerio de Hacienda seal
 // claim. The individual CDE remain the fiscal vouchers; this is informational.
 // Converts the branding accent (#rrggbb) into pdf-lib color space; falls back to the

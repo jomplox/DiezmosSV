@@ -210,7 +210,7 @@ describe("BrandingEditor edits the support email (source contract)", () => {
 });
 
 describe("Donor landing uses the uploaded logo when present (source contract)", () => {
-  it("renders the donor logo image and keeps the default vector fallback", () => {
+  it("renders the donor logo image and keeps the built-in vector fallback", () => {
     expect(donarSource).toContain("brandingDonorLogoSrc");
     expect(donarSource).toContain("donorLogoVersion");
     expect(donarSource).toContain("OrganizationLogo");
