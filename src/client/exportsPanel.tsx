@@ -353,6 +353,7 @@ export function AnnualCertificatePanel({
           value={search}
           placeholder="Buscar donante o correo"
           onChange={(event) => onSearchChange(event.target.value)}
+          aria-label="Buscar donante o correo"
         />
       </div>
       <div className="table-scroll export-table certificate-table">
