@@ -1,11 +1,46 @@
 import { lstatSync, readFileSync, readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join, relative, sep } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
+
+// Forbidden-host configuration.
+//
+// This check refuses to name the hosts it protects: writing them here would put
+// the private values into the very tree the check keeps public-safe. The list is
+// therefore supplied at run time and never committed:
+//
+//   1. PRIVATE_BOUNDARY_FORBIDDEN_HOSTS - comma / semicolon / whitespace separated
+//      hostnames, e.g. "private.example,tenant.example.net".
+//   2. A host file, one entry per line, "#" starts a comment. Its location is
+//      PRIVATE_BOUNDARY_FORBIDDEN_HOSTS_FILE (absolute paths are honoured, so the
+//      list can live entirely outside the repository); when unset it defaults to
+//      ".private-boundary-hosts" in the repository root, which .gitignore keeps
+//      untracked.
+//
+// Both sources are merged. Entries are normalised (scheme, userinfo, port, path,
+// leading "*." and stray dots are stripped) and match a hostname or any of its
+// subdomains. The default is an empty list, which names no organisation - and
+// because an empty list silently disables these host checks, it is reported as a
+// warning so the check can never look like protection it is not providing.
+//
+// Configured values are only ever compared, never printed: violations are
+// reported as file paths so the check itself does not disclose them.
+const FORBIDDEN_HOSTS_ENV = "PRIVATE_BOUNDARY_FORBIDDEN_HOSTS";
+const FORBIDDEN_HOSTS_FILE_ENV = "PRIVATE_BOUNDARY_FORBIDDEN_HOSTS_FILE";
+const DEFAULT_FORBIDDEN_HOSTS_FILE = ".private-boundary-hosts";
 
 const root = process.cwd();
 const violations = new Set();
 const allowedDevVarPaths = new Set([".dev.vars.ci", ".dev.vars.example"]);
 const skippedDevVarDirectories = new Set([".git", "node_modules"]);
+
+const forbiddenHosts = loadForbiddenHosts();
+const forbiddenHostPattern = buildForbiddenHostPattern(forbiddenHosts);
+
+if (forbiddenHosts.length === 0) {
+  console.warn(
+    `Private artifact boundary: WARNING no forbidden hosts configured, host checks are inactive. Set ${FORBIDDEN_HOSTS_ENV} or create ${DEFAULT_FORBIDDEN_HOSTS_FILE} (see the comment in scripts/check-private-boundary.mjs).`
+  );
+}
 
 collectDevVars(root);
 
@@ -134,7 +169,7 @@ function collectTrackedImplementationDetails() {
 function containsImplementationEndpoint(contents) {
   if (
     /(^|[^@A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)+workers\.dev\b/i.test(contents) ||
-    /(^|[^@A-Za-z0-9_-])(?:[A-Za-z0-9-]+\.)*elim\.[A-Za-z0-9.-]+\b/i.test(contents) ||
+    forbiddenHostPattern?.test(contents) ||
     /\bexample-worker-(?:staging|production)\b/i.test(contents)
   ) {
     return true;
@@ -144,15 +179,82 @@ function containsImplementationEndpoint(contents) {
       .replace(/^https?:\/\//i, "")
       .split("/", 1)[0]
       .toLowerCase();
-    if (
-      authority.includes(".workers.dev") ||
-      /(^|[.-])elim[.-]/i.test(authority)
-    ) {
+    if (authority.includes(".workers.dev") || isForbiddenAuthority(authority)) {
       return true;
     }
   }
   return /https:\/\/api\.cloudflare\.com\/client\/v4\/accounts\/[0-9a-f]{32}(?:\/|$)/i.test(
     contents
+  );
+}
+
+function isForbiddenAuthority(authority) {
+  const host = normalizeHost(authority);
+  if (!host) return false;
+  return forbiddenHosts.some(
+    (forbidden) => host === forbidden || host.endsWith(`.${forbidden}`)
+  );
+}
+
+function loadForbiddenHosts() {
+  const hosts = new Set();
+  for (const host of parseHostList(process.env[FORBIDDEN_HOSTS_ENV] ?? "")) {
+    hosts.add(host);
+  }
+  for (const host of parseHostList(readForbiddenHostsFile())) {
+    hosts.add(host);
+  }
+  return [...hosts];
+}
+
+function readForbiddenHostsFile() {
+  const configured = process.env[FORBIDDEN_HOSTS_FILE_ENV]?.trim();
+  const path = configured
+    ? isAbsolute(configured)
+      ? configured
+      : join(root, configured)
+    : join(root, DEFAULT_FORBIDDEN_HOSTS_FILE);
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EISDIR") return "";
+    throw error;
+  }
+}
+
+function parseHostList(raw) {
+  const hosts = [];
+  for (const line of raw.split(/\r?\n/)) {
+    for (const entry of line.split("#", 1)[0].split(/[\s,;]+/)) {
+      const host = normalizeHost(entry);
+      if (host) hosts.push(host);
+    }
+  }
+  return hosts;
+}
+
+function normalizeHost(entry) {
+  const host = entry
+    .trim()
+    .toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, "")
+    .split("/", 1)[0]
+    .split("@")
+    .at(-1)
+    .replace(/:\d+$/, "")
+    .replace(/^\*+\./, "")
+    .replace(/^\.+|\.+$/g, "");
+  return /^[a-z0-9][a-z0-9.-]*\.[a-z0-9-]+$/.test(host) ? host : "";
+}
+
+function buildForbiddenHostPattern(hosts) {
+  if (hosts.length === 0) return null;
+  const alternation = hosts
+    .map((host) => host.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join("|");
+  return new RegExp(
+    `(^|[^A-Za-z0-9_-])(?:[A-Za-z0-9-]+\\.)*(?:${alternation})\\b`,
+    "i"
   );
 }
 
