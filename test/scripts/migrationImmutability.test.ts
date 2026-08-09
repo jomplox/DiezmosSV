@@ -106,4 +106,28 @@ describe("migration immutability checker", () => {
       /0004_email_delivery_evidence\.sql.*missing/i
     );
   });
+
+  it.each([
+    "0001_duplicate.sql",
+    "0019_legacy_unexpected.sql",
+    "0023_z_unexpected.sql",
+    "0029_duplicate.sql"
+  ])("rejects unexpected immutable-range migration %s", async (name) => {
+    const { assertImmutableMigrations } = await loadChecker();
+    const copy = copiedMigrations();
+    writeFileSync(join(copy, name), "SELECT 1;\n");
+
+    expect(() => assertImmutableMigrations(copy)).toThrow(
+      new RegExp(`unexpected historical migration ${name}`, "i")
+    );
+  });
+
+  it("accepts additive migration names above the immutable boundary", async () => {
+    const { assertImmutableMigrations } = await loadChecker();
+    const copy = copiedMigrations();
+    writeFileSync(join(copy, "0032_future_addition.sql"), "SELECT 1;\n");
+    writeFileSync(join(copy, "0099_future_addition.sql"), "SELECT 1;\n");
+
+    expect(() => assertImmutableMigrations(copy)).not.toThrow();
+  });
 });

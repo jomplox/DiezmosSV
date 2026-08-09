@@ -397,23 +397,7 @@ function namedIndexes(snapshot, name) {
   return matches;
 }
 
-function normalizeIndexSql(sql) {
-  if (typeof sql !== "string") return "";
-  return sql
-    .trim()
-    .replace(/;+\s*$/, "")
-    .replace(/\[([^\]]+)\]/g, "$1")
-    .replace(/["`]/g, "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .replace(/\s*\(\s*/g, "(")
-    .replace(/\s*\)\s*/g, ")")
-    .replace(/^create unique index if not exists /, "create unique index ")
-    .trim();
-}
-
 function hasRequiredIndexShape(table, index, requirement) {
-  const expectedSql = normalizeIndexSql(requirement.createSql);
   return (
     table === requirement.table &&
     (index?.unique === 1 || index?.unique === true) &&
@@ -423,7 +407,7 @@ function hasRequiredIndexShape(table, index, requirement) {
     index.columns.every(
       (column, position) => column === requirement.columns[position]
     ) &&
-    normalizeIndexSql(index.sql) === expectedSql
+    indexTokenArraysEqual(index.sql, requirement.createSql)
   );
 }
 
@@ -434,6 +418,9 @@ function existingRequiredIndex(snapshot, requirement) {
     matches.length !== 1 ||
     !hasRequiredIndexShape(matches[0].table, matches[0].index, requirement)
   ) {
+    throw schemaMismatch();
+  }
+  if (duplicateCount(snapshot, requirement.duplicateCountKey) !== 0) {
     throw schemaMismatch();
   }
   return matches[0].index;
@@ -447,10 +434,13 @@ const SCHEMA_SQL_KEYWORDS = new Set([
   "create",
   "each",
   "end",
+  "exists",
   "for",
   "from",
+  "if",
   "ignore",
   "in",
+  "index",
   "insert",
   "into",
   "is",
@@ -463,6 +453,7 @@ const SCHEMA_SQL_KEYWORDS = new Set([
   "select",
   "set",
   "trigger",
+  "unique",
   "update",
   "values",
   "when",
@@ -643,6 +634,44 @@ function schemaTokenArraysEqual(actualSql, expectedSql) {
     expected.pop();
   }
   return (
+    actual.length === expected.length &&
+    expected.every((token, position) =>
+      schemaTokensMatch(actual[position], token)
+    )
+  );
+}
+
+function indexTokensForComparison(sql) {
+  const tokens = tokenizeSchemaSql(sql);
+  if (!tokens) return undefined;
+  while (
+    tokens.at(-1)?.type === "punctuation" &&
+    tokens.at(-1)?.value === ";"
+  ) {
+    tokens.pop();
+  }
+  const optionalClause = ["if", "not", "exists"];
+  if (
+    tokens[0]?.type === "keyword" && tokens[0]?.value === "create" &&
+    tokens[1]?.type === "keyword" && tokens[1]?.value === "unique" &&
+    tokens[2]?.type === "keyword" && tokens[2]?.value === "index" &&
+    optionalClause.every(
+      (value, offset) =>
+        tokens[offset + 3]?.type === "keyword" &&
+        tokens[offset + 3]?.value === value
+    )
+  ) {
+    tokens.splice(3, optionalClause.length);
+  }
+  return tokens;
+}
+
+function indexTokenArraysEqual(actualSql, expectedSql) {
+  const actual = indexTokensForComparison(actualSql);
+  const expected = indexTokensForComparison(expectedSql);
+  return (
+    actual !== undefined &&
+    expected !== undefined &&
     actual.length === expected.length &&
     expected.every((token, position) =>
       schemaTokensMatch(actual[position], token)

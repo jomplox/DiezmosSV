@@ -52,6 +52,16 @@ export function assertImmutableMigrations(
       throw new Error(`Historical migration ${name} was modified`);
     }
   }
+  for (const name of names) {
+    const match = /^(\d{4})_.*\.sql$/u.exec(name);
+    if (
+      match &&
+      Number(match[1]) <= 29 &&
+      !Object.hasOwn(IMMUTABLE_MIGRATION_SHA256, name)
+    ) {
+      throw new Error(`Unexpected historical migration ${name}`);
+    }
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
