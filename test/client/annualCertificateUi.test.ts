@@ -123,27 +123,42 @@ describe("annual certificate UI contract", () => {
     );
   });
 
-  it("coalesces an automatic refresh already consumed for the current input generation", () => {
+  it("coalesces one pending automatic refresh and queues only one current follower", () => {
     const keyStart = appSource.indexOf("const refreshKey = JSON.stringify");
-    const duplicateGuard = appSource.indexOf(
-      "if (automaticRefreshKeyRef.current === refreshKey)",
-      keyStart
-    );
-    const dispatch = appSource.indexOf("void refresh().catch", duplicateGuard);
-    const effectEnd = appSource.indexOf("// Effective analytics range", dispatch);
-    const keySource = appSource.slice(keyStart, duplicateGuard);
+    const keyEnd = appSource.indexOf("]);", keyStart) + 3;
+    const effectEnd = appSource.indexOf("// Effective analytics range", keyStart);
+    const keySource = appSource.slice(keyStart, keyEnd);
     const refreshSource = appSource.slice(keyStart, effectEnd);
 
     expect(keySource).toContain("certificateYear");
     expect(keySource).toContain("debouncedCertificateSearch");
     expect(keySource).toContain("certificateSearchInputGenerationRef.current");
     expect(keySource).not.toContain("settledCertificateSearchRevision");
-    expect(duplicateGuard).toBeGreaterThan(keyStart);
-    expect(duplicateGuard).toBeLessThan(dispatch);
-    expect(refreshSource).toContain("automaticRefreshKeyRef.current = refreshKey");
-    expect(refreshSource).toContain("if (automaticRefreshKeyRef.current !== refreshKey)");
-    expect(refreshSource).toContain("automaticRefreshKeyRef.current = null");
-    expect(refreshSource).toContain("handleApiFailure(error)");
+    expect(refreshSource).toContain("automaticRefreshFlightRef.current");
+    expect(refreshSource).toContain('currentFlight.state === "pending"');
+    expect(refreshSource).toContain("followerQueued: true");
+    expect(refreshSource).toContain("dispatchAutomaticRefresh(refreshKey, false)");
+  });
+
+  it("owns every automatic refresh commit and retries one queued follower only once", () => {
+    const dispatchStart = appSource.indexOf("function dispatchAutomaticRefresh");
+    const dispatchEnd = appSource.indexOf("function resetAccountState", dispatchStart);
+    const dispatchSource = appSource.slice(dispatchStart, dispatchEnd);
+
+    expect(dispatchSource).toContain("const token = Symbol(refreshKey)");
+    expect(dispatchSource).toContain("const control = automaticRefreshControl(token)");
+    expect(dispatchSource).toContain("void refresh(control)");
+    expect(dispatchSource).toContain("currentFlight.token !== token");
+    expect(dispatchSource).toContain('state: "completed"');
+    expect(dispatchSource).toContain("currentFlight.followerQueued && !currentFlight.retryUsed");
+    expect(dispatchSource).toContain("dispatchAutomaticRefresh(refreshKey, true)");
+
+    const controlStart = appSource.indexOf("function automaticRefreshControl");
+    const controlEnd = appSource.indexOf("function dispatchAutomaticRefresh", controlStart);
+    const controlSource = appSource.slice(controlStart, controlEnd);
+    expect(controlSource).toContain("automaticRefreshFlightRef.current?.token === token");
+    expect(controlSource).toContain("accountStateGuardRef.current.isCurrent(renderAccountStateVersion)");
+    expect(controlSource).toContain("operation()");
   });
 
   it("uses synchronous uniquely-owned claims for all certificate dispatch shapes", () => {
@@ -212,9 +227,14 @@ describe("annual certificate UI contract", () => {
   });
 
   it("invalidates certificate claims on account reset and unmount", () => {
+    const unmountStart = appSource.indexOf("useEffect(() => () => {");
+    const unmountEnd = appSource.indexOf("}, []);", unmountStart);
+    expect(appSource.slice(unmountStart, unmountEnd)).toContain("automaticRefreshFlightRef.current = null");
+
     const resetStart = appSource.indexOf("function resetAccountState");
     const resetEnd = appSource.indexOf("async function loadMoreDocuments", resetStart);
     expect(appSource.slice(resetStart, resetEnd)).toContain("certificateOperationClaimsRef.current.clear()");
+    expect(appSource.slice(resetStart, resetEnd)).toContain("automaticRefreshFlightRef.current = null");
     expect(appSource).toContain("generation: previewRequest.generation + 1");
     expect(appSource).toContain("generation: bulkTraversal.generation + 1");
   });

@@ -45,6 +45,60 @@ function sendResult(year: number, options: { hasMore?: boolean; nextCursor?: str
   };
 }
 
+function bundleDocument(label: "Old" | "New") {
+  const isNew = label === "New";
+  return {
+    id: `${label.toLowerCase()}-bundle-document`,
+    wompi_event_id: null,
+    tipo_dte: "15",
+    environment: isNew ? "01" : "00",
+    codigo_generacion: isNew
+      ? "22222222-2222-4222-8222-222222222222"
+      : "11111111-1111-4111-8111-111111111111",
+    numero_control: isNew ? "DTE-15-M001P001-000000000000222" : "DTE-15-M001P001-000000000000111",
+    status: "ACCEPTED",
+    plain_json: "{}",
+    signed_jws: null,
+    sello_recibido: null,
+    mh_estado: "PROCESADO",
+    mh_observaciones_json: "[]",
+    donor_email: `${label.toLowerCase()}-bundle@example.org`,
+    donor_name: `${label} bundle document`,
+    amount_cents: isNew ? 222 : 111,
+    issued_at: "2026-08-08T12:00:00.000Z",
+    accepted_at: "2026-08-08T12:00:00.000Z",
+    contingency_period_id: null,
+    transmission_deferred_at: null,
+    created_at: "2026-08-08T12:00:00.000Z",
+    updated_at: "2026-08-08T12:00:00.000Z"
+  };
+}
+
+function bundleIntent(label: "Old" | "New") {
+  const isNew = label === "New";
+  return {
+    id: `${label.toLowerCase()}-bundle-intent`,
+    status: "COMPLETED",
+    amount_cents: isNew ? 222 : 111,
+    document_donor_name: `${label} bundle intent`,
+    document_id: `${label.toLowerCase()}-bundle-document`,
+    numero_control: isNew ? "DTE-15-M001P001-000000000000222" : "DTE-15-M001P001-000000000000111",
+    gift_type: "DIEZMO",
+    created_at: "2026-08-08T12:00:00.000Z"
+  };
+}
+
+function bundleBackup(label: "Old" | "New") {
+  const isNew = label === "New";
+  return {
+    month: isNew ? "2025-02" : "2025-01",
+    status: "archivado",
+    exportedAt: "2026-08-08T12:00:00.000Z",
+    totalRows: isNew ? 222 : 111,
+    tables: []
+  };
+}
+
 function deferred(): { promise: Promise<void>; release: () => void } {
   let release = () => {};
   const promise = new Promise<void>((resolve) => {
@@ -1093,7 +1147,9 @@ test("retries the settled year refresh after its current bundle fails", async ({
     "/api/settings/emission-environment"
   ];
   const bundleCounts = new Map<string, number>();
+  const delayedLeader = deferred();
   let finalPreviewGets = 0;
+  let delayedLeaderSeen = false;
   let capture = false;
 
   await installAdminApp(page, async (route, url) => {
@@ -1109,6 +1165,8 @@ test("retries the settled year refresh after its current bundle fails", async ({
     if (capture && year === "2025" && search === "A") {
       finalPreviewGets += 1;
       if (finalPreviewGets === 1) {
+        delayedLeaderSeen = true;
+        await delayedLeader.promise;
         await fulfillError(route, "TRANSIENT SETTLED REFRESH ERROR");
         return true;
       }
@@ -1125,11 +1183,317 @@ test("retries the settled year refresh after its current bundle fails", async ({
   await search.fill("B");
   await search.fill("A");
   await certificateYearSelect(page).selectOption("2025");
-  await expect(page.getByText("TRANSIENT SETTLED REFRESH ERROR")).toBeVisible();
-  await expect(page.getByText("Retried 2025 A")).toBeVisible();
+  await expect.poll(() => delayedLeaderSeen).toBe(true);
+  await page.waitForTimeout(550);
 
-  expect(finalPreviewGets).toBe(2);
-  for (const path of refreshBundlePaths) {
-    expect(bundleCounts.get(path), path).toBe(2);
+  try {
+    delayedLeader.release();
+    await expect(page.getByText("TRANSIENT SETTLED REFRESH ERROR")).toBeVisible();
+    await expect(page.getByText("Retried 2025 A")).toBeVisible();
+
+    expect(finalPreviewGets).toBe(2);
+    for (const path of refreshBundlePaths) {
+      expect(bundleCounts.get(path), path).toBe(2);
+    }
+    await page.waitForTimeout(550);
+    expect(finalPreviewGets).toBe(2);
+  } finally {
+    delayedLeader.release();
+  }
+});
+
+test("discards a queued identical follower when its pending leader succeeds", async ({ page }) => {
+  const refreshBundlePaths = [
+    "/api/documents",
+    "/api/exports/f960",
+    "/api/donations/intents",
+    "/api/admin/backups",
+    "/api/settings/emission-environment"
+  ];
+  const pendingLeader = deferred();
+  const bundleCounts = new Map<string, number>();
+  let finalPreviewGets = 0;
+  let pendingLeaderSeen = false;
+  let capture = false;
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (capture && refreshBundlePaths.includes(url.pathname)) {
+      bundleCounts.set(url.pathname, (bundleCounts.get(url.pathname) ?? 0) + 1);
+    }
+    if (url.pathname !== "/api/certificates/annual" || request.method() !== "GET") {
+      return false;
+    }
+    const year = url.searchParams.get("year");
+    const search = url.searchParams.get("q");
+    if (capture && year === "2025" && search === "A") {
+      finalPreviewGets += 1;
+      pendingLeaderSeen = true;
+      await pendingLeader.promise;
+    }
+    await fulfillJson(route, preview(Number(year), [`Pending success ${year} ${search ?? "base"}`]));
+    return true;
+  });
+
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("A");
+  await expect(page.getByText("Pending success 2026 A")).toBeVisible();
+  capture = true;
+
+  await search.fill("B");
+  await search.fill("A");
+  await certificateYearSelect(page).selectOption("2025");
+  await expect.poll(() => pendingLeaderSeen).toBe(true);
+  await page.waitForTimeout(550);
+  expect(finalPreviewGets).toBe(1);
+
+  try {
+    pendingLeader.release();
+    await expect(page.getByText("Pending success 2025 A")).toBeVisible();
+    await page.waitForTimeout(550);
+    expect(finalPreviewGets).toBe(1);
+    for (const path of refreshBundlePaths) {
+      expect(bundleCounts.get(path), path).toBe(1);
+    }
+  } finally {
+    pendingLeader.release();
+  }
+});
+
+test("stops after one queued retry failure and surfaces the current error", async ({ page }) => {
+  const delayedLeader = deferred();
+  const delayedRetry = deferred();
+  let finalPreviewGets = 0;
+  let delayedLeaderSeen = false;
+  let delayedRetrySeen = false;
+  let capture = false;
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname !== "/api/certificates/annual" || request.method() !== "GET") {
+      return false;
+    }
+    const year = url.searchParams.get("year");
+    const search = url.searchParams.get("q");
+    if (capture && year === "2025" && search === "A") {
+      finalPreviewGets += 1;
+      if (finalPreviewGets === 1) {
+        delayedLeaderSeen = true;
+        await delayedLeader.promise;
+        await fulfillError(route, "DELAYED LEADER ERROR");
+        return true;
+      }
+      if (finalPreviewGets === 2) {
+        delayedRetrySeen = true;
+        await delayedRetry.promise;
+        await fulfillError(route, "CURRENT QUEUED RETRY ERROR");
+        return true;
+      }
+    }
+    await fulfillJson(route, preview(Number(year), [`Unexpected retry ${finalPreviewGets}`]));
+    return true;
+  });
+
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("A");
+  await expect(page.getByText("Unexpected retry 0")).toBeVisible();
+  capture = true;
+
+  await search.fill("B");
+  await search.fill("A");
+  await certificateYearSelect(page).selectOption("2025");
+  await expect.poll(() => delayedLeaderSeen).toBe(true);
+  await page.waitForTimeout(550);
+
+  try {
+    delayedLeader.release();
+    await expect(page.getByText("DELAYED LEADER ERROR")).toBeVisible();
+    await expect.poll(() => delayedRetrySeen).toBe(true);
+    delayedRetry.release();
+    await expect(page.getByText("CURRENT QUEUED RETRY ERROR")).toBeVisible();
+    await page.waitForTimeout(550);
+    expect(finalPreviewGets).toBe(2);
+  } finally {
+    delayedLeader.release();
+    delayedRetry.release();
+  }
+});
+
+test("keeps every newer export bundle value when an older certificate finishes last", async ({ page }) => {
+  const oldCertificate = deferred();
+  const bundleCalls = new Map<string, number>();
+  const certificateSearches: string[] = [];
+  let oldCertificateSeen = false;
+  let oldCertificateCompleted = false;
+  let capture = false;
+
+  function nextBundleLabel(path: string): "Old" | "New" {
+    const call = (bundleCalls.get(path) ?? 0) + 1;
+    bundleCalls.set(path, call);
+    return call === 1 ? "Old" : "New";
+  }
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname.startsWith("/api/documents/") && request.method() === "GET") {
+      await fulfillJson(route, { audit: [], donorDataVerified: false });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual" && request.method() === "GET") {
+      const search = url.searchParams.get("q") ?? "";
+      if (capture) certificateSearches.push(search);
+      if (search === "old") {
+        oldCertificateSeen = true;
+        await oldCertificate.promise;
+        await fulfillJson(route, preview(2026, ["Old bundle certificate"]));
+        oldCertificateCompleted = true;
+        return true;
+      }
+      await fulfillJson(route, preview(2026, [search === "new" ? "New bundle certificate" : "Initial bundle certificate"]));
+      return true;
+    }
+    if (!capture || request.method() !== "GET") {
+      return false;
+    }
+    if (url.pathname === "/api/documents") {
+      const label = nextBundleLabel(url.pathname);
+      await fulfillJson(route, { documents: [bundleDocument(label)], hasMore: false, nextCursor: null, limit: 50 });
+      return true;
+    }
+    if (url.pathname === "/api/exports/f960") {
+      const label = nextBundleLabel(url.pathname);
+      await fulfillJson(route, {
+        rows: [],
+        rowCount: label === "New" ? 222 : 111,
+        amountTotal: label === "New" ? "2.22" : "1.11"
+      });
+      return true;
+    }
+    if (url.pathname === "/api/donations/intents") {
+      const label = nextBundleLabel(url.pathname);
+      await fulfillJson(route, { intents: [bundleIntent(label)] });
+      return true;
+    }
+    if (url.pathname === "/api/admin/backups") {
+      const label = nextBundleLabel(url.pathname);
+      await fulfillJson(route, { months: [bundleBackup(label)] });
+      return true;
+    }
+    if (url.pathname === "/api/settings/emission-environment") {
+      const label = nextBundleLabel(url.pathname);
+      const environment = label === "New" ? "01" : "00";
+      await fulfillJson(route, {
+        emissionEnvironment: {
+          environment,
+          source: "setting",
+          appEnv: "test",
+          locked: true,
+          allowedEnvironments: [environment]
+        }
+      });
+      return true;
+    }
+    return false;
+  });
+
+  await expect(page.getByText("Initial bundle certificate")).toBeVisible();
+  capture = true;
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("old");
+  await expect.poll(() => oldCertificateSeen).toBe(true);
+  await search.fill("new");
+  await expect(page.getByText("New bundle certificate")).toBeVisible();
+
+  const f960Panel = page.getByRole("heading", { name: "F960" }).locator("xpath=ancestor::section[1]");
+  await expect(f960Panel.locator(".export-summary")).toContainText("222");
+  await expect(f960Panel.locator(".export-summary")).toContainText("$2.22");
+  await expect(page.getByText("New bundle intent")).toBeVisible();
+  await expect(page.getByText("2025-02", { exact: true })).toBeVisible();
+  await expect(page.getByText("Se exportan los contactos del ambiente activo (Producción).", { exact: true })).toBeVisible();
+
+  try {
+    oldCertificate.release();
+    await expect.poll(() => oldCertificateCompleted).toBe(true);
+    await settleReact(page);
+
+    expect(certificateSearches).toEqual(["old", "new"]);
+    await expect(page.getByText("New bundle certificate")).toBeVisible();
+    expect(await page.getByText("Old bundle certificate").count()).toBe(0);
+    await expect(f960Panel.locator(".export-summary")).toContainText("222");
+    await expect(f960Panel.locator(".export-summary")).toContainText("$2.22");
+    await expect(page.getByText("New bundle intent")).toBeVisible();
+    expect(await page.getByText("Old bundle intent").count()).toBe(0);
+    await expect(page.getByText("2025-02", { exact: true })).toBeVisible();
+    expect(await page.getByText("2025-01", { exact: true }).count()).toBe(0);
+    await expect(page.getByText("Se exportan los contactos del ambiente activo (Producción).", { exact: true })).toBeVisible();
+  } finally {
+    oldCertificate.release();
+  }
+});
+
+test("keeps the newer document page when an older automatic document request finishes last", async ({ page }) => {
+  const oldDocuments = deferred();
+  const oldCertificate = deferred();
+  const navigationDocuments = deferred();
+  let capturedDocumentCalls = 0;
+  let oldDocumentsSeen = false;
+  let oldDocumentsCompleted = false;
+  let navigationDocumentsSeen = false;
+  let capture = false;
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname.startsWith("/api/documents/") && request.method() === "GET") {
+      await fulfillJson(route, { audit: [], donorDataVerified: false });
+      return true;
+    }
+    if (capture && url.pathname === "/api/documents" && request.method() === "GET") {
+      capturedDocumentCalls += 1;
+      if (capturedDocumentCalls === 1) {
+        oldDocumentsSeen = true;
+        await oldDocuments.promise;
+        await fulfillJson(route, { documents: [bundleDocument("Old")], hasMore: false, nextCursor: null, limit: 50 });
+        oldDocumentsCompleted = true;
+        return true;
+      }
+      if (capturedDocumentCalls >= 3) {
+        navigationDocumentsSeen = true;
+        await navigationDocuments.promise;
+      }
+      await fulfillJson(route, { documents: [bundleDocument("New")], hasMore: false, nextCursor: null, limit: 50 });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual" && request.method() === "GET") {
+      const search = url.searchParams.get("q") ?? "";
+      if (search === "old") {
+        await oldCertificate.promise;
+      }
+      await fulfillJson(route, preview(2026, [search === "new" ? "New document preview" : "Initial document preview"]));
+      return true;
+    }
+    return false;
+  });
+
+  await expect(page.getByText("Initial document preview")).toBeVisible();
+  capture = true;
+  const search = page.getByPlaceholder("Buscar donante o correo");
+  await search.fill("old");
+  await expect.poll(() => oldDocumentsSeen).toBe(true);
+  await search.fill("new");
+  await expect(page.getByText("New document preview")).toBeVisible();
+
+  try {
+    oldDocuments.release();
+    await expect.poll(() => oldDocumentsCompleted).toBe(true);
+    await settleReact(page);
+    await page.getByRole("button", { name: "Documentos" }).click();
+    await expect.poll(() => navigationDocumentsSeen).toBe(true);
+    const documentTable = page.locator(".document-layout table");
+    await expect(documentTable.getByText("New bundle document")).toBeVisible();
+    expect(await documentTable.getByText("Old bundle document").count()).toBe(0);
+  } finally {
+    oldDocuments.release();
+    oldCertificate.release();
+    navigationDocuments.release();
   }
 });
