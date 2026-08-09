@@ -90,12 +90,22 @@ export function donarAmountDisplay(amount: string): string {
 // fiscal fields collapse and the embedded Givebutter giving form takes over. No
 // backend involvement: no intent, no webhook, no migration.
 //
-// Account code EXAMPLEACCT00001 (dashboard account 000000), campaign "example-campaign"
-// ("Mis Diezmos y Ofrendas", https://givebutter.com/example-campaign). The hosted campaign
-// page sends x-frame-options: sameorigin, so /donar must iframe Givebutter's
-// purpose-built embed URL instead.
-export const GIVEBUTTER_ACCOUNT_ID = "EXAMPLEACCT00001";
-export const GIVEBUTTER_CAMPAIGN = "example-campaign";
+// The campaign slug is BUILD configuration, never a literal in the source: set
+// VITE_GIVEBUTTER_CAMPAIGN before `npm run build` (which every cf:deploy:* script
+// runs) and the deployment's own campaign is baked into the client bundle. Unset, the
+// neutral placeholder below keeps a fresh clone runnable.
+//
+// The env bag is read defensively because this module is also loaded OUTSIDE Vite —
+// the vitest suites and the Playwright spec import it directly, and there
+// `import.meta.env` (or `import.meta` itself) can be undefined.
+const GIVEBUTTER_CAMPAIGN_FALLBACK = "example-campaign";
+const buildEnv: Record<string, string | undefined> =
+  typeof import.meta === "object" && import.meta !== null
+    ? ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {})
+    : {};
+export const GIVEBUTTER_CAMPAIGN = buildEnv.VITE_GIVEBUTTER_CAMPAIGN?.trim() || GIVEBUTTER_CAMPAIGN_FALLBACK;
+// The hosted campaign page sends x-frame-options: sameorigin, so /donar must iframe
+// Givebutter's purpose-built embed URL instead of the campaign page itself.
 export const GIVEBUTTER_EMBED_BASE_URL = `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
 // The CAT-020 código for Estados Unidos: the only foreign country that routes to
 // Givebutter (every other país stays on the Wompi + CDE path).

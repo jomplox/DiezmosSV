@@ -105,7 +105,7 @@ describe("normalizeBrandingSupportEmail", () => {
     expect(normalizeBrandingSupportEmail("  legacy-email-119@example.com  ")).toBe("legacy-email-119@example.com");
   });
 
-  it("accepts the historical fmce contact", () => {
+  it("accepts the historical default contact", () => {
     expect(normalizeBrandingSupportEmail("legacy-contact-1@example.com")).toBe("legacy-contact-1@example.com");
   });
 
@@ -201,7 +201,7 @@ describe("loadEmailBranding", () => {
     expect(branding.organizationName).toBe("Iglesia Central");
   });
 
-  it("defaults the support email to fmce when unset", async () => {
+  it("defaults the support email to the historical default when unset", async () => {
     const branding = await loadEmailBranding({ getSetting: async () => null }, originEnv);
     expect(branding.supportEmail).toBe("legacy-contact-1@example.com");
     expect(branding.senderName).toBe("ExamplePerson1");

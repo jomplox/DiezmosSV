@@ -21,7 +21,8 @@ import {
 import type { AnnualCertificateDonorTarget, Repository } from "../../src/worker/storage/repository";
 import type { DteDocumentRecord } from "../../src/worker/types";
 import { emisorConfig } from "./support/dteFixtures";
-import { env, InMemoryD1 } from "./support/inMemoryD1";
+import { env, FakeArchiveBucket, InMemoryD1 } from "./support/inMemoryD1";
+import { corruptJpegBytes, pngBytes, svgBytes } from "./support/rasterFixtures";
 
 describe("elSalvadorYearWindow", () => {
   it("spans the calendar year in El Salvador local time (UTC-6)", () => {
@@ -211,6 +212,45 @@ describe("sendAnnualCertificates dossier snapshot", () => {
     expect(harness.listDocuments).toHaveBeenCalledTimes(1);
     expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(1);
     expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_SENT")).toHaveLength(0);
+  });
+
+  it("embeds the deployment's stored branding logo in the sent dossier", async () => {
+    const harness = certificateSendHarness([
+      target("branded@example.org", { donorName: "Branded", count: 1, totalCents: 100 })
+    ], new Map([["branded@example.org", [dteRecord({
+      id: "branded-1",
+      donor_email: "branded@example.org",
+      donor_name: "Branded"
+    })]]]));
+    const archive = harness.workerEnv.ARCHIVE as unknown as FakeArchiveBucket;
+    await archive.put("branding/donor-logo", pngBytes(600, 200, { red: 20, green: 60, blue: 200 }), {
+      httpMetadata: { contentType: "image/png" }
+    });
+
+    const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    const message = harness.emailSend.mock.calls[0]?.[0] as { attachments: Array<{ content: Uint8Array }> };
+    expect(Buffer.from(message.attachments[0].content).toString("latin1")).toContain("/Subtype /Image");
+  });
+
+  it("still sends the dossier when the stored branding logo is unusable", async () => {
+    const harness = certificateSendHarness([
+      target("svg-logo@example.org", { donorName: "Svg Logo", count: 1, totalCents: 100 })
+    ], new Map([["svg-logo@example.org", [dteRecord({
+      id: "svg-logo-1",
+      donor_email: "svg-logo@example.org",
+      donor_name: "Svg Logo"
+    })]]]));
+    const archive = harness.workerEnv.ARCHIVE as unknown as FakeArchiveBucket;
+    // SVG is a valid Marca upload, but pdf-lib cannot embed it.
+    await archive.put("branding/donor-logo", svgBytes(), { httpMetadata: { contentType: "image/svg+xml" } });
+
+    const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    const message = harness.emailSend.mock.calls[0]?.[0] as { attachments: Array<{ content: Uint8Array }> };
+    expect(Buffer.from(message.attachments[0].content).toString("latin1")).not.toContain("/Subtype /Image");
   });
 
   it("keeps an unchanged dossier on the successful send path", async () => {
@@ -463,7 +503,111 @@ describe("renderCertificatePdf branding", () => {
     });
     expect(inflatedPdfStreams(pdf)).toContain("0.06 0.46 0.43");
   });
+
+  it("centres the configured logo in its slot without touching the organisation name", async () => {
+    const pdf = await renderCertificatePdf({
+      year: 2025,
+      donor: summary(),
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026",
+      logo: { bytes: pngBytes(600, 200, { red: 20, green: 60, blue: 200 }), format: "png" }
+    });
+    expect(Buffer.from(pdf).toString("latin1")).toContain("/Subtype /Image");
+
+    // 72dpi render: PDF points map 1:1 onto pixels, y flipped on a 612x792 page. The
+    // slot spans y 726..772 -> rows 20..66; the organisation name's baseline is at
+    // y 724 -> row 68, so its glyphs start around row 60.
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-cert-logo-"));
+    const pdfPath = join(dir, "cert.pdf");
+    const ppmPrefix = join(dir, "cert");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftoppm", ["-r", "72", "-singlefile", "-f", "1", "-l", "1", pdfPath, ppmPrefix]);
+    const image = readPpm(`${ppmPrefix}.ppm`);
+    const isLogoInk = (red: number, green: number, blue: number) => blue - red > 60 && blue - green > 60;
+    const bounds = inkBounds(image, { left: 0, right: 612, top: 0, bottom: 120 }, isLogoInk);
+
+    expect(bounds.width / bounds.height).toBeGreaterThan(2.85);
+    expect(bounds.width / bounds.height).toBeLessThan(3.15);
+    // Centred on the page...
+    expect((bounds.left + bounds.right) / 2).toBeGreaterThan(296);
+    expect((bounds.left + bounds.right) / 2).toBeLessThan(316);
+    // ...and clear of the name printed immediately below the slot.
+    expect(bounds.bottom).toBeLessThan(59);
+
+    const txtPath = join(dir, "cert.txt");
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+    expect(readFileSync(txtPath, "utf8")).toContain("MISION EXAMPLEORGANIZATION");
+  });
+
+  it("keeps issuing the constancia with the built-in vector when the logo cannot be embedded", async () => {
+    const pdf = await renderCertificatePdf({
+      year: 2025,
+      donor: summary(),
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026",
+      logo: { bytes: corruptJpegBytes(), format: "jpeg" }
+    });
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-cert-logo-corrupt-"));
+    const pdfPath = join(dir, "cert.pdf");
+    const txtPath = join(dir, "cert.txt");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+
+    expect(Buffer.from(pdf).toString("latin1")).not.toContain("/Subtype /Image");
+    expect(readFileSync(txtPath, "utf8")).toContain("Constancia de Donaciones 2025");
+  });
 });
+
+function inkBounds(
+  image: { width: number; height: number; pixels: Buffer },
+  crop: { left: number; right: number; top: number; bottom: number },
+  matches: (red: number, green: number, blue: number) => boolean
+): { left: number; right: number; top: number; bottom: number; width: number; height: number } {
+  let minX = image.width;
+  let maxX = -1;
+  let minY = image.height;
+  let maxY = -1;
+  for (let y = crop.top; y < Math.min(crop.bottom, image.height); y += 1) {
+    for (let x = crop.left; x < Math.min(crop.right, image.width); x += 1) {
+      const index = (y * image.width + x) * 3;
+      if (!matches(image.pixels[index], image.pixels[index + 1], image.pixels[index + 2])) {
+        continue;
+      }
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  expect(maxX).toBeGreaterThanOrEqual(minX);
+  return { left: minX, right: maxX, top: minY, bottom: maxY, width: maxX - minX + 1, height: maxY - minY + 1 };
+}
+
+// P6 PPM reader for the pixel assertions above.
+function readPpm(path: string): { width: number; height: number; pixels: Buffer } {
+  const bytes = readFileSync(path);
+  let offset = 0;
+  const isWhitespace = (byte: number) => byte === 9 || byte === 10 || byte === 13 || byte === 32;
+  const nextToken = () => {
+    while (offset < bytes.length && (isWhitespace(bytes[offset]) || bytes[offset] === 35)) {
+      if (bytes[offset] === 35) {
+        while (offset < bytes.length && bytes[offset] !== 10) offset += 1;
+      } else {
+        offset += 1;
+      }
+    }
+    const start = offset;
+    while (offset < bytes.length && !isWhitespace(bytes[offset])) offset += 1;
+    return bytes.subarray(start, offset).toString("ascii");
+  };
+
+  expect(nextToken()).toBe("P6");
+  const width = Number(nextToken());
+  const height = Number(nextToken());
+  expect(Number(nextToken())).toBe(255);
+  offset += 1;
+  return { width, height, pixels: bytes.subarray(offset) };
+}
 
 describe("renderCertificateDossierPdf", () => {
   it("appends every ACCEPTED DTE after the summary page, one per page, in issued_at/id order", async () => {
@@ -500,6 +644,34 @@ describe("renderCertificateDossierPdf", () => {
     const perPage3 = execFileSync("pdftotext", ["-layout", "-f", "3", "-l", "3", pdfPath, "-"], { encoding: "utf8" });
     expect(perPage).toContain("DTE-15-0001");
     expect(perPage3).toContain("DTE-15-0002");
+  });
+
+  it("carries the configured logo onto the appended comprobantes, not just the summary", async () => {
+    const donor: DonorCertificateSummary = {
+      ...summary(),
+      documents: [dteRecord({ id: "d1", numero_control: "DTE-15-0001" })]
+    };
+    const pdf = await renderCertificateDossierPdf({
+      year: 2025,
+      donor,
+      emisor: { nombre: "MISION EXAMPLEORGANIZATION", numDocumento: "10000003520015" },
+      issuedOnLabel: "05/07/2026",
+      logo: { bytes: pngBytes(600, 200, { red: 20, green: 60, blue: 200 }), format: "png" }
+    });
+
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-dossier-logo-"));
+    const pdfPath = join(dir, "dossier.pdf");
+    const ppmPrefix = join(dir, "cde-page");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftoppm", ["-r", "72", "-singlefile", "-f", "2", "-l", "2", pdfPath, ppmPrefix]);
+
+    // The appended CDE's own logo slot (x 28..158, rows 21..63) carries the raster.
+    const bounds = inkBounds(
+      readPpm(`${ppmPrefix}.ppm`),
+      { left: 18, right: 180, top: 8, bottom: 68 },
+      (red, green, blue) => blue - red > 60 && blue - green > 60
+    );
+    expect(bounds.width).toBeGreaterThan(95);
   });
 
   it("fails with a Spanish message when a DTE cannot be rendered", async () => {

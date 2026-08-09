@@ -3,9 +3,11 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, renderDtePdf } from "../../src/worker/services/pdf";
+import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, loadPdfBrandingLogo, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
 import { makeDocument } from "./fixtures";
+import { FakeArchiveBucket } from "./support/inMemoryD1";
+import { corruptJpegBytes, pngBytes, svgBytes } from "./support/rasterFixtures";
 
 describe("DTE PDF rendering", () => {
   it("uses the real comprobante de donacion fiscal layout", async () => {
@@ -40,7 +42,7 @@ describe("DTE PDF rendering", () => {
     plain.emisor.nombre = "Misión ExampleOrganization";
     plain.emisor.nombreComercial = "Misión ExampleOrganization";
     plain.emisor.descActividad = "Actividades de organizaciones religiosas";
-    plain.emisor.direccion.complemento = "Avenida Ejemplo 100";
+    plain.emisor.direccion.complemento = "Avenida ejemplo 100";
     plain.emisor.correo = "legacy-email-107@example.com";
     plain.emisor.codEstable = "0002";
     plain.receptor.nombre = "José Pérez";
@@ -118,8 +120,8 @@ describe("DTE PDF rendering", () => {
 
     // The emisor address (complemento + AGUILARES, SAN SALVADOR ESTE, SAN SALVADOR + phone)
     // is far too wide for the 294pt box, so it must wrap onto multiple rendered lines: the head
-    // ("SOYAPANGO.") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
-    const head = lines.findIndex((line) => line.includes("SOYAPANGO."));
+    // ("AVENIDA EJEMPLO 100") and the tail ("SAN SALVADOR ESTE") land on DIFFERENT extracted lines.
+    const head = lines.findIndex((line) => line.includes("AVENIDA EJEMPLO 100"));
     const tail = lines.findIndex((line) => line.includes("SAN SALVADOR ESTE"));
     expect(head).toBeGreaterThanOrEqual(0);
     expect(tail).toBeGreaterThanOrEqual(0);
@@ -130,18 +132,18 @@ describe("DTE PDF rendering", () => {
     // Overlap symptom (the live bug): the entire emisor address rendered as ONE over-wide line
     // — complemento + every geographic segment + the emisor phone — that ran straight through the
     // emisor box's right edge into the receptor column. Assert that single-line pattern (head
-    // "SOYAPANGO." AND tail "SAN SALVADOR ESTE" AND emisor phone "7000-0004" together) is gone.
+    // "AVENIDA EJEMPLO 100" AND tail "SAN SALVADOR ESTE" AND emisor phone "7000-0004" together) is gone.
     // (pdftotext -layout legitimately places the emisor and receptor columns on the same y, so
     // co-occurrence of the two columns on one extracted line is NOT the symptom — the symptom is
     // the whole address collapsed onto a single over-wide emisor line.)
     const overrun = lines.filter(
-      (line) => line.includes("SOYAPANGO.") && line.includes("SAN SALVADOR ESTE") && line.includes("7000-0004")
+      (line) => line.includes("AVENIDA EJEMPLO 100") && line.includes("SAN SALVADOR ESTE") && line.includes("7000-0004")
     );
     expect(overrun).toEqual([]);
   });
 
   it("keeps the emisor correo visible even when the wrapped address takes two lines", async () => {
-    // The emisor box clamps at 3 rendered lines. With the real church address the
+    // The emisor box clamps at 3 rendered lines. With the fixture emisor address the
     // wrapped address needs two of them, so the correo must ride on the (short)
     // establishment line instead of occupying a fourth line that would be clamped.
     const text = await renderToText(testDocument());
@@ -194,7 +196,7 @@ describe("DTE PDF rendering", () => {
     expect(text).not.toMatch(/DUI:\s+0614-280390-112-1/);
   });
 
-  it("draws the default logo as vector paths instead of an embedded raster image", async () => {
+  it("draws the built-in logo as vector paths instead of an embedded raster image", async () => {
     const pdf = await renderDtePdf(testDocument());
     const pdfBody = Buffer.from(pdf).toString("latin1");
 
@@ -386,6 +388,146 @@ describe("renderDtePdf foreign receptor", () => {
   });
 });
 
+describe("loadPdfBrandingLogo", () => {
+  it("reads the donor branding logo slot when a PNG is stored", async () => {
+    const archive = new FakeArchiveBucket();
+    const bytes = pngBytes(600, 200, { red: 20, green: 60, blue: 200 });
+    await archive.put("branding/donor-logo", bytes, { httpMetadata: { contentType: "image/png" } });
+
+    const logo = await loadPdfBrandingLogo({ ARCHIVE: archive as unknown as R2Bucket });
+
+    expect(logo?.format).toBe("png");
+    expect(logo?.bytes).toEqual(bytes);
+  });
+
+  it("returns null when no branding logo is stored", async () => {
+    const archive = new FakeArchiveBucket();
+    expect(await loadPdfBrandingLogo({ ARCHIVE: archive as unknown as R2Bucket })).toBeNull();
+  });
+
+  it("returns null for an SVG logo, which pdf-lib cannot embed", async () => {
+    const archive = new FakeArchiveBucket();
+    await archive.put("branding/donor-logo", svgBytes(), { httpMetadata: { contentType: "image/svg+xml" } });
+
+    expect(await loadPdfBrandingLogo({ ARCHIVE: archive as unknown as R2Bucket })).toBeNull();
+  });
+
+  it("returns null for bytes whose stored content type lies about the format", async () => {
+    const archive = new FakeArchiveBucket();
+    // Stored as image/png, actually an SVG: the sniffer must not trust the metadata.
+    await archive.put("branding/donor-logo", svgBytes(), { httpMetadata: { contentType: "image/png" } });
+
+    expect(await loadPdfBrandingLogo({ ARCHIVE: archive as unknown as R2Bucket })).toBeNull();
+  });
+
+  it("returns null instead of throwing when the archive read fails or is unbound", async () => {
+    const failing = { get: () => Promise.reject(new Error("R2 unavailable")) } as unknown as R2Bucket;
+
+    expect(await loadPdfBrandingLogo({ ARCHIVE: failing })).toBeNull();
+    expect(await loadPdfBrandingLogo({})).toBeNull();
+    expect(await loadPdfBrandingLogo({ ARCHIVE: {} as R2Bucket })).toBeNull();
+  });
+});
+
+describe("renderDtePdf branding logo", () => {
+  // Page is 612x792pt and pdftoppm renders at 72dpi, so PDF points map 1:1 onto pixels
+  // (y flipped). The logo slot spans x 28..158, y 729..771 -> rows 21..63 from the top.
+  const logoCrop = { left: 18, right: 180, top: 8, bottom: 68 };
+  const isLogoInk = (red: number, green: number, blue: number) => blue - red > 60 && blue - green > 60;
+
+  it("embeds the configured logo in the slot, scaled to fit without distortion", async () => {
+    const pdf = await renderDtePdf(testDocument(), {
+      bytes: pngBytes(600, 200, { red: 20, green: 60, blue: 200 }),
+      format: "png"
+    });
+    expect(Buffer.from(pdf).toString("latin1")).toContain("/Subtype /Image");
+
+    const bounds = inkBounds(renderPpm(pdf, "diezmos-pdf-logo-"), logoCrop, isLogoInk);
+
+    // 3:1 source stays 3:1 on the page (fitted to the 130pt slot width); the tolerance
+    // covers a pixel of rasterization error at 72dpi, not distortion.
+    expect(bounds.width / bounds.height).toBeGreaterThan(2.85);
+    expect(bounds.width / bounds.height).toBeLessThan(3.15);
+    expect(bounds.width).toBeGreaterThan(95);
+    expect(bounds.width).toBeLessThan(132);
+    // Anchored at the slot's left edge and inside its vertical band: the header title
+    // and the code box below keep their clearance.
+    expect(bounds.left).toBeGreaterThanOrEqual(27);
+    expect(bounds.top).toBeGreaterThanOrEqual(20);
+    expect(bounds.bottom).toBeLessThan(63);
+  });
+
+  it("keeps a tall logo inside the slot instead of stretching it", async () => {
+    const pdf = await renderDtePdf(testDocument(), {
+      bytes: pngBytes(200, 200, { red: 20, green: 60, blue: 200 }),
+      format: "png"
+    });
+
+    const bounds = inkBounds(renderPpm(pdf, "diezmos-pdf-logo-square-"), logoCrop, isLogoInk);
+
+    expect(bounds.width / bounds.height).toBeGreaterThan(0.9);
+    expect(bounds.width / bounds.height).toBeLessThan(1.1);
+    expect(bounds.bottom).toBeLessThan(63);
+  });
+
+  it("falls back to the built-in vector when the stored bytes cannot be embedded", async () => {
+    const pdf = await renderDtePdf(testDocument(), { bytes: corruptJpegBytes(), format: "jpeg" });
+    const dir = mkdtempSync(join(tmpdir(), "diezmos-pdf-logo-corrupt-"));
+    const pdfPath = join(dir, "cde.pdf");
+    const txtPath = join(dir, "cde.txt");
+    writeFileSync(pdfPath, pdf);
+    execFileSync("pdftotext", ["-layout", pdfPath, txtPath]);
+
+    // A valid comprobante is still produced, drawn with the vector mark.
+    expect(Buffer.from(pdf).toString("latin1")).not.toContain("/Subtype /Image");
+    expect(readFileSync(txtPath, "utf8")).toContain("COMPROBANTE DE DONACIÓN");
+  });
+});
+
+function renderPpm(pdf: Uint8Array, prefix: string): { width: number; height: number; pixels: Buffer } {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const pdfPath = join(dir, "doc.pdf");
+  const ppmPrefix = join(dir, "doc");
+  writeFileSync(pdfPath, pdf);
+  execFileSync("pdftoppm", ["-r", "72", "-singlefile", pdfPath, ppmPrefix]);
+  return readPpm(`${ppmPrefix}.ppm`);
+}
+
+function inkBounds(
+  image: { width: number; height: number; pixels: Buffer },
+  crop: { left: number; right: number; top: number; bottom: number },
+  matches: (red: number, green: number, blue: number) => boolean
+): { count: number; left: number; right: number; top: number; bottom: number; width: number; height: number } {
+  let minX = image.width;
+  let maxX = -1;
+  let minY = image.height;
+  let maxY = -1;
+  let count = 0;
+  for (let y = crop.top; y < Math.min(crop.bottom, image.height); y += 1) {
+    for (let x = crop.left; x < Math.min(crop.right, image.width); x += 1) {
+      const index = (y * image.width + x) * 3;
+      if (!matches(image.pixels[index], image.pixels[index + 1], image.pixels[index + 2])) {
+        continue;
+      }
+      count += 1;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  expect(count).toBeGreaterThan(0);
+  return {
+    count,
+    left: minX,
+    right: maxX,
+    top: minY,
+    bottom: maxY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1
+  };
+}
+
 function testDocument(): DteDocumentRecord {
   return makeDocument({
     plain_json: JSON.stringify({
@@ -413,7 +555,7 @@ function testDocument(): DteDocumentRecord {
           departamento: "06",
           municipio: "22",
           distrito: "01",
-          complemento: "AVENIDA EJEMPLO 100,  COLONIA EJEMPLO #1 SOYAPANGO."
+          complemento: "AVENIDA EJEMPLO 100, COLONIA EJEMPLO, SAN SALVADOR."
         },
         telefono: "7000-0004",
         correo: "legacy-contact-4@example.com",
