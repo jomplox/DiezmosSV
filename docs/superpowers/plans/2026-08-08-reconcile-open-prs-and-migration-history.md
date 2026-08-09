@@ -138,13 +138,13 @@
 
 **Checkable outcome:** preview retains at most 51 donor summaries, bulk processing examines at most 11 eligible unsent targets and processes 10, and a single dossier reads at most 26 rows and renders at most 25. API/UI expose deterministic continuation rather than silently truncating or claiming full-year totals.
 
-- [ ] Add constants: preview page 50, bulk donor batch 10, dossier document limit 25.
-- [ ] Add repository queries grouped/keyset-ordered by canonical recipient key `COALESCE(NULLIF(TRIM(donor_email), ''), NULLIF(TRIM(donor_name), ''), '(sin identificar)')`; target reads use `limit + 1`, dossier reads use 26, and all source filters remain accepted/non-claimed/year-bounded.
-- [ ] Bulk target selection excludes no-email and already-sent audit entries before the 11-row sentinel fetch; retain a final audit recheck before send. Preview search reuses existing accent-insensitive DTE search tokenization and computes complete-year summaries only for matched recipients.
-- [ ] Return `{ processed, sent, skipped, failed, hasMore, nextCursor }` for bulk and explicit `{ mode: 'single' }` semantics for per-row resend. Reject bodies containing both `donor` and `after`. Never write an email-derived continuation cursor to audit metadata.
-- [ ] Before PDF/email, reject a target count or 26-row read above 25. Bulk records one failed donor and continues; single returns HTTP 422. Prove PDF and email were never invoked.
-- [ ] Separate preview pagination state from bulk-send state in the client; show `Ver más donantes` and `Enviar siguiente tanda`, reset cursors on year/search/new traversal, and remove whole-year population/total claims that a bounded page cannot support.
-- [ ] Test 50+1 preview/resume, 10+1 bulk/resume, replay idempotence, 26-document bulk and single behavior, search, single resend, permissions, and year validation.
+- [x] Add constants: preview page 50, bulk donor batch 10, dossier document limit 25.
+- [x] Add repository queries grouped/keyset-ordered by canonical recipient key `COALESCE(NULLIF(TRIM(donor_email), ''), NULLIF(TRIM(donor_name), ''), '(sin identificar)')`; target reads use `limit + 1`, dossier reads use 26, and all source filters remain accepted/non-claimed/year-bounded.
+- [x] Bulk target selection excludes no-email and already-sent audit entries before the 11-row sentinel fetch; retain a final audit recheck before send. Preview search reuses existing accent-insensitive DTE search tokenization and computes complete-year summaries only for matched recipients.
+- [x] Return `{ processed, sent, skipped, failed, hasMore, nextCursor }` for bulk and explicit `{ mode: 'single' }` semantics for per-row resend. Reject bodies containing both `donor` and `after`. Never write an email-derived continuation cursor to audit metadata.
+- [x] Before PDF/email, reject a target count or 26-row read above 25. Bulk records one failed donor and continues; single returns HTTP 422. Prove PDF and email were never invoked.
+- [x] Separate preview pagination state from bulk-send state in the client; show `Ver más donantes` and `Enviar siguiente tanda`, reset cursors on year/search/new traversal, and remove whole-year population/total claims that a bounded page cannot support.
+- [x] Test 50+1 preview/resume, 10+1 bulk/resume, replay idempotence, 26-document bulk and single behavior, search, single resend, permissions, and year validation.
 
 ## Task 8: Reconcile public/private configuration and sender validation
 
