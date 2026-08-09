@@ -28,7 +28,7 @@ import { readFileSync as __readEmailHtmlSource } from "node:fs";
 import { resolve as __resolveEmailHtml } from "node:path";
 
 describe("email support contact", () => {
-  it("keeps the fmce default as the footer fallback in source", () => {
+  it("keeps the default support contact as the footer fallback in source", () => {
     // legacy-contact-1@example.com is the default support contact for both lanes; the shared
     // emailDocument chrome renders it when a church has not configured its own.
     const emailHtmlSource = __readEmailHtmlSource(
@@ -40,7 +40,7 @@ describe("email support contact", () => {
     expect(emailHtmlSource).toContain("mailto:");
   });
 
-  it("renders the fmce default in every footer when no support email is configured", () => {
+  it("renders the default support contact in every footer when no support email is configured", () => {
     const receipt = dteEmailHtml(fakeRecord(), "Gracias.", { organizationName: "ExamplePerson1" });
     const reset = passwordResetEmailHtml("Ana", "https://example.org/?reset=abc", 30, { organizationName: "ExamplePerson1" });
     const certificate = certificateEmailHtml({
