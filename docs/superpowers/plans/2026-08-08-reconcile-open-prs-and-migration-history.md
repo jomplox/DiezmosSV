@@ -158,11 +158,11 @@
 
 **Checkable outcome:** the public config has no active placeholder route, retains inert `.invalid` `APP_ORIGIN` and zero/example resource data, and has exactly one unrestricted `EMAIL` binding in each of root/staging/production. The selected private TOML is rejected if any root/environment/inline Email Service binding contains `allowed_sender_addresses` or if the required environment binding shape is wrong.
 
-- [ ] Remove only the active production route from public `wrangler.toml`; retain the inert origin so generated types do not drift. Prove `npm run types:check` remains green.
-- [ ] Rewrite provisioning docs to put real IDs/routes/origins/resource names only in the absolute, out-of-repo, owner-only `0600` config selected by `DIEZMOSSV_WRANGLER_CONFIG`, and route remote operations through existing private wrappers.
-- [ ] Remove sender allowlists from all three public example `EMAIL` bindings.
-- [ ] Parse and validate synthetic selected-private TOML root, named-environment, and inline binding forms before copying/executing it. Reject any sender allowlist and malformed/duplicate/missing expected bindings without reading a real private config in tests.
-- [ ] Run focused config/docs/boundary/type tests; commit no generated private value or live example.
+- [x] Remove only the active production route from public `wrangler.toml`; retain the inert origin so generated types do not drift. Prove `npm run types:check` remains green.
+- [x] Rewrite provisioning docs to put real IDs/routes/origins/resource names only in the absolute, out-of-repo, owner-only `0600` config selected by `DIEZMOSSV_WRANGLER_CONFIG`, and route remote operations through existing private wrappers.
+- [x] Remove sender allowlists from all three public example `EMAIL` bindings.
+- [x] Parse and validate synthetic selected-private TOML root, named-environment, and inline binding forms before copying/executing it. Reject any sender allowlist and malformed/duplicate/missing expected bindings without reading a real private config in tests.
+- [x] Run focused config/docs/boundary/type tests; commit no generated private value or live example.
 
 ## Task 9: Whole-branch review, privacy gate, publication, and main reconciliation
 
