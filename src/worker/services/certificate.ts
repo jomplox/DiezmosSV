@@ -354,6 +354,9 @@ export interface AnnualCertificateSendRequest {
 }
 
 interface CertificateDossierSnapshot {
+  groupKey: string;
+  donorName: string;
+  donorEmail: string | null;
   count: number;
   totalCents: number;
   hasTestEnvironment: boolean;
@@ -459,19 +462,24 @@ export async function sendAnnualCertificates(
         throw new CertificateDossierLimitError(target.groupKey, documents.length);
       }
       const snapshot = dossierSnapshot(documents);
+      const currentDonorEmail = snapshot.donorEmail;
       if (
         snapshot.count === 0 ||
+        !currentDonorEmail ||
+        snapshot.groupKey !== target.groupKey ||
+        snapshot.donorName !== target.donorName ||
+        currentDonorEmail !== donorEmail ||
         snapshot.count !== target.count ||
         snapshot.totalCents !== target.totalCents ||
         snapshot.hasTestEnvironment !== target.hasTestEnvironment
       ) {
         throw new CertificateDossierChangedError();
       }
-      const donor = donorSummary(target, documents, snapshot);
+      const donor = donorSummary(documents, snapshot);
       const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
       const totalLabel = formatCents(donor.totalCents);
       await email.sendDonorCertificate({
-        toEmail: donorEmail,
+        toEmail: currentDonorEmail,
         subject: `Constancia de donaciones ${year}`,
         text:
           `Estimado(a) ${donor.donorName}:\n\n` +
@@ -497,7 +505,7 @@ export async function sendAnnualCertificates(
         action: DONOR_CERTIFICATE_SENT_ACTION,
         entityType: DONOR_CERTIFICATE_ENTITY_TYPE,
         entityId,
-        summary: `Constancia ${year} enviada a ${donorEmail}`,
+        summary: `Constancia ${year} enviada a ${currentDonorEmail}`,
         metadata: { year, donorName: donor.donorName, count: donor.count, totalCents: donor.totalCents, ...(single ? { mode: "single" } : {}) }
       });
       result.sent += 1;
@@ -537,15 +545,14 @@ function previewDonor(target: AnnualCertificateDonorTarget): AnnualCertificatePr
 }
 
 function donorSummary(
-  target: AnnualCertificateDonorTarget,
   documents: DteDocumentRecord[],
   snapshot: CertificateDossierSnapshot
 ): DonorCertificateSummary {
   const ordered = [...documents].sort(compareDossierDocuments);
   return {
-    groupKey: target.groupKey,
-    donorName: target.donorName,
-    donorEmail: target.donorEmail,
+    groupKey: snapshot.groupKey,
+    donorName: snapshot.donorName,
+    donorEmail: snapshot.donorEmail,
     count: snapshot.count,
     totalCents: snapshot.totalCents,
     hasTestEnvironment: snapshot.hasTestEnvironment,
@@ -560,9 +567,20 @@ function donorSummary(
 }
 
 function dossierSnapshot(documents: DteDocumentRecord[]): CertificateDossierSnapshot {
+  const first = [...documents].sort(compareDossierDocuments)[0];
+  const donorName = normalizedDossierIdentityText(first?.donor_name);
+  const donorEmail = normalizedDossierIdentityText(first?.donor_email);
   return {
+    groupKey: donorEmail ?? donorName ?? "(sin identificar)",
+    donorName: donorName ?? donorEmail ?? "(sin identificar)",
+    donorEmail,
     count: documents.length,
     totalCents: documents.reduce((total, document) => total + document.amount_cents, 0),
     hasTestEnvironment: documents.some((document) => document.environment === "00")
   };
+}
+
+function normalizedDossierIdentityText(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }

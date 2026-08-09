@@ -613,7 +613,7 @@ describe("annual donor certificates", () => {
     expect(body.message).toMatch(/correo/i);
   });
 
-  it("returns one sanitized 409 when an explicit donor dossier changes before its bounded read", async () => {
+  it("returns one sanitized 409 when an explicit donor identity changes before its bounded read", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
     db.documents.push(testDocument({
@@ -628,7 +628,7 @@ describe("annual donor certificates", () => {
     db.prepare = ((sql: string) => {
       if (sql.includes("annual_certificate_documents")) {
         documentReads += 1;
-        db.documents[0].amount_cents = 200;
+        db.documents[0].donor_name = "Replacement Donor";
       }
       return originalPrepare(sql);
     }) as typeof db.prepare;
