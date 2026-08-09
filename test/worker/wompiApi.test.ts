@@ -379,7 +379,7 @@ describe("Wompi API service", () => {
             CodigoRegion: "06"
           },
           resultadoTransaccion: 0,
-          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          fechaTransaccion: "2026-01-15T10:00:00-06:00",
           montoOriginal: 25.5,
           idTransaccion: "tx-approved",
           esReal: true,
@@ -419,7 +419,7 @@ describe("Wompi API service", () => {
             CodigoRegion: "06"
           },
           resultadoTransaccion: 0,
-          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          fechaTransaccion: "2026-01-15T10:00:00-06:00",
           montoOriginal: 25.5,
           idTransaccion: "tx-approved",
           esReal: true,
@@ -434,8 +434,8 @@ describe("Wompi API service", () => {
         cantidadPagosExitosos: 1,
         imagenes: [],
         vigencia: {
-          fechaInicio: "2026-07-29T18:17:44-06:00",
-          fechaFin: "2026-07-29T19:17:44-06:00"
+          fechaInicio: "2026-01-15T09:00:00-06:00",
+          fechaFin: "2026-01-15T11:00:00-06:00"
         },
         limitesDeUso: {
           cantidadMaximaPagosExitosos: 1,
