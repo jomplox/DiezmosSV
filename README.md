@@ -280,40 +280,54 @@ against the committed non-secret mock env in `.dev.vars.ci`.
 
 <br/>
 
-The default Wrangler config is local/mock. Real Cloudflare testing uses the `staging` environment:
+The committed `wrangler.toml` is an inert local/example config. Before any remote command, select a
+private config that is an absolute path outside this repository, owned by the current user, and
+owner-only mode `0600`:
 
 ```bash
-# 1 - Authenticate Wrangler
-npx wrangler login
+export DIEZMOSSV_WRANGLER_CONFIG="/absolute/path/outside/this/repository/wrangler.toml"
+install -d -m 700 "$(dirname "$DIEZMOSSV_WRANGLER_CONFIG")"
+install -m 600 wrangler.toml "$DIEZMOSSV_WRANGLER_CONFIG"
+
+# Edit only the selected private file, then authenticate through its validated copy.
+node scripts/run-private-wrangler.mjs login
 npm run cf:whoami
+```
 
-# 2 - Create remote resources, then copy the returned D1 id into
-#     wrangler.toml under [[env.staging.d1_databases]]
-npx wrangler d1 create diezmossv-staging-example
-npx wrangler queues create diezmossv-staging-example-issuance
-npx wrangler queues create diezmossv-staging-example-issuance-dlq
-npx wrangler r2 bucket create diezmossv-staging-archive-example
+The wrapper rejects a relative, in-repository, symlinked, non-`0600`, or differently owned file.
+Put real D1 IDs, routes, origins, Worker/resource names, queue names, and R2 bucket names only in the
+selected private config; leave the public example and its zero IDs unchanged. Root, staging, and
+production must each contain exactly one `send_email` binding named `EMAIL`, without
+`allowed_sender_addresses`.
 
-# 3 - Set TEST/staging secrets
-npx wrangler secret put WOMPI_API_SECRET --env staging
-npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env staging
-npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env staging
-npx wrangler secret put CLOUDFLARE_API_TOKEN --env staging
-npx wrangler secret put MH_CERT_PASSWORD --env staging
-npx wrangler secret put MH_CERT_XML_PART_1 --env staging
-npx wrangler secret put MH_CERT_XML_PART_2 --env staging
-npx wrangler secret put MH_USER_TEST --env staging
-npx wrangler secret put MH_PASSWORD_TEST --env staging
-npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
-npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
-npx wrangler secret put EMAIL_FROM --env staging
-npx wrangler secret put EMISOR_CONFIG_JSON --env staging
+Create the remote resources in an owner-controlled Cloudflare workflow, record their returned names
+and IDs only in the selected private config, then verify that config through the wrapper:
 
-# 4 - Migrate and deploy
+```bash
+node scripts/run-private-wrangler.mjs d1 list
+node scripts/run-private-wrangler.mjs queues list
+node scripts/run-private-wrangler.mjs r2 bucket list
+
+# Set TEST/staging secrets through the same selected config.
+node scripts/run-private-wrangler.mjs secret put WOMPI_API_SECRET --env staging
+node scripts/run-private-wrangler.mjs secret put BOOTSTRAP_OWNER_TOKEN --env staging
+node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_ACCOUNT_ID --env staging
+node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_API_TOKEN --env staging
+node scripts/run-private-wrangler.mjs secret put MH_CERT_PASSWORD --env staging
+node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_1 --env staging
+node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_2 --env staging
+node scripts/run-private-wrangler.mjs secret put MH_USER_TEST --env staging
+node scripts/run-private-wrangler.mjs secret put MH_PASSWORD_TEST --env staging
+node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
+node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
+node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env staging
+node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env staging
+
+# Migrate and deploy through package scripts that use the same private wrapper.
 npm run cf:migrate:staging
 npm run cf:deploy:staging
 
-# 5 - Run the deployed edge smoke test
+# Run the deployed edge smoke test.
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
 ```
 
@@ -338,33 +352,30 @@ See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checkl
 <br/>
 
 Production is intentionally a separate Wrangler environment and should be used only after staging
-UAT approval.
+UAT approval. Its live values also stay only in the selected private config described above.
 
 ```bash
-# 1 - Verify the production resources exist. They were provisioned on 2026-07-05
-#     (D1 diezmossv-production-example, queues diezmossv-production-example-issuance and
-#     diezmossv-production-example-issuance-dlq, R2 diezmossv-production-archive-example) and
-#     their ids are already committed in wrangler.toml under [env.production].
-npx wrangler d1 list
-npx wrangler queues list
-npx wrangler r2 bucket list
+# Verify the private production targets without printing their values into this repository.
+node scripts/run-private-wrangler.mjs d1 list
+node scripts/run-private-wrangler.mjs queues list
+node scripts/run-private-wrangler.mjs r2 bucket list
 
-# 2 - Set production secrets
-npx wrangler secret put WOMPI_API_SECRET --env production
-npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env production
-npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env production
-npx wrangler secret put CLOUDFLARE_API_TOKEN --env production
-npx wrangler secret put MH_CERT_PASSWORD --env production
-npx wrangler secret put MH_CERT_XML_PART_1 --env production
-npx wrangler secret put MH_CERT_XML_PART_2 --env production
-npx wrangler secret put MH_USER_PROD --env production
-npx wrangler secret put MH_PASSWORD_PROD --env production
-npx wrangler secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned alternative
-npx wrangler secret put EMAIL_API_KEY --env production   # optional alternative-provider token
-npx wrangler secret put EMAIL_FROM --env production
-npx wrangler secret put EMISOR_CONFIG_JSON --env production
+# Set production secrets through the selected private config.
+node scripts/run-private-wrangler.mjs secret put WOMPI_API_SECRET --env production
+node scripts/run-private-wrangler.mjs secret put BOOTSTRAP_OWNER_TOKEN --env production
+node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_ACCOUNT_ID --env production
+node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_API_TOKEN --env production
+node scripts/run-private-wrangler.mjs secret put MH_CERT_PASSWORD --env production
+node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_1 --env production
+node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_2 --env production
+node scripts/run-private-wrangler.mjs secret put MH_USER_PROD --env production
+node scripts/run-private-wrangler.mjs secret put MH_PASSWORD_PROD --env production
+node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env production   # optional deployment-owned alternative
+node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production   # optional alternative-provider token
+node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
+node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# 3 - Migrate and deploy
+# Migrate and deploy.
 npm run cf:migrate:prod
 npm run cf:deploy:prod
 ```
@@ -377,8 +388,8 @@ Do one controlled low-value production issuance with live monitoring before enab
 
 ## ⚙️ Configuration reference
 
-**Secrets** - set with `wrangler secret put --env staging` / `--env production` remotely, or in the
-out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
+**Secrets** - set remotely with `scripts/run-private-wrangler.mjs secret put` and the config selected
+by `DIEZMOSSV_WRANGLER_CONFIG`, or in the out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 
 | Variable | Purpose |
 |---|---|
@@ -392,14 +403,15 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `MH_USER_TEST` / `MH_PASSWORD_TEST` | MH API login for **test** (`ambiente=00`). |
 | `MH_USER_PROD` / `MH_PASSWORD_PROD` | MH API login for **production** (`ambiente=01`). |
 | `EMAIL_PROVIDER_URL` / `EMAIL_API_KEY` | Optional alternative transactional provider selected before dispatch when Cloudflare arbitrary-recipient delivery is not enabled. The deployment-owned URL must be absolute HTTPS without embedded credentials; the provider receives a `POST` JSON body with an `Authorization: Bearer` header. |
-| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service or the selected HTTP provider. The sender domain must be onboarded in Cloudflare Email Sending and match a `send_email` `allowed_sender_addresses` entry in `wrangler.toml` when Cloudflare is selected. |
+| `EMAIL_FROM` | **Required for real sends.** Sender address used by Cloudflare Email Service or the selected HTTP provider. The sender domain must be onboarded in Cloudflare Email Sending. The selected private config must keep the `EMAIL` binding free of `allowed_sender_addresses` so an OWNER update does not conflict with deployment configuration. |
 | `EMISOR_CONFIG_JSON` | Issuer configuration for the real church/taxpayer. Treat as a secret for real deployments. |
 
 > The signer certificate and the MH API login are **different concerns**. `MH_CERT_*` is for signing;
 > `MH_USER_*` / `MH_PASSWORD_*` is for the API. Don't use production credentials for test donations —
 > a test payment routed to `ambiente=00` with production-only credentials will fail authentication.
 
-**Vars** - set in `wrangler.toml [vars]` and duplicated per Wrangler environment:
+**Vars** - the committed `wrangler.toml` contains inert examples; remote values belong in the
+selected private config and are duplicated per Wrangler environment:
 
 | Variable | Purpose |
 |---|---|
@@ -407,7 +419,7 @@ out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
 | `APP_ORIGIN` | Public base URL of the deployment, used to build absolute links such as password-reset URLs. |
 | `MOCK_EXTERNAL_SERVICES` | Mock mode is **explicit opt-in**: MH + email are stubbed only when this is exactly `"true"`. Local `wrangler.toml` sets `"true"`; staging and production set `"false"`. |
 | `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
-| `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Declared in `wrangler.toml` under `[[send_email]]`. |
+| `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Remote root, staging, and production bindings are declared only in the selected private config. |
 | `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export (`example-worker-archive-*`). |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker after Cloudflare Email Sending is confirmed to send to external donor addresses. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
