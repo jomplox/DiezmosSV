@@ -76,7 +76,7 @@ import { buildDonorExplorerCsv, donorExplorerCsvFilename } from "./services/dono
 import { buildF960Csv, buildF960Selection, buildF960Xlsx, XLSX_MIME, type F960Selection } from "./services/f960";
 import { MhClient, MhPreDispatchError } from "./services/mhClient";
 import { IssuancePipeline } from "./services/pipeline";
-import { renderDtePdf } from "./services/pdf";
+import { loadPdfBrandingLogo, renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
 import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, isManifestedBackupTable, listBackupMonths, verifyBackupMonth } from "./services/backups";
@@ -3553,7 +3553,7 @@ async function handleDocumentRoute(
   }
 
   if (action === "pdf" && request.method === "GET") {
-    const pdf = await renderDtePdf(document);
+    const pdf = await renderDtePdf(document, await loadPdfBrandingLogo(env));
     return new Response(pdf, {
       headers: {
         "Content-Type": "application/pdf",
