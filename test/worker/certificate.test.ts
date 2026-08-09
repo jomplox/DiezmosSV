@@ -216,7 +216,11 @@ describe("sendAnnualCertificates dossier snapshot", () => {
   it("keeps an unchanged dossier on the successful send path", async () => {
     const harness = certificateSendHarness([
       target("stable@example.org", { donorName: "Stable", count: 1, totalCents: 100, hasTestEnvironment: false })
-    ], new Map([["stable@example.org", [dteRecord({ id: "stable-1", donor_email: "stable@example.org" })]]]));
+    ], new Map([["stable@example.org", [dteRecord({
+      id: "stable-1",
+      donor_email: "stable@example.org",
+      donor_name: "Stable"
+    })]]]));
 
     const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
 
@@ -227,13 +231,77 @@ describe("sendAnnualCertificates dossier snapshot", () => {
     expect(harness.audits.filter((audit) => audit.action === "DONOR_CERTIFICATE_FAILED")).toHaveLength(0);
   });
 
+  it("uses the earliest trimmed snapshot identity without rereading the aggregate name", async () => {
+    const stableTarget = target("stable-identity@example.org", {
+      count: 2,
+      totalCents: 200,
+      donorEmail: "stable-identity@example.org"
+    });
+    let donorNameReads = 0;
+    Object.defineProperty(stableTarget, "donorName", {
+      enumerable: true,
+      get() {
+        donorNameReads += 1;
+        return donorNameReads === 1 ? "Snapshot Donor" : "Stale Target Donor";
+      }
+    });
+    const harness = certificateSendHarness([stableTarget], new Map([["stable-identity@example.org", [
+      dteRecord({
+        id: "identity-later",
+        donor_email: " stable-identity@example.org ",
+        donor_name: "Later Donor",
+        issued_at: "2025-03-01T16:00:00.000Z"
+      }),
+      dteRecord({
+        id: "identity-earliest",
+        donor_email: " stable-identity@example.org ",
+        donor_name: "  Snapshot Donor  ",
+        issued_at: "2025-02-01T16:00:00.000Z"
+      })
+    ]]]));
+
+    const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+    const message = harness.emailSend.mock.calls[0]?.[0] as { text: string };
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    expect(message.text).toContain("Snapshot Donor");
+    expect(message.text).not.toContain("Stale Target Donor");
+    expect(message.text).not.toContain("Later Donor");
+    expect(donorNameReads).toBe(1);
+  });
+
+  it("uses the trimmed current email when the earliest snapshot row has no donor name", async () => {
+    const harness = certificateSendHarness([
+      target("fallback@example.org", {
+        donorName: "fallback@example.org",
+        donorEmail: "fallback@example.org",
+        count: 1,
+        totalCents: 100
+      })
+    ], new Map([["fallback@example.org", [dteRecord({
+      id: "identity-fallback",
+      donor_email: "  fallback@example.org  ",
+      donor_name: "   "
+    })]]]));
+
+    const result = await sendAnnualCertificates(harness.workerEnv, harness.repo, 2025, "user_admin", {});
+    const message = harness.emailSend.mock.calls[0]?.[0] as { text: string };
+
+    expect(result).toMatchObject({ processed: 1, sent: 1, failed: 0 });
+    expect(message.text).toContain("fallback@example.org");
+  });
+
   it("audits one changed dossier once and continues to a later bulk target without retrying", async () => {
     const harness = certificateSendHarness([
       target("a-race@example.org", { donorName: "A Race", count: 1, totalCents: 100 }),
       target("b-next@example.org", { donorName: "B Next", count: 1, totalCents: 100 })
     ], new Map([
       ["a-race@example.org", [dteRecord({ id: "race-amount", donor_email: "a-race@example.org", amount_cents: 200 })]],
-      ["b-next@example.org", [dteRecord({ id: "next-stable", donor_email: "b-next@example.org" })]]
+      ["b-next@example.org", [dteRecord({
+        id: "next-stable",
+        donor_email: "b-next@example.org",
+        donor_name: "B Next"
+      })]]
     ]));
     const drawnText: string[] = [];
     const originalDrawText = PDFPage.prototype.drawText;
