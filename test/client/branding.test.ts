@@ -155,6 +155,10 @@ describe("App boots branding before the session (source contract)", () => {
 });
 
 describe("static bootstrap shell", () => {
+  it("uses the donor ceremony name as the initial browser title", () => {
+    expect(indexSource).toContain("<title>Diezmos y Ofrendas</title>");
+  });
+
   it("does not paint a donor-shaped placeholder before the public React page mounts", () => {
     expect(indexSource).toMatch(
       /html\[data-bootstrap-route="donor"\]\s+#app-bootstrap\s*\{\s*display:\s*none;/
