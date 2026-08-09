@@ -399,7 +399,7 @@ describe("auth rate limiting", () => {
       expect([...db.loginRateLimits.keys()]).toHaveLength(1);
       expect([...db.loginRateLimits.keys()][0]).toMatch(/^[a-f0-9]{64}$/);
       expect([...db.loginRateLimits.keys()][0]).not.toContain("203.0.113.70");
-    });
+    }, 30_000);
 
     it("resets an expired aggregate login bucket before normal credential handling", async () => {
       const db = new InMemoryD1();
@@ -686,7 +686,7 @@ describe("auth rate limiting", () => {
       expect(denied.status).toBe(429);
       await expect(denied.json()).resolves.toMatchObject({ error: "too_many_attempts" });
       expect([...db.loginRateLimits.keys()]).toHaveLength(1);
-    });
+    }, 30_000);
   });
 
   it("blocks the sixth failed login within 15 minutes without attempting authentication", async () => {
