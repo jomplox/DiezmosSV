@@ -451,8 +451,8 @@ export function DonarPage() {
   // still flips to "ready").
   const [handoff, setHandoff] = useState<"loading" | "ready" | "delayed" | "verifying">("loading");
   // Height reported by Wompi's checkout via sizeUpdate; null keeps the CSS fallback
-  // (min(78vh, 820px)) until the first message, then the iframe tracks the content and
-  // the inner scrollbar disappears — the page is the only scroller.
+  // (min(78vh, 820px)) until the first message. Tablet/desktop can then track the full
+  // content height; mobile CSS caps the frame and keeps Wompi's own scrolling available.
   const [embedHeight, setEmbedHeight] = useState<number | null>(null);
   // Explicit focus targets: the hero amount input after a quick-fill and the
   // summary's Editar control on an embedded handoff step.
@@ -1362,7 +1362,6 @@ export function DonarPage() {
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
                   title="Entrega segura con Wompi"
                   style={embedHeight ? { height: embedHeight } : undefined}
-                  scrolling={embedHeight ? "no" : undefined}
                   onLoad={() => setHandoff("ready")}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
