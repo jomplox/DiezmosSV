@@ -654,7 +654,7 @@ describe("donation intents", () => {
           esReal: true,
           esAprobada: true,
           codigoAutorizacion: "000001",
-          monto: 178,
+          monto: 125,
           idExterno: null
         }]
       }), { status: 200 }));
