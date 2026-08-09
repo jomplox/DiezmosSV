@@ -128,7 +128,7 @@ Only events with `ResultadoTransaccion = ExitosaAprobada` are issued. Everything
 Wompi, or the donor is recorded in D1 and the audit log.
 
 The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
-SV fiscal form (Wompi + CDE), and **EE. UU.** routes straight to the Givebutter (FMCE) block for a
+SV fiscal form (Wompi + CDE), and **EE. UU.** routes straight to the Givebutter block for a
 US-deductible receipt (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
@@ -426,6 +426,14 @@ selected private config and are duplicated per Wrangler environment:
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
+**Build-time vars** - read by Vite and baked into the client bundle by `npm run build` (which every
+`cf:deploy:*` script runs). They are **not** Worker vars and are **not** secrets — anything set here
+ships to the browser:
+
+| Variable | Purpose |
+|---|---|
+| `VITE_GIVEBUTTER_CAMPAIGN` | Givebutter campaign slug for the **EE. UU.** donor door. It is the path segment in both `https://givebutter.com/embed/c/<slug>` (the framed giving form) and `https://givebutter.com/<slug>` (the hosted fallback link). Unset, the client falls back to the placeholder `example-campaign`, so a fresh clone runs without pointing at anyone's real campaign. Set it before building any deployment that serves US donors. |
+
 Remote staging/production email delivery selects exactly one provider before dispatch. When both are
 configured, set `EMAIL_ARBITRARY_RECIPIENTS=true` only after the Cloudflare `send_email` binding can
 reach arbitrary donor addresses; that selects Cloudflare, while an unset marker selects the configured
@@ -535,24 +543,25 @@ the complemento + country name instead of the placeholder catalog labels.
 
 **US donors → Givebutter (no CDE — deliberate).** When "Resido en el extranjero" is checked **and the
 país is Estados Unidos (`US`)**, the SV fiscal fields collapse entirely and the page embeds the
-**Givebutter** giving form for the campaign **`example-campaign`** ("Mis Diezmos y Ofrendas") of the US
-501(c)(3) **Friends of Misión ExampleOrganization (FMCE)**, account `000000`. A US taxpayer needs a
-US-deductible receipt, not a Salvadoran CDE, and the gift belongs on the US entity's books — so these
-donations flow entirely through Givebutter and **never touch Wompi, the intent table, the webhook, or
-the CDE pipeline**. There is **no backend involvement**: no intent is created, no migration exists, and
-Givebutter emails its own tax receipt. The page embeds Givebutter's frameable
-`https://givebutter.com/embed/c/example-campaign` iframe directly — **not** the
-`widgets.givebutter.com` script — so third-party JavaScript does not execute on the app origin. The
-chosen amount plus an optional **"Donación mensual"** toggle (`frequency=monthly`) are prefilled in the
-iframe URL. If the embedded form does not load within ~4 s, a prominent **"Donar en GiveButter"** link
-to `https://givebutter.com/example-campaign?amount=…` (opens in a new tab) is shown; a small **"Done en
-GiveButter"** version of that link is always present beneath the form (GiveButter is the anchor text —
-no raw URL is shown). There is **no escape hatch** back to the SV form: the donor deliberately chose the
-EE. UU. door, and **"← Cambiar opción"** is the way back. All Givebutter constants (account, campaign,
-embed URL) live in `src/client/donation.ts`.
+**Givebutter** giving form for the deployment's configured campaign (see `VITE_GIVEBUTTER_CAMPAIGN` in
+the [configuration reference](#-configuration-reference)), run by the US 501(c)(3) that acts as the
+church's US giving vehicle. A US taxpayer needs a US-deductible receipt, not a Salvadoran CDE, and the
+gift belongs on the US entity's books — so these donations flow entirely through Givebutter and
+**never touch Wompi, the intent table, the webhook, or the CDE pipeline**. There is **no backend
+involvement**: no intent is created, no migration exists, and Givebutter emails its own tax receipt.
+The page embeds Givebutter's frameable `https://givebutter.com/embed/c/<campaign>` iframe directly —
+**not** the `widgets.givebutter.com` script — so third-party JavaScript does not execute on the app
+origin. (The hosted campaign page sends `x-frame-options: sameorigin`, which is why the embed URL is
+used rather than the campaign page.) The chosen amount plus an optional **"Donación mensual"** toggle
+(`frequency=monthly`) are prefilled in the iframe URL. If the embedded form does not load within ~4 s,
+a prominent **"Donar en GiveButter"** link to `https://givebutter.com/<campaign>?amount=…` (opens in a
+new tab) is shown; a small **"Done en GiveButter"** version of that link is always present beneath the
+form (GiveButter is the anchor text — no raw URL is shown). There is **no escape hatch** back to the SV
+form: the donor deliberately chose the EE. UU. door, and **"← Cambiar opción"** is the way back. The
+Givebutter constants (campaign, embed URL) live in `src/client/donation.ts`.
 
-Both doors fund the **same** mother church in El Salvador — Friends of Misión ExampleOrganization (the US
-501(c)(3)) is only the US giving vehicle, never a different beneficiary; the copy is residence-based, not
+Both doors fund the **same** mother church in El Salvador — the US 501(c)(3) is only the US giving
+vehicle, never a different beneficiary; the copy is residence-based, not
 destination-based. On the SV path the donor first states whether the gift is a **diezmo** or an
 **ofrenda** (a required chip selector); that choice names the Wompi payment sheet and rides on the CDE
 apéndice as an informational `TipoAportacion` line, while the legal `descripcion` stays **`DONACIÓN`**.
