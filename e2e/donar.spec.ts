@@ -393,6 +393,10 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
   await expect(page.locator("iframe.donar-embed")).toBeVisible({ timeout: 15_000 });
 
+  // The iframe can become visible before React has flushed the effects that install
+  // both status polling and the Wompi message listener. Wait for the first poll so a
+  // synthetic close cannot race ahead of the listener in headed Chromium.
+  await expect.poll(() => statusChecks).toBeGreaterThan(0);
   statusChecks = 0;
   await page.evaluate(() => {
     window.dispatchEvent(

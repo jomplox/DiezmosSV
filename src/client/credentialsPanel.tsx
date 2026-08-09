@@ -928,6 +928,9 @@ function BrandingEditor({
     void uploadDonorLogo(file);
   }
 
+  const previewDisplayName = displayName.trim() || "Su organización";
+  const previewSupportEmail = supportEmail.trim() || "Correo de soporte";
+
   return (
     <section className="credential-form-panel branding-panel">
       <div className="panel-head">
@@ -944,7 +947,7 @@ function BrandingEditor({
           <input
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
-            placeholder="ExamplePerson1"
+            placeholder="Nombre de su organización"
             maxLength={80}
             aria-label="Nombre de la organización"
           />
@@ -977,7 +980,7 @@ function BrandingEditor({
             type="email"
             value={supportEmail}
             onChange={(event) => setSupportEmail(event.target.value)}
-            placeholder="legacy-contact-1@example.com"
+            placeholder="soporte@su-dominio.org"
             maxLength={100}
             aria-label="Correo de soporte"
           />
@@ -1086,15 +1089,15 @@ function BrandingEditor({
             <div className="branding-preview-frame">
               <div className="branding-preview-email-header" style={{ background: colorForPicker }}>
                 {(previewUrl ?? currentLogoSrc) && (
-                  <img className="branding-preview-email-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={displayName} />
+                  <img className="branding-preview-email-logo" src={(previewUrl ?? currentLogoSrc) ?? undefined} alt={previewDisplayName} />
                 )}
-                <span className="branding-preview-email-name">{displayName || "ExamplePerson1"}</span>
+                <span className="branding-preview-email-name">{previewDisplayName}</span>
               </div>
               <div className="branding-preview-email-body">
                 <span className="branding-preview-line" />
                 <span className="branding-preview-line branding-preview-line-short" />
               </div>
-              <div className="branding-preview-email-footer">{supportEmail || "legacy-contact-1@example.com"}</div>
+              <div className="branding-preview-email-footer">{previewSupportEmail}</div>
             </div>
             <figcaption>Así se verá en los correos</figcaption>
           </figure>
@@ -1104,9 +1107,9 @@ function BrandingEditor({
           <figure className="branding-preview-card branding-preview-donor">
             <div className="branding-preview-frame branding-preview-donor-card">
               {(donorPreviewUrl ?? currentDonorLogoSrc) ? (
-                <img className="branding-preview-donor-logo" src={(donorPreviewUrl ?? currentDonorLogoSrc) ?? undefined} alt={displayName} />
+                <img className="branding-preview-donor-logo" src={(donorPreviewUrl ?? currentDonorLogoSrc) ?? undefined} alt={previewDisplayName} />
               ) : (
-                <span className="branding-preview-donor-mark">{displayName || "ExamplePerson1"}</span>
+                <span className="branding-preview-donor-mark">{previewDisplayName}</span>
               )}
               <span className="branding-preview-donor-title">Diezmos y Ofrendas</span>
             </div>
