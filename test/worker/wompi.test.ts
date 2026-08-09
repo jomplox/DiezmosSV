@@ -94,7 +94,7 @@ describe("Wompi API reconciliation", () => {
           CodigoPais: "SV",
           CodigoRegion: "06"
         },
-        fechaTransaccion: "2026-07-29T18:21:14-06:00",
+        fechaTransaccion: "2026-01-15T10:00:00-06:00",
         idTransaccion: "TEST-TXN-0000000001",
         esReal: true,
         esAprobada: true,
@@ -158,7 +158,7 @@ describe("Wompi API reconciliation", () => {
             CodigoRegion: "06"
           },
           resultadoTransaccion: 0,
-          fechaTransaccion: "2026-07-29T18:21:14-06:00",
+          fechaTransaccion: "2026-01-15T10:00:00-06:00",
           montoOriginal: 178,
           idTransaccion: "TEST-TXN-0000000001",
           esReal: true,
@@ -173,8 +173,8 @@ describe("Wompi API reconciliation", () => {
         cantidadPagosExitosos: 1,
         imagenes: [],
         vigencia: {
-          fechaInicio: "2026-07-29T18:17:44-06:00",
-          fechaFin: "2026-07-29T19:17:44-06:00"
+          fechaInicio: "2026-01-15T09:00:00-06:00",
+          fechaFin: "2026-01-15T11:00:00-06:00"
         },
         limitesDeUso: {
           cantidadMaximaPagosExitosos: 1,
@@ -192,7 +192,7 @@ describe("Wompi API reconciliation", () => {
 
     expect(recovered).toEqual({
       IdCuenta: "",
-      FechaTransaccion: "2026-07-29T18:21:14-06:00",
+      FechaTransaccion: "2026-01-15T10:00:00-06:00",
       Monto: "178",
       IdTransaccion: "TEST-TXN-0000000001",
       ResultadoTransaccion: "ExitosaAprobada",
