@@ -62,6 +62,7 @@ import {
 } from "./services/branding";
 import {
   buildAnnualCertificatePreview,
+  CertificateDossierChangedError,
   CertificateDossierLimitError,
   certificateYearError,
   sendAnnualCertificates,
@@ -1948,6 +1949,9 @@ async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Respon
   try {
     result = await sendAnnualCertificates(ctx.env, ctx.repo, year, ctx.actor!.id, sendRequest);
   } catch (error) {
+    if (error instanceof CertificateDossierChangedError) {
+      return jsonResponse({ error: "certificate_dossier_changed", message: error.message }, { status: 409 });
+    }
     if (error instanceof CertificateDossierLimitError) {
       return jsonResponse({ error: "certificate_dossier_too_large", message: error.message }, { status: 422 });
     }
