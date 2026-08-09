@@ -43,7 +43,7 @@ export const DONAR_VERIFYING_NOTICE_DELAY_MS = 20_000;
 // re-mints on the next Paso 1→2 crossing. 45 min keeps a 15-min margin under the hour.
 export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
 
-export const DONAR_AMOUNT_CHIPS = [5, 10, 25, 50] as const;
+export const DONAR_AMOUNT_CHIPS = [50, 150, 250, 500] as const;
 // The US door's quick amounts bridge toward the Givebutter campaign's own presets
 // ($100–$2,000): the chip prefills the embed, so wildly different anchors on two
 // consecutive screens read as a mistake. $50 keeps an accessible low option.
