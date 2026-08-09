@@ -13,39 +13,51 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    npm run build
    ```
 
-2. Confirm Wrangler is authenticated:
+2. Select the private Wrangler config before any remote operation. It must be an absolute path
+   outside this repository, a regular non-symlink file owned by the current user, and owner-only
+   mode `0600`:
 
    ```bash
+   export DIEZMOSSV_WRANGLER_CONFIG="/absolute/path/outside/this/repository/wrangler.toml"
+   install -d -m 700 "$(dirname "$DIEZMOSSV_WRANGLER_CONFIG")"
+   install -m 600 wrangler.toml "$DIEZMOSSV_WRANGLER_CONFIG"
+   # Edit only the selected private file. Keep the committed example unchanged.
+   node scripts/run-private-wrangler.mjs login
    npm run cf:whoami
    ```
 
-3. Create or verify the remote resources:
+   Put real Worker/resource names, D1 IDs, queue and R2 names, routes, and origins only in this
+   selected private config. Its root, staging, and production scopes must each have exactly one
+   `send_email` binding named `EMAIL` and omit `allowed_sender_addresses`. The wrapper validates the
+   selected file before copying it or executing Wrangler.
+
+3. Create resources through an owner-controlled Cloudflare workflow, record returned values only in
+   the selected private config, then verify the configured targets through the private wrapper:
 
    ```bash
-   npx wrangler d1 create diezmossv-staging-example
-   npx wrangler queues create diezmossv-staging-example-issuance
+   node scripts/run-private-wrangler.mjs d1 list
+   node scripts/run-private-wrangler.mjs queues list
+   node scripts/run-private-wrangler.mjs r2 bucket list
    ```
 
-4. Put the returned D1 id in `wrangler.toml` under `[[env.staging.d1_databases]]`.
-
-5. Set staging secrets. Do not commit these values. Generate the bootstrap token with
+4. Set staging secrets. Do not commit these values. Generate the bootstrap token with
    `printf 'bt_%s\n' "$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n')"` and paste that
    value when Wrangler prompts for `BOOTSTRAP_OWNER_TOKEN`:
 
    ```bash
-   npx wrangler secret put WOMPI_API_SECRET --env staging
-   npx wrangler secret put BOOTSTRAP_OWNER_TOKEN --env staging
-   npx wrangler secret put CLOUDFLARE_ACCOUNT_ID --env staging
-   npx wrangler secret put CLOUDFLARE_API_TOKEN --env staging
-   npx wrangler secret put MH_CERT_PASSWORD --env staging
-   npx wrangler secret put MH_CERT_XML_PART_1 --env staging
-   npx wrangler secret put MH_CERT_XML_PART_2 --env staging
-   npx wrangler secret put MH_USER_TEST --env staging
-   npx wrangler secret put MH_PASSWORD_TEST --env staging
-   npx wrangler secret put EMAIL_FROM --env staging
-   npx wrangler secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
-   npx wrangler secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
-   npx wrangler secret put EMISOR_CONFIG_JSON --env staging
+   node scripts/run-private-wrangler.mjs secret put WOMPI_API_SECRET --env staging
+   node scripts/run-private-wrangler.mjs secret put BOOTSTRAP_OWNER_TOKEN --env staging
+   node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_ACCOUNT_ID --env staging
+   node scripts/run-private-wrangler.mjs secret put CLOUDFLARE_API_TOKEN --env staging
+   node scripts/run-private-wrangler.mjs secret put MH_CERT_PASSWORD --env staging
+   node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_1 --env staging
+   node scripts/run-private-wrangler.mjs secret put MH_CERT_XML_PART_2 --env staging
+   node scripts/run-private-wrangler.mjs secret put MH_USER_TEST --env staging
+   node scripts/run-private-wrangler.mjs secret put MH_PASSWORD_TEST --env staging
+   node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env staging
+   node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env staging   # optional deployment-owned alternative
+   node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
+   node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env staging
    ```
 
    Local dev may keep the certificate in one `MH_CERT_XML` value. Cloudflare Workers limit each
@@ -55,7 +67,8 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    `CLOUDFLARE_API_TOKEN` is only needed when owners should be able to update secrets from the
    deployed **Credenciales** screen. Scope it narrowly to this Worker script's secret-edit API.
 
-   Receipt email uses the Cloudflare Email Service `EMAIL` binding declared in `wrangler.toml`.
+   Receipt email uses the Cloudflare Email Service `EMAIL` binding declared in the selected private
+   config. That binding remains sender-unrestricted; do not add `allowed_sender_addresses`.
    Before expecting donor delivery, onboard the sender domain under Cloudflare Email Sending and set
    `EMAIL_FROM` to an address on that domain. If Cloudflare returns `destination address is not a
    verified address`, the Worker is reaching Email Service but the account/domain is still limited to
@@ -78,7 +91,7 @@ Queue, Cron, ASSETS binding, `MOCK_EXTERNAL_SERVICES=false`, and MH `ambiente=00
    superseded email-endpoint secret left by earlier releases from the deployment. This repository
    change does not modify staging or production configuration.
 
-6. Apply the schema and deploy:
+5. Apply the schema and deploy:
 
    ```bash
    npm run cf:migrate:staging
@@ -174,11 +187,13 @@ Do not set production secrets or deploy `--env production` until staging UAT is 
 cutover then uses production MH credentials, production Wompi secret, production email sender, and one
 controlled low-value issuance while tailing logs.
 
-Before the first production deploy, create the production R2 archive bucket referenced by
-`[env.production.r2_buckets]` in `wrangler.toml` (the monthly retention export writes legal archives there):
+Before the first production deploy, create the production R2 archive bucket through an
+owner-controlled Cloudflare workflow, record it only under `[env.production.r2_buckets]` in the
+selected private config, and verify it through the wrapper (the monthly retention export writes
+legal archives there):
 
 ```
-npx wrangler r2 bucket create diezmossv-production-archive-example
+node scripts/run-private-wrangler.mjs r2 bucket list
 ```
 
 Protect the public Worker before production with Cloudflare Access or equivalent WAF/rate-limiting

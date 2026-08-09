@@ -12,9 +12,13 @@ export function assertPrivateWranglerConfig(
   options?: Pick<PrivateWranglerConfigOptions, "repositoryRoot">
 ): string;
 
+export function assertPrivateWranglerEmailBindings(rawConfig: unknown): void;
+
 export function preparePrivateWranglerConfig(
   configPath: string,
-  options?: Pick<PrivateWranglerConfigOptions, "repositoryRoot">
+  options?: Pick<PrivateWranglerConfigOptions, "repositoryRoot"> & {
+    migrationsDirOverride?: string;
+  }
 ): {
   configPath: string;
   cleanup(): void;

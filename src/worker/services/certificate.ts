@@ -3,7 +3,7 @@ import { formatDocument } from "../../shared/documentFormat";
 import { EL_SALVADOR_TIME_ZONE, formatElSalvadorDate } from "../../shared/legalWindows";
 import { formatCents } from "../../shared/money";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
-import { RETENTION_PAGE_SIZE, type Repository } from "../storage/repository";
+import type { AnnualCertificateDonorTarget, Repository } from "../storage/repository";
 import { getEmisorConfig } from "../config";
 import type { DteDocumentRecord, Env } from "../types";
 import { loadEmailBranding } from "./branding";
@@ -14,6 +14,10 @@ import { renderDtePdf } from "./pdf";
 const DONOR_CERTIFICATE_SENT_ACTION = "DONOR_CERTIFICATE_SENT";
 const DONOR_CERTIFICATE_FAILED_ACTION = "DONOR_CERTIFICATE_FAILED";
 const DONOR_CERTIFICATE_ENTITY_TYPE = "donor_certificate";
+
+export const ANNUAL_CERTIFICATE_PREVIEW_PAGE_SIZE = 50;
+export const ANNUAL_CERTIFICATE_BULK_DONOR_LIMIT = 10;
+export const ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT = 25;
 
 const EL_SALVADOR_UTC_OFFSET_HOURS = 6;
 
@@ -81,84 +85,9 @@ function elSalvadorYear(date: Date): number {
   return Number(parts.find((part) => part.type === "year")?.value ?? 0);
 }
 
-// Aggregate ACCEPTED donations for a calendar year into one summary per donor,
-// grouped by email (fallback: name). Totals accumulate in integer cents to avoid
-// float drift. Documents are read in keyset-paged chunks so a busy year never
-// loads unbounded rows at once.
-export async function aggregateAnnualDonors(repo: Repository, year: number): Promise<DonorCertificateSummary[]> {
-  const window = elSalvadorYearWindow(year);
-  const groups = new Map<string, DonorCertificateSummary>();
-  let cursor: { issuedAt: string; id: string } | null = null;
-  for (;;) {
-    const rows = await repo.listAcceptedDocumentsInYear(window, cursor, RETENTION_PAGE_SIZE);
-    if (rows.length === 0) {
-      break;
-    }
-    for (const row of rows) {
-      const email = normalizeText(row.donor_email);
-      const name = normalizeText(row.donor_name);
-      const groupKey = email ?? name ?? "(sin identificar)";
-      const existing = groups.get(groupKey);
-      const donation: CertificateDonation = {
-        issuedAt: row.issued_at,
-        dateLabel: formatElSalvadorDate(row.issued_at),
-        numeroControl: row.numero_control,
-        amountCents: row.amount_cents
-      };
-      if (existing) {
-        existing.count += 1;
-        existing.totalCents += row.amount_cents;
-        existing.hasTestEnvironment ||= row.environment === "00";
-        existing.donations.push(donation);
-        existing.documents.push(row);
-        if (!existing.donorEmail && email) {
-          existing.donorEmail = email;
-        }
-      } else {
-        groups.set(groupKey, {
-          groupKey,
-          donorName: name ?? email ?? "(sin identificar)",
-          donorEmail: email,
-          count: 1,
-          totalCents: row.amount_cents,
-          hasTestEnvironment: row.environment === "00",
-          donations: [donation],
-          documents: [row]
-        });
-      }
-    }
-    const last = rows[rows.length - 1];
-    cursor = { issuedAt: last.issued_at, id: last.id };
-    if (rows.length < RETENTION_PAGE_SIZE) {
-      break;
-    }
-  }
-  const donors = [...groups.values()];
-  for (const donor of donors) {
-    donor.donations.sort((left, right) => left.issuedAt.localeCompare(right.issuedAt));
-    // Dossier order: chronological by acceptance, tie-broken by issue instant then id
-    // so the appended CDE pages are deterministic even when two share an accepted_at.
-    donor.documents.sort(compareDossierDocuments);
-  }
-  donors.sort((left, right) => left.donorName.localeCompare(right.donorName, "es"));
-  return donors;
-}
-
-// accepted_at may be null on legacy rows; treat null as an empty string so it sorts
-// before any real timestamp and never throws in the comparator.
+// Dossier rows use the same deterministic chronology as their bounded SQL read.
 function compareDossierDocuments(left: DteDocumentRecord, right: DteDocumentRecord): number {
-  const leftAccepted = left.accepted_at ?? "";
-  const rightAccepted = right.accepted_at ?? "";
-  return (
-    leftAccepted.localeCompare(rightAccepted) ||
-    left.issued_at.localeCompare(right.issued_at) ||
-    left.id.localeCompare(right.id)
-  );
-}
-
-function normalizeText(value: string | null | undefined): string | null {
-  const trimmed = (value ?? "").trim();
-  return trimmed.length ? trimmed : null;
+  return left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id);
 }
 
 // Bare amount for the table cells: the "Monto (US$)" header already carries the unit,
@@ -255,8 +184,7 @@ export async function renderCertificateDossierPdf(input: RenderCertificateInput)
   const summaryBytes = await renderCertificatePdf(input);
   const dossier = await PDFDocument.load(summaryBytes);
 
-  // Sort here too (aggregateAnnualDonors already does) so the dossier invariant holds
-  // regardless of the order the caller supplies the records in.
+  // Sort here too so the dossier invariant holds regardless of caller order.
   const ordered = [...input.donor.documents].sort(compareDossierDocuments);
   for (const record of ordered) {
     let dteBytes: Uint8Array;
@@ -368,9 +296,7 @@ function drawRightAligned(page: PDFPage, text: string, y: number, size: number, 
   page.drawText(text, { x: rightX - font.widthOfTextAtSize(text, size), y, size, font, color });
 }
 
-interface AnnualCertificatePreviewDonor {
-  // The donor grouping key (email, else name) — the single-donor send addresses a
-  // donor by this exact value, so the preview row carries it for the per-row button.
+export interface AnnualCertificatePreviewDonor {
   groupKey: string;
   donorName: string;
   donorEmail: string | null;
@@ -378,79 +304,76 @@ interface AnnualCertificatePreviewDonor {
   count: number;
   totalLabel: string;
   hasTestEnvironment: boolean;
+  dossierTooLarge: boolean;
 }
 
 export interface AnnualCertificatePreview {
   year: number;
-  // donorCount/withEmail/withoutEmail/totalLabel are ALWAYS computed over the full,
-  // unfiltered year — the summary describes the whole statement run, not the current
-  // search. Only `donors` narrows to (and is capped over) the search results.
-  donorCount: number;
-  withEmail: number;
-  withoutEmail: number;
-  totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
-  // Total donors matching the search `q` (or the full year when q is empty). `donors`
-  // is the first ANNUAL_PREVIEW_LIMIT of these in aggregation order; `truncated` is
-  // true when matchCount exceeds that cap so the UI can show "Mostrando N de M".
-  matchCount: number;
-  truncated: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
-// A busy year can have thousands of donors; the preview table (and its JSON payload)
-// collapses at that scale, so the preview returns at most this many donor rows. The
-// summary counts and matchCount still describe the full set.
-const ANNUAL_PREVIEW_LIMIT = 50;
-
-// Fold accents and lowercase so a search for "jose" finds "José". NFD splits a base
-// letter from its combining diacritic; stripping the U+0300–U+036F combining range
-// removes the accent. Applied to BOTH the query and each candidate before comparing.
-function deaccentLower(value: string): string {
-  return value
-    .normalize("NFD")
-    .replace(/[̀-ͯ]/g, "")
-    .toLowerCase();
-}
-
-export async function buildAnnualCertificatePreview(repo: Repository, year: number, q?: string | null): Promise<AnnualCertificatePreview> {
-  const donors = await aggregateAnnualDonors(repo, year);
-  // Summary is over the FULL year, independent of the search filter.
-  const withEmail = donors.filter((donor) => donor.donorEmail).length;
-  const totalCents = donors.reduce((sum, donor) => sum + donor.totalCents, 0);
-
-  const needle = deaccentLower((q ?? "").trim());
-  const matches = needle
-    ? donors.filter(
-        (donor) =>
-          deaccentLower(donor.donorName).includes(needle) || deaccentLower(donor.donorEmail ?? "").includes(needle)
-      )
-    : donors;
-
+export async function buildAnnualCertificatePreview(
+  repo: Repository,
+  year: number,
+  q?: string | null,
+  after?: string | null
+): Promise<AnnualCertificatePreview> {
+  const targets = await repo.listAnnualCertificateDonorTargets(elSalvadorYearWindow(year), {
+    afterGroupKey: after?.trim() || null,
+    limit: ANNUAL_CERTIFICATE_PREVIEW_PAGE_SIZE,
+    search: q?.trim() || null,
+    unsentEmailOnly: false,
+    year
+  });
+  const hasMore = targets.length > ANNUAL_CERTIFICATE_PREVIEW_PAGE_SIZE;
+  const visible = targets.slice(0, ANNUAL_CERTIFICATE_PREVIEW_PAGE_SIZE);
   return {
     year,
-    donorCount: donors.length,
-    withEmail,
-    withoutEmail: donors.length - withEmail,
-    totalLabel: formatCents(totalCents),
-    matchCount: matches.length,
-    truncated: matches.length > ANNUAL_PREVIEW_LIMIT,
-    donors: matches.slice(0, ANNUAL_PREVIEW_LIMIT).map((donor) => ({
-      groupKey: donor.groupKey,
-      donorName: donor.donorName,
-      donorEmail: donor.donorEmail,
-      hasEmail: Boolean(donor.donorEmail),
-      count: donor.count,
-      totalLabel: formatCents(donor.totalCents),
-      hasTestEnvironment: donor.hasTestEnvironment
-    }))
+    donors: visible.map(previewDonor),
+    hasMore,
+    nextCursor: hasMore ? visible.at(-1)?.groupKey ?? null : null
   };
 }
 
 export interface AnnualCertificateSendResult {
   year: number;
+  mode: "bulk" | "single";
+  processed: number;
   sent: number;
   skipped: number;
   failed: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface AnnualCertificateSendRequest {
+  donor?: string;
+  after?: string;
+}
+
+interface CertificateDossierSnapshot {
+  groupKey: string;
+  donorName: string;
+  donorEmail: string | null;
+  count: number;
+  totalCents: number;
+  hasTestEnvironment: boolean;
+}
+
+export class CertificateDossierLimitError extends Error {
+  constructor(readonly groupKey: string, readonly documentCount: number) {
+    super(`La constancia del donante supera el límite de ${ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT} comprobantes.`);
+    this.name = "CertificateDossierLimitError";
+  }
+}
+
+export class CertificateDossierChangedError extends Error {
+  constructor() {
+    super("La constancia cambió mientras se preparaba. Intente enviarla nuevamente.");
+    this.name = "CertificateDossierChangedError";
+  }
 }
 
 // Raised when an explicit single-donor send names a donor who cannot be served.
@@ -463,27 +386,46 @@ export class SingleDonorSendError extends Error {
   }
 }
 
-// Emails certificates for the given year. Two modes:
-//  - Bulk (no `donorGroupKey`): one certificate per donor WITH an email address.
-//    Idempotent re-runs — a donor with an existing DONOR_CERTIFICATE_SENT audit for
-//    this year (entityId `<year>:<email>`) is skipped, so re-running covers only new
-//    or previously failed donors. Donors without email are counted as skipped. Each
-//    donor is audited SENT or FAILED independently — one failure never aborts the batch.
-//  - Single (`donorGroupKey` set): sends ONLY that donor and is also the resend path,
-//    so the sent-dedupe is deliberately bypassed. An unknown donor throws a 404 and a
-//    donor without email a 400 (both Spanish); the audit metadata records mode "single".
 export async function sendAnnualCertificates(
   env: Env,
   repo: Repository,
   year: number,
   actorId: string | null,
-  donorGroupKey?: string | null
+  request: AnnualCertificateSendRequest = {}
 ): Promise<AnnualCertificateSendResult> {
+  const single = typeof request.donor === "string";
+  const range = elSalvadorYearWindow(year);
+  const candidateTargets = await repo.listAnnualCertificateDonorTargets(range, {
+    afterGroupKey: single ? null : request.after?.trim() || null,
+    limit: single ? 1 : ANNUAL_CERTIFICATE_BULK_DONOR_LIMIT,
+    search: null,
+    unsentEmailOnly: !single,
+    year,
+    ...(single ? { groupKey: request.donor } : {})
+  });
+  if (single && candidateTargets.length === 0) {
+    throw new SingleDonorSendError(404, "No se encontró al donante indicado en las donaciones aceptadas de este año.");
+  }
+  if (single && !candidateTargets[0].donorEmail) {
+    throw new SingleDonorSendError(400, "El donante indicado no tiene correo registrado, por lo que no se le puede enviar la constancia.");
+  }
+  const hasMore = !single && candidateTargets.length > ANNUAL_CERTIFICATE_BULK_DONOR_LIMIT;
+  const targets = single
+    ? candidateTargets.slice(0, 1)
+    : candidateTargets.slice(0, ANNUAL_CERTIFICATE_BULK_DONOR_LIMIT);
+  const result: AnnualCertificateSendResult = {
+    year,
+    mode: single ? "single" : "bulk",
+    processed: 0,
+    sent: 0,
+    skipped: 0,
+    failed: 0,
+    hasMore,
+    nextCursor: hasMore ? targets.at(-1)?.groupKey ?? null : null
+  };
+
   const emisorConfig = getEmisorConfig(env);
   const emisor: CertificateEmisor = { nombre: emisorConfig.nombreComercial || emisorConfig.nombre, numDocumento: emisorConfig.numDocumento };
-  const donors = await aggregateAnnualDonors(repo, year);
-  // The certificate keeps the emisor's legal name (it is a fiscal document), but the
-  // email chrome still picks up the church's accent color.
   const branding = await loadEmailBranding(repo, env);
   const email = new EmailService(env, undefined, {
     organizationName: emisor.nombre,
@@ -494,28 +436,12 @@ export async function sendAnnualCertificates(
     logoUrl: branding.logoUrl
   });
   const issuedOnLabel = formatElSalvadorDate(new Date().toISOString());
-  const result: AnnualCertificateSendResult = { year, sent: 0, skipped: 0, failed: 0 };
-  const single = typeof donorGroupKey === "string";
 
-  let targets = donors;
-  if (single) {
-    const donor = donors.find((candidate) => candidate.groupKey === donorGroupKey);
-    if (!donor) {
-      throw new SingleDonorSendError(404, "No se encontró al donante indicado en las donaciones aceptadas de este año.");
-    }
-    if (!donor.donorEmail) {
-      throw new SingleDonorSendError(400, "El donante indicado no tiene correo registrado, por lo que no se le puede enviar la constancia.");
-    }
-    targets = [donor];
-  }
-
-  for (const donor of targets) {
-    if (!donor.donorEmail) {
-      result.skipped += 1;
-      continue;
-    }
-    const entityId = `${year}:${donor.donorEmail}`;
-    // A single-donor send is the explicit resend path, so it never dedupes.
+  for (const target of targets) {
+    result.processed += 1;
+    const donorEmail = target.donorEmail;
+    if (!donorEmail) continue;
+    const entityId = `${year}:${donorEmail}`;
     if (!single) {
       const alreadySent = await repo.countAuditEntries(DONOR_CERTIFICATE_SENT_ACTION, entityId);
       if (alreadySent > 0) {
@@ -524,10 +450,36 @@ export async function sendAnnualCertificates(
       }
     }
     try {
+      if (target.count > ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT) {
+        throw new CertificateDossierLimitError(target.groupKey, target.count);
+      }
+      const documents = await repo.listAnnualCertificateDonorDocuments(
+        range,
+        target.groupKey,
+        ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT + 1
+      );
+      if (documents.length > ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT) {
+        throw new CertificateDossierLimitError(target.groupKey, documents.length);
+      }
+      const snapshot = dossierSnapshot(documents);
+      const currentDonorEmail = snapshot.donorEmail;
+      if (
+        snapshot.count === 0 ||
+        !currentDonorEmail ||
+        snapshot.groupKey !== target.groupKey ||
+        snapshot.donorName !== target.donorName ||
+        currentDonorEmail !== donorEmail ||
+        snapshot.count !== target.count ||
+        snapshot.totalCents !== target.totalCents ||
+        snapshot.hasTestEnvironment !== target.hasTestEnvironment
+      ) {
+        throw new CertificateDossierChangedError();
+      }
+      const donor = donorSummary(documents, snapshot);
       const pdfBytes = await renderCertificateDossierPdf({ year, donor, emisor, issuedOnLabel, accentColor: branding.brandColor });
       const totalLabel = formatCents(donor.totalCents);
       await email.sendDonorCertificate({
-        toEmail: donor.donorEmail,
+        toEmail: currentDonorEmail,
         subject: `Constancia de donaciones ${year}`,
         text:
           `Estimado(a) ${donor.donorName}:\n\n` +
@@ -553,7 +505,7 @@ export async function sendAnnualCertificates(
         action: DONOR_CERTIFICATE_SENT_ACTION,
         entityType: DONOR_CERTIFICATE_ENTITY_TYPE,
         entityId,
-        summary: `Constancia ${year} enviada a ${donor.donorEmail}`,
+        summary: `Constancia ${year} enviada a ${currentDonorEmail}`,
         metadata: { year, donorName: donor.donorName, count: donor.count, totalCents: donor.totalCents, ...(single ? { mode: "single" } : {}) }
       });
       result.sent += 1;
@@ -568,7 +520,67 @@ export async function sendAnnualCertificates(
         metadata: single ? { mode: "single" } : undefined
       });
       result.failed += 1;
+      if (
+        single &&
+        (error instanceof CertificateDossierLimitError || error instanceof CertificateDossierChangedError)
+      ) {
+        throw error;
+      }
     }
   }
   return result;
+}
+
+function previewDonor(target: AnnualCertificateDonorTarget): AnnualCertificatePreviewDonor {
+  return {
+    groupKey: target.groupKey,
+    donorName: target.donorName,
+    donorEmail: target.donorEmail,
+    hasEmail: Boolean(target.donorEmail),
+    count: target.count,
+    totalLabel: formatCents(target.totalCents),
+    hasTestEnvironment: target.hasTestEnvironment,
+    dossierTooLarge: target.count > ANNUAL_CERTIFICATE_DOSSIER_DOCUMENT_LIMIT
+  };
+}
+
+function donorSummary(
+  documents: DteDocumentRecord[],
+  snapshot: CertificateDossierSnapshot
+): DonorCertificateSummary {
+  const ordered = [...documents].sort(compareDossierDocuments);
+  return {
+    groupKey: snapshot.groupKey,
+    donorName: snapshot.donorName,
+    donorEmail: snapshot.donorEmail,
+    count: snapshot.count,
+    totalCents: snapshot.totalCents,
+    hasTestEnvironment: snapshot.hasTestEnvironment,
+    donations: ordered.map((document) => ({
+      issuedAt: document.issued_at,
+      dateLabel: formatElSalvadorDate(document.issued_at),
+      numeroControl: document.numero_control,
+      amountCents: document.amount_cents
+    })),
+    documents: ordered
+  };
+}
+
+function dossierSnapshot(documents: DteDocumentRecord[]): CertificateDossierSnapshot {
+  const first = [...documents].sort(compareDossierDocuments)[0];
+  const donorName = normalizedDossierIdentityText(first?.donor_name);
+  const donorEmail = normalizedDossierIdentityText(first?.donor_email);
+  return {
+    groupKey: donorEmail ?? donorName ?? "(sin identificar)",
+    donorName: donorName ?? donorEmail ?? "(sin identificar)",
+    donorEmail,
+    count: documents.length,
+    totalCents: documents.reduce((total, document) => total + document.amount_cents, 0),
+    hasTestEnvironment: documents.some((document) => document.environment === "00")
+  };
+}
+
+function normalizedDossierIdentityText(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : null;
 }

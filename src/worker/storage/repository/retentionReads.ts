@@ -5,6 +5,7 @@ import type {
 } from "../../types";
 import type { ContactSourceRow } from "../../services/contacts";
 import { redactSensitiveAuditRows } from "../shared";
+import { buildDteSearchQuery } from "./dteDocuments";
 
 export const RETENTION_PAGE_SIZE = 500;
 
@@ -34,6 +35,24 @@ export interface RetentionCursor {
 export interface DocumentSequenceRetentionCursor {
   environment: string;
   controlPrefix: string;
+}
+
+export interface AnnualCertificateDonorTarget {
+  groupKey: string;
+  donorName: string;
+  donorEmail: string | null;
+  count: number;
+  totalCents: number;
+  hasTestEnvironment: boolean;
+}
+
+interface AnnualCertificateDonorTargetRow {
+  recipient_key: string;
+  donor_name: string;
+  donor_email: string | null;
+  document_count: number;
+  total_cents: number;
+  has_test_environment: number;
 }
 
 function retentionSnapshotTimestampColumn(
@@ -118,6 +137,158 @@ export async function listAcceptedDocumentsInYear(
   return rows.results ?? [];
 }
 
+// Bounded annual-certificate summary read. The caller supplies the number of rows it
+// can display/process; this reader adds exactly one sentinel and never returns more
+// than 51 preview summaries or 11 unsent-email summaries. Search chooses matching
+// recipient keys through the existing FTS index, while `grouped` still aggregates
+// every accepted annual row for each chosen recipient.
+export async function listAnnualCertificateDonorTargets(
+  db: D1Database,
+  range: { startIso: string; endIso: string },
+  options: {
+    afterGroupKey: string | null;
+    limit: number;
+    search: string | null;
+    unsentEmailOnly: boolean;
+    year: number;
+    groupKey?: string | null;
+  }
+): Promise<AnnualCertificateDonorTarget[]> {
+  if (!Number.isFinite(options.limit) || !Number.isInteger(options.limit) || options.limit <= 0) {
+    throw new RangeError("annual certificate target limit must be a positive finite integer");
+  }
+  const maximumPageSize = options.unsentEmailOnly ? 10 : 50;
+  const pageSize = Math.min(options.limit, maximumPageSize);
+  const ftsQuery = buildDteSearchQuery(options.search);
+  const bindings: Array<string | number> = [range.startIso, range.endIso];
+  const matchingCte = ftsQuery
+    ? `,
+       matching_recipient_keys AS (
+         SELECT DISTINCT filtered.recipient_key
+           FROM filtered
+           JOIN dte_document_search
+             ON dte_document_search.document_id = filtered.id
+          WHERE dte_document_search MATCH ?
+       )`
+    : "";
+  if (ftsQuery) {
+    bindings.push(ftsQuery);
+  }
+  const groupedFilter = ftsQuery
+    ? "WHERE ranked.recipient_key IN (SELECT recipient_key FROM matching_recipient_keys)"
+    : "";
+  const outerConditions: string[] = [];
+  if (options.groupKey) {
+    outerConditions.push("recipient_key = ?");
+    bindings.push(options.groupKey);
+  } else if (options.afterGroupKey) {
+    outerConditions.push("recipient_key > ?");
+    bindings.push(options.afterGroupKey);
+  }
+  if (options.unsentEmailOnly) {
+    outerConditions.push("donor_email IS NOT NULL");
+    outerConditions.push(
+      `NOT EXISTS (
+         SELECT 1
+           FROM audit_logs
+          WHERE audit_logs.action = 'DONOR_CERTIFICATE_SENT'
+            AND audit_logs.entity_id = CAST(? AS TEXT) || ':' || grouped.donor_email
+       )`
+    );
+    bindings.push(String(options.year));
+  }
+  const outerWhere = outerConditions.length ? `WHERE ${outerConditions.join(" AND ")}` : "";
+  const rows = await db
+    .prepare(
+      `/* annual_certificate_targets */
+       WITH filtered AS (
+         SELECT id,
+                environment,
+                donor_email,
+                donor_name,
+                amount_cents,
+                issued_at,
+                COALESCE(NULLIF(TRIM(donor_email), ''), NULLIF(TRIM(donor_name), ''), '(sin identificar)') AS recipient_key
+           FROM dte_documents
+          WHERE status = 'ACCEPTED'
+            AND fiscal_operation_claim_id IS NULL
+            AND issued_at >= ?
+            AND issued_at < ?
+       ),
+       ranked AS (
+         SELECT filtered.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY recipient_key
+                  ORDER BY issued_at ASC, id ASC
+                ) AS recipient_row
+           FROM filtered
+       )
+       ${matchingCte},
+       grouped AS (
+         SELECT ranked.recipient_key,
+                MAX(CASE WHEN recipient_row = 1
+                  THEN COALESCE(NULLIF(TRIM(donor_name), ''), NULLIF(TRIM(donor_email), ''), '(sin identificar)')
+                  ELSE NULL END) AS donor_name,
+                MAX(CASE WHEN recipient_row = 1
+                  THEN NULLIF(TRIM(donor_email), '')
+                  ELSE NULL END) AS donor_email,
+                COUNT(*) AS document_count,
+                SUM(amount_cents) AS total_cents,
+                MAX(CASE WHEN environment = '00' THEN 1 ELSE 0 END) AS has_test_environment
+           FROM ranked
+           ${groupedFilter}
+          GROUP BY ranked.recipient_key
+       )
+       SELECT recipient_key,
+              donor_name,
+              donor_email,
+              document_count,
+              total_cents,
+              has_test_environment
+         FROM grouped
+         ${outerWhere}
+        ORDER BY recipient_key ASC
+        LIMIT ?`
+    )
+    .bind(...bindings, pageSize + 1)
+    .all<AnnualCertificateDonorTargetRow>();
+  return (rows.results ?? []).map((row) => ({
+    groupKey: row.recipient_key,
+    donorName: row.donor_name,
+    donorEmail: row.donor_email,
+    count: Number(row.document_count),
+    totalCents: Number(row.total_cents),
+    hasTestEnvironment: Number(row.has_test_environment) === 1
+  }));
+}
+
+// Full records are needed only when rendering one dossier. The hard clamp keeps even
+// accidental callers at the 25-document cap plus one sentinel.
+export async function listAnnualCertificateDonorDocuments(
+  db: D1Database,
+  range: { startIso: string; endIso: string },
+  groupKey: string,
+  limit: number
+): Promise<DteDocumentRecord[]> {
+  const boundedLimit = Math.min(Math.max(Math.trunc(limit), 1), 26);
+  const rows = await db
+    .prepare(
+      `/* annual_certificate_documents */
+       SELECT *
+         FROM dte_documents
+        WHERE status = 'ACCEPTED'
+          AND fiscal_operation_claim_id IS NULL
+          AND issued_at >= ?
+          AND issued_at < ?
+          AND COALESCE(NULLIF(TRIM(donor_email), ''), NULLIF(TRIM(donor_name), ''), '(sin identificar)') = ?
+        ORDER BY issued_at ASC, id ASC
+        LIMIT ?`
+    )
+    .bind(range.startIso, range.endIso, groupKey, boundedLimit)
+    .all<DteDocumentRecord>();
+  return rows.results ?? [];
+}
+
 // Keyset-paged read of Wompi-lane ACCEPTED documents for one ambiente, LEFT JOINed
 // to their correlated COMPLETED donation intent (0 or 1 per document via
 // donation_intents.document_id, idx_donation_intents_document_id from migration
@@ -183,7 +354,7 @@ export async function listStalledApprovedWompiEvents(
   // wompi_events has no created_at column — it records received_at (migrations/0001_init.sql).
   const rows = await db
     .prepare(
-      `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at FROM wompi_events
+      `SELECT id, transaction_id, environment, received_at, issuance_attempt_id, issuance_last_attempt_at, stalled_requeue_epoch_at FROM wompi_events
        WHERE created_document_id IS NULL
          AND result = 'ExitosaAprobada'
          AND NOT EXISTS (
@@ -230,9 +401,10 @@ export async function countAuditEntries(
   return Number(row?.count ?? 0);
 }
 
-// Windowed variant for the auth rate limiter: counts (action, entity_id) audits
-// whose created_at is at or after `sinceIso`. Reads use the (action, entity_id,
-// created_at) index added in migration 0008.
+// Wompi stalled-episode count. New audits carry their durable episode identity,
+// so a frozen or regressing database clock cannot hide them. Legacy audits have
+// no identity and use an exclusive timestamp boundary, keeping an audit written
+// exactly at operator rotation in the prior episode.
 export async function countAuditEntriesSince(
   db: D1Database,
   action: string,
@@ -240,8 +412,35 @@ export async function countAuditEntriesSince(
   sinceIso: string
 ): Promise<number> {
   const row = await db
-    .prepare("SELECT COUNT(*) AS count FROM audit_logs WHERE action = ? AND entity_id = ? AND created_at >= ?")
-    .bind(action, entityId, sinceIso)
+    .prepare(
+      `WITH episode_audits AS (
+         SELECT created_at,
+                (
+                  SELECT CASE WHEN episode_member.type = 'text'
+                    THEN NULLIF(episode_member.value, '')
+                    ELSE NULL
+                  END
+                    FROM json_each(
+                      CASE WHEN json_valid(candidate_audit.metadata_json)
+                        THEN candidate_audit.metadata_json
+                        ELSE '{}'
+                      END
+                    ) AS episode_member
+                   WHERE episode_member.parent IS NULL
+                     AND episode_member.key = 'stalledRequeueEpochAt'
+                   ORDER BY episode_member.id DESC
+                   LIMIT 1
+                ) AS episode_id
+           FROM audit_logs AS candidate_audit
+          WHERE candidate_audit.action = ?
+            AND candidate_audit.entity_id = ?
+       )
+       SELECT COUNT(*) AS count
+         FROM episode_audits
+        WHERE episode_id = ?
+           OR (episode_id IS NULL AND created_at > ?)`
+    )
+    .bind(action, entityId, sinceIso, sinceIso)
     .first<{ count: number }>();
   return Number(row?.count ?? 0);
 }

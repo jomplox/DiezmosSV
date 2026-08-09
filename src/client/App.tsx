@@ -124,6 +124,42 @@ export type FiscalCorrectionTarget =
 const DOCUMENT_PAGE_SIZE = 50;
 const DOCUMENT_SEARCH_DEBOUNCE_MS = 300;
 const TOAST_DISMISS_MS = 6000;
+
+interface CertificatePreviewRequest {
+  generation: number;
+  year: string;
+  search: string;
+  cursor: string | null;
+}
+
+interface CertificateBulkRequest {
+  generation: number;
+  year: string;
+  cursor: string | null;
+}
+
+interface CertificateBulkTraversal extends CertificateBulkRequest {
+  started: boolean;
+  hasMore: boolean;
+}
+
+interface RunActionOwner {
+  token: symbol;
+}
+
+interface RunActionControl {
+  isOwner: () => boolean;
+  commit: (operation: () => void) => boolean;
+}
+
+interface AutomaticRefreshFlight {
+  key: string;
+  token: symbol;
+  state: "pending" | "completed";
+  followerQueued: boolean;
+  retryUsed: boolean;
+}
+
 // The general Documents status picker keeps a combined fiscal failure option. The
 // dedicated Fallos view uses the server-side attention filter so it can also include
 // accepted CDEs whose latest receipt email failed.
@@ -270,6 +306,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return stored ? (JSON.parse(stored) as User) : null;
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
+  const runActionOwnerRef = useRef<RunActionOwner | null>(null);
   const resendRequestIds = useRef(new Map<string, string>());
   const fiscalCorrectionSubmissions = useRef(
     new Map<string, FiscalCorrectionPendingSubmission>()
@@ -334,7 +371,27 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [certificateYear, setCertificateYear] = useState(() => String(new Date().getFullYear()));
   const [certificateSearch, setCertificateSearch] = useState("");
   const [debouncedCertificateSearch, setDebouncedCertificateSearch] = useState("");
+  const [settledCertificateSearchRevision, setSettledCertificateSearchRevision] = useState(0);
   const [certificatePreview, setCertificatePreview] = useState<AnnualCertificatePreview | null>(null);
+  const [certificatePreviewCursor, setCertificatePreviewCursor] = useState<string | null>(null);
+  const [bulkHasMore, setBulkHasMore] = useState(false);
+  const [bulkTraversalStarted, setBulkTraversalStarted] = useState(false);
+  const certificatePreviewRequestRef = useRef<CertificatePreviewRequest>({
+    generation: 0,
+    year: certificateYear,
+    search: debouncedCertificateSearch,
+    cursor: null
+  });
+  const certificateBulkTraversalRef = useRef<CertificateBulkTraversal>({
+    generation: 0,
+    year: certificateYear,
+    cursor: null,
+    started: false,
+    hasMore: false
+  });
+  const certificateOperationClaimsRef = useRef(new Map<string, symbol>());
+  const certificateSearchInputGenerationRef = useRef(0);
+  const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
   const [contactsPeriod, setContactsPeriod] = useState<ContactsPeriod>("todo");
@@ -396,6 +453,27 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return () => window.clearInterval(interval);
   }, []);
 
+  useEffect(() => () => {
+    const previewRequest = certificatePreviewRequestRef.current;
+    certificatePreviewRequestRef.current = {
+      ...previewRequest,
+      generation: previewRequest.generation + 1,
+      cursor: null
+    };
+    const bulkTraversal = certificateBulkTraversalRef.current;
+    certificateBulkTraversalRef.current = {
+      ...bulkTraversal,
+      generation: bulkTraversal.generation + 1,
+      cursor: null,
+      started: false,
+      hasMore: false
+    };
+    certificateOperationClaimsRef.current.clear();
+    certificateSearchInputGenerationRef.current += 1;
+    automaticRefreshFlightRef.current = null;
+    runActionOwnerRef.current = null;
+  }, []);
+
   useEffect(() => {
     const allowed = emissionEnvironment?.allowedEnvironments[0];
     if (!allowed) return;
@@ -448,7 +526,26 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }, [view]);
 
   useEffect(() => {
-    const handle = window.setTimeout(() => setDebouncedCertificateSearch(certificateSearch.trim()), DOCUMENT_SEARCH_DEBOUNCE_MS);
+    const nextSearch = certificateSearch.trim();
+    const inputGeneration = certificateSearchInputGenerationRef.current;
+    const handle = window.setTimeout(() => {
+      if (certificateSearchInputGenerationRef.current !== inputGeneration) {
+        return;
+      }
+      const current = certificatePreviewRequestRef.current;
+      if (current.search !== nextSearch) {
+        certificatePreviewRequestRef.current = {
+          generation: current.generation + 1,
+          year: current.year,
+          search: nextSearch,
+          cursor: null
+        };
+        setCertificatePreview(null);
+        setCertificatePreviewCursor(null);
+      }
+      setDebouncedCertificateSearch(nextSearch);
+      setSettledCertificateSearchRevision(inputGeneration);
+    }, DOCUMENT_SEARCH_DEBOUNCE_MS);
     return () => window.clearTimeout(handle);
   }, [certificateSearch]);
 
@@ -460,8 +557,29 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!token) {
       return;
     }
-    void refresh().catch(handleApiFailure);
-  }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch]);
+    const refreshKey = JSON.stringify([
+      renderAccountStateVersion,
+      status,
+      debouncedQuery,
+      view,
+      exportStartDate,
+      exportEndDate,
+      certificateYear,
+      debouncedCertificateSearch,
+      certificateSearchInputGenerationRef.current
+    ]);
+    const currentFlight = automaticRefreshFlightRef.current;
+    if (currentFlight?.key === refreshKey) {
+      if (currentFlight.state === "pending" && !currentFlight.followerQueued) {
+        automaticRefreshFlightRef.current = {
+          ...currentFlight,
+          followerQueued: true
+        };
+      }
+      return;
+    }
+    dispatchAutomaticRefresh(refreshKey, false);
+  }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch, settledCertificateSearchRevision]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
   // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
@@ -643,7 +761,18 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return runAccountOperation(() => api<T>(path, token, options));
   }
 
-  async function fetchDocumentPage(options: { append?: boolean; cursor?: string | null; query?: string; status?: string } = {}) {
+  function commitRefreshState(control: RunActionControl | undefined, operation: () => void): boolean {
+    if (control) {
+      return control.commit(operation);
+    }
+    operation();
+    return true;
+  }
+
+  async function fetchDocumentPage(
+    options: { append?: boolean; cursor?: string | null; query?: string; status?: string } = {},
+    control?: RunActionControl
+  ) {
     const params = new URLSearchParams();
     const effectiveStatus = options.status ?? status;
     const effectiveQuery = options.query ?? debouncedQuery;
@@ -653,17 +782,19 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (options.cursor) params.set("cursor", options.cursor);
     params.set("limit", String(DOCUMENT_PAGE_SIZE));
     const page = await accountApi<DocumentListPage>(`/api/documents?${params}`);
-    setDocuments((current) => options.append ? [...current, ...page.documents] : page.documents);
-    setDocumentNextCursor(page.nextCursor);
-    setDocumentsHasMore(page.hasMore);
-    if (!options.append) {
-      setSelectedId((current) => {
-        if (current && page.documents.some((document) => document.id === current)) {
-          return current;
-        }
-        return page.documents[0]?.id ?? null;
-      });
-    }
+    commitRefreshState(control, () => {
+      setDocuments((current) => options.append ? [...current, ...page.documents] : page.documents);
+      setDocumentNextCursor(page.nextCursor);
+      setDocumentsHasMore(page.hasMore);
+      if (!options.append) {
+        setSelectedId((current) => {
+          if (current && page.documents.some((document) => document.id === current)) {
+            return current;
+          }
+          return page.documents[0]?.id ?? null;
+        });
+      }
+    });
     return page;
   }
 
@@ -674,47 +805,58 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setPreCdeFailuresLoading(false);
   }
 
-  async function fetchPreCdeFailures() {
+  async function fetchPreCdeFailures(control?: RunActionControl) {
     const request = preCdeFailureRequests.current.start();
     request.commit(() => {
-      setPreCdeFailuresError("");
-      setPreCdeFailuresLoading(true);
+      commitRefreshState(control, () => {
+        setPreCdeFailuresError("");
+        setPreCdeFailuresLoading(true);
+      });
     });
     try {
       const result = await api<{ failures: WompiIssuanceFailureItem[] }>("/api/wompi-events/issuance-failures", token);
       request.commit(() => {
-        setPreCdeFailures(result.failures);
-        setPreCdeFailuresError("");
-        setPreCdeFailuresLoading(false);
+        commitRefreshState(control, () => {
+          setPreCdeFailures(result.failures);
+          setPreCdeFailuresError("");
+          setPreCdeFailuresLoading(false);
+        });
       });
     } catch (error) {
       request.commit(() => {
-        setPreCdeFailures([]);
-        setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
-        setPreCdeFailuresLoading(false);
+        commitRefreshState(control, () => {
+          setPreCdeFailures([]);
+          setPreCdeFailuresError(userFacingErrorMessage(error instanceof Error ? error.message : String(error)));
+          setPreCdeFailuresLoading(false);
+        });
       });
     }
   }
 
-  async function refresh() {
+  async function refresh(control?: RunActionControl) {
     await Promise.all([
-      fetchDocumentPage(),
-      view === "failures" ? fetchPreCdeFailures() : Promise.resolve()
+      fetchDocumentPage({}, control),
+      view === "failures" ? fetchPreCdeFailures(control) : Promise.resolve()
     ]);
+    if (control && !control.isOwner()) {
+      return;
+    }
     if (view === "audit") {
       const auditPage = await accountApi<{ audit: AuditRow[]; nextCursor: string | null }>("/api/audit?limit=50");
-      setAudit(auditPage.audit);
-      setAuditCursor(auditPage.nextCursor);
+      commitRefreshState(control, () => {
+        setAudit(auditPage.audit);
+        setAuditCursor(auditPage.nextCursor);
+      });
     }
     if (view === "users" && can(user, "ADMIN")) {
       const result = await accountApi<{ users: User[] }>("/api/users");
-      setUsers(result.users);
+      commitRefreshState(control, () => setUsers(result.users));
     }
     if (view === "donors" && can(user, "ADMIN")) {
       const environmentResult = await accountApi<{ emissionEnvironment: EmissionEnvironmentState }>(
         "/api/settings/emission-environment"
       );
-      setEmissionEnvironment(environmentResult.emissionEnvironment);
+      commitRefreshState(control, () => setEmissionEnvironment(environmentResult.emissionEnvironment));
     }
     if (view === "credentials" && can(user, "OWNER")) {
       const [credentialResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
@@ -725,20 +867,39 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         accountApi<{ wompiNotifications: WompiNotificationSettings }>("/api/settings/wompi-notifications"),
         accountApi<AlertEmailState>("/api/settings/alert-email")
       ]);
-      setCredentials(credentialResult.credentials);
-      setEmissionEnvironment(environmentResult.emissionEnvironment);
-      applyEmailTemplates(emailTemplateResult.emailTemplates);
-      applyEmailSender(emailSenderResult.emailSender);
-      setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
-      applyAlertEmail(alertEmailResult.alertEmail);
+      commitRefreshState(control, () => {
+        setCredentials(credentialResult.credentials);
+        setEmissionEnvironment(environmentResult.emissionEnvironment);
+        applyEmailTemplates(emailTemplateResult.emailTemplates);
+        applyEmailSender(emailSenderResult.emailSender);
+        setWompiNotificationsDraft(wompiNotificationResult.wompiNotifications);
+        applyAlertEmail(alertEmailResult.alertEmail);
+      });
     }
     if (view === "exports" && can(user, "ADMIN")) {
       if (exportStartDate && exportEndDate && exportStartDate > exportEndDate) {
-        setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
-        setToast("Revise el rango de fechas");
+        commitRefreshState(control, () => {
+          setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
+          setToast("Revise el rango de fechas");
+        });
         return;
       }
       const params = exportParams(exportStartDate, exportEndDate);
+      const currentCertificateInput = certificatePreviewRequestRef.current;
+      const certificateRequest = currentCertificateInput.year === certificateYear
+        && currentCertificateInput.search === debouncedCertificateSearch
+        ? beginCertificatePreviewReplacement(certificateYear, debouncedCertificateSearch)
+        : null;
+      const certificateResultPromise = certificateRequest
+        ? accountApi<AnnualCertificatePreview>(certificatePreviewPath(
+            certificateRequest.year,
+            certificateRequest.search,
+            certificateRequest.cursor
+          )).then(
+            (value) => ({ status: "fulfilled" as const, value }),
+            (reason: unknown) => ({ status: "rejected" as const, reason })
+          )
+        : Promise.resolve(null);
       const [
         f960Preview,
         certificateResult,
@@ -747,21 +908,104 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         environmentResult
       ] = await Promise.all([
         accountApi<F960Preview>(`/api/exports/f960?${params}`),
-        accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)),
+        certificateResultPromise,
         accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
-      setExportPreview(f960Preview);
-      setCertificatePreview(certificateResult);
-      setDonationIntents(donationIntentResult.intents);
-      setBackups(backupsResult.months);
-      setEmissionEnvironment(environmentResult.emissionEnvironment);
+      if (certificateRequest && certificateResult?.status === "fulfilled") {
+        commitRefreshState(control, () => {
+          setExportPreview(f960Preview);
+          commitCertificatePreview(certificateRequest, certificateResult.value, false);
+          setDonationIntents(donationIntentResult.intents);
+          setBackups(backupsResult.months);
+          setEmissionEnvironment(environmentResult.emissionEnvironment);
+        });
+      } else if (
+        certificateRequest
+        && certificateResult?.status === "rejected"
+        && isCurrentCertificatePreviewRequest(certificateRequest)
+        && (!control || control.isOwner())
+      ) {
+        throw certificateResult.reason;
+      } else {
+        commitRefreshState(control, () => {
+          setExportPreview(f960Preview);
+          setDonationIntents(donationIntentResult.intents);
+          setBackups(backupsResult.months);
+          setEmissionEnvironment(environmentResult.emissionEnvironment);
+        });
+      }
     }
+  }
+
+  function automaticRefreshControl(token: symbol): RunActionControl {
+    const isOwner = () => (
+      accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
+      && automaticRefreshFlightRef.current?.token === token
+    );
+    return {
+      isOwner,
+      commit(operation) {
+        if (!isOwner()) {
+          return false;
+        }
+        operation();
+        return true;
+      }
+    };
+  }
+
+  function dispatchAutomaticRefresh(refreshKey: string, retryUsed: boolean) {
+    const token = Symbol(refreshKey);
+    automaticRefreshFlightRef.current = {
+      key: refreshKey,
+      token,
+      state: "pending",
+      followerQueued: false,
+      retryUsed
+    };
+    const control = automaticRefreshControl(token);
+    void refresh(control)
+      .then(() => {
+        const currentFlight = automaticRefreshFlightRef.current;
+        if (!currentFlight || currentFlight.token !== token) {
+          return;
+        }
+        automaticRefreshFlightRef.current = {
+          ...currentFlight,
+          state: "completed",
+          followerQueued: false
+        };
+      })
+      .catch((error) => {
+        const currentFlight = automaticRefreshFlightRef.current;
+        if (!currentFlight || currentFlight.token !== token) {
+          return;
+        }
+        const shouldRetry = currentFlight.followerQueued && !currentFlight.retryUsed;
+        handleApiFailure(error);
+        if (automaticRefreshFlightRef.current?.token !== token) {
+          return;
+        }
+        if (shouldRetry) {
+          dispatchAutomaticRefresh(refreshKey, true);
+          return;
+        }
+        automaticRefreshFlightRef.current = null;
+      });
   }
 
   function resetAccountState() {
     accountStateGuardRef.current.advance();
+    runActionOwnerRef.current = null;
+    certificateOperationClaimsRef.current.clear();
+    certificateSearchInputGenerationRef.current += 1;
+    automaticRefreshFlightRef.current = null;
+    setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
+    const certificateResetYear = String(new Date().getFullYear());
+    invalidateCertificatePreview(certificateResetYear, "");
+    resetCertificateBulkTraversal(certificateResetYear);
     setView("documents");
     setDocuments([]);
     clearPreCdeFailures();
@@ -799,10 +1043,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setExportStartDate(currentMonthStartValue());
     setExportEndDate(todayDateValue());
     setExportPreview({ rows: [], rowCount: 0, amountTotal: "0.00" });
-    setCertificateYear(String(new Date().getFullYear()));
+    setCertificateYear(certificateResetYear);
     setCertificateSearch("");
     setDebouncedCertificateSearch("");
-    setCertificatePreview(null);
     setContactsPeriod("todo");
     setContactsFrom(currentMonthStartValue());
     setContactsTo(todayDateValue());
@@ -888,10 +1131,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function retryPreCdeFailure(id: string) {
-    await runAction(`pre-cde-retry:${id}`, async () => {
+    await runAction(`pre-cde-retry:${id}`, async (control) => {
       await api(`/api/wompi-events/${id}/retry`, token, { method: "POST", body: {} });
-      setToast("Reintento de creación en cola");
-      await refresh();
+      if (!control.commit(() => setToast("Reintento de creación en cola")) || !control.isOwner()) {
+        return;
+      }
+      await refresh(control);
     });
   }
 
@@ -1053,23 +1298,32 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast(validationError);
       return;
     }
-    await runAction("test-dte", async () => {
+    await runAction("test-dte", async (control) => {
       await accountApi("/api/test/dte", { method: "POST", body: testInput });
-      setTestInput(emptyTestDteInput());
-      setToast("CDE creado. Transmitiendo al Ministerio de Hacienda…");
+      if (!control.commit(() => {
+        setTestInput(emptyTestDteInput());
+        setToast("CDE creado. Transmitiendo al Ministerio de Hacienda…");
+      })) {
+        return;
+      }
       await delay(2500);
-      await refresh();
+      if (!control.isOwner()) {
+        return;
+      }
+      await refresh(control);
     });
   }
 
   async function openAdvancedDte() {
-    await runAction("advanced-template", async () => {
+    await runAction("advanced-template", async (control) => {
       const result = await accountApi<{ draft: Record<string, unknown> }>("/api/test/dte/advanced-template", { method: "POST", body: testInput });
-      setAdvancedDteTemplate(result.draft);
-      setAdvancedDteForm(advancedFormFromDraft(result.draft));
-      setAdvancedDteStep(0);
-      setAdvancedDteError("");
-      setAdvancedDteOpen(true);
+      control.commit(() => {
+        setAdvancedDteTemplate(result.draft);
+        setAdvancedDteForm(advancedFormFromDraft(result.draft));
+        setAdvancedDteStep(0);
+        setAdvancedDteError("");
+        setAdvancedDteOpen(true);
+      });
     });
   }
 
@@ -1085,12 +1339,19 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
     const draft = advancedDraftFromForm(advancedDteTemplate, advancedDteForm);
     setAdvancedDteError("");
-    await runAction("advanced-dte", async () => {
+    await runAction("advanced-dte", async (control) => {
       await accountApi("/api/test/dte/advanced", { method: "POST", body: { draft } });
-      setToast("CDE avanzado creado. Transmitiendo al Ministerio de Hacienda…");
-      setAdvancedDteOpen(false);
+      if (!control.commit(() => {
+        setToast("CDE avanzado creado. Transmitiendo al Ministerio de Hacienda…");
+        setAdvancedDteOpen(false);
+      })) {
+        return;
+      }
       await delay(2500);
-      await refresh();
+      if (!control.isOwner()) {
+        return;
+      }
+      await refresh(control);
     });
   }
 
@@ -1114,7 +1375,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       : action === "resend"
         ? { resendRequestId }
         : {};
-    await runAction(action, async () => {
+    await runAction(action, async (control) => {
       let result: {
         accepted?: boolean;
         result?: { estado?: string };
@@ -1136,24 +1397,32 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               : null
           )
         ) {
-          resendRequestIds.current.delete(target.id);
+          control.commit(() => resendRequestIds.current.delete(target.id));
         }
         throw error;
       }
-      if (action === "resend") {
-        resendRequestIds.current.delete(target.id);
+      if (!control.commit(() => {
+        if (action === "resend") {
+          resendRequestIds.current.delete(target.id);
+        }
+        setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
+        if (action === "invalidate") setPendingInvalidationId(null);
+        if (action === "resend") {
+          setSelectedDocumentDetailVersion((current) => current + 1);
+        }
+      })) {
+        return;
       }
-      setToast(action === "resend" ? "Correo reenviado" : action === "retry" ? "Reintento ejecutado" : invalidationToast(result));
-      if (action === "invalidate") setPendingInvalidationId(null);
       if (action !== "resend") {
-        await refresh();
-        setSelectedDocumentDetailVersion((current) => current + 1);
+        if (!control.isOwner()) {
+          return;
+        }
+        await refresh(control);
+        control.commit(() => setSelectedDocumentDetailVersion((current) => current + 1));
+      } else if (control.isOwner()) {
+        await refresh(control);
       }
     });
-    if (action === "resend") {
-      setSelectedDocumentDetailVersion((current) => current + 1);
-      await refresh();
-    }
   }
 
   async function saveDocumentEmail(target = selected) {
@@ -1163,13 +1432,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast("Ingrese un correo válido");
       return;
     }
-    await runAction("email", async () => {
+    await runAction("email", async (control) => {
       await accountApi(`/api/documents/${target.id}/email`, { method: "PATCH", body: { email } });
-      resendRequestIds.current.delete(target.id);
-      setToast("Correo de envío actualizado");
-      setEmailEditingId(null);
-      setEmailDraft("");
-      await refresh();
+      if (control.commit(() => {
+        resendRequestIds.current.delete(target.id);
+        setToast("Correo de envío actualizado");
+        setEmailEditingId(null);
+        setEmailDraft("");
+      }) && control.isOwner()) {
+        await refresh(control);
+      }
     });
   }
 
@@ -1201,7 +1473,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function downloadF960(format: "csv" | "xlsx") {
-    await runAction(`export-${format}`, async () => {
+    await runAction(`export-${format}`, async (control) => {
       const { blob, contentDisposition } = await fetchAccountDownload(`/api/exports/f960.${format}?${exportParams(exportStartDate, exportEndDate)}`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1209,12 +1481,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       link.download = filenameFromDisposition(contentDisposition, `f960.${format}`);
       link.click();
       URL.revokeObjectURL(href);
-      setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
+      control.commit(() => {
+        setToast(format === "csv" ? "CSV F960 descargado" : "XLSX de inspección descargado");
+      });
     });
   }
 
   async function downloadContacts() {
-    await runAction("export-contacts", async () => {
+    await runAction("export-contacts", async (control) => {
       const environment = emissionEnvironment?.environment;
       if (!environment) {
         throw new Error("No se pudo determinar el ambiente activo.");
@@ -1244,12 +1518,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       link.download = filenameFromDisposition(contentDisposition, "contactos-donantes.csv");
       link.click();
       URL.revokeObjectURL(href);
-      setToast("Contactos exportados");
+      control.commit(() => setToast("Contactos exportados"));
     });
   }
 
   async function downloadDonors(params: URLSearchParams) {
-    await runAction("export-donors", async () => {
+    await runAction("export-donors", async (control) => {
       const { blob, contentDisposition } = await fetchAccountDownload(
         `/api/exports/donors.csv?${params.toString()}`
       );
@@ -1259,15 +1533,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       link.download = filenameFromDisposition(contentDisposition, "donantes.csv");
       link.click();
       URL.revokeObjectURL(href);
-      setToast("Donantes exportados");
+      control.commit(() => setToast("Donantes exportados"));
     });
   }
 
   async function verifyBackup(month: string) {
-    await runAction(`backup-verify-${month}`, async () => {
+    await runAction(`backup-verify-${month}`, async (control) => {
       const result = await accountApi<BackupVerifyResult>(`/api/admin/backups/${month}/verify`, { method: "POST" });
-      setBackupVerifyByMonth((current) => ({ ...current, [month]: result }));
-      setToast(result.ok ? `Respaldo de ${month} verificado: íntegro.` : `Respaldo de ${month}: se detectaron discrepancias.`);
+      control.commit(() => {
+        setBackupVerifyByMonth((current) => ({ ...current, [month]: result }));
+        setToast(result.ok ? `Respaldo de ${month} verificado: íntegro.` : `Respaldo de ${month}: se detectaron discrepancias.`);
+      });
     });
   }
 
@@ -1289,7 +1565,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   // Downloads the whole month's archive (every table object + manifest) as one ZIP.
   // Keyed by `backup-download-all-<month>` so only that row's button shows a busy state.
   async function downloadAllBackup(month: string) {
-    await runAction(`backup-download-all-${month}`, async () => {
+    await runAction(`backup-download-all-${month}`, async (control) => {
       const { blob, contentDisposition } = await fetchAccountDownload(`/api/admin/backups/${month}/download-all`);
       const href = URL.createObjectURL(blob);
       const link = document.createElement("a");
@@ -1297,7 +1573,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       link.download = filenameFromDisposition(contentDisposition, `respaldo-${month}.zip`);
       link.click();
       URL.revokeObjectURL(href);
-      setToast(`Respaldo completo de ${month} descargado.`);
+      control.commit(() => setToast(`Respaldo completo de ${month} descargado.`));
     });
   }
 
@@ -1306,35 +1582,229 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!confirmed) {
       return;
     }
-    await runAction(`backup-export-${month}`, async () => {
+    await runAction(`backup-export-${month}`, async (control) => {
       await accountApi(`/api/admin/retention-export?month=${month}`, { method: "POST" });
-      setBackups((await accountApi<BackupsGrid>("/api/admin/backups")).months);
-      setToast(`Respaldo del mes ${month} generado.`);
+      const nextBackups = (await accountApi<BackupsGrid>("/api/admin/backups")).months;
+      control.commit(() => {
+        setBackups(nextBackups);
+        setToast(`Respaldo del mes ${month} generado.`);
+      });
     });
+  }
+
+  function claimCertificateOperation(key: string): symbol | null {
+    if (certificateOperationClaimsRef.current.has(key)) {
+      return null;
+    }
+    const token = Symbol(key);
+    certificateOperationClaimsRef.current.set(key, token);
+    return token;
+  }
+
+  function ownsCertificateOperation(key: string, token: symbol): boolean {
+    return certificateOperationClaimsRef.current.get(key) === token;
+  }
+
+  function releaseCertificateOperation(key: string, token: symbol): void {
+    if (ownsCertificateOperation(key, token)) {
+      certificateOperationClaimsRef.current.delete(key);
+    }
+  }
+
+  function beginCertificatePreviewReplacement(year: string, search: string): CertificatePreviewRequest {
+    const request = {
+      generation: certificatePreviewRequestRef.current.generation + 1,
+      year,
+      search,
+      cursor: null
+    };
+    certificatePreviewRequestRef.current = request;
+    setCertificatePreviewCursor(null);
+    return request;
+  }
+
+  function isCurrentCertificatePreviewRequest(request: CertificatePreviewRequest): boolean {
+    const current = certificatePreviewRequestRef.current;
+    return current.generation === request.generation
+      && current.year === request.year
+      && current.search === request.search
+      && current.cursor === request.cursor;
+  }
+
+  function commitCertificatePreview(
+    request: CertificatePreviewRequest,
+    page: AnnualCertificatePreview,
+    append: boolean
+  ): boolean {
+    if (!isCurrentCertificatePreviewRequest(request)) {
+      return false;
+    }
+    certificatePreviewRequestRef.current = { ...request, cursor: page.nextCursor };
+    setCertificatePreview((currentPreview) => {
+      const current = certificatePreviewRequestRef.current;
+      if (
+        current.generation !== request.generation
+        || current.year !== request.year
+        || current.search !== request.search
+        || current.cursor !== page.nextCursor
+      ) {
+        return currentPreview;
+      }
+      if (append && currentPreview?.year === page.year) {
+        return { ...page, donors: [...currentPreview.donors, ...page.donors] };
+      }
+      return page;
+    });
+    setCertificatePreviewCursor((currentCursor) => {
+      const current = certificatePreviewRequestRef.current;
+      return current.generation === request.generation
+        && current.year === request.year
+        && current.search === request.search
+        && current.cursor === page.nextCursor
+        ? page.nextCursor
+        : currentCursor;
+    });
+    return true;
+  }
+
+  function invalidateCertificatePreview(year: string, search: string): void {
+    const current = certificatePreviewRequestRef.current;
+    certificatePreviewRequestRef.current = {
+      generation: current.generation + 1,
+      year,
+      search,
+      cursor: null
+    };
+    setCertificatePreview(null);
+    setCertificatePreviewCursor(null);
+  }
+
+  function resetCertificateBulkTraversal(year: string): void {
+    const current = certificateBulkTraversalRef.current;
+    certificateBulkTraversalRef.current = {
+      generation: current.generation + 1,
+      year,
+      cursor: null,
+      started: false,
+      hasMore: false
+    };
+    setBulkHasMore(false);
+    setBulkTraversalStarted(false);
+  }
+
+  function isCurrentCertificateBulkRequest(request: CertificateBulkRequest): boolean {
+    const current = certificateBulkTraversalRef.current;
+    return current.generation === request.generation
+      && current.year === request.year
+      && (current.started ? current.cursor : null) === request.cursor;
   }
 
   async function sendAnnualCertificates() {
-    const preview = certificatePreview;
-    if (!preview || preview.withEmail === 0) {
-      setToast("No hay donantes con correo para el año seleccionado.");
+    const traversal = certificateBulkTraversalRef.current;
+    if (traversal.started && (!traversal.hasMore || !traversal.cursor)) {
+      setToast("El recorrido actual ya terminó. Inicie uno nuevo para volver a revisar el año.");
+      return;
+    }
+    const request: CertificateBulkRequest = {
+      generation: traversal.generation,
+      year: traversal.year,
+      cursor: traversal.started ? traversal.cursor : null
+    };
+    const claimKey = JSON.stringify(["bulk", request.generation, request.year, request.cursor]);
+    const claimToken = claimCertificateOperation(claimKey);
+    if (!claimToken) {
       return;
     }
     const confirmed = window.confirm(
-      `Se enviarán constancias del año ${preview.year} a ${preview.withEmail} donante(s) con correo. ` +
-        `${preview.withoutEmail} donante(s) sin correo se omitirán. ¿Desea continuar?`
+      "Se enviará una tanda de hasta 10 constancias a donantes con correo. Podrá continuar si quedan más. ¿Desea continuar?"
     );
     if (!confirmed) {
+      releaseCertificateOperation(claimKey, claimToken);
       return;
     }
-    await runAction("certificates-send", async () => {
-      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, { method: "POST" });
-      setToast(`Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas`);
-      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
-    });
+    try {
+      await runAction("certificates-send", async (control) => {
+        const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${request.year}`, {
+          method: "POST",
+          body: request.cursor ? { after: request.cursor } : {}
+        });
+        if (!isCurrentCertificateBulkRequest(request) || !ownsCertificateOperation(claimKey, claimToken)) {
+          return;
+        }
+        control.commit(() => {
+          certificateBulkTraversalRef.current = {
+            generation: request.generation,
+            year: request.year,
+            cursor: result.nextCursor,
+            started: true,
+            hasMore: result.hasMore
+          };
+          setBulkTraversalStarted(true);
+          setBulkHasMore(result.hasMore);
+          setToast(
+            `Constancias ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas.` +
+              (result.hasMore ? " Quedan donantes por procesar." : " Recorrido completado.")
+          );
+        });
+      }, () => isCurrentCertificateBulkRequest(request) && ownsCertificateOperation(claimKey, claimToken));
+    } finally {
+      releaseCertificateOperation(claimKey, claimToken);
+    }
   }
 
-  // Single-donor send (also the resend path): posts the donor's grouping key. Keyed by
-  // `certificates-send-<groupKey>` so only that row shows a busy state while it runs.
+  async function loadMoreCertificatePreview() {
+    if (!certificatePreview?.hasMore || !certificatePreviewCursor) {
+      return;
+    }
+    const request = { ...certificatePreviewRequestRef.current };
+    if (request.cursor !== certificatePreviewCursor) {
+      return;
+    }
+    const claimKey = JSON.stringify([
+      "preview-page",
+      request.generation,
+      request.year,
+      request.search,
+      request.cursor
+    ]);
+    const claimToken = claimCertificateOperation(claimKey);
+    if (!claimToken) {
+      return;
+    }
+    try {
+      await runAction("certificates-preview-more", async (control) => {
+        const page = await accountApi<AnnualCertificatePreview>(
+          certificatePreviewPath(request.year, request.search, request.cursor)
+        );
+        if (!ownsCertificateOperation(claimKey, claimToken)) {
+          return;
+        }
+        control.commit(() => commitCertificatePreview(request, page, true));
+      }, () => isCurrentCertificatePreviewRequest(request) && ownsCertificateOperation(claimKey, claimToken));
+    } finally {
+      releaseCertificateOperation(claimKey, claimToken);
+    }
+  }
+
+  function startNewCertificateTraversal() {
+    resetCertificateBulkTraversal(certificateYear);
+    setToast("Recorrido de constancias reiniciado.");
+  }
+
+  function changeCertificateYear(year: string) {
+    invalidateCertificatePreview(year, certificatePreviewRequestRef.current.search);
+    resetCertificateBulkTraversal(year);
+    setCertificateYear(year);
+  }
+
+  function changeCertificateSearch(value: string) {
+    certificateSearchInputGenerationRef.current += 1;
+    invalidateCertificatePreview(certificatePreviewRequestRef.current.year, value.trim());
+    setCertificateSearch(value);
+  }
+
+  // Single-donor send (also the resend path): the claim is recipient-independent so only
+  // one external send can run per preview generation; the busy key still marks its row.
   async function sendDonorCertificate(donor: AnnualCertificatePreviewDonor) {
     const preview = certificatePreview;
     if (!preview) {
@@ -1344,24 +1814,74 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast("Este donante no tiene correo registrado, por lo que no se le puede enviar la constancia.");
       return;
     }
+    if (donor.dossierTooLarge) {
+      setToast("Demasiados comprobantes para una sola constancia.");
+      return;
+    }
+    const previewRequest = { ...certificatePreviewRequestRef.current };
+    if (previewRequest.year !== String(preview.year)) {
+      return;
+    }
+    const claimKey = JSON.stringify([
+      "single",
+      previewRequest.generation,
+      previewRequest.year
+    ]);
+    const claimToken = claimCertificateOperation(claimKey);
+    if (!claimToken) {
+      return;
+    }
     const confirmed = window.confirm(
       `Se enviará la constancia del año ${preview.year} a ${donor.donorName}. ¿Desea continuar?`
     );
     if (!confirmed) {
+      releaseCertificateOperation(claimKey, claimToken);
       return;
     }
-    await runAction(`certificates-send-${donor.groupKey}`, async () => {
-      const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, {
-        method: "POST",
-        body: { donor: donor.groupKey }
-      });
-      setToast(
-        result.sent > 0
-          ? `Constancia ${result.year} enviada a ${donor.donorName}.`
-          : `No se pudo enviar la constancia a ${donor.donorName}.`
-      );
-      setCertificatePreview(await accountApi<AnnualCertificatePreview>(certificatePreviewPath(certificateYear, debouncedCertificateSearch)));
-    });
+    let activePreviewRequest = previewRequest;
+    try {
+      await runAction(`certificates-send-${donor.groupKey}`, async (control) => {
+        const result = await accountApi<AnnualCertificateSendResult>(`/api/certificates/annual/send?year=${preview.year}`, {
+          method: "POST",
+          body: { donor: donor.groupKey }
+        });
+        if (
+          !isCurrentCertificatePreviewRequest(activePreviewRequest)
+          || !ownsCertificateOperation(claimKey, claimToken)
+        ) {
+          return;
+        }
+        if (!control.commit(() => {
+          setToast(
+            result.sent > 0
+              ? `Constancia ${result.year} enviada a ${donor.donorName}.`
+              : `No se pudo enviar la constancia a ${donor.donorName}.`
+          );
+          activePreviewRequest = beginCertificatePreviewReplacement(
+            previewRequest.year,
+            previewRequest.search
+          );
+        })) {
+          return;
+        }
+        const refreshed = await accountApi<AnnualCertificatePreview>(
+          certificatePreviewPath(
+            activePreviewRequest.year,
+            activePreviewRequest.search,
+            activePreviewRequest.cursor
+          )
+        );
+        if (!ownsCertificateOperation(claimKey, claimToken)) {
+          return;
+        }
+        control.commit(() => commitCertificatePreview(activePreviewRequest, refreshed, false));
+      }, () => (
+        isCurrentCertificatePreviewRequest(activePreviewRequest)
+        && ownsCertificateOperation(claimKey, claimToken)
+      ));
+    } finally {
+      releaseCertificateOperation(claimKey, claimToken);
+    }
   }
 
   async function createUser() {
@@ -1370,11 +1890,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast(passwordError);
       return;
     }
-    await runAction("create-user", async () => {
+    await runAction("create-user", async (control) => {
       const created = await accountApi<{ user: User }>("/api/users", { method: "POST", body: newUser });
-      setToast(`Usuario creado: ${created.user.email}`);
-      setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
-      await refresh();
+      if (!control.commit(() => {
+        setToast(`Usuario creado: ${created.user.email}`);
+        setNewUser({ name: "", email: "", role: "VIEWER", password: "" });
+      })) {
+        return;
+      }
+      await refresh(control);
     });
   }
 
@@ -1402,7 +1926,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast("Ingrese nombre y correo del usuario");
       return;
     }
-    await runAction("user-settings", async () => {
+    await runAction("user-settings", async (control) => {
       const result = await accountApi<{ user: User }>(`/api/users/${selectedUserId}`, {
         method: "PATCH",
         body: {
@@ -1412,13 +1936,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           disabled: userSettings.disabled
         }
       });
-      setUsers((current) => current.map((candidate) => candidate.id === result.user.id ? result.user : candidate));
-      if (user?.id === result.user.id) {
-        setUser(result.user);
-        localStorage.setItem("diezmos_user", JSON.stringify(result.user));
-      }
-      setUserSettings({ ...userSettingsFromUser(result.user), password: "" });
-      setToast(`Usuario actualizado: ${result.user.email}`);
+      control.commit(() => {
+        setUsers((current) => current.map((candidate) => candidate.id === result.user.id ? result.user : candidate));
+        if (user?.id === result.user.id) {
+          setUser(result.user);
+          localStorage.setItem("diezmos_user", JSON.stringify(result.user));
+        }
+        setUserSettings({ ...userSettingsFromUser(result.user), password: "" });
+        setToast(`Usuario actualizado: ${result.user.email}`);
+      });
     });
   }
 
@@ -1429,21 +1955,28 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       setToast(passwordError);
       return;
     }
-    await runAction("user-password", async () => {
+    await runAction("user-password", async (control) => {
       await accountApi(`/api/users/${selectedUserId}/password`, { method: "POST", body: { password: userSettings.password } });
-      setUserSettings((current) => ({ ...current, password: "" }));
-      setToast("Contraseña restablecida");
+      control.commit(() => {
+        setUserSettings((current) => ({ ...current, password: "" }));
+        setToast("Contraseña restablecida");
+      });
     });
   }
 
   async function updateCredentials() {
-    await runAction("credentials", async () => {
+    await runAction("credentials", async (control) => {
       const result = await accountApi<{ updated: string[]; deleted: string[] }>("/api/credentials", { method: "POST", body: credentialInput });
-      setToast(`Secretos actualizados: ${result.updated.length}`);
-      setCredentialInput(emptyCredentialInput(credentialInput.environment));
-      setCredentials((await accountApi<{ credentials: CredentialStatus }>("/api/credentials")).credentials);
-      const emailSenderResult = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender");
-      applyEmailSender(emailSenderResult.emailSender);
+      const [credentialResult, emailSenderResult] = await Promise.all([
+        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+        accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")
+      ]);
+      control.commit(() => {
+        setToast(`Secretos actualizados: ${result.updated.length}`);
+        setCredentialInput(emptyCredentialInput(credentialInput.environment));
+        setCredentials(credentialResult.credentials);
+        applyEmailSender(emailSenderResult.emailSender);
+      });
     });
   }
 
@@ -1451,13 +1984,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (emissionEnvironment?.environment === environment && emissionEnvironment.source === "setting") {
       return;
     }
-    await runAction("emission-environment", async () => {
+    await runAction("emission-environment", async (control) => {
       const result = await accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment", {
         method: "PUT",
         body: { environment }
       });
-      setEmissionEnvironment(result.emissionEnvironment);
-      setToast(`Ambiente de emisión cambiado a ${environmentLabel(environment)}`);
+      control.commit(() => {
+        setEmissionEnvironment(result.emissionEnvironment);
+        setToast(`Ambiente de emisión cambiado a ${environmentLabel(environment)}`);
+      });
     });
   }
 
@@ -1477,29 +2012,33 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   async function updateAlertEmail() {
-    await runAction("alert-email", async () => {
+    await runAction("alert-email", async (control) => {
       const result = await accountApi<AlertEmailState>("/api/settings/alert-email", {
         method: "PUT",
         body: { alertEmail: alertEmailDraft.trim() }
       });
-      applyAlertEmail(result.alertEmail);
-      setToast(result.alertEmail ? "Correos de alertas actualizados" : "Alertas operativas desactivadas");
+      control.commit(() => {
+        applyAlertEmail(result.alertEmail);
+        setToast(result.alertEmail ? "Correos de alertas actualizados" : "Alertas operativas desactivadas");
+      });
     });
   }
 
   async function updateEmailTemplates() {
-    await runAction("email-templates", async () => {
+    await runAction("email-templates", async (control) => {
       const result = await accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates", {
         method: "PUT",
         body: { templates: emailTemplateDraft }
       });
-      applyEmailTemplates(result.emailTemplates);
-      setToast("Plantillas de correo actualizadas");
+      control.commit(() => {
+        applyEmailTemplates(result.emailTemplates);
+        setToast("Plantillas de correo actualizadas");
+      });
     });
   }
 
   async function updateEmailSender() {
-    await runAction("email-sender", async () => {
+    await runAction("email-sender", async (control) => {
       const result = await accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender", {
         method: "PUT",
         body: {
@@ -1507,13 +2046,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           replyToAddress: emailReplyToDraft
         }
       });
-      applyEmailSender(result.emailSender);
-      setToast("Configuración del remitente actualizada");
+      control.commit(() => {
+        applyEmailSender(result.emailSender);
+        setToast("Configuración del remitente actualizada");
+      });
     });
   }
 
   async function updateWompiNotifications() {
-    await runAction("wompi-notifications", async () => {
+    await runAction("wompi-notifications", async (control) => {
       const result = await accountApi<{ wompiNotifications: WompiNotificationSettings }>(
         "/api/settings/wompi-notifications",
         {
@@ -1521,8 +2062,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           body: wompiNotificationsDraft
         }
       );
-      setWompiNotificationsDraft(result.wompiNotifications);
-      setToast("Notificaciones de Wompi actualizadas");
+      control.commit(() => {
+        setWompiNotificationsDraft(result.wompiNotifications);
+        setToast("Notificaciones de Wompi actualizadas");
+      });
     });
   }
 
@@ -1544,14 +2087,43 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     }
   }
 
-  async function runAction(name: string, action: () => Promise<void>) {
+  async function runAction(
+    name: string,
+    action: (control: RunActionControl) => Promise<void>,
+    isCurrent: () => boolean = () => true
+  ) {
+    const actionToken = Symbol(name);
+    runActionOwnerRef.current = { token: actionToken };
+    const isOwner = () => (
+      accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
+      && runActionOwnerRef.current?.token === actionToken
+      && isCurrent()
+    );
+    const control: RunActionControl = {
+      isOwner,
+      commit(operation) {
+        if (!isOwner()) {
+          return false;
+        }
+        operation();
+        return true;
+      }
+    };
     setBusy(name);
     try {
-      await runAccountOperation(action);
+      await runAccountOperation(() => action(control));
     } catch (error) {
-      handleApiFailure(error);
+      if (isOwner()) {
+        handleApiFailure(error);
+      }
     } finally {
-      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) setBusy("");
+      if (
+        accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
+        && runActionOwnerRef.current?.token === actionToken
+      ) {
+        runActionOwnerRef.current = null;
+        setBusy("");
+      }
     }
   }
 
@@ -1930,10 +2502,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               search={certificateSearch}
               busy={busy === "certificates-send"}
               rowBusy={busy}
-              onYearChange={setCertificateYear}
-              onSearchChange={setCertificateSearch}
+              bulkTraversalStarted={bulkTraversalStarted}
+              bulkHasMore={bulkHasMore}
+              onYearChange={changeCertificateYear}
+              onSearchChange={changeCertificateSearch}
               onSend={sendAnnualCertificates}
               onSendDonor={sendDonorCertificate}
+              onLoadMore={loadMoreCertificatePreview}
+              onResetBulk={startNewCertificateTraversal}
             />
             <ContactsExportPanel
               environment={emissionEnvironment?.environment ?? null}
@@ -3706,24 +4282,25 @@ export interface AnnualCertificatePreviewDonor {
   count: number;
   totalLabel: string;
   hasTestEnvironment: boolean;
+  dossierTooLarge: boolean;
 }
 
 export interface AnnualCertificatePreview {
   year: number;
-  donorCount: number;
-  withEmail: number;
-  withoutEmail: number;
-  totalLabel: string;
   donors: AnnualCertificatePreviewDonor[];
-  matchCount: number;
-  truncated: boolean;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 interface AnnualCertificateSendResult {
   year: number;
+  mode: "bulk" | "single";
+  processed: number;
   sent: number;
   skipped: number;
   failed: number;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 export interface F960PreviewRow {

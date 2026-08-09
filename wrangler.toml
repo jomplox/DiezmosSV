@@ -20,7 +20,6 @@ enabled = false
 
 [[send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["donations@example.org"]
 
 [vars]
 APP_ENV = "local"
@@ -78,7 +77,6 @@ enabled = false
 
 [[env.staging.send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["donations@example.org"]
 
 [env.staging.vars]
 APP_ENV = "staging"
@@ -125,7 +123,6 @@ crons = ["*/15 * * * *", "0 9 1 * *"]
 [env.production]
 name = "diezmossv-production-example"
 assets = { directory = "./dist/client", binding = "ASSETS", not_found_handling = "single-page-application", run_worker_first = true }
-routes = [{ pattern = "donations.example.invalid", custom_domain = true }]
 workers_dev = true
 
 [env.production.observability]
@@ -140,7 +137,6 @@ enabled = false
 
 [[env.production.send_email]]
 name = "EMAIL"
-allowed_sender_addresses = ["donations@example.org"]
 
 [env.production.vars]
 APP_ENV = "production"

@@ -10,6 +10,7 @@ import {
   writeFileSync
 } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { experimental_readRawConfig } from "wrangler";
 
 const DEFAULT_CONFIG_PATH = join(
   homedir(),
@@ -70,15 +71,29 @@ export function assertPrivateWranglerConfig(configPath, {
 }
 
 export function preparePrivateWranglerConfig(configPath, {
-  repositoryRoot = process.cwd()
+  repositoryRoot = process.cwd(),
+  migrationsDirOverride
 } = {}) {
   const sourceConfig = assertPrivateWranglerConfig(configPath, {
     repositoryRoot
   });
   const resolvedRepository = realpathSync(repositoryRoot);
+  const { rawConfig } = experimental_readRawConfig({ config: sourceConfig });
+  assertPrivateWranglerEmailBindings(rawConfig);
   let contents = readFileSync(sourceConfig, "utf8");
   contents = rewriteRelativeTomlPath(contents, "main", resolvedRepository);
-  contents = rewriteRelativeTomlPath(contents, "migrations_dir", resolvedRepository);
+  if (migrationsDirOverride === undefined) {
+    contents = rewriteRelativeTomlPath(
+      contents,
+      "migrations_dir",
+      resolvedRepository
+    );
+  } else {
+    contents = rewriteMigrationsDirOverride(
+      contents,
+      assertOwnerOnlyDirectory(migrationsDirOverride)
+    );
+  }
   contents = contents.replace(
     /(\bdirectory\s*=\s*)"([^"]+)"/g,
     (match, prefix, value) =>
@@ -102,6 +117,97 @@ export function preparePrivateWranglerConfig(configPath, {
       rmSync(directory, { recursive: true, force: true });
     }
   };
+}
+
+export function assertPrivateWranglerEmailBindings(rawConfig) {
+  const rawEnvironments = ownValue(rawConfig, "env");
+  const environments = isObject(rawEnvironments) ? rawEnvironments : undefined;
+  const namedEnvironments = environments ? Object.values(environments) : [];
+  for (const config of [rawConfig, ...namedEnvironments]) {
+    if (!isObject(config)) continue;
+    const rawBindings = ownValue(config, "send_email");
+    const bindings = Array.isArray(rawBindings) ? rawBindings : [rawBindings];
+    if (
+      bindings.some(
+        (binding) =>
+          isObject(binding) && Object.hasOwn(binding, "allowed_sender_addresses")
+      )
+    ) {
+      throw new Error(
+        "The selected private Wrangler config must not restrict the OWNER-configurable EMAIL_FROM sender"
+      );
+    }
+  }
+
+  const scopes = [
+    ["root", rawConfig],
+    ["staging", ownValue(environments, "staging")],
+    ["production", ownValue(environments, "production")]
+  ];
+
+  for (const [scope, config] of scopes) {
+    const bindings = ownValue(config, "send_email");
+    if (!Array.isArray(bindings) || bindings.length !== 1 || !isObject(bindings[0])) {
+      throw new Error(
+        "The selected private Wrangler config must declare exactly one EMAIL binding in root, staging, and production"
+      );
+    }
+
+    const binding = bindings[0];
+    if (ownValue(binding, "name") !== "EMAIL") {
+      throw new Error(
+        `The selected private Wrangler config Email Service binding in ${scope} must be named EMAIL`
+      );
+    }
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function ownValue(value, key) {
+  return isObject(value) && Object.hasOwn(value, key) ? value[key] : undefined;
+}
+
+function assertOwnerOnlyDirectory(directory) {
+  if (!isAbsolute(directory)) {
+    throw new Error("The migrations override must use an absolute path");
+  }
+
+  let entry;
+  let resolved;
+  try {
+    entry = lstatSync(directory);
+    resolved = realpathSync(directory);
+  } catch {
+    throw new Error("The migrations override is missing or inaccessible");
+  }
+  if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    throw new Error("The migrations override must be a regular directory");
+  }
+
+  const stat = statSync(resolved);
+  if ((stat.mode & 0o077) !== 0) {
+    throw new Error("The migrations override must have owner-only permissions (0700)");
+  }
+  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+    throw new Error("The migrations override must be owned by the current user");
+  }
+  return resolved;
+}
+
+function rewriteMigrationsDirOverride(contents, migrationsDirOverride) {
+  const assignment = /^(\s*migrations_dir\s*=\s*)"[^"]+"/gm;
+  let replacements = 0;
+  const rewritten = contents.replace(assignment, (_match, prefix) => {
+    replacements += 1;
+    return `${prefix}${JSON.stringify(migrationsDirOverride)}`;
+  });
+  if (replacements === 0) {
+    throw new Error("The private Wrangler config must declare migrations_dir");
+  }
+  return rewritten;
 }
 
 function rewriteRelativeTomlPath(contents, key, repositoryRoot) {

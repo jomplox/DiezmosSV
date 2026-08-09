@@ -200,6 +200,7 @@ export class InMemoryD1 {
   documentLookupCount = 0;
   wompiIssuanceFailureLookupCount = 0;
   wompiIssuanceRetryClaimCount = 0;
+  auditCreatedAt = "2026-06-26T01:46:47.015Z";
   loginCredentialReads = 0;
   nextSequence = 1;
   sessionUser: Record<string, string> | null = null;
@@ -1607,8 +1608,34 @@ export class Statement {
         ).length
       } as T;
     }
+    if (
+      this.sql.includes("SELECT COUNT(*) AS count") &&
+      this.sql.includes("episode_member.key = 'stalledRequeueEpochAt'")
+    ) {
+      const [action, entityId, episodeId, exclusiveBoundary] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
+      return {
+        count: this.db.audits.filter((audit) => {
+          const auditEpisodeId = auditStalledRequeueEpisodeId(audit);
+          return audit.action === action &&
+            audit.entity_id === entityId &&
+            (
+              auditEpisodeId === episodeId ||
+              (
+                auditEpisodeId === null &&
+                String(audit.created_at) > exclusiveBoundary
+              )
+            );
+        }).length
+      } as T;
+    }
     if (this.sql.includes("SELECT COUNT(*) AS count FROM audit_logs") && this.sql.includes("created_at >= ?")) {
       const [action, entityId, sinceIso] = this.args.map(String);
+      if (this.db.beforeAuditCount) {
+        await this.db.beforeAuditCount(action, entityId);
+      }
       return {
         count: this.db.audits.filter(
           (audit) => audit.action === action && audit.entity_id === entityId && String(audit.created_at) >= sinceIso
@@ -1741,6 +1768,7 @@ export class Statement {
       if (this.sql.includes("issuance_attempt_id, issuance_claim_id")) {
         failure.issuance_attempt_id = event.issuance_attempt_id ?? null;
         failure.issuance_claim_id = event.issuance_claim_id ?? null;
+        failure.stalled_requeue_epoch_at = event.stalled_requeue_epoch_at ?? null;
       }
       return failure as T;
     }
@@ -2126,6 +2154,88 @@ export class Statement {
       }
       lines.sort((left, right) => Number(left.line_no ?? 0) - Number(right.line_no ?? 0));
       return { results: lines as T[] };
+    }
+    if (this.sql.includes("annual_certificate_targets")) {
+      let argIndex = 0;
+      const startIso = String(this.args[argIndex++]);
+      const endIso = String(this.args[argIndex++]);
+      let documents = this.db.documents.filter(
+        (document) =>
+          document.status === "ACCEPTED" &&
+          (document.fiscal_operation_claim_id ?? null) === null &&
+          document.issued_at >= startIso &&
+          document.issued_at < endIso
+      );
+      if (this.sql.includes("dte_document_search MATCH ?")) {
+        const ftsQuery = String(this.args[argIndex++]);
+        const matchingKeys = new Set(
+          documents
+            .filter((document) => documentMatchesFtsQuery(document, ftsQuery))
+            .map(annualCertificateRecipientKey)
+        );
+        documents = documents.filter((document) => matchingKeys.has(annualCertificateRecipientKey(document)));
+      }
+      const groups = new Map<string, DteDocumentRecord[]>();
+      for (const document of documents) {
+        const key = annualCertificateRecipientKey(document);
+        const existing = groups.get(key);
+        if (existing) existing.push(document);
+        else groups.set(key, [document]);
+      }
+      let targets = [...groups.entries()].map(([groupKey, groupDocuments]) => {
+        groupDocuments.sort(
+          (left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id)
+        );
+        const earliest = groupDocuments[0];
+        const donorEmail = normalizedCertificateText(earliest.donor_email);
+        return {
+          recipient_key: groupKey,
+          donor_name: normalizedCertificateText(earliest.donor_name) ?? donorEmail ?? "(sin identificar)",
+          donor_email: donorEmail,
+          document_count: groupDocuments.length,
+          total_cents: groupDocuments.reduce((total, document) => total + document.amount_cents, 0),
+          has_test_environment: groupDocuments.some((document) => document.environment === "00") ? 1 : 0
+        };
+      });
+      if (this.sql.includes("recipient_key = ?")) {
+        const groupKey = String(this.args[argIndex++]);
+        targets = targets.filter((target) => target.recipient_key === groupKey);
+      } else if (this.sql.includes("recipient_key > ?")) {
+        const afterGroupKey = String(this.args[argIndex++]);
+        targets = targets.filter((target) => target.recipient_key > afterGroupKey);
+      }
+      if (this.sql.includes("DONOR_CERTIFICATE_SENT")) {
+        const year = String(this.args[argIndex++]);
+        targets = targets.filter(
+          (target) =>
+            target.donor_email !== null &&
+            !this.db.audits.some(
+              (audit) =>
+                audit.action === "DONOR_CERTIFICATE_SENT" &&
+                audit.entity_id === `${year}:${target.donor_email}`
+            )
+        );
+      }
+      targets.sort((left, right) => left.recipient_key.localeCompare(right.recipient_key));
+      const limit = Number(this.args.at(-1));
+      return { results: targets.slice(0, limit) as T[] };
+    }
+    if (this.sql.includes("annual_certificate_documents")) {
+      const [startIso, endIso, groupKey, rawLimit] = this.args;
+      const documents = this.db.documents
+        .filter(
+          (document) =>
+            document.status === "ACCEPTED" &&
+            (document.fiscal_operation_claim_id ?? null) === null &&
+            document.issued_at >= String(startIso) &&
+            document.issued_at < String(endIso) &&
+            annualCertificateRecipientKey(document) === String(groupKey)
+        )
+        .sort(
+          (left, right) => left.issued_at.localeCompare(right.issued_at) || left.id.localeCompare(right.id)
+        )
+        .slice(0, Number(rawLimit));
+      return { results: documents as T[] };
     }
     if (this.sql.includes("FROM dte_documents") && this.sql.includes("ORDER BY issued_at ASC, id ASC")) {
       // Annual donor certificate aggregation (Task 4): keyset-paged ACCEPTED-in-year read.
@@ -2940,7 +3050,71 @@ export class Statement {
           metadata_json: metadataJson,
           actor_ip: null,
           actor_context: null,
-          created_at: "2026-06-26T01:46:47.015Z"
+          created_at: this.db.auditCreatedAt
+        });
+        changes = 1;
+      }
+    } else if (
+      this.sql.includes("INSERT INTO audit_logs") &&
+      this.sql.includes("episode_member.key = 'stalledRequeueEpochAt'") &&
+      this.sql.includes("WHERE NOT EXISTS")
+    ) {
+      const [
+        id,
+        actorType,
+        actorId,
+        action,
+        entityType,
+        entityId,
+        summary,
+        metadataJson,
+        actorIp,
+        actorContext,
+        rateLimitClaimId,
+        guardAction,
+        guardEntityType,
+        guardEntityId,
+        rawEpisodeId,
+        ,
+        rawExclusiveBoundary
+      ] = this.args;
+      if (this.db.failNextAuditAction === action) {
+        this.db.failNextAuditAction = null;
+        throw new Error(`injected ${String(action)} audit failure`);
+      }
+      const episodeId = rawEpisodeId == null ? null : String(rawEpisodeId);
+      const exclusiveBoundary = rawExclusiveBoundary == null
+        ? null
+        : String(rawExclusiveBoundary);
+      const exists = this.db.audits.some((audit) => {
+        const auditEpisodeId = auditStalledRequeueEpisodeId(audit);
+        return audit.action === guardAction &&
+          audit.entity_type === guardEntityType &&
+          audit.entity_id === guardEntityId &&
+          (
+            episodeId === null ||
+            auditEpisodeId === episodeId ||
+            (
+              auditEpisodeId === null &&
+              exclusiveBoundary !== null &&
+              String(audit.created_at) > exclusiveBoundary
+            )
+          );
+      });
+      if (!exists) {
+        this.db.audits.push({
+          id,
+          actor_type: actorType,
+          actor_id: actorId,
+          action,
+          entity_type: entityType,
+          entity_id: entityId,
+          summary,
+          metadata_json: metadataJson,
+          actor_ip: actorIp ?? null,
+          actor_context: actorContext ?? null,
+          rate_limit_claim_id: rateLimitClaimId ?? null,
+          created_at: this.db.auditCreatedAt
         });
         changes = 1;
       }
@@ -3000,7 +3174,7 @@ export class Statement {
         actor_ip: actorIp ?? null,
         actor_context: actorContext ?? null,
         rate_limit_claim_id: rateLimitClaimId ?? null,
-        created_at: "2026-06-26T01:46:47.015Z"
+        created_at: this.db.auditCreatedAt
       });
     }
     if (this.sql.includes("INSERT INTO app_settings")) {
@@ -3557,15 +3731,17 @@ export class Statement {
       this.sql.includes("issuance_status = 'RETRY_QUEUED'") &&
       this.sql.includes("issuance_status IN ('FAILED', 'DEAD_LETTERED')")
     ) {
-      const [attemptId, queuedAt, wompiEventId] = this.args;
+      const [attemptId, queuedAt, stalledEpochAt, wompiEventId] = this.args;
       const observed = this.sql.includes("AND issuance_error_code IS ?")
         ? {
-            status: this.args[3],
-            processedAt: this.args[4],
-            attemptId: this.args[5],
-            claimId: this.args[6],
-            errorCode: this.args[7],
-            errorMessage: this.args[8]
+            status: this.args[4],
+            processedAt: this.args[5],
+            attemptId: this.args[6],
+            claimId: this.args[7],
+            errorCode: this.args[8],
+            errorMessage: this.args[9],
+            lastAttemptAt: this.args[10],
+            stalledEpochAt: this.args[11]
           }
         : null;
       const event = this.db.wompiEvents.find(
@@ -3590,6 +3766,8 @@ export class Statement {
               && (row.issuance_claim_id ?? null) === observed.claimId
               && (row.issuance_error_code ?? null) === observed.errorCode
               && (row.issuance_error_message ?? null) === observed.errorMessage
+              && (row.issuance_last_attempt_at ?? null) === observed.lastAttemptAt
+              && (row.stalled_requeue_epoch_at ?? null) === observed.stalledEpochAt
             )
           )
       );
@@ -3598,6 +3776,7 @@ export class Statement {
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = String(attemptId);
         event.issuance_last_attempt_at = String(queuedAt);
+        event.stalled_requeue_epoch_at = String(stalledEpochAt);
         changes = 1;
       }
     }
@@ -3639,6 +3818,7 @@ export class Statement {
       ) {
         event.issuance_status = "RETRY_QUEUED";
         event.issuance_attempt_id = attemptId;
+        event.stalled_requeue_epoch_at ??= event.issuance_last_attempt_at ?? event.received_at;
         event.issuance_last_attempt_at = queuedAt;
         changes = 1;
       }
@@ -4019,6 +4199,22 @@ export class Statement {
   }
 }
 
+function auditMetadata(audit: Record<string, unknown>): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(audit.metadata_json ?? "{}"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function auditStalledRequeueEpisodeId(audit: Record<string, unknown>): string | null {
+  const value = auditMetadata(audit).stalledRequeueEpochAt;
+  return typeof value === "string" && value ? value : null;
+}
+
 export function authedDb(role: "VIEWER" | "OPERATOR" | "ADMIN" | "OWNER", db: InMemoryD1): InMemoryD1 {
   db.sessionUser = {
     id: `user_${role.toLowerCase()}`,
@@ -4065,6 +4261,15 @@ export function documentMatchesFtsQuery(document: DteDocumentRecord, query: stri
   ];
   const tokens = corpus.flatMap((value) => String(value ?? "").toLowerCase().match(/[a-z0-9]+/g) ?? []);
   return prefixes.every((prefix) => tokens.some((token) => token.startsWith(prefix)));
+}
+
+function normalizedCertificateText(value: string | null | undefined): string | null {
+  const trimmed = (value ?? "").trim();
+  return trimmed || null;
+}
+
+function annualCertificateRecipientKey(document: DteDocumentRecord): string {
+  return normalizedCertificateText(document.donor_email) ?? normalizedCertificateText(document.donor_name) ?? "(sin identificar)";
 }
 
 export function analyticsDocumentRow(

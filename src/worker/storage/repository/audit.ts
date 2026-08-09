@@ -32,6 +32,67 @@ export async function createAudit(
   const actorContext = serializeAuditContext(
     input.actorContext ?? auditContext?.context
   );
+  const metadataJson = JSON.stringify(input.metadata ?? {});
+  if (input.action === "WOMPI_EVENT_STALLED") {
+    const episodeId = stalledRequeueEpisodeId(input.metadata);
+    await db
+      .prepare(
+        `INSERT INTO audit_logs (
+           id, actor_type, actor_id, action, entity_type, entity_id, summary,
+           metadata_json, actor_ip, actor_context, rate_limit_claim_id
+         )
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE NOT EXISTS (
+            SELECT 1 FROM (
+              SELECT created_at,
+                     (
+                       SELECT CASE WHEN episode_member.type = 'text'
+                         THEN NULLIF(episode_member.value, '')
+                         ELSE NULL
+                       END
+                         FROM json_each(
+                           CASE WHEN json_valid(candidate_audit.metadata_json)
+                             THEN candidate_audit.metadata_json
+                             ELSE '{}'
+                           END
+                         ) AS episode_member
+                        WHERE episode_member.parent IS NULL
+                          AND episode_member.key = 'stalledRequeueEpochAt'
+                        ORDER BY episode_member.id DESC
+                        LIMIT 1
+                     ) AS episode_id
+                FROM audit_logs AS candidate_audit
+               WHERE candidate_audit.action = ?
+                 AND candidate_audit.entity_type = ?
+                 AND candidate_audit.entity_id = ?
+            ) AS existing_episode_audits
+             WHERE ? IS NULL
+                OR episode_id = ?
+                OR (episode_id IS NULL AND created_at > ?)
+          )`
+      )
+      .bind(
+        newId("audit"),
+        input.actorType ?? "SYSTEM",
+        input.actorId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        input.summary,
+        metadataJson,
+        actorIp,
+        actorContext,
+        input.rateLimitClaimId ?? null,
+        input.action,
+        input.entityType,
+        input.entityId,
+        episodeId,
+        episodeId,
+        episodeId
+      )
+      .run();
+    return;
+  }
   await db
     .prepare(
       `INSERT INTO audit_logs (id, actor_type, actor_id, action, entity_type, entity_id, summary, metadata_json, actor_ip, actor_context, rate_limit_claim_id)
@@ -45,12 +106,20 @@ export async function createAudit(
       input.entityType,
       input.entityId,
       input.summary,
-      JSON.stringify(input.metadata ?? {}),
+      metadataJson,
       actorIp,
       actorContext,
       input.rateLimitClaimId ?? null
     )
     .run();
+}
+
+function stalledRequeueEpisodeId(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const value = (metadata as Record<string, unknown>).stalledRequeueEpochAt;
+  return typeof value === "string" && value ? value : null;
 }
 
 export async function ensurePostAcceptAudit(

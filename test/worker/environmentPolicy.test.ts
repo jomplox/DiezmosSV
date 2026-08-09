@@ -88,14 +88,18 @@ describe("deployment endpoint availability", () => {
   });
 });
 
-describe("production hostname policy", () => {
-  it("exposes the Worker only on the canonical production custom domain", () => {
+describe("public production hostname policy", () => {
+  it("does not publish an active production route", () => {
     const block = tomlBlock("env.production");
 
-    expect(block).toContain(
-      '{ pattern = "donations.example.invalid", custom_domain = true }'
-    );
-    expect(block.match(/custom_domain = true/g) ?? []).toHaveLength(1);
+    expect(block).not.toMatch(/^\s*routes\s*=/m);
+    expect(block).not.toMatch(/custom_domain\s*=\s*true/);
+  });
+
+  it("retains the inert production origin sentinel", () => {
+    const block = tomlBlock("env.production.vars");
+
+    expect(block).toContain('APP_ORIGIN = "https://donations.example.invalid"');
   });
 });
 

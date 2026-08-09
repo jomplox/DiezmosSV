@@ -39,12 +39,16 @@ describe("remote deploy and migration scripts", () => {
     ).toBe(true);
   });
 
-  it("still runs the D1 preflight before every remote migration", () => {
-    for (const script of ["cf:migrate:staging", "cf:migrate:prod"] as const) {
-      expect(packageJson.scripts[script]).toMatch(
-        /^(node scripts\/assert-fiscal-cutover\.mjs && )?node scripts\/d1-migration-preflight\.mjs --binding DB .* && node scripts\/run-private-wrangler\.mjs d1 migrations apply DB /
-      );
-    }
+  it("runs preflight and compatibility migration in the exact staging order", () => {
+    expect(packageJson.scripts["cf:migrate:staging"]).toBe(
+      "node scripts/d1-migration-preflight.mjs --binding DB --env staging && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env staging"
+    );
+  });
+
+  it("keeps the fiscal assertion first, then preflight and compatibility migration in production", () => {
+    expect(packageJson.scripts["cf:migrate:prod"]).toBe(
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --binding DB --env production && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env production"
+    );
   });
 
   it("routes every remote Wrangler command through the private config wrapper", () => {
@@ -58,7 +62,9 @@ describe("remote deploy and migration scripts", () => {
       "cf:tail:prod"
     ] as const) {
       expect(packageJson.scripts[script], `script ${script}`).toContain(
-        "scripts/run-private-wrangler.mjs"
+        script.startsWith("cf:migrate:")
+          ? "scripts/d1-schema-compatibility.mjs"
+          : "scripts/run-private-wrangler.mjs"
       );
       expect(packageJson.scripts[script], `script ${script}`).not.toMatch(
         /(?:^|&& )wrangler /
