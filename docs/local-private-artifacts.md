@@ -50,12 +50,13 @@ For a lost or potentially exposed DTE signing key, the official May 2026 MH proc
 
 This procedure requires the taxpayer's authenticated DGII account and, for a legal entity, an authorized representative recorded in the RUC. It cannot be performed by an unauthenticated repository maintainer. If access is unavailable, use the official [Facturación Electrónica support channel](https://factura.gob.sv/contactenos/). Certificate replacement does not by itself prove that the DTE API password was rotated; handle that as a separate credential if it crossed an unintended boundary.
 
-## 2026-07-09 containment record
+## Containment review
 
-- Local operator/staging env files, MH live/test signing material, a private Wompi capture, F960 data, DTE outputs, and bulky MH references were copied out of the checkout, byte-verified, permission-restricted, and then removed from their old paths.
-- Disposable Wrangler account caches were removed. Ordinary `.wrangler/state` D1/R2 development state was not touched.
-- No matching private-artifact filenames were found in reachable Git history during triage.
-- The repository owner confirmed on 2026-07-09 that the active MH production certificate has remained private and directed that no provider-side certificate action be taken. The previously observed live-looking local fragment did not establish exposure of the active production identity, so rotation is not required on current evidence. If later custody evidence contradicts that confirmation, use the official cancel/generate/download/upload procedure above.
-- One F960 row crossed the same transcript boundary. It is a PII containment/retention incident, not a credential-rotation event.
-- At the 2026-07-09 containment check, FileVault was enabled and Time Machine had no configured destination. The private root was not excluded, so re-check backup custody if a destination is configured later.
-- No values from the env files or private Wompi capture were printed during relocation; absent other custody evidence, no additional rotation is indicated solely by their former local location.
+Run this review after any relocation pass, and record only the outcome — never the artifact contents:
+
+- Confirm every artifact was byte-verified at its destination before the checkout copy was removed.
+- Remove disposable Wrangler account caches. Leave ordinary `.wrangler/state` D1/R2 development state alone.
+- Search reachable Git history for private-artifact filenames.
+- Decide rotation versus containment using the rules above. A protected local file that never left approved custody is not by itself evidence of exposure; an unclear custody trail is.
+- Confirm that no artifact value was printed to a shell, log, ticket, chat, or task transcript during the pass.
+- Re-check backup and disk-encryption custody whenever a backup destination is added or changed — the private root is not excluded from backups by default.

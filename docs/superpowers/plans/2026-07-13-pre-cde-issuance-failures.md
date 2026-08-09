@@ -386,7 +386,7 @@ expect(item).toEqual({
   issuance_last_attempt_at: "2026-07-13T22:06:49.000Z",
   issuance_failed_at: "2026-07-13T22:06:49.000Z",
   issuance_dead_lettered_at: "2026-07-13T22:06:52.000Z",
-  reserved_numero_control: "DTE-15-M001P004-000000000000031"
+  reserved_numero_control: "DTE-15-M001P004-000000000000701"
 });
 expect(JSON.stringify(item)).not.toContain("raw_body");
 expect(JSON.stringify(item)).not.toContain("headers_json");

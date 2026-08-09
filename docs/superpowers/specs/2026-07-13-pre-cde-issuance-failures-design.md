@@ -35,9 +35,9 @@ Authoritative source supplied for implementation:
 
 The same manuals are published through [MH technical and functional documentation](https://factura.gob.sv/informacion-tecnica-y-funcional/).
 
-The failed staging donation `wompi_226a47e9-39e3-4418-b1f2-2b46e29849e8` never created
+The failed staging donation `wompi_11111111-1111-4111-8111-111111111111` never created
 a `dte_documents` row and was never signed or sent to MH. Its four queue deliveries
-advanced the local test sequence from 31 through 34 because sequence allocation occurs
+advanced the local test sequence from 701 through 704 because sequence allocation occurs
 before schema validation. Those numbers were consumed only by the local counter; MH did
 not receive or spend them.
 
