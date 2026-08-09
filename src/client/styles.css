@@ -3925,10 +3925,10 @@ pre {
   text-decoration: underline;
 }
 
-/* Paso 3: the Wompi checkout embedded directly in the wizard card. The page
-   (urlEnlaceLargo + esWidget=1) runs ~830px tall and scrolls internally when
-   the viewport gives it less. On mobile only the iframe breaks out to the
-   viewport edges; from 520px onward it meets the card interior instead. */
+/* Paso 3: the Wompi checkout embedded directly in the wizard card. On mobile
+   the frame stays within the visible viewport so Wompi's fixed confirmation
+   dialog remains visible and its document scrolls internally. From 520px onward
+   Wompi's sizeUpdate can expand the frame to its full content height. */
 .donar-embed {
   width: 100vw;
   max-width: none;
@@ -3938,6 +3938,12 @@ pre {
   border: 1px solid #e5e5e5;
   border-radius: 12px;
   background: #ffffff;
+}
+
+@media (max-width: 519px) {
+  .donar-embed {
+    max-height: min(78svh, 820px);
+  }
 }
 
 @media (min-width: 520px) {
