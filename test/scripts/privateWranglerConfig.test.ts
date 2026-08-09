@@ -202,19 +202,35 @@ describe("private Wrangler configuration", () => {
     expect(existsSync(prepared.configPath)).toBe(false);
   });
 
+  it("preserves sender allowlists in private Wrangler configs", () => {
+    const restrictedBindings = namedEmailBindings.replaceAll(
+      'name = "EMAIL"',
+      'name = "EMAIL"\nallowed_sender_addresses = ["donations@example.org"]'
+    );
+    const { repositoryRoot, configPath } = privateConfig(restrictedBindings);
+
+    const prepared = preparePrivateWranglerConfig(configPath, { repositoryRoot });
+    try {
+      expect(readFileSync(prepared.configPath, "utf8")).toContain(
+        'allowed_sender_addresses = ["donations@example.org"]'
+      );
+    } finally {
+      prepared.cleanup();
+    }
+  });
+
   it.each([
     ["root", withSenderAllowlist(namedEmailBindings, "root")],
     ["staging", withSenderAllowlist(namedEmailBindings, "staging")],
     ["production", withSenderAllowlist(namedEmailBindings, "production")]
-  ])("rejects an allowed sender restriction in %s", (_scope, bindings) => {
+  ])("accepts an allowed sender restriction in %s", (_scope, bindings) => {
     const { repositoryRoot, configPath } = privateConfig(bindings);
 
-    expect(() =>
-      preparePrivateWranglerConfig(configPath, { repositoryRoot })
-    ).toThrow(/must not restrict.*EMAIL_FROM sender/i);
+    const prepared = preparePrivateWranglerConfig(configPath, { repositoryRoot });
+    prepared.cleanup();
   });
 
-  it("rejects an allowed sender restriction in any additional environment", () => {
+  it("accepts an allowed sender restriction in an additional environment", () => {
     const { repositoryRoot, configPath } = privateConfig([
       namedEmailBindings,
       "[[env.preview.send_email]]",
@@ -222,12 +238,11 @@ describe("private Wrangler configuration", () => {
       'allowed_sender_addresses = ["sender@example.invalid"]'
     ].join("\n"));
 
-    expect(() =>
-      preparePrivateWranglerConfig(configPath, { repositoryRoot })
-    ).toThrow(/must not restrict.*EMAIL_FROM sender/i);
+    const prepared = preparePrivateWranglerConfig(configPath, { repositoryRoot });
+    prepared.cleanup();
   });
 
-  it("rejects an inline allowed sender restriction", () => {
+  it("accepts an inline allowed sender restriction", () => {
     const { repositoryRoot, configPath } = privateConfig(
       inlineEmailBindings.replace(
         'send_email = [{ name = "EMAIL" }]',
@@ -235,9 +250,8 @@ describe("private Wrangler configuration", () => {
       )
     );
 
-    expect(() =>
-      preparePrivateWranglerConfig(configPath, { repositoryRoot })
-    ).toThrow(/must not restrict.*EMAIL_FROM sender/i);
+    const prepared = preparePrivateWranglerConfig(configPath, { repositoryRoot });
+    prepared.cleanup();
   });
 
   it.each([
@@ -365,7 +379,7 @@ describe("private Wrangler configuration", () => {
     ).toEqual({ accepted: false, preparedCreated: false });
   });
 
-  it("ignores inherited send_email values while scanning sender allowlists", () => {
+  it("ignores inherited send_email values in additional environments", () => {
     expect(
       isolatedPrototypeValidation(
         [namedEmailBindings, "[env.preview]"].join("\n"),
@@ -374,7 +388,7 @@ describe("private Wrangler configuration", () => {
     ).toEqual({ accepted: true, preparedCreated: true });
   });
 
-  it("ignores inherited allowed_sender_addresses on own bindings", () => {
+  it("accepts bindings with an inherited allowed_sender_addresses value", () => {
     expect(
       isolatedPrototypeValidation(
         namedEmailBindings,
@@ -383,7 +397,7 @@ describe("private Wrangler configuration", () => {
     ).toEqual({ accepted: true, preparedCreated: true });
   });
 
-  it("rejects an own allowlist in a __proto__ named environment", () => {
+  it("accepts an own allowlist in a __proto__ named environment", () => {
     expect(
       isolatedPrototypeValidation([
         namedEmailBindings,
@@ -391,7 +405,7 @@ describe("private Wrangler configuration", () => {
         'name = "EXTRA_EMAIL"',
         "allowed_sender_addresses = []"
       ].join("\n"), "none")
-    ).toEqual({ accepted: false, preparedCreated: false });
+    ).toEqual({ accepted: true, preparedCreated: true });
   });
 
   it("accepts valid null-prototype config objects", () => {

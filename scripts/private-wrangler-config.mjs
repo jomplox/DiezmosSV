@@ -122,23 +122,6 @@ export function preparePrivateWranglerConfig(configPath, {
 export function assertPrivateWranglerEmailBindings(rawConfig) {
   const rawEnvironments = ownValue(rawConfig, "env");
   const environments = isObject(rawEnvironments) ? rawEnvironments : undefined;
-  const namedEnvironments = environments ? Object.values(environments) : [];
-  for (const config of [rawConfig, ...namedEnvironments]) {
-    if (!isObject(config)) continue;
-    const rawBindings = ownValue(config, "send_email");
-    const bindings = Array.isArray(rawBindings) ? rawBindings : [rawBindings];
-    if (
-      bindings.some(
-        (binding) =>
-          isObject(binding) && Object.hasOwn(binding, "allowed_sender_addresses")
-      )
-    ) {
-      throw new Error(
-        "The selected private Wrangler config must not restrict the OWNER-configurable EMAIL_FROM sender"
-      );
-    }
-  }
-
   const scopes = [
     ["root", rawConfig],
     ["staging", ownValue(environments, "staging")],
