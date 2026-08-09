@@ -601,7 +601,7 @@ describe("donation intents", () => {
     db.donationIntents.push({
       id: "di_reconcile",
       status: "EXPIRED",
-      amount_cents: 17800,
+      amount_cents: 12500,
       donor_name: null,
       donor_document_type: "13",
       donor_document: VALID_DUI,
@@ -684,7 +684,7 @@ describe("donation intents", () => {
     expect(db.wompiEvents[0]).toMatchObject({
       transaction_id: "tx-recovered",
       environment: "01",
-      amount_cents: 17800,
+      amount_cents: 12500,
       issuance_status: "RETRY_QUEUED"
     });
     expect(JSON.parse(String(db.wompiEvents[0].headers_json))).toEqual({

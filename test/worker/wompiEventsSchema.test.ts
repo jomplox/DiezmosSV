@@ -44,7 +44,7 @@ describe("wompi_events schema contract", () => {
     database.prepare(
       `INSERT INTO wompi_events (
          id, transaction_id, environment, result, amount_cents, raw_body
-       ) VALUES (?, ?, '01', 'ExitosaAprobada', 17800, ?)`
+       ) VALUES (?, ?, '01', 'ExitosaAprobada', 12500, ?)`
     ).run(
       "wompi_existing",
       "uuid-from-webhook",
@@ -64,7 +64,7 @@ describe("wompi_events schema contract", () => {
     expect(() => database.prepare(
       `INSERT INTO wompi_events (
          id, transaction_id, payment_link_id, environment, result, amount_cents, raw_body
-       ) VALUES ('wompi_duplicate', 'display-id-from-api', 9000001, '01', 'ExitosaAprobada', 17800, '{}')`
+       ) VALUES ('wompi_duplicate', 'display-id-from-api', 9000001, '01', 'ExitosaAprobada', 12500, '{}')`
     ).run()).toThrow(/UNIQUE/);
   });
 
