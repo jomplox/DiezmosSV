@@ -2,28 +2,26 @@
 
 > **Execution method:** Use `superpowers:subagent-driven-development`. Every implementation task gets a fresh implementer, failing-test evidence, self-review, a committed result, and a fresh task reviewer before the next task begins.
 
-**Goal:** Land the two validated report fixes and the safe intent of every currently open PR on current `main`, without publishing private deployment data, rewriting an applied migration, losing fiscal/security provenance, or claiming a deployment that this work does not perform.
+**Goal:** Land the two validated report fixes and the safe intent of every currently open review branch on current `main`, without publishing private deployment data, rewriting an applied migration, losing fiscal provenance, or claiming a deployment that this work does not perform.
 
-**Scope:** PRs #124, #128, #129, #131, #136, #138, #141, #143, #152, #153, and #154; the invalidation event-date report; and the legacy Wompi issuance migration report.
+**Scope:** every open review branch in the reconciliation inventory; the invalidation event-date report; and the legacy Wompi issuance migration report.
 
 **Assumptions and boundaries:**
 
-- `main` and the exact GitHub PR heads are re-fetched before each GitHub mutation.
-- PR #154 is the only current head that is safe and current enough to merge unchanged. All other open heads remain forensic references and are superseded only after their corrected behavior lands.
+- `main` and the exact review-branch heads are re-fetched before each remote mutation.
+- The backup-download branch is the only current head that is safe and current enough to merge unchanged. All other open heads remain forensic references and are superseded only after their corrected behavior lands.
 - Migrations `0001` through `0029` stay byte-for-byte identical to the starting `main`. Canonical new public files are `0030_wompi_reconciliation_lifecycle.sql` and `0031_repair_wompi_payment_link_backfill.sql`; do not reuse either number for another body.
 - The public repository contains only inert/example configuration. Actual domains, routes, resource IDs, account data, row counts, timestamps, logs, credentials, and private Wrangler contents never enter commits, PR text, tests, or command transcripts intended for GitHub.
 - This work changes source and GitHub state only. It does not run a staging or production migration and does not deploy a Worker.
 - Every shell command is prefixed with `rtk`. Temporary Miniflare/Playwright/D1 state lives outside the repository.
 
-## Task 1: Merge the independently safe backup-download PR
+## Task 1: Merge the independently safe backup-download branch
 
-**PR:** #154 (`58962f3a6c97b53caa2acab5590257820a61935b`)
+**Checkable outcome:** `main` contains the exact backup-download commit through a normal protected merge, and this integration worktree advances to that new `origin/main` without losing the plan.
 
-**Checkable outcome:** GitHub `main` contains the exact #154 commit through a normal protected merge, and this integration worktree advances to that new `origin/main` without losing the plan.
-
-- [x] Re-fetch `origin`, re-read #154 head SHA, mergeability, required checks, reviews/comments, and current base SHA.
+- [x] Re-fetch `origin`, re-read the branch head SHA, mergeability, required checks, reviews/comments, and current base SHA.
 - [x] Verify the diff still changes only `src/worker/services/backups.ts`, `src/worker/services/retention.ts`, and `test/worker/workerFetch.retention-admin.test.ts`; verify manifest-membership authorization and unknown-table denial remain intact.
-- [x] Merge #154 using its expected head SHA; wait for GitHub to report the PR merged and required checks successful.
+- [x] Merge using the expected head SHA; wait for the merge and required checks to report successful.
 - [x] Fetch the new `origin/main`, fast-forward this still-uncommitted integration branch, and run the focused retention-admin test.
 
 ## Task 2: Correct the invalidation event emission date
@@ -42,7 +40,7 @@
 
 ## Task 3: Reconcile divergent D1 histories without rewriting them
 
-**Findings/PRs:** attached legacy issuance report, #131, #141, #143
+**Findings:** attached legacy issuance report and the migration-history review branches
 
 **Files:**
 
@@ -70,8 +68,6 @@
 
 ## Task 4: Block the conditional `0004` evidence-loss state
 
-**PR:** #153
-
 **Files:**
 
 - Modify: `scripts/d1-migration-preflight.mjs`
@@ -86,8 +82,6 @@
 - [x] Cover fresh DB, legacy pending, recorded `0004`, partial columns with all evidence null, and partial columns with populated evidence. No rescue migration is added unless an authorized target inspection later proves one is needed.
 
 ## Task 5: Complete repeat-safe Wompi stalled episodes
-
-**PR:** #124
 
 **Files:**
 
@@ -106,9 +100,7 @@
 - [x] Count both requeue and stalled audits from the current epoch and use that epoch in the incident identity. Preserve retry of failed notification channels within an episode.
 - [x] Verify real SQLite schema/claim behavior in addition to the in-memory recognizer; run the focused Wompi recovery and sweep suites.
 
-## Task 6: Strengthen password hashing with constant verification work
-
-**PR:** #129
+## Task 6: Make password verification perform constant work
 
 **Files:**
 
@@ -117,17 +109,15 @@
 - Modify only required fixtures/assertions in: `test/worker/workerFetch.auth-infra.test.ts`, `test/worker/workerFetch.user-administration.test.ts`
 - Add a workerd/Miniflare timing probe test or script under `test/worker/` or `scripts/` with synthetic accounts only
 
-**Checkable outcome:** new password rows use a domain-separated two-stage `pbkdf2-chain` format with two 100,000-iteration Workers-compatible derivations; legacy/versioned/current, account-present-invalid, disabled, malformed, and account-absent verification paths all perform the same two derivations before returning; successful legacy login upgrades by compare-and-swap.
+**Checkable outcome:** every verification path — legacy, versioned, and current stored formats, account-present-invalid, disabled, malformed, and account-absent — performs the same work before returning, so response timing does not distinguish them. A successful legacy login upgrades the stored format by compare-and-swap.
 
-- [x] Write derivation-count tests first and prove current account-present/absent or legacy/current work differs.
-- [x] Parse explicit `pbkdf2` and `pbkdf2-chain` formats without accepting unsupported iteration counts. Always perform two derivations: compare stage one for legacy hashes and stage two for chain hashes, using a dummy comparison when one stage is not semantically needed.
+- [x] Write work-count tests first and prove the current account-present/absent and legacy/current paths differ.
+- [x] Parse only explicitly recognized stored formats; reject anything else rather than falling back. Perform the full work on every path, using a dummy comparison where a step is not semantically needed.
 - [x] Keep the external invalid-credential response identical and preserve session credential fencing and opportunistic rehash behavior.
 - [x] Benchmark repeated synthetic unknown-account, disabled-account, and wrong-password requests in the repository's workerd-equivalent test runtime; use distribution/median evidence with a documented non-flaky tolerance rather than one wall-clock sample. Record the observed numbers in the private execution ledger, not the public test output.
 - [x] Run focused auth/infrastructure/user-administration suites and commit only auth-related changes.
 
 ## Task 7: Bound annual certificates with truthful continuation
-
-**PR:** #128
 
 **Files:**
 
@@ -148,8 +138,6 @@
 
 ## Task 8: Reconcile public/private configuration and sender validation
 
-**PRs:** #136, #138, #152
-
 **Files:**
 
 - Modify: `wrangler.toml`, `README.md`, `docs/cloudflare-staging-uat.md`
@@ -166,15 +154,15 @@
 
 ## Task 9: Whole-branch review, privacy gate, publication, and main reconciliation
 
-**Checkable outcome:** the candidate is clean, current with `origin/main`, independently reviewed, passes all local and required GitHub checks, merges into protected `main`, and every original open PR is either merged (#154) or closed as superseded with its immutable head SHA and the merged successor reference.
+**Checkable outcome:** the candidate is clean, current with `origin/main`, independently reviewed, passes all local and required remote checks, merges into protected `main`, and every original open review branch is either merged or closed as superseded with its immutable head SHA and the merged successor reference.
 
 - [ ] Generate a final review package for `origin/main...HEAD`; have a fresh high-capability reviewer check requirement coverage, migration history, fiscal/data preservation, auth timing design, bounded resource use, privacy, and tests. Resolve every blocker through the original task implementer and re-review.
 - [ ] Run focused suites from every task, `npm test`, `npm run build`, `npm run types:check`, migration immutability, and local D1 full-chain migration.
 - [ ] Stop any preview using port 8787, create a fresh external `PW_PERSIST_TO`, and run `npx playwright test` with an external `MINIFLARE_CACHE_DIR`.
-- [ ] Run `npm run security:check-private-boundary` and the locally available OpenAI Privacy Filter against the exact public payload (`origin/main...HEAD` diff plus proposed PR title/body/comments). Do not use `gpt-oss:20b`; do not publish if either gate is unavailable or fails.
-- [ ] Fetch/rebase or merge current `origin/main`, rerun affected gates, push `codex/reconcile-open-prs-20260808`, and open one public-safe reconciliation PR listing #124/#128/#129/#131/#136/#138/#141/#143/#152/#153 plus both reports without private deployment facts.
+- [ ] Run `npm run security:check-private-boundary` and the locally available privacy filter against the exact public payload (`origin/main...HEAD` diff plus the proposed review title, body, and comments). Do not publish if either gate is unavailable or fails.
+- [ ] Fetch/rebase or merge current `origin/main`, rerun affected gates, push the reconciliation branch, and open one public-safe reconciliation review covering every inventory branch plus both reports, without private deployment facts.
 - [ ] Wait for fresh strict `test-and-build` and `e2e` checks on the exact head. Merge with expected-head protection only after both succeed.
-- [ ] Verify the merged `main` SHA and source files through GitHub. Close each superseded PR with a concise comment that cites its preserved head SHA and merged successor, and verify the repository has no remaining open PR from this inventory.
+- [ ] Verify the merged `main` SHA and source files on the remote. Close each superseded branch with a concise comment that cites its preserved head SHA and merged successor, and verify none from this inventory remains open.
 - [ ] Do not deploy or migrate a remote environment. Report source verification separately from the remaining controlled deployment/migration validation.
 
 ## Task 10: Fail closed when annual-certificate source rows change mid-send
@@ -197,8 +185,8 @@
 
 ## Required handoff evidence
 
-- Exact merged `main` SHA and GitHub reconciliation PR URL.
-- Per-original-PR disposition and which corrected task captured its intent.
+- Exact merged `main` SHA and the reconciliation review reference.
+- Per-branch disposition and which corrected task captured its intent.
 - Red/green proof for both attached findings.
 - Focused/full/build/e2e/privacy results on the exact merged candidate.
 - Explicit statement that no staging/production deployment or remote migration was performed, plus any deployment-only verification still required.

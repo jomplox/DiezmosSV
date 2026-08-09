@@ -995,14 +995,14 @@ SELECT 'audit_smoke_backfill_' || d.id,
        )
   FROM dte_documents d
  WHERE d.id IN (
-   'dte_5cafb5e8-4413-4e1f-a3ce-5aa73a14b171',
-   'dte_3004a6c3-7eb1-499b-ad7a-96801296abf9',
-   'dte_9734c9c8-04f5-44a5-b930-0dac78a9bad8',
-   'dte_8397ada1-bfc7-403b-8968-35108e39b640',
-   'dte_ea51bdca-e323-49bd-a9a1-e6f862d5a1c8',
-   'dte_cf14cbd8-86d9-457c-8959-c542d06b3126',
-   'dte_e0e3ae30-d2eb-4385-973d-1df87bc91f8d',
-   'dte_56217a51-e5cb-4122-8db0-544a5de08276'
+   'dte_11111111-1111-4111-8111-111111111101',
+   'dte_11111111-1111-4111-8111-111111111102',
+   'dte_11111111-1111-4111-8111-111111111103',
+   'dte_11111111-1111-4111-8111-111111111104',
+   'dte_11111111-1111-4111-8111-111111111105',
+   'dte_11111111-1111-4111-8111-111111111106',
+   'dte_11111111-1111-4111-8111-111111111107',
+   'dte_11111111-1111-4111-8111-111111111108'
  )
    AND NOT EXISTS (
      SELECT 1 FROM audit_logs a
@@ -1012,9 +1012,10 @@ SELECT 'audit_smoke_backfill_' || d.id,
    );
 ```
 
-The eight IDs above are the exact rows returned and reviewed in the read-only
-preflight. Re-run the candidate proof immediately before applying this staging-only
-backfill. Verify eight markers and zero document mutations.
+The eight IDs above are placeholders for the exact rows returned and reviewed in the
+read-only preflight; substitute that output before running the statement. Re-run the
+candidate proof immediately before applying this staging-only backfill. Verify eight
+markers and zero document mutations.
 
 - [ ] **Step 7: Commit the smoke-provenance checkpoint**
 
