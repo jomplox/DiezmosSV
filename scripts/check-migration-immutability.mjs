@@ -15,7 +15,7 @@ export const IMMUTABLE_MIGRATION_SHA256 = Object.freeze({
   "0009_donation_intents.sql": "03b27d5984b717e6ca186b18153952e472ba37a8584b62f1153ad758f66f11ee",
   "0010_donation_intents_optional_contact.sql": "2b089d5c7934b622eff12dd724ac53d7566753f2f48bf083496c21a8d18c802e",
   "0011_donation_intents_document_types.sql": "9c82d0323e4f67cf84f51f531f140985830517ed08800d44a02ed2526e0e92f3",
-  "0012_donation_intents_gift_type.sql": "9401892d89c18b67f274896c8deedd410eeeab646232c3f1c345252bfd505cc7",
+  "0012_donation_intents_gift_type.sql": "ee2148e66d8c12f21c1594deb1b0d1b40edef4f2a97cc49b12e28a071279e0d0",
   "0013_audit_actor_context.sql": "a03b1e4b1b1e10d81e2fb09fbc223e5d88851ada8e83610e6d6a304a91bd8d2b",
   "0014_transmission_pending_status.sql": "382031f8f64aa34fef151d0de2afc3811cced91119195a39876603bb5f29a696",
   "0015_donation_intents_draft_donor.sql": "281885eb375a1876d49bc268a9cff5aea93fce0a73e5c216e87db091737d8392",
