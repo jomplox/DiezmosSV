@@ -1,11 +1,11 @@
 import { pathToFileURL } from "node:url";
 
 // The foreign-resident donation lane's campaign slug is build configuration: Vite
-// bakes VITE_GIVEBUTTER_CAMPAIGN into the client bundle at `npm run build` time and
-// src/client/donation.ts falls back to a neutral placeholder so a fresh clone, the
-// test suites and staging stay runnable without it. A production build must not use
-// that fallback: it would ship a lane pointing at a campaign that does not exist,
-// and nothing downstream would report the mistake.
+// bakes VITE_GIVEBUTTER_CAMPAIGN into the client bundle at build time. Plain public,
+// local, and test builds may use src/client/donation.ts's neutral placeholder, while
+// staging and production releases use the target-bound `build:private` wrapper. A
+// deployment build must not use that fallback: it would ship a lane pointing at a
+// campaign that does not exist, and nothing downstream would report the mistake.
 const CAMPAIGN_ENV = "VITE_GIVEBUTTER_CAMPAIGN";
 const PLACEHOLDER_CAMPAIGN = "example-campaign";
 

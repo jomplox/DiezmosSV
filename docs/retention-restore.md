@@ -78,7 +78,7 @@ duplicating work. It looks like:
 ## 1. List what's in the archive
 
 ```bash
-npx wrangler r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/manifest.json --env staging
+node scripts/run-private-wrangler.mjs r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/manifest.json --env staging
 ```
 
 To list all objects for a given month without downloading each one, use the
@@ -91,7 +91,7 @@ Download each `.ndjson` referenced in the manifest and confirm its SHA-256
 matches the recorded hash before trusting it for a restore:
 
 ```bash
-npx wrangler r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/dte_documents.ndjson \
+node scripts/run-private-wrangler.mjs r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/dte_documents.ndjson \
   --env staging --file dte_documents.ndjson
 shasum -a 256 dte_documents.ndjson
 # Compare against manifest.json → tables.dte_documents.sha256
@@ -117,9 +117,10 @@ table:
    an older row may use `NULL` for absent nullable lifecycle columns and the
    default `0` for `issuance_attempt_count`; do not manufacture lifecycle
    evidence.
-3. Apply via `wrangler d1 execute <database> --env <env> --remote --file
-   restore.sql`, batching inserts (D1 has a statement-size limit) rather
-   than issuing thousands of individual `wrangler d1 execute` calls.
+3. Apply via `node scripts/run-private-wrangler.mjs d1 execute <database>
+   --env <env> --remote --file restore.sql`, batching inserts (D1 has a
+   statement-size limit) rather than issuing thousands of individual
+   `d1 execute` calls.
 4. Wrangler wraps the file in its own transaction. Do not put `BEGIN`, `COMMIT`, or `ROLLBACK` inside `restore.sql`;
    nested transaction statements make `wrangler d1 execute --file` fail.
    There is no valid flat insert order because

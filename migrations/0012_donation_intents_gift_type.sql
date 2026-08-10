@@ -3,7 +3,7 @@
 -- or an ofrenda. It rides on the intent as a new nullable donor-facing enum
 -- gift_type ('DIEZMO' | 'OFRENDA'); it is informational only — the legal CDE
 -- descripcion stays "DONACIÓN". ABSENT stays allowed: legacy rows and the US
--- (Givebutter/FMCE) path never carry it, so the column is nullable with no default.
+-- (Givebutter) path never carry it, so the column is nullable with no default.
 --
 -- SQLite cannot add a CHECK constraint to an existing column in place, so we
 -- rebuild the table (same pattern as 0010/0011, both already applied on staging AND

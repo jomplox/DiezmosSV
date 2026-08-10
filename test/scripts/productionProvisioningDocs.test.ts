@@ -1,16 +1,64 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+const repoRoot = resolve(import.meta.dirname, "../..");
+
 const readme = readFileSync(resolve(import.meta.dirname, "../../README.md"), "utf8");
-const stagingRunbook = readFileSync(
-  resolve(import.meta.dirname, "../../docs/cloudflare-staging-uat.md"),
-  "utf8"
-);
-const provisioningDocuments = [
+const readmeEs = readFileSync(resolve(import.meta.dirname, "../../README.es.md"), "utf8");
+const operationalDoc = (name: string) =>
+  readFileSync(resolve(import.meta.dirname, "../../docs", name), "utf8");
+const stagingRunbook = operationalDoc("cloudflare-staging-uat.md");
+// The wording assertions read English phrasing, so translations stay out of this list.
+const englishProvisioningDocuments = [
   ["README", readme],
   ["staging UAT runbook", stagingRunbook]
 ] as const;
+// These documents must actively teach the wrapper, and the live-identifier pattern does not read
+// prose, so it holds for all of them in any language. The two phrase-based negatives still only
+// match English. The separate rule that no document may show a direct remote command is swept
+// across every tracked Markdown file below, so it needs no enrolment.
+const remoteCommandDocuments = [
+  ...englishProvisioningDocuments,
+  ["Spanish README", readmeEs],
+  ["fiscal reconciliation runbook", operationalDoc("fiscal-claim-reconciliation.md")],
+  ["retention restore runbook", operationalDoc("retention-restore.md")],
+  ["pre-CDE recovery runbook", operationalDoc("staging-pre-cde-recovery.md")],
+  ["operator runbook", operationalDoc("runbook-operador.md")]
+] as const;
+const releaseSafetyReadmes = [
+  [
+    "English README",
+    readme,
+    /release builds[\s\S]{0,220}target-bound deploy file[\s\S]{0,220}owner-owned `0600` files outside this repository, without symlinks/i
+  ],
+  [
+    "Spanish README",
+    readmeEs,
+    /los builds de release[\s\S]{0,220}archivo de despliegue vinculado al ambiente[\s\S]{0,220}propiedad del usuario actual, con permisos `0600`,[\s\S]{0,100}fuera de este repositorio y sin enlaces simbólicos/i
+  ]
+] as const;
+// Fixed synthetic UUIDs used across the repository's docs, fixtures and examples. They are
+// literals, so they cannot stand in for a live Cloudflare or D1 identifier.
+const placeholderUuids = [
+  "00000000-0000-0000-0000-000000000000",
+  "11111111-1111-4111-8111-111111111111"
+] as const;
+// Session records under docs/superpowers/ transcribe commands as they were run at the time, so
+// they are history rather than instructions and are the one thing the sweep does not police.
+const sweptDocumentExclusion = /^docs\/superpowers\//;
+const trackedMarkdown = spawnSync("git", ["ls-files", "-z", "--", "*.md"], {
+  cwd: repoRoot,
+  encoding: "utf8"
+})
+  .stdout.split("\0")
+  .filter((path) => path.length > 0 && !sweptDocumentExclusion.test(path));
+const liveUuidPattern = new RegExp(
+  `\\b(?!(?:${placeholderUuids.join("|")})\\b)` +
+    "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b",
+  "i"
+);
 const exactLocalD1Migration =
   "npx wrangler d1 migrations apply diezmossv-local-db-example --local";
 const exactLocalD1MigrationTokens = exactLocalD1Migration.split(" ");
@@ -202,6 +250,20 @@ wrangler secret put X --env staging`],
   [
     "alternate local binary local lookalike",
     "node_modules/.bin/wrangler d1 migrations apply diezmossv-local-db-example --local"
+  ],
+  ["proxied npx", "rtk npx wrangler secret put X --env staging"],
+  ["proxied bare Wrangler", "rtk wrangler secret put X --env staging"],
+  [
+    "explicitly proxied local binary",
+    "rtk proxy ./node_modules/.bin/wrangler secret put X --env staging"
+  ],
+  [
+    "proxied npm exec",
+    "rtk proxy npm exec -- wrangler secret put X --env staging"
+  ],
+  [
+    "proxied local migration with remote flag",
+    "rtk npx wrangler d1 migrations apply diezmossv-local-db-example --local --remote"
   ]
 ] as const;
 const allowedWranglerDocumentationCases = [
@@ -277,11 +339,52 @@ const allowedWranglerDocumentationCases = [
   [
     "quoted Wrangler package with quoted echo launcher",
     'npm exec --package "wrangler@latest" -- "echo" safe'
-  ]
+  ],
+  ["proxied package script", "rtk npm run cf:deploy:staging"],
+  ["proxied private wrapper", "rtk node scripts/run-private-wrangler.mjs secret put X --env staging"],
+  ["proxied exact local migration", `rtk ${exactLocalD1Migration}`],
+  ["proxy lookalike token", "rtkx npx wrangler secret put X --env staging"]
 ] as const;
 
 describe("remote provisioning documentation", () => {
-  it.each(provisioningDocuments)(
+  it.each(releaseSafetyReadmes)(
+    "documents the target-bound private release contract in the %s",
+    (_name, document, ownerOnlyReleaseFilePattern) => {
+      expect(document).toMatch(ownerOnlyReleaseFilePattern);
+      expect(document).toContain("DIEZMOSSV_DEPLOY_CONFIG");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=staging");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=production");
+      expect(document).toContain("DIEZMOSSV_APP_ORIGIN");
+      expect(document).toContain("DIEZMOSSV_DONOR_LOGO_FILE");
+      expect(document).toContain("pdf-lib");
+      expect(document).toContain("/api/health");
+      expect(document).toContain("appEnv");
+      expect(document).toContain("npm run cf:branding:check -- --env staging");
+      expect(document).toContain("npm run cf:branding:check -- --env production");
+      expect(document).toContain("npm run build:private -- --env staging");
+      expect(document).toContain("npm run build:private -- --env production");
+    }
+  );
+
+  it.each(releaseSafetyReadmes)(
+    "uses the persistent production deploy config in the %s",
+    (_name, document) => {
+      expect(document).toContain(
+        "FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod"
+      );
+    }
+  );
+
+  it.each(releaseSafetyReadmes)(
+    "does not override the persistent production campaign in the %s",
+    (_name, document) => {
+      expect(document).not.toMatch(
+        /^FISCAL_CUTOVER_QUIESCED=1\s+VITE_GIVEBUTTER_CAMPAIGN=[^\n]+\s+npm run cf:deploy:prod\s*$/m
+      );
+    }
+  );
+
+  it.each(englishProvisioningDocuments)(
     "requires the selected owner-only external config in the %s",
     (_name, document) => {
       expect(document).toContain("DIEZMOSSV_WRANGLER_CONFIG");
@@ -292,11 +395,30 @@ describe("remote provisioning documentation", () => {
     }
   );
 
-  it.each(provisioningDocuments)(
-    "routes every documented remote Wrangler command through the private wrapper in the %s",
+  it.each(remoteCommandDocuments)(
+    "shows an operator the private wrapper in the %s",
     (_name, document) => {
-      expect(directRemoteWranglerCommandRefs(document)).toEqual([]);
       expect(document).toContain("scripts/run-private-wrangler.mjs");
+    }
+  );
+
+  // A hand-kept list would leave a new document unguarded until someone remembered to add it,
+  // so this rule is swept instead of enrolled.
+  it("sweeps a plausible set of tracked Markdown files", () => {
+    // Guards against git returning nothing and the sweep passing vacuously.
+    expect(trackedMarkdown.length).toBeGreaterThan(10);
+    expect(trackedMarkdown).toContain("README.md");
+    expect(trackedMarkdown).toContain("docs/runbook-operador.md");
+    expect(
+      trackedMarkdown.filter((path) => sweptDocumentExclusion.test(path))
+    ).toEqual([]);
+  });
+
+  it.each(trackedMarkdown)(
+    "routes every documented remote Wrangler command through the private wrapper in %s",
+    (path) => {
+      const document = readFileSync(resolve(repoRoot, path), "utf8");
+      expect(directRemoteWranglerCommandRefs(document)).toEqual([]);
     }
   );
 
@@ -315,15 +437,13 @@ describe("remote provisioning documentation", () => {
   );
 
   it("keeps live resource identifiers and routing data out of the public config workflow", () => {
-    const documents = provisioningDocuments
+    const documents = remoteCommandDocuments
       .map(([_name, document]) => document)
       .join("\n");
 
     expect(documents).not.toMatch(/copy the returned D1 id into\s+wrangler\.toml/i);
     expect(documents).not.toMatch(/ids are already committed in wrangler\.toml/i);
-    expect(documents).not.toMatch(
-      /\b(?!00000000-0000-0000-0000-000000000000\b)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i
-    );
+    expect(documents).not.toMatch(liveUuidPattern);
   });
 });
 
@@ -497,13 +617,27 @@ function tokenizeShellCommand(command: string): string[] {
 function directWranglerInvocation(
   rawTokens: string[]
 ): DirectWranglerInvocation | undefined {
-  const commandTokens = rawTokens[0] === "$" ? rawTokens.slice(1) : rawTokens;
+  const commandTokens = stripPassthroughPrefixes(rawTokens);
   const recognizer = directWranglerRecognizers.find(({ matches }) =>
     matches(commandTokens)
   );
   return recognizer
     ? { family: recognizer.family, commandTokens }
     : undefined;
+}
+
+// Tokens that precede the real command without changing what runs: a copied shell prompt, and
+// `rtk`, the pass-through CLI proxy that appears throughout this repository's session records
+// (`rtk <cmd>` and `rtk proxy <cmd>` both execute <cmd>). Without this, `rtk npx wrangler …`
+// reads as a command named "rtk" and slips past every recognizer.
+function stripPassthroughPrefixes(tokens: string[]): string[] {
+  let index = 0;
+  if (tokens[index] === "$") index += 1;
+  if (tokens[index] === "rtk") {
+    index += 1;
+    if (tokens[index] === "proxy") index += 1;
+  }
+  return index === 0 ? tokens : tokens.slice(index);
 }
 
 function isAllowedLocalD1Migration(

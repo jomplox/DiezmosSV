@@ -5,7 +5,7 @@ Esta guía es para la persona que administra el panel **ExamplePerson1** en el d
 acciones descritas aquí se hacen desde el panel web; los nombres de botones y secciones
 aparecen tal como los verá en pantalla.
 
-> Este documento acompaña al [README](../README.md), que está dirigido a quien instala y
+> Este documento acompaña al [README](../README.es.md), que está dirigido a quien instala y
 > despliega la aplicación.
 
 ---
@@ -122,7 +122,8 @@ EE. UU. y su recibo proviene de Givebutter y de la organización aliada, no del 
 
 > **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
 > `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del
-> negocio** y se configuran con `npx wrangler secret put WOMPI_CLIENT_ID --env staging|production`
+> negocio** y se configuran con
+> `node scripts/run-private-wrangler.mjs secret put WOMPI_CLIENT_ID --env staging|production`
 > (y lo mismo para `WOMPI_CLIENT_SECRET`). El enlace de pago fijo no los necesita. Si algo en esta
 > sección no funciona, contacte a soporte técnico.
 

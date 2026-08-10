@@ -17,6 +17,10 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 [![TypeScript](https://img.shields.io/badge/TypeScript-7-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Status](https://img.shields.io/badge/status-early%20release-orange)](#-project-status)
 
+<br/>
+
+**English** · [Español](README.es.md)
+
 </div>
 
 ---
@@ -49,6 +53,7 @@ them to the **Ministerio de Hacienda**, and emails the donor a PDF receipt — a
 - [Online donations (/donar)](#-online-donations-donar)
 - [Admin panel & roles](#-admin-panel--roles)
 - [Document lifecycle](#-document-lifecycle)
+  - [Fiscal corrections](#fiscal-corrections)
 - [Data model](#-data-model)
 - [Compliance notes](#-compliance-notes)
 - [Why no JVM signer?](#-why-no-jvm-signer)
@@ -67,18 +72,21 @@ auditable, and cheap to run.
 
 | | |
 |---|---|
-| 🔐 **Verified ingress** | Validates the raw-body `wompi_hash` HMAC and deduplicates Wompi retries by `IdTransaccion` before anything else happens. |
+| 🔐 **Verified ingress** | Validates the raw-body `wompi_hash` HMAC and deduplicates on **two** keys before anything else happens: Wompi's `IdTransaccion`, and — for dynamic `/donar` links — the numeric payment-link id, which is the stable fiscal idempotency key because a single-use link admits exactly one successful payment. The same payment arriving twice under two different transaction identifiers therefore still produces exactly one CDE. |
 | 🧾 **Correct CDE mapping** | Maps approved donations into MH CDE JSON (`tipoDte=15`) and validates it against the bundled MH JSON schema. |
 | ✍️ **Native signing** | Signs DTE JSON in the Worker with WebCrypto as a compact **RS512 JWS** — no external JVM signer required. |
 | 🏛️ **MH transmission** | Authenticates with MH, caches the token in D1, transmits to *Recepción*, and records the **Sello de recepción**. |
 | 📄 **Donor receipt** | Generates a PDF *representación gráfica* with a QR code and emails it (plus the signed JSON) through a configurable provider. |
 | 🌩️ **Resilient by design** | On an MH outage the CDE is signed normally, the donor gets an immediate **transitorio** receipt, and a 15-minute cron retries transmission until MH seals it (deferred transmission — the contingency evento excludes tipo 15 per the Anexo, field 35). A dead-letter queue plus a stalled-event sweep self-heal issuance messages that exhaust their retries. |
+| 📡 **Missed-webhook reconciliation** | A webhook that Wompi never delivered is not a lost donation. Every 15 minutes the Worker re-reads up to 25 unresolved `/donar` intents from the last 7 days directly against the Wompi payment-link API and, when the link shows a completed payment, replays it through the *same* verified ingest path a real webhook takes — audited as `WOMPI_RECONCILED`. Correlation stays strict (a payload that does not bind to the stored intent and link id is refused and audited as `WOMPI_RECONCILIATION_REJECTED`), and a Wompi outage leaves the intent eligible for the next tick instead of consuming it. |
 | 🧷 **One legal submission, ever** | Every MH-facing transmission or invalidation first acquires a durable **fiscal operation claim**. An ambiguous outcome (timeout, interrupted isolate) freezes the document for operator reconciliation instead of risking a duplicate legal submission — every retry path fails closed while the claim is held. |
 | ⚖️ **Legal invalidation** | Supports signed invalidation events with the CDE legal-window check baked in, and emails the donor a branded notice when MH accepts the invalidation. |
-| 🖥️ **Admin panel** | React SPA for documents, failures (CDE **and** pre-CDE), contingency history (read-only), audit log, analytics, users, exports, backups, resend, retry, and invalidation — no CLI-only operations. |
+| 🩹 **Fiscal corrections** | A CDE that MH rejected on `receptor` fields — or a Wompi payment whose donor data never produced a CDE at all — is repaired from the panel instead of by hand. The operator edits only the 14 receptor fields (everything else is refused as `protected_field`), and the Worker rebuilds, re-signs, and re-transmits under a **fresh `codigoGeneracion` and `numeroControl`** reserved by a database trigger. Idempotent by request UUID and payload digest, single-owner by claim token, and never blindly retried once the MH dispatch has started. |
+| 🖥️ **Admin panel** | React SPA for documents, donors, failures (CDE **and** pre-CDE), contingency history (read-only), audit log, analytics, users, exports, backups, resend, retry, fiscal correction, reissue, and invalidation — no CLI-only operations. |
 | 📊 **Donation analytics** | The **Analítica** view charts Wompi-lane giving trends — amounts, counts, diezmo/ofrenda mix — bucketed in El Salvador time, with capacity-bounded queries. |
 | 🎁 **Donor care built in** | One-click **constancia anual** (annual donation-summary certificate) per donor or in bulk, plus a CRM-ready donor contact export. |
-| 🏷️ **White-label** | Rebrand the panel, donor pages, and donor email with your church's display name, accent color, and logos (stored in R2) from the **Marca** settings — no fork needed. |
+| 🔎 **Donor explorer** | The **Donantes** view resolves accepted CDEs into a donor register — identity, contact, location, gift count, lifetime total, and last gift — keyed by fiscal document, falling back to email, then to the document itself. Filter by document type/number, name, email, amount range, diezmo/ofrenda, and online/manual origin; export the filtered set as CSV. ADMIN and above; document numbers are masked in the table and revealed only in the detail panel. |
+| 🏷️ **White-label** | Rebrand the panel, donor pages, donor email, **the receipt PDF, and the annual certificate** with your church's display name, accent color, support address, and logos (stored in R2) from the **Marca** settings — no fork needed. An uploaded logo is fitted into the same reserved ink band as the built-in default, so the surrounding layout stays valid. |
 | 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and D1-backed rate limiting on login, password reset, and public donation endpoints — with per-claim audit provenance. |
 | 📬 **Branded email** | All donor email (receipt, invalidation notice, annual certificate, password reset) is sent as branded HTML with configurable templates. |
 | 🚨 **Operational alerting** | Alerts a configurable email address on emission failures, receipt-delivery failures, MH unavailability, stalled events, retention failures, and MH signer-certificate expiry. Each incident also emits a privacy-safe `operational_alert` Workers Logs event for independent Cloudflare Observability alerting and Notifications delivery. |
@@ -111,7 +119,7 @@ flowchart TB
         Q --> Pipe["Issuance pipeline"]
         Q -. exhausted retries .-> DLQ[["Dead-letter queue"]]
         Pipe --> Build["Build CDE JSON<br/>schema validate · RS512 sign"]
-        Cron{{"Cron every 15 min<br/>deferred-transmission retry · stalled-event sweep<br/>cert-expiry check"}} --> Pipe
+        Cron{{"Cron every 15 min<br/>transmission · finalization · stalled-event retries<br/>fiscal-correction recovery · webhook reconciliation<br/>intent expiry · cert-expiry check"}} --> Pipe
         Retention{{"Cron monthly<br/>R2 retention export"}} --> DB
         DB[("D1 database")]
     end
@@ -135,19 +143,30 @@ licensed OTFs are never committed; only the generated woff2 subsets are.
 
 ---
 
-## ☁️ Cloudflare architecture
+## ☁ Cloudflare architecture
 
 | Resource | Binding | Role |
 |---|---|---|
 | **Worker** | `main = src/worker/index.ts` | API, webhook ingress, issuance pipeline, MH client, signer, PDF/email orchestration. |
 | **D1** | `DB` | Wompi events, DTE documents, signed events, tokens, users, sessions, audit log, contingency periods, app settings. |
-| **Queues** | `ISSUANCE_QUEUE` → `diezmossv-local-issuance-example` (+ `-dlq`) | Async issuance triggered by approved Wompi webhooks (batch ≤ 10, up to 3 retries). Messages that exhaust retries land in a dead-letter queue that audits and alerts on each one. |
-| **R2** | `ARCHIVE` → `example-worker-archive-*` | Monthly legal-retention export bucket (NDJSON snapshots + SHA-256 manifest). |
-| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min: deferred-transmission retry, stalled-event sweep, and signer-certificate expiry check. Monthly (09:00 UTC on the 1st): R2 retention export. |
+| **Queues** | `ISSUANCE_QUEUE` → `diezmossv-local-issuance-example` (+ `-dlq`) | Async issuance (batch ≤ 10, up to 3 retries) for three message kinds: an approved Wompi webhook, a hand-issued advanced CDE, and a fiscal correction — each identified by its own ownership token, and a message carrying none is rejected outright. Messages that exhaust retries land in a dead-letter queue that audits and alerts on each one. |
+| **R2** | `ARCHIVE` → `diezmossv-<env>-archive-example` | Monthly legal-retention export bucket (NDJSON snapshots + SHA-256 manifest), plus the branding logo objects (`branding/logo`, `branding/donor-logo`). |
+| **Cron Triggers** | `*/15 * * * *` · `0 9 1 * *` | Every 15 min, ten independently-guarded sweeps: expired login/rate-limit claim cleanup, deferred-transmission retry, post-accept finalization retry, accepted-Wompi finalization retry, stalled pre-CDE event sweep, stalled fiscal-correction recovery, missed-webhook reconciliation against the Wompi payment-link API, donation-intent expiry + Wompi link deactivation, and the signer-certificate expiry check. One failing sweep never aborts the tick. Monthly (09:00 UTC on the 1st): R2 retention export. |
 | **Static assets** | `ASSETS` → `./dist/client` | React admin panel served from the Worker with SPA fallback. |
 
 `compatibility_date = 2026-06-02` with `nodejs_compat` enabled for crypto operations. `APP_ORIGIN`
 is set per environment for building absolute links (e.g. password-reset URLs).
+
+Every 15-minute sweep is wrapped independently: a sweep that throws is logged as a
+Workers Logs error event and the tick continues with the next one, so one degraded
+dependency (MH, Wompi, R2) never starves the others. Bounded work per tick — the
+intent expiry sweep snapshots at most 100 rows and the webhook reconciliation at most
+25 — so public traffic cannot make one cron invocation unbounded.
+
+Observability is enabled in every environment at `head_sampling_rate = 1`, with
+invocation logs and traces off — the Worker emits its own structured events (notably
+the privacy-safe `operational_alert`) rather than relying on per-request logging, which
+keeps donor traffic out of the log stream while still making incidents alertable.
 
 ---
 
@@ -157,7 +176,7 @@ is set per environment for building absolute links (e.g. password-reset URLs).
 **Worker** · Cloudflare Workers · D1 (SQLite) · Queues · Cron Triggers · WebCrypto
 **Crypto & docs** · WebCrypto `RS512` JWS · `pdf-lib` · `qrcode`
 **Validation** · `ajv` + `ajv-formats` against bundled MH JSON schemas
-**Tooling** · Wrangler 4 · Vitest 4 · split `tsconfig` for client/worker
+**Tooling** · Wrangler 4 · Vitest 4 · Playwright 1.62 (real-Worker e2e) · split `tsconfig` for client/worker
 
 ---
 
@@ -168,20 +187,29 @@ DiezmosSV/
 ├── src/
 │   ├── worker/                 # Cloudflare Worker (backend)
 │   │   ├── index.ts            # Entry: fetch() · queue() · scheduled()
-│   │   ├── config.ts           # Env parsing & validation
+│   │   ├── config.ts           # Env parsing & emisor validation
 │   │   ├── domain/             # wompi · dteBuilder · signer · schema
-│   │   ├── services/           # mhClient · pipeline · email · pdf · auth · alerts · retention · f960
-│   │   │                       # analytics · certificate · contacts · backups · branding · credentials
-│   │   ├── storage/            # repository.ts — raw D1 access (no ORM)
-│   │   └── utils/              # ids · dates · encoding · http
-│   ├── client/                 # React + Vite admin panel
-│   └── shared/                 # Catalogs, DUI, legal windows, password policy (client + worker)
-├── migrations/                 # D1 schema (incremental 0001…0024)
+│   │   ├── routes/             # router.ts — declarative route table + RBAC dispatch
+│   │   ├── services/           # pipeline · mhClient · email(+Html/Sender/Templates) · pdf
+│   │   │                       # auth · credentials · alerts · observability · retention
+│   │   │                       # analytics · certificate · contacts · backups · f960
+│   │   │                       # branding · orgLogo · donations · donorExport · wompiApi
+│   │   │                       # wompiNotifications · fiscalCorrection · environmentPolicy
+│   │   ├── storage/            # repository.ts + repository/ (13 modules) — raw D1, no ORM
+│   │   └── utils/              # ids · dates · encoding · http · guards · zip
+│   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
+│   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
+│                               # fiscal corrections · checkout · money · email
+├── migrations/                 # D1 schema (incremental, append-only 0001…0031)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
-├── docs/                       # Deploy/UAT · operator runbook · retention-restore · fiscal-claim cutover/reconciliation
+├── docs/                       # Deploy/UAT · operator runbook · retention-restore
+│                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
+│                               # local-artifact boundary · plans/ · superpowers/
+├── scripts/                    # Private-config wrangler wrapper, deploy guards, D1 preflight
 ├── examples/                   # wompi-webhook.sample.json (safe test payload)
-├── test/                       # Vitest unit tests (client + worker)
-└── wrangler.toml               # Bindings, vars, queues, crons
+├── test/                       # Vitest: client · worker · migrations · scripts
+├── e2e/                        # Playwright specs (donar, admin, security, smoke)
+└── wrangler.toml               # Bindings, vars, queues, crons, observability
 ```
 
 ---
@@ -252,11 +280,16 @@ EMISOR_CONFIG_JSON="{...}"
 ## ✅ Validation
 
 ```bash
-npm test          # Vitest unit tests (npx vitest run)
-npm run typecheck # Type-check client + worker
-npm run build     # Vite build + worker type-check
-DIEZMOSSV_ENV_FILE=.dev.vars.ci npx playwright test # Non-secret mock env
+npm test                        # Vitest unit tests (client · worker · migrations · scripts)
+npm run typecheck               # Type-check client + worker
+npm run types:check             # Verify the generated Cloudflare binding types are current
+npm run migrations:check-immutability   # Applied migrations must never be edited
+npm run build                   # Vite build + worker type-check
 npm run security:check-private-boundary
+
+# Playwright drives a real local Worker on :8787, not Vite. PW_PERSIST_TO keeps the
+# suite's D1 isolated from your dev checkout's local database.
+DIEZMOSSV_ENV_FILE=.dev.vars.ci PW_PERSIST_TO=/tmp/diezmossv-e2e npx playwright test
 ```
 
 The unit tests cover, among other areas:
@@ -266,10 +299,28 @@ The unit tests cover, among other areas:
 - Native RS512 signing and verification, plus certificate-expiry parsing
 - CDE invalidation legal-window calculation
 - Auth rate limiting, password reset, and branded email templates
+- Fiscal-correction claim ownership, control-number reservation, and recovery
+- Donor-explorer grouping, filters, and CSV export bounds
+- Deploy-guard scripts (`assert-fiscal-cutover`, `assert-donation-lane-config`,
+  private-wrangler-config, D1 migration preflight)
 
-CI (`.github/workflows/ci.yml`) runs two jobs on every push: a **test-and-build** job
-(`typecheck` → `vitest run` → `build`) and a separate **e2e** job that runs the Playwright suite
-against the committed non-secret mock env in `.dev.vars.ci`.
+CI (`.github/workflows/ci.yml`) runs two jobs on pushes to `main` and `codex/**`, and
+on pull requests to `main`.
+
+**test-and-build** installs `poppler-utils` (the PDF tests inspect rendered output with
+`pdftotext`/`pdftoppm`), then runs `security:check-private-boundary` →
+`migrations:check-immutability` → `types:check` → `typecheck` → `vitest run` → `build`.
+The boundary check reads an optional `PRIVATE_BOUNDARY_FORBIDDEN_HOSTS` repository
+secret; without it the generic checks still run and the script warns that host checks
+are inactive — it never names an organization in the public tree.
+
+**e2e** runs the Playwright suite against the committed non-secret mock env in
+`.dev.vars.ci`: it installs the Chromium browser, applies the local D1 migrations
+against a fresh runner (exercising the bootstrap path naturally), and runs
+`npx playwright test`. `playwright.config.ts` owns the web server — it builds the
+client, re-applies migrations, and starts a real `wrangler dev` on port 8787, so the
+suite drives the actual Worker rather than Vite. The HTML report is uploaded as an
+artifact on failure.
 
 ---
 
@@ -300,6 +351,28 @@ selected private config; leave the public example and its zero IDs unchanged. Ro
 production must each contain exactly one `send_email` binding named `EMAIL`, without
 `allowed_sender_addresses`.
 
+Release builds use a separate target-bound deploy file and donor raster. Keep both as regular,
+owner-owned `0600` files outside this repository, without symlinks:
+
+```dotenv
+# /absolute/private/path/staging.env
+DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
+```
+
+Select it with `export DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env`. The selected target must
+match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used for receipts. Before a
+remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
+`appEnv=staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
+target-bound private build automatically; the same steps can be run independently without deploying:
+
+```bash
+npm run cf:branding:check -- --env staging
+npm run build:private -- --env staging
+```
+
 Create the remote resources in an owner-controlled Cloudflare workflow, record their returned names
 and IDs only in the selected private config, then verify that config through the wrapper:
 
@@ -327,13 +400,26 @@ node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env stagin
 npm run cf:migrate:staging
 npm run cf:deploy:staging
 
+# Or, for a quiesced fiscal-claim cutover window, one command that asserts the
+# acknowledgement, migrates, and deploys:
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:cutover:staging
+
 # Run the deployed edge smoke test.
 DIEZMOSSV_ENV_FILE="$HOME/Library/Application Support/DiezmosSV/private/env/staging-smoke.env" npm run smoke:staging
 ```
 
-Both `cf:migrate:*` commands first run a read-only D1 preflight for duplicate non-null
+Every `cf:migrate:*` command first runs a read-only D1 preflight for duplicate non-null
 `dte_documents.wompi_event_id` links. Any duplicate blocks the migration for manual
-legal-record review; the preflight never deletes, relinks, or chooses a document.
+legal-record review; the preflight never deletes, relinks, or chooses a document. The
+migration itself runs through `scripts/d1-schema-compatibility.mjs`, which reconciles
+the applied-migration ledger before handing off to Wrangler.
+
+Two deploy guards fail the command closed rather than shipping a broken deployment:
+
+| Guard | Runs on | Blocks unless |
+|---|---|---|
+| `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
+| `scripts/run-private-build.mjs`, which applies `scripts/assert-donation-lane-config.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -352,9 +438,15 @@ See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checkl
 <br/>
 
 Production is intentionally a separate Wrangler environment and should be used only after staging
-UAT approval. Its live values also stay only in the selected private config described above.
+UAT approval. Its live values also stay only in the selected private Wrangler config described above.
+Select a distinct owner-only deploy file containing `DIEZMOSSV_DEPLOY_TARGET=production`, the
+production app origin, campaign, and an embeddable private PNG/JPEG. A staging-target file or an
+origin whose `/api/health` does not report `appEnv=production` is rejected before branding authentication or
+upload.
 
 ```bash
+export DIEZMOSSV_DEPLOY_CONFIG="/absolute/private/path/production.env"
+
 # Verify the private production targets without printing their values into this repository.
 node scripts/run-private-wrangler.mjs d1 list
 node scripts/run-private-wrangler.mjs queues list
@@ -375,10 +467,39 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production 
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# Migrate and deploy.
-npm run cf:migrate:prod
-npm run cf:deploy:prod
+# Assert branding first: it is read-only, so a regression fails the window before the
+# migration has written anything. Both remote steps refuse to run outside an acknowledged
+# quiesced window, and the deploy validates the campaign slug from the selected
+# target-bound deploy file.
+npm run cf:branding:check -- --env production
+npm run build:private -- --env production
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
+
+# Release the selection, or the next staging command fails its target check.
+unset DIEZMOSSV_DEPLOY_CONFIG
 ```
+
+The explicit branding check and private build above are useful operator preflights; the guarded
+`cf:deploy:prod` command repeats both before its private Wrangler deploy.
+
+**First production deploy only.** The branding gate compares the *running* deployment's donor
+logo, so it cannot pass before a production deployment exists. Bootstrap once, in this order,
+and use `cf:deploy:prod` for every release after that:
+
+```bash
+node scripts/run-private-wrangler.mjs deploy --env production --keep-vars
+npm run cf:branding:migrate -- --env production --apply
+```
+
+This is a documented one-time path, not an escape hatch: nothing in the tooling skips the gate,
+and it applies only when the production Worker has never been deployed.
+
+The committed example ships `DONATION_INTAKE_DISABLED = "true"` in
+`[env.production.vars]`. Leave it in place until the production lane has been
+approved, then remove it (or set any other value) in the selected private config and
+redeploy. It only closes public intake: the webhook, the queue, the cron sweeps, and
+the admin panel continue to serve donations already in flight.
 
 Do one controlled low-value production issuance with live monitoring before enabling normal volume.
 
@@ -386,7 +507,7 @@ Do one controlled low-value production issuance with live monitoring before enab
 
 ---
 
-## ⚙️ Configuration reference
+## ⚙ Configuration reference
 
 **Secrets** - set remotely with `scripts/run-private-wrangler.mjs secret put` and the config selected
 by `DIEZMOSSV_WRANGLER_CONFIG`, or in the out-of-tree file selected by `DIEZMOSSV_ENV_FILE` locally:
@@ -394,9 +515,11 @@ by `DIEZMOSSV_WRANGLER_CONFIG`, or in the out-of-tree file selected by `DIEZMOSS
 | Variable | Purpose |
 |---|---|
 | `WOMPI_API_SECRET` | HMAC secret used to verify the `wompi_hash` on incoming webhooks. |
+| `WOMPI_CLIENT_ID` / `WOMPI_CLIENT_SECRET` | OAuth client-credentials used to mint the single-use, cards-only Wompi payment links behind `/donar`, and to read a link back during missed-webhook reconciliation. Obtain them from the Wompi merchant panel under **Datos del negocio**. The legacy static-payment-link flow does not need them. |
 | `BOOTSTRAP_OWNER_TOKEN` | One-time setup secret required by `/api/auth/bootstrap-owner` before the first owner exists. It must be generated from 32 random bytes and formatted as `bt_` plus 43 base64url characters. Rotate or remove it after the owner account exists. |
 | `CLOUDFLARE_ACCOUNT_ID` | Cloudflare account target used by the OWNER-only credential UI when saving Worker secrets. |
 | `CLOUDFLARE_API_TOKEN` | Scoped Cloudflare API token used by the OWNER-only credential UI to call the Worker secret bulk-update endpoint. |
+| `CLOUDFLARE_API_BASE_URL` | Optional override for the Cloudflare API host the OWNER-only credential UI calls. Leave unset for the public API; set it only when a deployment must route through a different endpoint. |
 | `MH_CERT_XML` | MH certificate XML (contains the RSA key material used for signing). Works locally and remotely only when it fits Cloudflare's 5 KB Worker variable limit. |
 | `MH_CERT_XML_PART_1` / `MH_CERT_XML_PART_2` | Split form of the same certificate XML for Cloudflare Workers when `MH_CERT_XML` is over the per-variable limit. |
 | `MH_CERT_PASSWORD` | Private-key password for the signer. |
@@ -420,15 +543,17 @@ selected private config and are duplicated per Wrangler environment:
 | `MOCK_EXTERNAL_SERVICES` | Mock mode is **explicit opt-in**: MH + email are stubbed only when this is exactly `"true"`. Local `wrangler.toml` sets `"true"`; staging and production set `"false"`. |
 | `CLOUDFLARE_SCRIPT_NAME` | Worker script name targeted by the OWNER-only credential UI. |
 | `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Remote root, staging, and production bindings are declared only in the selected private config. |
-| `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export (`example-worker-archive-*`). |
-| `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker after Cloudflare Email Sending is confirmed to send to external donor addresses. |
+| `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export and the white-label logo objects. The committed example config names `diezmossv-local-archive-example`, `diezmossv-staging-archive-example`, and `diezmossv-production-archive-example`; real bucket names belong only in the selected private config. |
+| `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker set after Cloudflare Email Sending is confirmed able to reach external donor addresses. The committed example already sets it for `staging`; local and production leave it unset. |
+| `DONATION_INTAKE_DISABLED` | Emergency kill switch for the public donation lane. When exactly `"true"`, `POST /api/donations/intent` and `/api/donations/intent/*` return `503 donation_intake_disabled`, and `/`, `/donar`, and `/donar/gracias` serve an empty locked-down document. Checked before the API router, so the Wompi webhook, the issuance pipeline, and the admin panel keep working — in-flight donations still receive their CDE. The committed example sets it to `"true"` for `production`; unset or any other value leaves intake open. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
-**Build-time vars** - read by Vite and baked into the client bundle by `npm run build` (which every
-`cf:deploy:*` script runs). They are **not** Worker vars and are **not** secrets — anything set here
-ships to the browser:
+**Build-time vars** - read by Vite and baked into the client bundle. Deployment scripts run the
+target-bound `npm run build:private -- --env staging|production` wrapper, which supplies the campaign
+from the owner-only deploy file; plain `npm run build` remains for public clones and tests. These are
+**not** Worker vars and are **not** secrets — anything set here ships to the browser:
 
 | Variable | Purpose |
 |---|---|
@@ -507,6 +632,15 @@ Every accepted webhook row also carries a **pre-CDE issuance lifecycle**
 control numbers, attempt counts, and error evidence — so a donation that fails before a CDE exists
 is visible and recoverable from the **Fallos** view instead of vanishing into queue history.
 
+**When the webhook never arrives.** Delivery is not assumed. Every 15 minutes the
+Worker reconciles unresolved `/donar` intents against the Wompi payment-link API
+(up to 25 per tick, intents created within the last 7 days, re-checked at most every
+10 minutes) and replays any completed payment through the same ingest, HMAC-equivalent
+correlation, and dedup that a real webhook goes through — recorded as `WOMPI_RECONCILED`
+with `source: payment_link_api`. Because the numeric payment-link id is a unique dedup
+key, a webhook that arrives *after* reconciliation cannot produce a second CDE. The
+sweep is disabled under `MOCK_EXTERNAL_SERVICES = "true"`.
+
 ---
 
 ## 💳 Online donations (`/donar`)
@@ -530,7 +664,7 @@ Carnet de Residente.
 | Tipo (label on /donar) | Code | Rule | Stored as |
 |---|---|---|---|
 | DUI | `13` | Check-digit validated | `XXXXXXXX-X` |
-| Empresa (NIT) | `36` | **NIT de la empresa**: 14 digits, **format-only** (no check digit: MH validates NITs server-side, and a homebrew checksum would reject valid NITs). Requires the **razón social**, stored on the intent's `donor_name` so the comprobante names the empresa instead of the Wompi cardholder. | `XXXX-XXXXXX-XXX-X` |
+| Empresa (NIT) | `36` | **NIT de la empresa**: 14 digits, **format-only** (no check digit: MH validates NITs server-side, and a homebrew checksum would reject valid NITs). Requires the **razón social** (1–200 chars), stored on the intent's `donor_name` so the comprobante names the empresa instead of the Wompi cardholder. | `XXXX-XXXXXX-XXX-X` |
 | Otro | `37` | Free text, ≤50 chars | As entered |
 | Pasaporte | `03` | Free text, 5–30 chars | Uppercased |
 | Carnet de Residente | `02` | Free text, 5–30 chars | Uppercased |
@@ -552,10 +686,15 @@ involvement**: no intent is created, no migration exists, and Givebutter emails 
 The page embeds Givebutter's frameable `https://givebutter.com/embed/c/<campaign>` iframe directly —
 **not** the `widgets.givebutter.com` script — so third-party JavaScript does not execute on the app
 origin. (The hosted campaign page sends `x-frame-options: sameorigin`, which is why the embed URL is
-used rather than the campaign page.) The chosen amount plus an optional **"Donación mensual"** toggle
-(`frequency=monthly`) are prefilled in the iframe URL. If the embedded form does not load within ~4 s,
-a prominent **"Donar en GiveButter"** link to `https://givebutter.com/<campaign>?amount=…` (opens in a
-new tab) is shown; a small **"Done en GiveButter"** version of that link is always present beneath the
+used rather than the campaign page.) The chosen amount plus a **"Donación mensual"**
+segmented control (**Única** | **Mensual**, a radiogroup whose accessible name is still
+"Donación mensual") are prefilled in the
+iframe URL — `frequency=monthly` is sent only for a monthly gift, and a one-time gift
+carries no frequency param. A short notice states that the embedded form is in English.
+The block's intro copy is composed at runtime from the deployment's own branding record,
+never from a literal, so a reusable build never ships someone else's organization name.
+If the embedded form does not load within ~4 s, a prominent **"Donar en GiveButter"**
+link to `https://givebutter.com/<campaign>?amount=…` (opens in a new tab) is shown; a small **"Done en GiveButter"** version of that link is always present beneath the
 form (GiveButter is the anchor text — no raw URL is shown). There is **no escape hatch** back to the SV
 form: the donor deliberately chose the EE. UU. door, and **"← Cambiar opción"** is the way back. The
 Givebutter constants (campaign, embed URL) live in `src/client/donation.ts`.
@@ -595,6 +734,21 @@ node scripts/run-private-wrangler.mjs secret put WOMPI_CLIENT_SECRET --env stagi
 | `COMPLETED` | Payment webhook correlated and the CDE was accepted by MH. Links to the emitted `document_id`. |
 | `EXPIRED` | The donor never paid; the cron sweep expired the unpaid intent. |
 
+**`paid_at` is not a status.** `COMPLETED` means *MH accepted the CDE*, which the async
+pipeline can reach seconds or minutes after the donor pays — or not at all. So the
+webhook stamps a separate `paid_at` marker **synchronously, before the queue enqueue
+and regardless of it**, and the public status endpoint exposes `paid = (paid_at IS NOT
+NULL)`. The donor sees *Gracias* the moment the payment is recorded while the
+comprobante continues on its own schedule. The marker is idempotent and is stamped on
+replays too; it is donor-UI convenience only — the pipeline still owns fiscal
+completion.
+
+**Checkout window.** The payment link is minted when the donor enters Paso 2 and stays
+valid for one hour; the hosted checkout interface is configured for **30 minutes**
+(`duracionInterfazIntentoMinutos`), and `/donar` polls for exactly that long. Both sides
+read the same shared constant, because when they disagreed the page gave up first and
+dropped a donor still completing a 3DS bank challenge onto the closing message.
+
 **Correlation model** — the intent id is sent as `identificadorEnlaceComercio` and must return as
 `EnlacePago.IdentificadorEnlaceComercio`; `EnlacePago.Id` must also exactly match the numeric link id
 stored for that intent. `IdExterno` is never accepted as the selector. Legacy static-link payments
@@ -603,8 +757,11 @@ always comes from Wompi: if the webhook amount differs from the intent amount, t
 `DONATION_INTENT_AMOUNT_MISMATCH` audit entry and still correlates, using the webhook's amount on the
 CDE. A `COMPLETED` intent never correlates twice.
 
-**Admin visibility** — the **Exportar** view lists the last 50 online donations (status, amount, donor,
-date, and the emitted `numero de control` for completed ones). The **donor** column is joined from the
+**Admin visibility** — the **Exportar** view lists the last 50 online donations (status,
+tipo, amount, donor, date, and the emitted `numero de control` for completed ones). The
+query is a strict column allowlist: donor document, donor email, client IP, and the
+Wompi payment-link URLs are never sent to the browser, because nothing renders them.
+The **donor** column is joined from the
 emitted CDE's `donor_name` (which came from the webhook), so it is shown only for **COMPLETED**
 intents — every other status renders "—", since the intent itself carries no name. A CDE produced from
 a completed intent shows a **"Datos del donante verificados en el formulario de donación"** badge in
@@ -628,11 +785,26 @@ the donation capability contract, the staging/production invariant, and forbidde
 
 ## 👥 Admin panel & roles
 
-The React admin panel handles documents, failures, the read-only contingency history, the audit log,
-donation analytics, user management, exports, per-document actions (resend, retry, invalidation), and
-— for owners — a **Configuración** workspace. No CLI-only operations. The Spanish navigation reads:
-Documentos, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar, Configuración.
+The React admin panel handles documents, donors, failures, the read-only contingency
+history, the audit log, donation analytics, user management, exports, per-document
+actions (resend, retry, fiscal correction, invalidation), and — for owners — a
+**Configuración** workspace. No CLI-only operations. The Spanish navigation reads:
+Documentos, Donantes, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar,
+Configuración.
 
+- **Donantes** turns accepted CDEs into a donor register. Donors are keyed by fiscal
+  document (type + normalized number), falling back to lowercased email, then to the
+  document id, and only `ACCEPTED` CDEs in the active emission environment are counted
+  — the header says so. Each row carries contact, location, gift count, lifetime total,
+  preferred gift type (diezmo/ofrenda/sin clasificar) and origin (en línea/manual/ambos);
+  the detail panel adds the first gift and the full address. Filters: document type,
+  document number (separator-insensitive substring), name, email, `Total desde`/`hasta`,
+  gift type, and origin — gift type and origin are **inclusive**, so a donor who has
+  given both ways matches both. `Descargar CSV` exports the filtered set (14 columns,
+  full document numbers, UTF-8 BOM, formula-injection guarded) up to 1000 donors; past
+  that it asks you to narrow the filters. Every export is audited as `DONORS_EXPORTED`
+  with counts and boolean filter flags only — never the filter values. Paged 25 at a
+  time; **ADMIN** and above.
 - **Fallos** lists both CDE-level failures (`FAILED` and MH `REJECTED`) **and pre-CDE issuance
   failures** — approved Wompi events that died before a document existed — with searchable error
   evidence and guided recovery, so no approved donation is silently lost.
@@ -645,16 +817,24 @@ Documentos, Fallos, Contingencia, Auditoría, Analítica, Usuarios, Exportar, Co
   accepted donations — per donor or in bulk, every send audited), **Contactos para CRM** (aggregate
   donor contact export for CRM import), and **Respaldos mensuales** (browse and verify the monthly
   R2 legal snapshots, download a month as a ZIP up to 32 MiB).
-- **Configuración** is organized in sections: Ambiente, MH, Wompi, Emisor, Correo, Plantillas, and
-  **Marca** — white-label branding with a display name, accent color, support email, and two logos
-  (admin + donor-facing) stored in R2. Defaults keep the historical "ExamplePerson1" identity.
+- **Configuración** is organized in sections: Ambiente, MH, Wompi, **Notificaciones de
+  Wompi** (merchant notification emails and phones, plus whether Wompi itself emails
+  the donor — off by default, because the app sends the CDE), Emisor, Correo,
+  Plantillas, and **Marca** — white-label branding with a display name, accent color,
+  support email, and two logos (admin + donor-facing) stored in R2. Defaults keep the
+  historical "ExamplePerson1" identity.
 
 | Role | Capabilities |
 |---|---|
-| `VIEWER` (Consulta) | Read documents, the contingency history, the audit log, and Analítica. |
-| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), initiate invalidation. |
-| `ADMIN` (Administrador) | Also: manage users and roles, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
-| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, branding (Marca), alert address, and on-demand retention export. |
+| `VIEWER` (Consulta) | Read documents, online-donation intents, pre-CDE issuance failures, the contingency history, the audit log, and Analítica. |
+| `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), **fiscal corrections and reissue**, and initiate invalidation. |
+| `ADMIN` (Administrador) | Also: manage users and roles, the **Donantes** explorer and its CSV export, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
+| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
+
+> Navigation is filtered by role for **Donantes**, **Exportar** (ADMIN) and
+> **Configuración** (OWNER). **Usuarios** is always visible but its body is
+> ADMIN-gated: a viewer or operator opening it sees an explanatory panel, not the
+> user list.
 
 > 📖 For a task-oriented walkthrough in Spanish, see the [operator runbook](./docs/runbook-operador.md).
 
@@ -692,25 +872,79 @@ scheduled retry, manual retry, resend, invalidation, and status-dependent export
 until a deployment operator reconciles the true MH outcome per
 [`docs/fiscal-claim-reconciliation.md`](./docs/fiscal-claim-reconciliation.md).
 
+### Fiscal corrections
+
+A rejected CDE is not a dead end. When the failure is a **receptor** problem — a bad
+document number, a wrong domicile, an address MH would not accept — an **Operador**
+opens **"Corregir datos fiscales"** from the **Fallos** view and fixes exactly the 14
+receptor fields. Everything outside that set (monto, emisor, ambiente, fiscal
+identifiers) is rejected server-side as `protected_field`.
+
+Corrections apply to two targets, and to no others:
+
+| Target | Situation | Result |
+|---|---|---|
+| `WOMPI_EVENT` | An approved payment whose donor data never produced a CDE (*"Pagos sin CDE creado"*) | Issuance re-runs from the raw webhook with the corrected receptor |
+| `DTE_DOCUMENT` | An existing CDE in `REJECTED` | The row is rewritten in place under new fiscal identifiers; the pre-correction document is snapshotted and restored if the correction is retired |
+
+This is **not** invalidation. Invalidation acts on an `ACCEPTED` CDE that carries a
+sello, sends a signed anulación event to MH, and is bounded by the legal window. A
+correction acts on a CDE that MH never accepted — there is no sello, so no legal
+window exists, nothing is sent to the `anulacion` endpoint, and the outcome is a
+**new** valid document rather than the retirement of an old one.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED
+    QUEUED --> PROCESSING: claim token matches
+    PROCESSING --> ACCEPTED: MH accepted the corrected CDE
+    PROCESSING --> REJECTED: MH rejected it again
+    PROCESSING --> FAILED: failed before MH dispatch
+    PROCESSING --> REVIEW_REQUIRED: MH outcome unknown after dispatch
+```
+
+The safety model is the fiscal-claim model applied to a repair path:
+
+- **Idempotent by construction.** Each correction carries a client-minted UUIDv4
+  `request_id` (unique) plus a SHA-256 digest of the canonical receptor payload. A
+  replay returns the existing status; the same id with a different payload or a
+  different target is refused with `correction_request_conflict`.
+- **Single owner.** A `processing_claim_id` qualifies every state-advancing write, and
+  the correction additionally holds exactly one of the target's ownership tokens — the
+  Wompi issuance attempt id or the document's fiscal claim id, never both.
+- **The legal sequence is a database invariant.** Control numbers are reserved once,
+  under unique indexes, by a trigger that increments `document_sequences` in the same
+  statement transaction and aborts if it does not move exactly one row. Recovery reuses
+  the persisted reservation instead of burning a second number.
+- **Ambiguity is never resolved by guessing.** A correction that reaches
+  `REVIEW_REQUIRED` (`MH_DISPATCH_UNCERTAIN`) blocks any further correction on that
+  target and waits for an operator. The 15-minute recovery sweep only re-drives
+  corrections that provably never dispatched to MH.
+- **Only receptor failures qualify.** The Worker classifies each failure; a
+  configuration failure gets **"Reemitir sin cambios"** and the guidance *"Revise
+  Configuración y la evidencia técnica antes de volver a intentar."*, while the plain
+  retry endpoint conversely refuses a failure that needs a correction.
+
 ---
 
-## 🗄️ Data model
+## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0025)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0031)</strong></summary>
 
 <br/>
 
 | Table | Purpose |
 |---|---|
-| `wompi_events` | Incoming Wompi webhooks; dedup by `transaction_id`. Carries the pre-CDE issuance lifecycle: status, reserved control numbers, attempt/error evidence. |
+| `wompi_events` | Incoming Wompi webhooks and reconciled payment-link payloads; deduplicated by `transaction_id` **and** by the unique `payment_link_id` (the stable fiscal idempotency key for single-use `/donar` links). Carries the pre-CDE issuance lifecycle: status, reserved control numbers, attempt/error evidence, and the stalled-requeue epoch. |
 | `dte_documents` | Issued CDEs: status, plain JSON, signed JWS, MH seal, donor info — plus the deferred-transmission marker, fiscal-operation claim, and post-accept finalization columns. |
 | `donation_intents` | `/donar` intents: donor document + catalog-coded address, Wompi link correlation, gift type (diezmo/ofrenda), status lifecycle, and the hashed `/datos` completion capability. |
+| `fiscal_corrections` | Receptor-repair attempts for rejected CDEs and pre-CDE Wompi failures: request idempotency (`request_id`, `request_payload_sha256`), per-target `attempt_number`, before/after receptor JSON and changed-field list, the pre-correction document snapshot, ownership tokens, the reserved control-number identifiers, and the status/failure evidence. |
 | `dte_events` | Invalidation events, plus historical contingency events (one-to-many with documents). |
 | `contingency_periods` | Historical MH-outage windows (read-only; new emissions defer instead). |
 | `audit_logs` | Immutable action log: actor, action, entity, metadata. |
 | `mh_tokens` | Cached MH auth tokens, per environment. |
-| `document_sequences` | Control-number counters per environment/prefix. |
+| `document_sequences` | Control-number counters per environment/prefix. Advanced by the issuance pipeline and, for fiscal corrections, by a database trigger that increments the counter inside the same statement transaction as the reservation and aborts unless it moves exactly one row. |
 | `email_deliveries` | Claimed email attempts, dispatch/outcome evidence, provider IDs, and PDF/JSON evidence hashes. |
 | `operational_alert_deliveries` | Incident- and recipient-scoped claims for alert email delivery. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
@@ -725,7 +959,7 @@ Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 
 ---
 
-## ⚖️ Compliance notes
+## ⚖ Compliance notes
 
 - CDE is transmitted normally **before** delivery to the donor, except while MH is unavailable.
 - The contingency evento's validation table (Anexo, field 35) excludes tipo 15, so a CDE is **never**
@@ -744,6 +978,15 @@ Foreign keys are enabled (`PRAGMA foreign_keys = ON`). Access is raw SQL via
 - CDE invalidation is only allowed through the **tenth business day of the month following the
   sello** — the legal window per *Normativa de Cumplimiento de los DTE* Cuadro 6. The panel shows the
   remaining time and blocks the action once the window closes.
+- A CDE that MH **rejected** was never accepted, carries no sello, and is therefore
+  outside the invalidation regime entirely. It is repaired through a **fiscal
+  correction**: the receptor block is fixed and the document is re-signed and
+  re-transmitted under a **new `codigoGeneracion` and `numeroControl`** reserved by a
+  database trigger, so no fiscal identifier is ever reused and the legal sequence
+  cannot skip or duplicate. The pre-correction document is snapshotted before the
+  rewrite. If the MH outcome of a correction cannot be determined, the correction
+  stops at `REVIEW_REQUIRED` and waits for an operator rather than risking a second
+  legal submission.
 - Keep signed JSON, MH responses, and audit records **immutable** for retention. The monthly R2
   retention export preserves them independently of D1; restoring from it is documented in
   [`docs/retention-restore.md`](./docs/retention-restore.md).
@@ -779,22 +1022,25 @@ a production integration. Every church must still provide its own:
 
 ## 🤝 Contributing
 
-Issues and pull requests are welcome. Before opening a PR, please run the full validation suite
-(`npm test && npm run typecheck && npm run build`) and **never** include real credentials, MH
-certificates, or production Wompi payloads in commits, fixtures, or screenshots.
+Issues and pull requests are welcome. Before opening a PR, please run the same gates CI
+runs (`npm run security:check-private-boundary && npm run migrations:check-immutability
+&& npm run types:check && npm run typecheck && npm test && npm run build`) and **never**
+include real credentials, MH certificates, organization names, domains, or production
+Wompi payloads in commits, fixtures, or screenshots.
 
 ---
 
 ## 📜 License
 
 Licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
-Copyright © 2026 Example Person.
+Copyright © 2026 jomplox.
 
 ### Third-party assets
 
 The EE. UU. donation-door flag icon is inlined from [HatScripts/circle-flags](https://github.com/HatScripts/circle-flags)
-(`us.svg`), licensed under the **MIT License**. The El Salvador door uses the church's own flag asset
-(`src/client/assets/sv-flag.png`).
+(`us.svg`), licensed under the **MIT License**. The El Salvador door uses the project's
+own inline SVG flag badge (`src/client/assets/sv-flag.svg`) — flag *emoji* are not used,
+because Windows renders them as bare letters and other platforms as a blank box.
 
 <div align="center">
 <sub>Built for the church accountant who'd rather not run a server. ✦</sub>

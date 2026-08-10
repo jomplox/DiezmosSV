@@ -6,9 +6,13 @@ Use this out-of-tree root on macOS:
 
 ```text
 ~/Library/Application Support/DiezmosSV/private/
+├── deploy/
+│   ├── staging.env
+│   └── production.env
 ├── env/
 │   ├── local-operator.env
-│   └── staging-smoke.env
+│   ├── staging-smoke.env
+│   └── production-operator.env
 ├── mh/live/signing/
 ├── mh/test/signing/
 ├── wompi/live/captures/
@@ -19,6 +23,57 @@ Use this out-of-tree root on macOS:
 ```
 
 Every directory is `0700`; every file is `0600`. Do not use symlinks. `npm run dev:worker` reads `env/local-operator.env` by default, while `npm run smoke:staging` reads `env/staging-smoke.env`. Override either with `DIEZMOSSV_ENV_FILE=/absolute/path/to/file`; a relative override is resolved from the checkout.
+
+## Private release branding contract
+
+The staging and production deploy files default to these owner-only, out-of-repository paths:
+
+```text
+~/Library/Application Support/DiezmosSV/private/deploy/staging.env
+~/Library/Application Support/DiezmosSV/private/deploy/production.env
+```
+
+Each file contains only these required keys:
+
+```dotenv
+DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
+```
+
+`DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env` may select another deploy file. The override must be absolute, and `DIEZMOSSV_DEPLOY_TARGET` must exactly match the command's `--env` target. The deploy file and donor logo must be regular, owner-owned `0600` files outside the repository, never symlinks. The donor logo must be a PNG (`.png`) or JPEG (`.jpg`/`.jpeg`) whose extension agrees with its byte signature and which `pdf-lib` can embed and save; SVG, corrupt, or truncated rasters block release before any remote request or upload.
+
+## Private release builds
+
+Deployment scripts call the owner-only build wrapper automatically. To build a release artifact without deploying, select the target explicitly:
+
+```sh
+npm run build:private -- --env staging
+npm run build:private -- --env production
+```
+
+The wrapper reads the selected target-bound private deploy file, rejects a blank or placeholder campaign, and passes only `VITE_GIVEBUTTER_CAMPAIGN` from that file to the `npm run build` child process. It does not expose the configured origin, donor logo, or operator credentials to the build child. Plain `npm run build` remains available for public clones and tests.
+
+Logo migration uses an external operator env file. Staging reuses `env/staging-smoke.env`; production uses the distinct `env/production-operator.env`. Override either with the absolute `DIEZMOSSV_OPERATOR_ENV_FILE`. The file accepts target-prefixed pairs (`STAGING_EMAIL`/`STAGING_PASSWORD` or `PRODUCTION_EMAIL`/`PRODUCTION_PASSWORD`) or the generic `DIEZMOSSV_OPERATOR_EMAIL`/`DIEZMOSSV_OPERATOR_PASSWORD` pair and follows the same external, regular, owner-owned `0600`, no-symlink rules.
+
+Run the read-only preflight before a release:
+
+```sh
+npm run cf:branding:check -- --env staging
+npm run cf:branding:check -- --env production
+```
+
+The preflight validates the private raster locally, requires public `/api/health` to report the selected target, and only then compares `/api/branding` plus the exact remote logo bytes. A target mismatch stops before authentication or any write.
+
+Migration is a separate explicit write and does nothing remotely without `--apply`:
+
+```sh
+npm run cf:branding:migrate -- --env staging --apply
+npm run cf:branding:migrate -- --env production --apply
+```
+
+Without `--apply`, the migration command still runs the local `pdf-lib` embeddability check and exits without sending a remote request.
 
 ## Safe relocation
 
