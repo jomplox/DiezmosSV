@@ -300,6 +300,28 @@ selected private config; leave the public example and its zero IDs unchanged. Ro
 production must each contain exactly one `send_email` binding named `EMAIL`, without
 `allowed_sender_addresses`.
 
+Release builds use a separate target-bound deploy file and donor raster. Keep both as regular,
+owner-owned `0600` files outside this repository, without symlinks:
+
+```dotenv
+# /absolute/private/path/staging.env
+DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
+```
+
+Select it with `export DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env`. The selected target must
+match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used for receipts. Before a
+remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
+`staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
+target-bound private build automatically; the same steps can be run independently without deploying:
+
+```bash
+npm run cf:branding:check -- --env staging
+npm run build:private -- --env staging
+```
+
 Create the remote resources in an owner-controlled Cloudflare workflow, record their returned names
 and IDs only in the selected private config, then verify that config through the wrapper:
 
@@ -352,9 +374,15 @@ See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checkl
 <br/>
 
 Production is intentionally a separate Wrangler environment and should be used only after staging
-UAT approval. Its live values also stay only in the selected private config described above.
+UAT approval. Its live values also stay only in the selected private Wrangler config described above.
+Select a distinct owner-only deploy file containing `DIEZMOSSV_DEPLOY_TARGET=production`, the
+production app origin, campaign, and an embeddable private PNG/JPEG. A staging-target file or an
+origin whose `/api/health` does not report `production` is rejected before branding authentication or
+upload.
 
 ```bash
+export DIEZMOSSV_DEPLOY_CONFIG="/absolute/private/path/production.env"
+
 # Verify the private production targets without printing their values into this repository.
 node scripts/run-private-wrangler.mjs d1 list
 node scripts/run-private-wrangler.mjs queues list
@@ -377,8 +405,13 @@ node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env produc
 
 # Migrate and deploy.
 npm run cf:migrate:prod
+npm run cf:branding:check -- --env production
+npm run build:private -- --env production
 npm run cf:deploy:prod
 ```
+
+The explicit branding check and private build above are useful operator preflights; the guarded
+`cf:deploy:prod` command repeats both before its private Wrangler deploy.
 
 Do one controlled low-value production issuance with live monitoring before enabling normal volume.
 
@@ -426,9 +459,10 @@ selected private config and are duplicated per Wrangler environment:
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
-**Build-time vars** - read by Vite and baked into the client bundle by `npm run build` (which every
-`cf:deploy:*` script runs). They are **not** Worker vars and are **not** secrets — anything set here
-ships to the browser:
+**Build-time vars** - read by Vite and baked into the client bundle. Deployment scripts run the
+target-bound `npm run build:private -- --env staging|production` wrapper, which supplies the campaign
+from the owner-only deploy file; plain `npm run build` remains for public clones and tests. These are
+**not** Worker vars and are **not** secrets — anything set here ships to the browser:
 
 | Variable | Purpose |
 |---|---|

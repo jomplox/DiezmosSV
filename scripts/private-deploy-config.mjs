@@ -34,6 +34,11 @@ export function loadPrivateDeployConfig({
     throw sanitizedError("The private deploy config is invalid");
   }
 
+  const configuredTarget = requiredValue(parsed, "DIEZMOSSV_DEPLOY_TARGET", "deploy config");
+  if (!TARGETS.has(configuredTarget) || configuredTarget !== target) {
+    throw sanitizedError("The private deploy config does not match the selected target");
+  }
+
   const campaign = requiredValue(parsed, "VITE_GIVEBUTTER_CAMPAIGN", "deploy config");
   try {
     assertDonationLaneConfigured({

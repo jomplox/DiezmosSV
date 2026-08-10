@@ -14,10 +14,18 @@ import {
   migrateRuntimeBrandingLogo,
   verifyRuntimeBrandingLogo
 } from "../../scripts/runtime-branding-logo.mjs";
+import {
+  corruptJpegBytes,
+  pngBytes as generatePngBytes
+} from "../worker/support/rasterFixtures";
 
-const localRasterBytes = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d
-]);
+const localRasterBytes = Buffer.from(
+  generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 })
+);
+const validJpegBytes = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAACAAIBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==",
+  "base64"
+);
 const roots: string[] = [];
 
 afterEach(() => {
@@ -31,6 +39,7 @@ describe("runtime donor logo verification", () => {
     const requests: string[] = [];
     const server = await localServer(async (request, response) => {
       requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
       if (request.url === "/api/branding") {
         return json(response, 200, { donorLogoVersion: "fixture-version" });
       }
@@ -50,8 +59,10 @@ describe("runtime donor logo verification", () => {
         migrateRuntimeBrandingLogo(config, credentials(), { fetchImpl: fetch })
       ).resolves.toEqual({ changed: false });
       expect(requests).toEqual([
+        "GET /api/health",
         "GET /api/branding",
         "GET /api/branding/donor-logo?v=fixture-version",
+        "GET /api/health",
         "GET /api/branding",
         "GET /api/branding/donor-logo?v=fixture-version"
       ]);
@@ -66,6 +77,7 @@ describe("runtime donor logo verification", () => {
     ["lying content type", "image/jpeg", localRasterBytes]
   ])("rejects %s as a PDF-embeddable donor logo mismatch", async (_name, contentType, bytes) => {
     const server = await localServer(async (request, response) => {
+      if (respondToHealth(request, response)) return;
       if (request.url === "/api/branding") {
         return json(response, 200, { donorLogoVersion: "fixture-version" });
       }
@@ -82,10 +94,40 @@ describe("runtime donor logo verification", () => {
     }
   });
 
+  it("accepts an exact valid JPEG through the production decoder path", async () => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: "jpeg-version" });
+      }
+      response.writeHead(200, { "Content-Type": "image/jpeg" });
+      response.end(validJpegBytes);
+    });
+
+    try {
+      await expect(
+        verifyRuntimeBrandingLogo(runtimeConfig(server.origin, {
+          bytes: validJpegBytes,
+          contentType: "image/jpeg"
+        }), { fetchImpl: fetch })
+      ).resolves.toEqual({ matched: true });
+      expect(requests).toEqual([
+        "GET /api/health",
+        "GET /api/branding",
+        "GET /api/branding/donor-logo?v=jpeg-version"
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("does not authenticate when the public branding check is unavailable", async () => {
     const requests: string[] = [];
     const server = await localServer(async (request, response) => {
       requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
       response.writeHead(503).end();
     });
 
@@ -95,7 +137,66 @@ describe("runtime donor logo verification", () => {
           fetchImpl: fetch
         })
       ).rejects.toThrow(/verification unavailable/i);
-      expect(requests).toEqual(["GET /api/branding"]);
+      expect(requests).toEqual(["GET /api/health", "GET /api/branding"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects a deployment whose public health target differs before branding or authentication", async () => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (request.url === "/api/health") {
+        return json(response, 200, { appEnv: "production" });
+      }
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: "fixture-version" });
+      }
+      if (request.url === "/api/branding/donor-logo?v=fixture-version") {
+        response.writeHead(200, { "Content-Type": "image/png" });
+        return response.end(localRasterBytes);
+      }
+      response.writeHead(404).end();
+    });
+
+    try {
+      await expect(
+        migrateRuntimeBrandingLogo(runtimeConfig(server.origin), credentials(), {
+          fetchImpl: fetch
+        })
+      ).rejects.toThrow(/deployment target/i);
+      expect(requests).toEqual(["GET /api/health"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects an exact signature-valid corrupt local and remote raster before any request", async () => {
+    const requests: string[] = [];
+    const corruptBytes = Buffer.from(corruptJpegBytes());
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: "fixture-version" });
+      }
+      response.writeHead(200, { "Content-Type": "image/jpeg" });
+      response.end(corruptBytes);
+    });
+    const config = runtimeConfig(server.origin, {
+      bytes: corruptBytes,
+      contentType: "image/jpeg"
+    });
+
+    try {
+      await expect(
+        verifyRuntimeBrandingLogo(config, { fetchImpl: fetch })
+      ).rejects.toThrow(/private donor logo.*PDF-embeddable/i);
+      await expect(
+        migrateRuntimeBrandingLogo(config, credentials(), { fetchImpl: fetch })
+      ).rejects.toThrow(/private donor logo.*PDF-embeddable/i);
+      expect(requests).toEqual([]);
     } finally {
       await server.close();
     }
@@ -111,6 +212,7 @@ describe("runtime donor logo migration", () => {
     let upload: { method?: string; path?: string; contentType?: string | undefined; body?: Buffer; authorization?: string | undefined } = {};
     const server = await localServer(async (request, response) => {
       requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
       if (request.url === "/api/branding") {
         return json(response, 200, { donorLogoVersion: version });
       }
@@ -155,10 +257,12 @@ describe("runtime donor logo migration", () => {
       });
       expect(upload.body).toEqual(localRasterBytes);
       expect(requests).toEqual([
+        "GET /api/health",
         "GET /api/branding",
         "GET /api/branding/donor-logo?v=legacy-version",
         "POST /api/auth/login",
         "PUT /api/settings/branding/donor-logo",
+        "GET /api/health",
         "GET /api/branding",
         "GET /api/branding/donor-logo?v=raster-version"
       ]);
@@ -171,6 +275,7 @@ describe("runtime donor logo migration", () => {
     for (const failure of ["auth", "upload", "postflight"] as const) {
       let uploaded = false;
       const server = await localServer(async (request, response) => {
+        if (respondToHealth(request, response)) return;
         if (request.url === "/api/branding") {
           if (failure === "postflight" && uploaded) {
             return response.writeHead(503).end();
@@ -227,10 +332,36 @@ describe("runtime logo command-line guards", () => {
     }
   });
 
+  it("rejects a corrupt local raster without --apply and sends no request", async () => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      response.writeHead(500).end();
+    });
+    const fixture = cliFixture(server.origin, {
+      logoName: "private-logo-fixture.jpeg",
+      logoBytes: Buffer.from(corruptJpegBytes())
+    });
+
+    try {
+      const result = await runCli(
+        "scripts/migrate-runtime-branding-logo.mjs",
+        ["--env", "staging"],
+        fixture
+      );
+      expect(result.code).toBe(1);
+      expect(requests).toEqual([]);
+      expectSanitizedOutput(result, fixture);
+    } finally {
+      await server.close();
+    }
+  });
+
   it("runs read-only assertion and explicit migration with sanitized output", async () => {
     let remoteBytes: Buffer<ArrayBufferLike> = Buffer.from(localRasterBytes);
     let version = "fixture-version";
     const server = await localServer(async (request, response) => {
+      if (respondToHealth(request, response)) return;
       if (request.url === "/api/branding") {
         return json(response, 200, { donorLogoVersion: version });
       }
@@ -274,6 +405,7 @@ describe("runtime logo command-line guards", () => {
 
   it("sanitizes command failures", async () => {
     const server = await localServer(async (_request, response) => {
+      if (respondToHealth(_request, response)) return;
       response.writeHead(503).end();
     });
     const fixture = cliFixture(server.origin);
@@ -292,16 +424,20 @@ describe("runtime logo command-line guards", () => {
   });
 });
 
-function runtimeConfig(origin: string) {
+function runtimeConfig(origin: string, options: {
+  bytes?: Buffer<ArrayBufferLike>;
+  contentType?: "image/png" | "image/jpeg";
+} = {}) {
+  const bytes = options.bytes ?? localRasterBytes;
   return {
     target: "staging" as const,
     campaign: "campaign-fixture",
     origin,
     donorLogo: {
       path: "/private-fixture/logo.png",
-      bytes: localRasterBytes,
-      contentType: "image/png" as const,
-      sha256: createHash("sha256").update(localRasterBytes).digest("hex")
+      bytes,
+      contentType: options.contentType ?? "image/png" as const,
+      sha256: createHash("sha256").update(bytes).digest("hex")
     }
   };
 }
@@ -310,14 +446,19 @@ function credentials() {
   return { email: "operator@example.invalid", password: "password-fixture" };
 }
 
-function cliFixture(origin: string) {
+function cliFixture(origin: string, options: {
+  logoName?: string;
+  logoBytes?: Buffer<ArrayBufferLike>;
+} = {}) {
   const repositoryRoot = resolve(import.meta.dirname, "../..");
   const privateRoot = temporaryRoot("diezmos-runtime-private-");
-  const logoPath = join(privateRoot, "private-logo-fixture.png");
+  const logoPath = join(privateRoot, options.logoName ?? "private-logo-fixture.png");
   const configPath = join(privateRoot, "staging.env");
   const operatorPath = join(privateRoot, "operator.env");
-  writeFileSync(logoPath, localRasterBytes, { mode: 0o600 });
+  const logoBytes = options.logoBytes ?? localRasterBytes;
+  writeFileSync(logoPath, logoBytes, { mode: 0o600 });
   writeFileSync(configPath, [
+    "DIEZMOSSV_DEPLOY_TARGET=staging",
     "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${origin}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
@@ -330,7 +471,7 @@ function cliFixture(origin: string) {
   ].join("\n"), { mode: 0o600 });
   chmodSync(configPath, 0o600);
   chmodSync(operatorPath, 0o600);
-  return { repositoryRoot, privateRoot, logoPath, configPath, operatorPath, origin };
+  return { repositoryRoot, privateRoot, logoPath, logoBytes, configPath, operatorPath, origin };
 }
 
 async function runCli(
@@ -371,8 +512,8 @@ function expectSanitizedOutput(
     fixture.configPath,
     fixture.operatorPath,
     fixture.origin,
-    createHash("sha256").update(localRasterBytes).digest("hex"),
-    localRasterBytes.toString("hex")
+    createHash("sha256").update(fixture.logoBytes).digest("hex"),
+    fixture.logoBytes.toString("hex")
   ]) {
     expect(output).not.toContain(privateValue);
   }
@@ -401,6 +542,16 @@ async function localServer(
 function json(response: ServerResponse, status: number, body: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json" });
   response.end(JSON.stringify(body));
+}
+
+function respondToHealth(
+  request: IncomingMessage,
+  response: ServerResponse,
+  appEnv = "staging"
+): boolean {
+  if (request.url !== "/api/health") return false;
+  json(response, 200, { appEnv });
+  return true;
 }
 
 async function requestBody(request: IncomingMessage): Promise<Buffer> {

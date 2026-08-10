@@ -3,11 +3,15 @@ import {
   loadOperatorCredentials,
   loadPrivateDeployConfig
 } from "./private-deploy-config.mjs";
-import { migrateRuntimeBrandingLogo } from "./runtime-branding-logo.mjs";
+import {
+  assertPrivateBrandingLogoEmbeddable,
+  migrateRuntimeBrandingLogo
+} from "./runtime-branding-logo.mjs";
 
 try {
   const { target, apply } = parseArgs(process.argv.slice(2));
   const config = loadPrivateDeployConfig({ target });
+  await assertPrivateBrandingLogoEmbeddable(config);
   const credentials = loadOperatorCredentials({ target });
   if (!apply) {
     process.stdout.write("Private runtime logo inputs validated; no remote request was sent.\n");

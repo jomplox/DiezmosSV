@@ -4,6 +4,10 @@ export interface RuntimeBrandingLogoOptions {
   fetchImpl?: typeof fetch;
 }
 
+export function assertPrivateBrandingLogoEmbeddable(
+  config: PrivateDeployConfig
+): Promise<void>;
+
 export function verifyRuntimeBrandingLogo(
   config: PrivateDeployConfig,
   options?: RuntimeBrandingLogoOptions

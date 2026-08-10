@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { PDFDocument } from "pdf-lib";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
@@ -11,6 +12,25 @@ class RuntimeBrandingLogoMismatchError extends Error {
 }
 
 export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = {}) {
+  await assertPrivateBrandingLogoEmbeddable(config);
+  const healthResponse = await publicFetch(
+    fetchImpl,
+    new URL("/api/health", config.origin),
+    "Runtime deployment target verification unavailable"
+  );
+  if (!healthResponse.ok) {
+    throw new Error("Runtime deployment target verification unavailable");
+  }
+  let health;
+  try {
+    health = await healthResponse.json();
+  } catch {
+    throw new Error("Runtime deployment target verification unavailable");
+  }
+  if (health?.appEnv !== config.target) {
+    throw new Error("Runtime deployment target does not match the selected release target");
+  }
+
   const brandingResponse = await publicFetch(
     fetchImpl,
     new URL("/api/branding", config.origin),
@@ -63,6 +83,26 @@ export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = 
     throw new RuntimeBrandingLogoMismatchError();
   }
   return { matched: true };
+}
+
+export async function assertPrivateBrandingLogoEmbeddable(config) {
+  try {
+    const pdf = await PDFDocument.create();
+    const bytes = Uint8Array.from(config.donorLogo.bytes);
+    const image = config.donorLogo.contentType === "image/png"
+      ? await pdf.embedPng(bytes)
+      : await pdf.embedJpg(bytes);
+    const page = pdf.addPage([Math.max(1, image.width), Math.max(1, image.height)]);
+    page.drawImage(image, {
+      x: 0,
+      y: 0,
+      width: Math.max(1, image.width),
+      height: Math.max(1, image.height)
+    });
+    await pdf.save();
+  } catch {
+    throw new Error("Private donor logo is not PDF-embeddable");
+  }
 }
 
 export async function migrateRuntimeBrandingLogo(

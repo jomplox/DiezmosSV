@@ -4,10 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { runPrivateBuild } from "../../scripts/run-private-build.mjs";
+import { pngBytes as generatePngBytes } from "../worker/support/rasterFixtures";
 
-const pngBytes = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d
-]);
+const pngBytes = Buffer.from(generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 }));
 const roots: string[] = [];
 
 afterEach(() => {
@@ -103,6 +102,7 @@ function deploymentFixture(target: "staging" | "production"): Fixture {
   writeFileSync(
     configPath,
     [
+      `DIEZMOSSV_DEPLOY_TARGET=${target}`,
       "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
       `DIEZMOSSV_APP_ORIGIN=https://${target}.example.invalid`,
       `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,

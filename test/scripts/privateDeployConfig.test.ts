@@ -13,11 +13,13 @@ import {
   loadOperatorCredentials,
   loadPrivateDeployConfig
 } from "../../scripts/private-deploy-config.mjs";
+import { pngBytes as generatePngBytes } from "../worker/support/rasterFixtures";
 
-const pngBytes = Buffer.from([
-  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d
-]);
-const jpegBytes = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+const pngBytes = Buffer.from(generatePngBytes(2, 2, { red: 20, green: 60, blue: 200 }));
+const jpegBytes = Buffer.from(
+  "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAACAAIBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q==",
+  "base64"
+);
 const roots: string[] = [];
 
 afterEach(() => {
@@ -45,7 +47,11 @@ describe("private deployment configuration", () => {
   });
 
   it("accepts JPEG bytes when the private extension agrees", () => {
-    const fixture = deploymentFixture({ logoName: "logo.jpeg", logoBytes: jpegBytes });
+    const fixture = deploymentFixture({
+      target: "production",
+      logoName: "logo.jpeg",
+      logoBytes: jpegBytes
+    });
 
     expect(
       loadPrivateDeployConfig({
@@ -66,6 +72,18 @@ describe("private deployment configuration", () => {
         repositoryRoot: fixture.repositoryRoot
       }).origin
     ).toBe("http://127.0.0.1:8787");
+  });
+
+  it("rejects a deploy file selected for the other target without disclosure", () => {
+    const fixture = deploymentFixture({ target: "staging" });
+
+    expectSanitizedFailure(() =>
+      loadPrivateDeployConfig({
+        target: "production",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }), fixture
+    );
   });
 
   it.each([
@@ -90,6 +108,14 @@ describe("private deployment configuration", () => {
     }],
     ["config mode 0700", (fixture: Fixture) => {
       chmodSync(fixture.configPath, 0o700);
+      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
+    }],
+    ["missing deploy target", (fixture: Fixture) => {
+      writeFileSync(
+        fixture.configPath,
+        fixture.configContents.replace(/^DIEZMOSSV_DEPLOY_TARGET=.*\n/m, ""),
+        { mode: 0o600 }
+      );
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
     ["missing key", (fixture: Fixture) => {
@@ -286,6 +312,7 @@ interface Fixture {
 }
 
 function deploymentFixture(options: {
+  target?: "staging" | "production";
   logoName?: string;
   logoBytes?: Uint8Array;
   origin?: string;
@@ -297,6 +324,7 @@ function deploymentFixture(options: {
   writeFileSync(logoPath, options.logoBytes ?? pngBytes, { mode: 0o600 });
   const configPath = join(privateRoot, "staging.env");
   const configContents = [
+    `DIEZMOSSV_DEPLOY_TARGET=${options.target ?? "staging"}`,
     "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${options.origin ?? "https://staging.example.invalid"}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
