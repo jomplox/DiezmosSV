@@ -419,7 +419,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
+| `scripts/run-private-build.mjs`, which applies `scripts/assert-donation-lane-config.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -467,16 +467,33 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production 
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# Migrate and deploy. Both refuse to run outside an acknowledged quiesced window,
-# and the deploy validates the campaign slug from the selected target-bound deploy file.
-FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
+# Assert branding first: it is read-only, so a regression fails the window before the
+# migration has written anything. Both remote steps refuse to run outside an acknowledged
+# quiesced window, and the deploy validates the campaign slug from the selected
+# target-bound deploy file.
 npm run cf:branding:check -- --env production
 npm run build:private -- --env production
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
+
+# Release the selection, or the next staging command fails its target check.
+unset DIEZMOSSV_DEPLOY_CONFIG
 ```
 
 The explicit branding check and private build above are useful operator preflights; the guarded
 `cf:deploy:prod` command repeats both before its private Wrangler deploy.
+
+**First production deploy only.** The branding gate compares the *running* deployment's donor
+logo, so it cannot pass before a production deployment exists. Bootstrap once, in this order,
+and use `cf:deploy:prod` for every release after that:
+
+```bash
+node scripts/run-private-wrangler.mjs deploy --env production --keep-vars
+npm run cf:branding:migrate -- --env production --apply
+```
+
+This is a documented one-time path, not an escape hatch: nothing in the tooling skips the gate,
+and it applies only when the production Worker has never been deployed.
 
 The committed example ships `DONATION_INTAKE_DISABLED = "true"` in
 `[env.production.vars]`. Leave it in place until the production lane has been

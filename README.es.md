@@ -432,7 +432,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
+| `scripts/run-private-build.mjs`, que aplica `scripts/assert-donation-lane-config.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -481,16 +481,34 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production 
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# Migre y despliegue. Ambos se niegan a correr fuera de una ventana detenida y reconocida,
-# y el despliegue valida el slug de campaña del archivo seleccionado y vinculado al ambiente.
-FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
+# Verifique la marca primero: es de solo lectura, así que una regresión falla la ventana
+# antes de que la migración haya escrito nada. Ambos pasos remotos se niegan a correr fuera
+# de una ventana detenida y reconocida, y el despliegue valida el slug de campaña del
+# archivo seleccionado y vinculado al ambiente.
 npm run cf:branding:check -- --env production
 npm run build:private -- --env production
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
+
+# Libere la selección, o el siguiente comando de staging fallará su verificación de ambiente.
+unset DIEZMOSSV_DEPLOY_CONFIG
 ```
 
 La verificación explícita de marca y el build privado anterior son preflights útiles para el operador;
 el comando protegido `cf:deploy:prod` repite ambos antes de su despliegue privado con Wrangler.
+
+**Solo para el primer despliegue de producción.** La guarda de marca compara el logo del donante
+del despliegue *en ejecución*, así que no puede pasar antes de que exista un despliegue de
+producción. Arranque una sola vez, en este orden, y use `cf:deploy:prod` para cada publicación
+posterior:
+
+```bash
+node scripts/run-private-wrangler.mjs deploy --env production --keep-vars
+npm run cf:branding:migrate -- --env production --apply
+```
+
+Es un camino documentado de una sola vez, no una vía de escape: nada en las herramientas omite la
+guarda, y solo aplica cuando el Worker de producción nunca ha sido desplegado.
 
 El ejemplo versionado incluye `DONATION_INTAKE_DISABLED = "true"` en `[env.production.vars]`. Déjelo
 tal cual hasta que el carril de producción esté aprobado; luego elimínelo (o póngale cualquier otro
