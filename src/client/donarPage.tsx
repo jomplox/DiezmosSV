@@ -649,8 +649,9 @@ export function DonarPage() {
   // Once an intent exists, Paso 3 embeds the checkout directly (iframe below). This
   // effect only drives the waiting UI: spinner from entry, and if the iframe has not
   // fired onLoad within the render budget, the manual hosted-checkout CTA appears —
-  // never a redirect. The iframe keeps loading underneath; its onLoad flips to
-  // "ready" whenever it lands.
+  // never a redirect. The iframe keeps loading underneath; its onLoad flips a
+  // loading/delayed handoff to "ready" whenever it lands, but cannot cancel a
+  // Wompi-close verification already in progress.
   useEffect(() => {
     if (stage !== "widget" || !intent) {
       return;
@@ -1362,7 +1363,7 @@ export function DonarPage() {
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
                   title="Entrega segura con Wompi"
                   style={embedHeight ? { height: embedHeight } : undefined}
-                  onLoad={() => setHandoff("ready")}
+                  onLoad={() => setHandoff((current) => (current === "verifying" ? current : "ready"))}
                 />
                 <button type="button" className="link-button" onClick={() => (window.location.href = intent.urlEnlace)}>
                   ¿Problemas con el formulario? Continúe aquí

@@ -382,6 +382,20 @@ test("the SV wizard walks monto → datos → Wompi handoff", async ({ page }) =
 test("keeps checking the same intent when Wompi closes before its webhook is visible", async ({ page }) => {
   let paymentConfirmed = false;
   let statusChecks = 0;
+  let wompiIframeRequestHeld = false;
+  let releaseWompiIframe!: () => void;
+  const wompiIframeRelease = new Promise<void>((resolve) => {
+    releaseWompiIframe = resolve;
+  });
+  await page.route("https://mock.wompi.sv/**", async (route) => {
+    wompiIframeRequestHeld = true;
+    await wompiIframeRelease;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<html><body>mock wompi hosted flow</body></html>"
+    });
+  });
   await page.route("**/api/donations/intent/*/status", (route) => {
     statusChecks += 1;
     return route.fulfill({
@@ -402,7 +416,9 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   await page.getByLabel("Municipio").selectOption({ index: 1 });
   await page.getByLabel("Distrito").selectOption({ index: 1 });
   await page.getByRole("button", { name: "Continuar con su diezmo" }).click();
-  await expect(page.locator("iframe.donar-embed")).toBeVisible({ timeout: 15_000 });
+  const embed = page.locator("iframe.donar-embed");
+  await expect(embed).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => wompiIframeRequestHeld).toBe(true);
 
   // The iframe can become visible before React has flushed the effects that install
   // both status polling and the Wompi message listener. Wait for the first poll so a
@@ -419,6 +435,8 @@ test("keeps checking the same intent when Wompi closes before its webhook is vis
   });
 
   await expect.poll(() => statusChecks).toBeGreaterThan(0);
+  releaseWompiIframe();
+  await expect(page.frameLocator("iframe.donar-embed").getByText("mock wompi hosted flow")).toBeVisible();
   const verifyingMessage = page.getByText("Verificando su entrega…");
   await expect(verifyingMessage).toHaveCount(0);
   await expect(verifyingMessage).toBeVisible({
