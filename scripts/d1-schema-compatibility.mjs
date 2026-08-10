@@ -40,6 +40,14 @@ WHERE control_prefix <> UPPER(control_prefix);`
 
 const requiredColumns = [
   {
+    migration: "0009_donation_intents.sql",
+    table: "donation_intents",
+    column: "document_id",
+    type: "TEXT",
+    nullable: true,
+    addSql: "ALTER TABLE donation_intents ADD COLUMN document_id TEXT;"
+  },
+  {
     migration: MIGRATION_0023,
     table: "wompi_events",
     column: "issuance_status",
