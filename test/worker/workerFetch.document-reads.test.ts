@@ -9,6 +9,26 @@ import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
 installWorkerFetchGlobals();
 
 describe("document listing", () => {
+  it("lists invalidated documents when that status is selected", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };
+    db.documents.push(
+      testDocument({ id: "doc_invalidated", status: "INVALIDATED" }),
+      testDocument({ id: "doc_accepted", status: "ACCEPTED" })
+    );
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/documents?status=INVALIDATED", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db)
+    );
+
+    expect(response.status).toBe(200);
+    const page = await response.json() as { documents: DteDocumentRecord[] };
+    expect(page.documents.map((document) => document.id)).toEqual(["doc_invalidated"]);
+  });
+
   it("rejects unbounded or unknown document status filters", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_viewer", email: "viewer@example.org", name: "Viewer", role: "VIEWER" };

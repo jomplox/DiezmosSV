@@ -1481,6 +1481,7 @@ async function handleDocumentList(ctx: ApiRouteContext): Promise<Response> {
     "REJECTED",
     "FAILED",
     "CONTINGENCY_PENDING",
+    "INVALIDATED",
     "TRANSMISSION_PENDING"
   ]);
   const statuses = statusParam?.length && statusParam.length <= 160
