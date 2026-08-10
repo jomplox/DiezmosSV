@@ -13,8 +13,9 @@ const englishProvisioningDocuments = [
   ["README", readme],
   ["staging UAT runbook", stagingRunbook]
 ] as const;
-// The private-wrapper and resource-identifier assertions do not read prose, so they hold for
-// every provisioning document in any language.
+// The private-wrapper assertion and the live-identifier pattern do not read prose, so they hold
+// for every provisioning document in any language. The two phrase-based negatives that follow
+// them still only match English.
 const provisioningDocuments = [
   ...englishProvisioningDocuments,
   ["Spanish README", readmeEs]
