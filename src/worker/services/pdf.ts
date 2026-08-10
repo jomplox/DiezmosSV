@@ -1,6 +1,7 @@
 import { degrees, PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import QRCode from "qrcode";
 import { BRANDING_DONOR_LOGO_OBJECT_KEY } from "./branding";
+import { logOperationalAlert } from "./observability";
 import { ORG_LOGO_INK_VIEW_HEIGHT, ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, findCatalogOption, getCat008Districts, getCat013Municipalities } from "../../shared/catalogs";
 import { formatDocument } from "../../shared/documentFormat";
@@ -28,6 +29,7 @@ export interface PdfBrandingLogo {
 // a bare object, mirroring branding.ts's BrandingOriginEnv.
 export interface BrandingLogoArchiveEnv {
   ARCHIVE?: R2Bucket;
+  APP_ENV?: string;
 }
 
 const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -40,17 +42,21 @@ const JPEG_SIGNATURE = [0xff, 0xd8, 0xff];
 // documents then draw the built-in vector. A misconfigured logo must never be able to
 // fail a receipt, so nothing here throws.
 export async function loadPdfBrandingLogo(env: BrandingLogoArchiveEnv): Promise<PdfBrandingLogo | null> {
+  let logo: PdfBrandingLogo | null = null;
   try {
     const object = await env.ARCHIVE?.get(BRANDING_DONOR_LOGO_OBJECT_KEY);
-    if (!object) {
-      return null;
+    if (object) {
+      const bytes = new Uint8Array(await object.arrayBuffer());
+      const format = embeddableLogoFormat(bytes);
+      logo = format ? { bytes, format } : null;
     }
-    const bytes = new Uint8Array(await object.arrayBuffer());
-    const format = embeddableLogoFormat(bytes);
-    return format ? { bytes, format } : null;
   } catch {
-    return null;
+    logo = null;
   }
+  if (!logo && env.APP_ENV === "production") {
+    logOperationalAlert(env as import("../types").Env, "branding_logo_fallback", "credentials");
+  }
+  return logo;
 }
 
 // Sniffs the bytes instead of trusting the recorded content type: the upload stores

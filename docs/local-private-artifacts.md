@@ -6,9 +6,13 @@ Use this out-of-tree root on macOS:
 
 ```text
 ~/Library/Application Support/DiezmosSV/private/
+├── deploy/
+│   ├── staging.env
+│   └── production.env
 ├── env/
 │   ├── local-operator.env
-│   └── staging-smoke.env
+│   ├── staging-smoke.env
+│   └── production-operator.env
 ├── mh/live/signing/
 ├── mh/test/signing/
 ├── wompi/live/captures/
@@ -19,6 +23,41 @@ Use this out-of-tree root on macOS:
 ```
 
 Every directory is `0700`; every file is `0600`. Do not use symlinks. `npm run dev:worker` reads `env/local-operator.env` by default, while `npm run smoke:staging` reads `env/staging-smoke.env`. Override either with `DIEZMOSSV_ENV_FILE=/absolute/path/to/file`; a relative override is resolved from the checkout.
+
+## Private release branding contract
+
+The staging and production deploy files default to these owner-only, out-of-repository paths:
+
+```text
+~/Library/Application Support/DiezmosSV/private/deploy/staging.env
+~/Library/Application Support/DiezmosSV/private/deploy/production.env
+```
+
+Each file contains only these required keys:
+
+```dotenv
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
+```
+
+`DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env` may select another deploy file. The override must be absolute. The deploy file and donor logo must be regular, owner-owned `0600` files outside the repository, never symlinks. The donor logo must be a PNG (`.png`) or JPEG (`.jpg`/`.jpeg`) whose extension agrees with its byte signature; SVG is not PDF-embeddable and blocks release.
+
+Logo migration uses an external operator env file. Staging reuses `env/staging-smoke.env`; production uses the distinct `env/production-operator.env`. Override either with the absolute `DIEZMOSSV_OPERATOR_ENV_FILE`. The file accepts target-prefixed pairs (`STAGING_EMAIL`/`STAGING_PASSWORD` or `PRODUCTION_EMAIL`/`PRODUCTION_PASSWORD`) or the generic `DIEZMOSSV_OPERATOR_EMAIL`/`DIEZMOSSV_OPERATOR_PASSWORD` pair and follows the same external, regular, owner-owned `0600`, no-symlink rules.
+
+Run the read-only preflight before a release:
+
+```sh
+npm run cf:branding:check -- --env staging
+npm run cf:branding:check -- --env production
+```
+
+Migration is a separate explicit write and does nothing remotely without `--apply`:
+
+```sh
+npm run cf:branding:migrate -- --env staging --apply
+npm run cf:branding:migrate -- --env production --apply
+```
 
 ## Safe relocation
 

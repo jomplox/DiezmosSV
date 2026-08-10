@@ -42,6 +42,27 @@ describe("remote deploy and migration scripts", () => {
     ).toBe(true);
   });
 
+  it("blocks deployment unless the private runtime donor logo matches", () => {
+    expect(packageJson.scripts["cf:deploy:staging"]).toBe(
+      "node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars"
+    );
+    expect(packageJson.scripts["cf:deploy:prod"]).toBe(
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env production && node scripts/assert-donation-lane-config.mjs && npm run build && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars"
+    );
+    expect(packageJson.scripts["cf:branding:check"]).toBe(
+      "node scripts/assert-runtime-branding-logo.mjs"
+    );
+    expect(packageJson.scripts["cf:branding:migrate"]).toBe(
+      "node scripts/migrate-runtime-branding-logo.mjs"
+    );
+    expect(
+      existsSync(resolve(import.meta.dirname, "../../scripts/assert-runtime-branding-logo.mjs"))
+    ).toBe(true);
+    expect(
+      existsSync(resolve(import.meta.dirname, "../../scripts/migrate-runtime-branding-logo.mjs"))
+    ).toBe(true);
+  });
+
   it("guards the explicit staging cutover before migration and deployment", () => {
     expect(packageJson.scripts["cf:cutover:staging"]).toBe(
       "node scripts/assert-fiscal-cutover.mjs && npm run cf:migrate:staging && npm run cf:deploy:staging"

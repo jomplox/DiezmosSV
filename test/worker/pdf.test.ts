@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildDteQrPayload, DTE_PDF_RENDERER_VERSION, loadPdfBrandingLogo, renderDtePdf } from "../../src/worker/services/pdf";
 import type { DteDocumentRecord } from "../../src/worker/types";
 import { makeDocument } from "./fixtures";
@@ -426,6 +426,43 @@ describe("loadPdfBrandingLogo", () => {
     expect(await loadPdfBrandingLogo({ ARCHIVE: failing })).toBeNull();
     expect(await loadPdfBrandingLogo({})).toBeNull();
     expect(await loadPdfBrandingLogo({ ARCHIVE: {} as R2Bucket })).toBeNull();
+  });
+
+  it("emits one allowlisted production event when receipt branding falls back", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      await expect(loadPdfBrandingLogo({ APP_ENV: "production" })).resolves.toBeNull();
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith({
+        event: "operational_alert",
+        app_env: "production",
+        alert_kind: "branding_logo_fallback",
+        entity_type: "credentials"
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("keeps non-production fallback and a valid production raster quiet", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const archive = new FakeArchiveBucket();
+    await archive.put("branding/donor-logo", pngBytes(10, 10, { red: 1, green: 2, blue: 3 }), {
+      httpMetadata: { contentType: "image/png" }
+    });
+    try {
+      await expect(loadPdfBrandingLogo({ APP_ENV: "local" })).resolves.toBeNull();
+      await expect(loadPdfBrandingLogo({ APP_ENV: "staging" })).resolves.toBeNull();
+      await expect(
+        loadPdfBrandingLogo({
+          APP_ENV: "production",
+          ARCHIVE: archive as unknown as R2Bucket
+        })
+      ).resolves.toMatchObject({ format: "png" });
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

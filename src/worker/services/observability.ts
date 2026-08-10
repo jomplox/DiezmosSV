@@ -50,6 +50,7 @@ const ERROR_EVENTS = new Set([
 ]);
 const ALERT_KINDS = new Set([
   "advanced_cde_failed",
+  "branding_logo_fallback",
   "cert_expiring",
   "dte_failed",
   "email_failed",
