@@ -432,7 +432,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
+| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -482,11 +482,11 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
 # Migre y despliegue. Ambos se niegan a correr fuera de una ventana detenida y reconocida,
-# y el despliegue además rechaza un slug de campaña de Givebutter que sea un marcador.
+# y el despliegue valida el slug de campaña del archivo seleccionado y vinculado al ambiente.
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
 npm run cf:branding:check -- --env production
 npm run build:private -- --env production
-FISCAL_CUTOVER_QUIESCED=1 VITE_GIVEBUTTER_CAMPAIGN="<slug de este despliegue>" npm run cf:deploy:prod
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
 ```
 
 La verificación explícita de marca y el build privado anterior son preflights útiles para el operador;

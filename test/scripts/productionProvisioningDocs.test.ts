@@ -321,6 +321,24 @@ describe("remote provisioning documentation", () => {
     }
   );
 
+  it.each(releaseSafetyReadmes)(
+    "uses the persistent production deploy config in the %s",
+    (_name, document) => {
+      expect(document).toContain(
+        "FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod"
+      );
+    }
+  );
+
+  it.each(releaseSafetyReadmes)(
+    "does not override the persistent production campaign in the %s",
+    (_name, document) => {
+      expect(document).not.toMatch(
+        /^FISCAL_CUTOVER_QUIESCED=1\s+VITE_GIVEBUTTER_CAMPAIGN=[^\n]+\s+npm run cf:deploy:prod\s*$/m
+      );
+    }
+  );
+
   it.each(englishProvisioningDocuments)(
     "requires the selected owner-only external config in the %s",
     (_name, document) => {

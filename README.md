@@ -419,7 +419,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` is set to a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
+| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -468,11 +468,11 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
 # Migrate and deploy. Both refuse to run outside an acknowledged quiesced window,
-# and the deploy additionally refuses a placeholder Givebutter campaign slug.
+# and the deploy validates the campaign slug from the selected target-bound deploy file.
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
 npm run cf:branding:check -- --env production
 npm run build:private -- --env production
-FISCAL_CUTOVER_QUIESCED=1 VITE_GIVEBUTTER_CAMPAIGN="<this deployment's slug>" npm run cf:deploy:prod
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
 ```
 
 The explicit branding check and private build above are useful operator preflights; the guarded
