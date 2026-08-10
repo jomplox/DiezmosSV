@@ -982,7 +982,7 @@ Wompi payloads in commits, fixtures, or screenshots.
 ## 📜 License
 
 Licensed under the **Apache License 2.0** — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE).
-Copyright © 2026 Example Person.
+Copyright © 2026 jomplox.
 
 ### Third-party assets
 
@@ -2009,7 +2009,7 @@ producción en los commits, los fixtures ni las capturas de pantalla.
 ## 📜 Licencia
 
 Licenciado bajo la **Apache License 2.0** — vea [LICENSE](./LICENSE) y [NOTICE](./NOTICE).
-Copyright © 2026 Example Person.
+Copyright © 2026 jomplox.
 
 ### Recursos de terceros
 
