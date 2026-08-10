@@ -3,6 +3,8 @@ import { PDFDocument } from "pdf-lib";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8, 0xff]);
+// A stalled origin must fail the release gate with a message, not hang it silently.
+const REQUEST_TIMEOUT_MS = 15_000;
 
 class RuntimeBrandingLogoMismatchError extends Error {
   constructor() {
@@ -19,6 +21,7 @@ export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = 
     "Runtime deployment target verification unavailable"
   );
   if (!healthResponse.ok) {
+    discardBody(healthResponse);
     throw new Error("Runtime deployment target verification unavailable");
   }
   let health;
@@ -37,6 +40,7 @@ export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = 
     "Runtime donor logo verification unavailable"
   );
   if (!brandingResponse.ok) {
+    discardBody(brandingResponse);
     throw new Error("Runtime donor logo verification unavailable");
   }
   let branding;
@@ -60,13 +64,16 @@ export async function verifyRuntimeBrandingLogo(config, { fetchImpl = fetch } = 
     "Runtime donor logo verification unavailable"
   );
   if (logoResponse.status === 404) {
+    discardBody(logoResponse);
     throw new RuntimeBrandingLogoMismatchError();
   }
   if (!logoResponse.ok) {
+    discardBody(logoResponse);
     throw new Error("Runtime donor logo verification unavailable");
   }
   const contentType = logoResponse.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "image/png" && contentType !== "image/jpeg") {
+    discardBody(logoResponse);
     throw new RuntimeBrandingLogoMismatchError();
   }
   let bytes;
@@ -130,6 +137,7 @@ export async function migrateRuntimeBrandingLogo(
     "Runtime donor logo authentication failed"
   );
   if (!loginResponse.ok) {
+    discardBody(loginResponse);
     throw new Error("Runtime donor logo authentication failed");
   }
   let token;
@@ -156,6 +164,9 @@ export async function migrateRuntimeBrandingLogo(
     },
     "Runtime donor logo upload failed"
   );
+  // The upload acknowledgement is never read; the mandatory postflight below is what
+  // decides whether the write landed.
+  discardBody(uploadResponse);
   if (!uploadResponse.ok) {
     throw new Error("Runtime donor logo upload failed");
   }
@@ -167,19 +178,36 @@ async function publicFetch(fetchImpl, url, errorMessage) {
   try {
     return await fetchImpl(url, {
       method: "GET",
-      headers: { Accept: "application/json, image/png, image/jpeg" }
+      headers: { Accept: "application/json, image/png, image/jpeg" },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
     });
-  } catch {
-    throw new Error(errorMessage);
+  } catch (error) {
+    throw requestError(errorMessage, error);
   }
 }
 
 async function privateFetch(fetchImpl, url, init, errorMessage) {
   try {
-    return await fetchImpl(url, init);
-  } catch {
-    throw new Error(errorMessage);
+    return await fetchImpl(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+  } catch (error) {
+    throw requestError(errorMessage, error);
   }
+}
+
+// Only this module's own sanitized text is surfaced: the rejected cause can carry the
+// origin, path, or credential material, so it is inspected but never interpolated.
+function requestError(errorMessage, error) {
+  return new Error(timedOut(error) ? `${errorMessage}: the request timed out` : errorMessage);
+}
+
+function timedOut(error) {
+  return error?.name === "TimeoutError" || error?.cause?.name === "TimeoutError";
+}
+
+// Release an unread body so the process does not linger on a keep-alive socket after
+// the gate has already decided to fail.
+function discardBody(response) {
+  response.body?.cancel().catch(() => {});
 }
 
 function sniffRaster(bytes) {

@@ -123,6 +123,121 @@ describe("runtime donor logo verification", () => {
     }
   });
 
+  it.each([
+    ["absent", {}],
+    ["blank", { donorLogoVersion: "   " }],
+    ["null", { donorLogoVersion: null }]
+  ])("treats a %s runtime logo version as a mismatch before requesting the stream", async (
+    _name,
+    body
+  ) => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, body);
+      }
+      response.writeHead(404).end();
+    });
+
+    try {
+      await expect(
+        verifyRuntimeBrandingLogo(runtimeConfig(server.origin), { fetchImpl: fetch })
+      ).rejects.toThrow(/PDF-embeddable donor logo/i);
+      expect(requests).toEqual(["GET /api/health", "GET /api/branding"]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("treats a missing runtime logo stream as a mismatch", async () => {
+    const requests: string[] = [];
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: "fixture-version" });
+      }
+      response.writeHead(404).end();
+    });
+
+    try {
+      await expect(
+        verifyRuntimeBrandingLogo(runtimeConfig(server.origin), { fetchImpl: fetch })
+      ).rejects.toThrow(/PDF-embeddable donor logo/i);
+      expect(requests).toEqual([
+        "GET /api/health",
+        "GET /api/branding",
+        "GET /api/branding/donor-logo?v=fixture-version"
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("bounds every request with an abort signal that is not already spent", async () => {
+    const signals: (AbortSignal | undefined)[] = [];
+    let remoteBytes: Buffer<ArrayBufferLike> = Buffer.from("<svg>legacy</svg>");
+    let remoteContentType = "image/svg+xml";
+    let version = "legacy-version";
+    const server = await localServer(async (request, response) => {
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: version });
+      }
+      if (request.url?.startsWith("/api/branding/donor-logo")) {
+        response.writeHead(200, { "Content-Type": remoteContentType });
+        return response.end(remoteBytes);
+      }
+      if (request.url === "/api/auth/login") {
+        return json(response, 200, { token: "fixture-token" });
+      }
+      if (request.url === "/api/settings/branding/donor-logo") {
+        remoteBytes = await requestBody(request);
+        remoteContentType = request.headers["content-type"] ?? "";
+        version = "raster-version";
+        return json(response, 200, { ok: true });
+      }
+      response.writeHead(404).end();
+    });
+    const fetchImpl: typeof fetch = (input, init) => {
+      signals.push(init?.signal ?? undefined);
+      return fetch(input, init);
+    };
+
+    try {
+      await expect(
+        migrateRuntimeBrandingLogo(runtimeConfig(server.origin), credentials(), { fetchImpl })
+      ).resolves.toEqual({ changed: true });
+      expect(signals.length).toBe(8);
+      for (const signal of signals) {
+        expect(signal).toBeInstanceOf(AbortSignal);
+        expect(signal?.aborted).toBe(false);
+      }
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("fails closed with a sanitized message when a request times out", async () => {
+    const origin = "https://runtime-fixture.example.invalid";
+    const timingOutFetch = (() =>
+      Promise.reject(
+        Object.assign(new Error(`connect timeout on ${origin}`), { name: "TimeoutError" })
+      )) as unknown as typeof fetch;
+
+    let message = "";
+    try {
+      await verifyRuntimeBrandingLogo(runtimeConfig(origin), { fetchImpl: timingOutFetch });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toMatch(/deployment target verification unavailable: the request timed out/i);
+    expect(message).not.toContain(origin);
+  });
+
   it("does not authenticate when the public branding check is unavailable", async () => {
     const requests: string[] = [];
     const server = await localServer(async (request, response) => {
@@ -265,6 +380,53 @@ describe("runtime donor logo migration", () => {
         "GET /api/health",
         "GET /api/branding",
         "GET /api/branding/donor-logo?v=raster-version"
+      ]);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("restores the donor slot when the runtime advertises no logo at all", async () => {
+    const requests: string[] = [];
+    let remoteBytes: Buffer<ArrayBufferLike> | null = null;
+    let version: string | null = null;
+    const server = await localServer(async (request, response) => {
+      requests.push(`${request.method} ${request.url}`);
+      if (respondToHealth(request, response)) return;
+      if (request.url === "/api/branding") {
+        return json(response, 200, { donorLogoVersion: version });
+      }
+      if (request.url?.startsWith("/api/branding/donor-logo")) {
+        if (!remoteBytes) return response.writeHead(404).end();
+        response.writeHead(200, { "Content-Type": "image/png" });
+        return response.end(remoteBytes);
+      }
+      if (request.url === "/api/auth/login") {
+        return json(response, 200, { token: "fixture-token" });
+      }
+      if (request.url === "/api/settings/branding/donor-logo") {
+        remoteBytes = await requestBody(request);
+        version = "restored-version";
+        return json(response, 200, { ok: true, donorLogoVersion: version });
+      }
+      response.writeHead(404).end();
+    });
+
+    try {
+      await expect(
+        migrateRuntimeBrandingLogo(runtimeConfig(server.origin), credentials(), {
+          fetchImpl: fetch
+        })
+      ).resolves.toEqual({ changed: true });
+      expect(remoteBytes).toEqual(localRasterBytes);
+      expect(requests).toEqual([
+        "GET /api/health",
+        "GET /api/branding",
+        "POST /api/auth/login",
+        "PUT /api/settings/branding/donor-logo",
+        "GET /api/health",
+        "GET /api/branding",
+        "GET /api/branding/donor-logo?v=restored-version"
       ]);
     } finally {
       await server.close();
