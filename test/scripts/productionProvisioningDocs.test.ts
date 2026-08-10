@@ -3,13 +3,34 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const readme = readFileSync(resolve(import.meta.dirname, "../../README.md"), "utf8");
+const readmeEs = readFileSync(resolve(import.meta.dirname, "../../README.es.md"), "utf8");
 const stagingRunbook = readFileSync(
   resolve(import.meta.dirname, "../../docs/cloudflare-staging-uat.md"),
   "utf8"
 );
-const provisioningDocuments = [
+// The wording assertions read English phrasing, so translations stay out of this list.
+const englishProvisioningDocuments = [
   ["README", readme],
   ["staging UAT runbook", stagingRunbook]
+] as const;
+// The private-wrapper assertion and the live-identifier pattern do not read prose, so they hold
+// for every provisioning document in any language. The two phrase-based negatives that follow
+// them still only match English.
+const provisioningDocuments = [
+  ...englishProvisioningDocuments,
+  ["Spanish README", readmeEs]
+] as const;
+const releaseSafetyReadmes = [
+  [
+    "English README",
+    readme,
+    /release builds[\s\S]{0,220}target-bound deploy file[\s\S]{0,220}owner-owned `0600` files outside this repository, without symlinks/i
+  ],
+  [
+    "Spanish README",
+    readmeEs,
+    /los builds de release[\s\S]{0,220}archivo de despliegue vinculado al ambiente[\s\S]{0,220}propiedad del usuario actual, con permisos `0600`,[\s\S]{0,100}fuera de este repositorio y sin enlaces simbólicos/i
+  ]
 ] as const;
 const exactLocalD1Migration =
   "npx wrangler d1 migrations apply diezmossv-local-db-example --local";
@@ -281,7 +302,26 @@ const allowedWranglerDocumentationCases = [
 ] as const;
 
 describe("remote provisioning documentation", () => {
-  it.each(provisioningDocuments)(
+  it.each(releaseSafetyReadmes)(
+    "documents the target-bound private release contract in the %s",
+    (_name, document, ownerOnlyReleaseFilePattern) => {
+      expect(document).toMatch(ownerOnlyReleaseFilePattern);
+      expect(document).toContain("DIEZMOSSV_DEPLOY_CONFIG");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=staging");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=production");
+      expect(document).toContain("DIEZMOSSV_APP_ORIGIN");
+      expect(document).toContain("DIEZMOSSV_DONOR_LOGO_FILE");
+      expect(document).toContain("pdf-lib");
+      expect(document).toContain("/api/health");
+      expect(document).toContain("appEnv");
+      expect(document).toContain("npm run cf:branding:check -- --env staging");
+      expect(document).toContain("npm run cf:branding:check -- --env production");
+      expect(document).toContain("npm run build:private -- --env staging");
+      expect(document).toContain("npm run build:private -- --env production");
+    }
+  );
+
+  it.each(englishProvisioningDocuments)(
     "requires the selected owner-only external config in the %s",
     (_name, document) => {
       expect(document).toContain("DIEZMOSSV_WRANGLER_CONFIG");
