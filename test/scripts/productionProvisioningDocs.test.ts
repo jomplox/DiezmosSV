@@ -27,6 +27,18 @@ const remoteCommandDocuments = [
   ["pre-CDE recovery runbook", operationalDoc("staging-pre-cde-recovery.md")],
   ["operator runbook", operationalDoc("runbook-operador.md")]
 ] as const;
+const releaseSafetyReadmes = [
+  [
+    "English README",
+    readme,
+    /release builds[\s\S]{0,220}target-bound deploy file[\s\S]{0,220}owner-owned `0600` files outside this repository, without symlinks/i
+  ],
+  [
+    "Spanish README",
+    readmeEs,
+    /los builds de release[\s\S]{0,220}archivo de despliegue vinculado al ambiente[\s\S]{0,220}propiedad del usuario actual, con permisos `0600`,[\s\S]{0,100}fuera de este repositorio y sin enlaces simbólicos/i
+  ]
+] as const;
 // Fixed synthetic UUIDs used across the repository's docs, fixtures and examples. They are
 // literals, so they cannot stand in for a live Cloudflare or D1 identifier.
 const placeholderUuids = [
@@ -335,6 +347,43 @@ const allowedWranglerDocumentationCases = [
 ] as const;
 
 describe("remote provisioning documentation", () => {
+  it.each(releaseSafetyReadmes)(
+    "documents the target-bound private release contract in the %s",
+    (_name, document, ownerOnlyReleaseFilePattern) => {
+      expect(document).toMatch(ownerOnlyReleaseFilePattern);
+      expect(document).toContain("DIEZMOSSV_DEPLOY_CONFIG");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=staging");
+      expect(document).toContain("DIEZMOSSV_DEPLOY_TARGET=production");
+      expect(document).toContain("DIEZMOSSV_APP_ORIGIN");
+      expect(document).toContain("DIEZMOSSV_DONOR_LOGO_FILE");
+      expect(document).toContain("pdf-lib");
+      expect(document).toContain("/api/health");
+      expect(document).toContain("appEnv");
+      expect(document).toContain("npm run cf:branding:check -- --env staging");
+      expect(document).toContain("npm run cf:branding:check -- --env production");
+      expect(document).toContain("npm run build:private -- --env staging");
+      expect(document).toContain("npm run build:private -- --env production");
+    }
+  );
+
+  it.each(releaseSafetyReadmes)(
+    "uses the persistent production deploy config in the %s",
+    (_name, document) => {
+      expect(document).toContain(
+        "FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod"
+      );
+    }
+  );
+
+  it.each(releaseSafetyReadmes)(
+    "does not override the persistent production campaign in the %s",
+    (_name, document) => {
+      expect(document).not.toMatch(
+        /^FISCAL_CUTOVER_QUIESCED=1\s+VITE_GIVEBUTTER_CAMPAIGN=[^\n]+\s+npm run cf:deploy:prod\s*$/m
+      );
+    }
+  );
+
   it.each(englishProvisioningDocuments)(
     "requires the selected owner-only external config in the %s",
     (_name, document) => {

@@ -361,6 +361,30 @@ privada seleccionada; deje sin cambios el ejemplo público y sus IDs en cero. La
 producción deben contener cada una exactamente un binding `send_email` llamado `EMAIL`, sin
 `allowed_sender_addresses`.
 
+Los builds de release usan un archivo de despliegue vinculado al ambiente y un raster para donantes
+separados. Mantenga ambos como archivos regulares, propiedad del usuario actual, con permisos `0600`,
+fuera de este repositorio y sin enlaces simbólicos:
+
+```dotenv
+# /ruta/privada/absoluta/staging.env
+DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
+```
+
+Selecciónelo con `export DIEZMOSSV_DEPLOY_CONFIG=/ruta/privada/absoluta/staging.env`. El ambiente
+seleccionado debe coincidir con `--env`; el PNG/JPEG debe ser decodificable por la misma ruta de
+`pdf-lib` que usan los comprobantes. Antes de un despliegue remoto, el preflight de marca valida ese
+raster localmente, exige que `/api/health` reporte `appEnv=staging` y compara exactamente el raster
+remoto anunciado. `cf:deploy:staging` ejecuta automáticamente el preflight y el build privado vinculado
+al ambiente; los mismos pasos pueden ejecutarse por separado sin desplegar:
+
+```bash
+npm run cf:branding:check -- --env staging
+npm run build:private -- --env staging
+```
+
 Cree los recursos remotos mediante un flujo de Cloudflare controlado por el dueño, registre los
 nombres e IDs devueltos únicamente en la configuración privada seleccionada y luego verifique esa
 configuración a través de la envoltura:
@@ -408,7 +432,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
+| `scripts/run-private-build.mjs`, que aplica `scripts/assert-donation-lane-config.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -429,9 +453,14 @@ de humo contra el edge y la lista de aprobación.
 
 Producción es deliberadamente un ambiente de Wrangler aparte y debe usarse solo después de aprobar la
 UAT en staging. Sus valores en vivo también quedan únicamente en la configuración privada seleccionada
-que se describió arriba.
+que se describió arriba. Seleccione un archivo de despliegue distinto y exclusivo del dueño que
+contenga `DIEZMOSSV_DEPLOY_TARGET=production`, el origen de producción, la campaña y un PNG/JPEG
+privado embebible. Un archivo vinculado a staging o un origen cuyo `/api/health` no reporte
+`appEnv=production` se rechaza antes de autenticar la marca o subir archivos.
 
 ```bash
+export DIEZMOSSV_DEPLOY_CONFIG="/ruta/privada/absoluta/production.env"
+
 # Verifique los destinos privados de producción sin imprimir sus valores dentro de este repositorio.
 node scripts/run-private-wrangler.mjs d1 list
 node scripts/run-private-wrangler.mjs queues list
@@ -452,11 +481,34 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production 
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# Migre y despliegue. Ambos se niegan a correr fuera de una ventana detenida y reconocida,
-# y el despliegue además rechaza un slug de campaña de Givebutter que sea un marcador.
+# Verifique la marca primero: es de solo lectura, así que una regresión falla la ventana
+# antes de que la migración haya escrito nada. Ambos pasos remotos se niegan a correr fuera
+# de una ventana detenida y reconocida, y el despliegue valida el slug de campaña del
+# archivo seleccionado y vinculado al ambiente.
+npm run cf:branding:check -- --env production
+npm run build:private -- --env production
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
-FISCAL_CUTOVER_QUIESCED=1 VITE_GIVEBUTTER_CAMPAIGN="<slug de este despliegue>" npm run cf:deploy:prod
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
+
+# Libere la selección, o el siguiente comando de staging fallará su verificación de ambiente.
+unset DIEZMOSSV_DEPLOY_CONFIG
 ```
+
+La verificación explícita de marca y el build privado anterior son preflights útiles para el operador;
+el comando protegido `cf:deploy:prod` repite ambos antes de su despliegue privado con Wrangler.
+
+**Solo para el primer despliegue de producción.** La guarda de marca compara el logo del donante
+del despliegue *en ejecución*, así que no puede pasar antes de que exista un despliegue de
+producción. Arranque una sola vez, en este orden, y use `cf:deploy:prod` para cada publicación
+posterior:
+
+```bash
+node scripts/run-private-wrangler.mjs deploy --env production --keep-vars
+npm run cf:branding:migrate -- --env production --apply
+```
+
+Es un camino documentado de una sola vez, no una vía de escape: nada en las herramientas omite la
+guarda, y solo aplica cuando el Worker de producción nunca ha sido desplegado.
 
 El ejemplo versionado incluye `DONATION_INTAKE_DISABLED = "true"` en `[env.production.vars]`. Déjelo
 tal cual hasta que el carril de producción esté aprobado; luego elimínelo (o póngale cualquier otro
@@ -516,9 +568,11 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `MH_USER_AGENT` | Encabezado User-Agent enviado a MH. |
 | `EMISOR_CONFIG_JSON` | La configuración del emisor de demostración/local vive en el archivo de entorno privado seleccionado; el valor remoto real se define como secreto de Cloudflare. |
 
-**Vars de tiempo de build** - las lee Vite y quedan incrustadas en el bundle del cliente por
-`npm run build` (que ejecuta cada script `cf:deploy:*`). **No** son vars del Worker y **no** son
-secretos — todo lo que se defina aquí viaja al navegador:
+**Vars de tiempo de build** - las lee Vite y quedan incrustadas en el bundle del cliente. Los scripts
+de despliegue ejecutan la envoltura vinculada al ambiente
+`npm run build:private -- --env staging|production`, que obtiene la campaña del archivo de despliegue
+exclusivo del dueño; `npm run build` sin envoltura queda para clones públicos y pruebas. **No** son
+vars del Worker ni secretos: todo lo que se defina aquí viaja al navegador:
 
 | Variable | Propósito |
 |---|---|

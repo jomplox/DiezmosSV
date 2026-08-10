@@ -351,6 +351,28 @@ selected private config; leave the public example and its zero IDs unchanged. Ro
 production must each contain exactly one `send_email` binding named `EMAIL`, without
 `allowed_sender_addresses`.
 
+Release builds use a separate target-bound deploy file and donor raster. Keep both as regular,
+owner-owned `0600` files outside this repository, without symlinks:
+
+```dotenv
+# /absolute/private/path/staging.env
+DIEZMOSSV_DEPLOY_TARGET=staging
+VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
+DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
+DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
+```
+
+Select it with `export DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env`. The selected target must
+match `--env`; the PNG/JPEG must be decodable by the same `pdf-lib` path used for receipts. Before a
+remote deploy, the branding preflight validates that raster locally, requires `/api/health` to report
+`appEnv=staging`, and compares the exact advertised remote raster. `cf:deploy:staging` runs the preflight and
+target-bound private build automatically; the same steps can be run independently without deploying:
+
+```bash
+npm run cf:branding:check -- --env staging
+npm run build:private -- --env staging
+```
+
 Create the remote resources in an owner-controlled Cloudflare workflow, record their returned names
 and IDs only in the selected private config, then verify that config through the wrapper:
 
@@ -397,7 +419,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/assert-donation-lane-config.mjs` | `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` is set to a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
+| `scripts/run-private-build.mjs`, which applies `scripts/assert-donation-lane-config.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -416,9 +438,15 @@ See `docs/cloudflare-staging-uat.md` for the edge smoke test and approval checkl
 <br/>
 
 Production is intentionally a separate Wrangler environment and should be used only after staging
-UAT approval. Its live values also stay only in the selected private config described above.
+UAT approval. Its live values also stay only in the selected private Wrangler config described above.
+Select a distinct owner-only deploy file containing `DIEZMOSSV_DEPLOY_TARGET=production`, the
+production app origin, campaign, and an embeddable private PNG/JPEG. A staging-target file or an
+origin whose `/api/health` does not report `appEnv=production` is rejected before branding authentication or
+upload.
 
 ```bash
+export DIEZMOSSV_DEPLOY_CONFIG="/absolute/private/path/production.env"
+
 # Verify the private production targets without printing their values into this repository.
 node scripts/run-private-wrangler.mjs d1 list
 node scripts/run-private-wrangler.mjs queues list
@@ -439,11 +467,33 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env production 
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env production
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env production
 
-# Migrate and deploy. Both refuse to run outside an acknowledged quiesced window,
-# and the deploy additionally refuses a placeholder Givebutter campaign slug.
+# Assert branding first: it is read-only, so a regression fails the window before the
+# migration has written anything. Both remote steps refuse to run outside an acknowledged
+# quiesced window, and the deploy validates the campaign slug from the selected
+# target-bound deploy file.
+npm run cf:branding:check -- --env production
+npm run build:private -- --env production
 FISCAL_CUTOVER_QUIESCED=1 npm run cf:migrate:prod
-FISCAL_CUTOVER_QUIESCED=1 VITE_GIVEBUTTER_CAMPAIGN="<this deployment's slug>" npm run cf:deploy:prod
+FISCAL_CUTOVER_QUIESCED=1 npm run cf:deploy:prod
+
+# Release the selection, or the next staging command fails its target check.
+unset DIEZMOSSV_DEPLOY_CONFIG
 ```
+
+The explicit branding check and private build above are useful operator preflights; the guarded
+`cf:deploy:prod` command repeats both before its private Wrangler deploy.
+
+**First production deploy only.** The branding gate compares the *running* deployment's donor
+logo, so it cannot pass before a production deployment exists. Bootstrap once, in this order,
+and use `cf:deploy:prod` for every release after that:
+
+```bash
+node scripts/run-private-wrangler.mjs deploy --env production --keep-vars
+npm run cf:branding:migrate -- --env production --apply
+```
+
+This is a documented one-time path, not an escape hatch: nothing in the tooling skips the gate,
+and it applies only when the production Worker has never been deployed.
 
 The committed example ships `DONATION_INTAKE_DISABLED = "true"` in
 `[env.production.vars]`. Leave it in place until the production lane has been
@@ -500,9 +550,10 @@ selected private config and are duplicated per Wrangler environment:
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
 
-**Build-time vars** - read by Vite and baked into the client bundle by `npm run build` (which every
-`cf:deploy:*` script runs). They are **not** Worker vars and are **not** secrets — anything set here
-ships to the browser:
+**Build-time vars** - read by Vite and baked into the client bundle. Deployment scripts run the
+target-bound `npm run build:private -- --env staging|production` wrapper, which supplies the campaign
+from the owner-only deploy file; plain `npm run build` remains for public clones and tests. These are
+**not** Worker vars and are **not** secrets — anything set here ships to the browser:
 
 | Variable | Purpose |
 |---|---|
