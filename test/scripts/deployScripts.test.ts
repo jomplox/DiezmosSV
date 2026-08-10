@@ -30,24 +30,31 @@ describe("remote deploy and migration scripts", () => {
     }
   });
 
-  it("checks the donation lane build configuration before the production build only", () => {
-    expect(packageJson.scripts["cf:deploy:prod"]).toContain(
-      "node scripts/assert-donation-lane-config.mjs && npm run build"
+  it("routes each deployment build through the private configuration wrapper", () => {
+    expect(packageJson.scripts["build:private"]).toBe("node scripts/run-private-build.mjs");
+    expect(packageJson.scripts["cf:deploy:staging"]).toContain(
+      "npm run build:private -- --env staging"
     );
-    expect(packageJson.scripts["cf:deploy:staging"]).not.toContain(
+    expect(packageJson.scripts["cf:deploy:prod"]).toContain(
+      "npm run build:private -- --env production"
+    );
+    expect(packageJson.scripts["cf:deploy:prod"]).not.toContain(
       "assert-donation-lane-config"
     );
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/assert-donation-lane-config.mjs"))
     ).toBe(true);
+    expect(
+      existsSync(resolve(import.meta.dirname, "../../scripts/run-private-build.mjs"))
+    ).toBe(true);
   });
 
   it("blocks deployment unless the private runtime donor logo matches", () => {
     expect(packageJson.scripts["cf:deploy:staging"]).toBe(
-      "node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars"
+      "node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build:private -- --env staging && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars"
     );
     expect(packageJson.scripts["cf:deploy:prod"]).toBe(
-      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env production && node scripts/assert-donation-lane-config.mjs && npm run build && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars"
+      "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env production && npm run build:private -- --env production && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars"
     );
     expect(packageJson.scripts["cf:branding:check"]).toBe(
       "node scripts/assert-runtime-branding-logo.mjs"

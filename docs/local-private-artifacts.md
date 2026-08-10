@@ -43,6 +43,17 @@ DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 
 `DIEZMOSSV_DEPLOY_CONFIG=/absolute/private/path/staging.env` may select another deploy file. The override must be absolute. The deploy file and donor logo must be regular, owner-owned `0600` files outside the repository, never symlinks. The donor logo must be a PNG (`.png`) or JPEG (`.jpg`/`.jpeg`) whose extension agrees with its byte signature; SVG is not PDF-embeddable and blocks release.
 
+## Private release builds
+
+Deployment scripts call the owner-only build wrapper automatically. To build a release artifact without deploying, select the target explicitly:
+
+```sh
+npm run build:private -- --env staging
+npm run build:private -- --env production
+```
+
+The wrapper reads the selected private deploy file, rejects a blank or placeholder campaign, and passes only `VITE_GIVEBUTTER_CAMPAIGN` from that file to the `npm run build` child process. It does not expose the configured origin, donor logo, or operator credentials to the build child. Plain `npm run build` remains available for public clones and tests.
+
 Logo migration uses an external operator env file. Staging reuses `env/staging-smoke.env`; production uses the distinct `env/production-operator.env`. Override either with the absolute `DIEZMOSSV_OPERATOR_ENV_FILE`. The file accepts target-prefixed pairs (`STAGING_EMAIL`/`STAGING_PASSWORD` or `PRODUCTION_EMAIL`/`PRODUCTION_PASSWORD`) or the generic `DIEZMOSSV_OPERATOR_EMAIL`/`DIEZMOSSV_OPERATOR_PASSWORD` pair and follows the same external, regular, owner-owned `0600`, no-symlink rules.
 
 Run the read-only preflight before a release:
