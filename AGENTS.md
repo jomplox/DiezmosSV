@@ -88,6 +88,13 @@ asserted absent.
   oversize value passes validation, takes the donor's gift, and only then fails — stranding a
   completed entrega without a comprobante.
 
+## Documentation
+
+- **`README.md` is the canonical English document and `README.es.md` is its Spanish mirror.**
+  A change to one must be mirrored in the other in the same PR. In
+  `test/scripts/productionProvisioningDocs.test.ts` the private-wrapper and resource-identifier
+  assertions cover both files, while the wording assertions cover only the English one.
+
 ## Testing
 
 - `npm test` — unit and integration (vitest).

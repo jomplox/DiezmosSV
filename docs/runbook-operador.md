@@ -5,7 +5,7 @@ Esta guía es para la persona que administra el panel **ExamplePerson1** en el d
 acciones descritas aquí se hacen desde el panel web; los nombres de botones y secciones
 aparecen tal como los verá en pantalla.
 
-> Este documento acompaña al [README](../README.md), que está dirigido a quien instala y
+> Este documento acompaña al [README](../README.es.md), que está dirigido a quien instala y
 > despliega la aplicación.
 
 ---
