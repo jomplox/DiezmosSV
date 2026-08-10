@@ -14,7 +14,7 @@
     "cf:whoami": "node scripts/run-private-wrangler.mjs whoami",
     "cf:migrate:staging": "node scripts/d1-migration-preflight.mjs --binding DB --env staging && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env staging",
     "cf:deploy:staging": "node scripts/assert-runtime-branding-logo.mjs --env staging && npm run build:private -- --env staging && node scripts/run-private-wrangler.mjs deploy --env staging --keep-vars",
-    "cf:cutover:staging": "node scripts/assert-fiscal-cutover.mjs && npm run cf:migrate:staging && npm run cf:deploy:staging",
+    "cf:cutover:staging": "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env staging && npm run cf:migrate:staging && npm run cf:deploy:staging",
     "cf:tail:staging": "node scripts/run-private-wrangler.mjs tail --env staging",
     "cf:migrate:prod": "node scripts/assert-fiscal-cutover.mjs && node scripts/d1-migration-preflight.mjs --binding DB --env production && node scripts/d1-schema-compatibility.mjs migrate --binding DB --env production",
     "cf:deploy:prod": "node scripts/assert-fiscal-cutover.mjs && node scripts/assert-runtime-branding-logo.mjs --env production && npm run build:private -- --env production && node scripts/run-private-wrangler.mjs deploy --env production --keep-vars",
