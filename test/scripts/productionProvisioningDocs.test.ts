@@ -1,6 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+
+const repoRoot = resolve(import.meta.dirname, "../..");
 
 const readme = readFileSync(resolve(import.meta.dirname, "../../README.md"), "utf8");
 const readmeEs = readFileSync(resolve(import.meta.dirname, "../../README.es.md"), "utf8");
@@ -12,13 +15,10 @@ const englishProvisioningDocuments = [
   ["README", readme],
   ["staging UAT runbook", stagingRunbook]
 ] as const;
-// The private-wrapper assertion and the live-identifier pattern do not read prose, so they hold
-// for every document that shows an operator a remote command, in any language. The two
-// phrase-based negatives that follow them still only match English.
-//
-// Enrolment is per document, so a NEW doc is unguarded until it is added here. Session records
-// under docs/superpowers/ are deliberately excluded: they transcribe commands as they were run
-// at the time, so they are history rather than instructions.
+// These documents must actively teach the wrapper, and the live-identifier pattern does not read
+// prose, so it holds for all of them in any language. The two phrase-based negatives still only
+// match English. The separate rule that no document may show a direct remote command is swept
+// across every tracked Markdown file below, so it needs no enrolment.
 const remoteCommandDocuments = [
   ...englishProvisioningDocuments,
   ["Spanish README", readmeEs],
@@ -33,6 +33,15 @@ const placeholderUuids = [
   "00000000-0000-0000-0000-000000000000",
   "11111111-1111-4111-8111-111111111111"
 ] as const;
+// Session records under docs/superpowers/ transcribe commands as they were run at the time, so
+// they are history rather than instructions and are the one thing the sweep does not police.
+const sweptDocumentExclusion = /^docs\/superpowers\//;
+const trackedMarkdown = spawnSync("git", ["ls-files", "-z", "--", "*.md"], {
+  cwd: repoRoot,
+  encoding: "utf8"
+})
+  .stdout.split("\0")
+  .filter((path) => path.length > 0 && !sweptDocumentExclusion.test(path));
 const liveUuidPattern = new RegExp(
   `\\b(?!(?:${placeholderUuids.join("|")})\\b)` +
     "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b",
@@ -338,10 +347,29 @@ describe("remote provisioning documentation", () => {
   );
 
   it.each(remoteCommandDocuments)(
-    "routes every documented remote Wrangler command through the private wrapper in the %s",
+    "shows an operator the private wrapper in the %s",
     (_name, document) => {
-      expect(directRemoteWranglerCommandRefs(document)).toEqual([]);
       expect(document).toContain("scripts/run-private-wrangler.mjs");
+    }
+  );
+
+  // A hand-kept list would leave a new document unguarded until someone remembered to add it,
+  // so this rule is swept instead of enrolled.
+  it("sweeps a plausible set of tracked Markdown files", () => {
+    // Guards against git returning nothing and the sweep passing vacuously.
+    expect(trackedMarkdown.length).toBeGreaterThan(10);
+    expect(trackedMarkdown).toContain("README.md");
+    expect(trackedMarkdown).toContain("docs/runbook-operador.md");
+    expect(
+      trackedMarkdown.filter((path) => sweptDocumentExclusion.test(path))
+    ).toEqual([]);
+  });
+
+  it.each(trackedMarkdown)(
+    "routes every documented remote Wrangler command through the private wrapper in %s",
+    (path) => {
+      const document = readFileSync(resolve(repoRoot, path), "utf8");
+      expect(directRemoteWranglerCommandRefs(document)).toEqual([]);
     }
   );
 
