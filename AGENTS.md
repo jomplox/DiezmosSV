@@ -92,8 +92,9 @@ asserted absent.
 
 - **`README.md` is the canonical English document and `README.es.md` is its Spanish mirror.**
   A change to one must be mirrored in the other in the same PR. In
-  `test/scripts/productionProvisioningDocs.test.ts` the private-wrapper and resource-identifier
-  assertions cover both files, while the wording assertions cover only the English one.
+  `test/scripts/productionProvisioningDocs.test.ts` the private-wrapper assertion and the
+  live-identifier pattern cover both files; every phrase-based assertion reads English, so it
+  catches a regression in `README.md` only.
 
 ## Testing
 
