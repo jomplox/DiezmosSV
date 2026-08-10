@@ -81,6 +81,24 @@ async function loadCompatibility() {
 }
 
 describe("legacy Wompi issuance migration compatibility", () => {
+  it("repairs document correlation for databases that applied the original 0009", async () => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const plan = buildCompatibilityPlan({
+      appliedMigrations: ["0009_donation_intents.sql"],
+      tableColumns: {
+        donation_intents: [{ name: "id", type: "TEXT", notnull: 0 }]
+      },
+      tableIndexes: {},
+      schemaObjects: {},
+      tableSql: {},
+      duplicateCounts: {}
+    });
+
+    expect(plan.statements).toContain(
+      "ALTER TABLE donation_intents ADD COLUMN document_id TEXT;"
+    );
+  });
+
   it("allowlists all 0023 columns, unique indexes, and the reservation trigger", async () => {
     const { REQUIRED_SCHEMA_MANIFEST } = await loadCompatibility();
     expect(
