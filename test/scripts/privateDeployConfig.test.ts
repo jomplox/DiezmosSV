@@ -74,6 +74,97 @@ describe("private deployment configuration", () => {
     ).toBe("http://127.0.0.1:8787");
   });
 
+  it("accepts a stricter read-only config and donor logo", () => {
+    const fixture = deploymentFixture();
+    chmodSync(fixture.logoPath, 0o400);
+    chmodSync(fixture.configPath, 0o400);
+
+    expect(
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }).donorLogo.contentType
+    ).toBe("image/png");
+  });
+
+  it.each([
+    "DIEZMOSSV_DEPLOY_TARGET",
+    "VITE_GIVEBUTTER_CAMPAIGN",
+    "DIEZMOSSV_APP_ORIGIN",
+    "DIEZMOSSV_DONOR_LOGO_FILE"
+  ])("names %s when that required setting is absent", (key) => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace(new RegExp(`^${key}=.*\n`, "m"), ""),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(new RegExp(`missing a required setting: ${key}`));
+    expectSanitizedFailure(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      }), fixture
+    );
+  });
+
+  it("keeps the placeholder campaign diagnostic distinct from a blank one", () => {
+    const fixture = deploymentFixture();
+    writeFileSync(
+      fixture.configPath,
+      fixture.configContents.replace("campaign-fixture", "example-campaign"),
+      { mode: 0o600 }
+    );
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(/still the "example-campaign" placeholder/);
+  });
+
+  it("rejects a missing config file and an empty one without disclosure", () => {
+    const fixture = deploymentFixture();
+    const absentPath = join(fixture.privateRoot, "absent.env");
+    const emptyPath = join(fixture.privateRoot, "empty.env");
+    writeFileSync(emptyPath, "", { mode: 0o600 });
+
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: absentPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(/missing or inaccessible/);
+    expect(() =>
+      loadPrivateDeployConfig({
+        target: "staging",
+        env: { DIEZMOSSV_DEPLOY_CONFIG: emptyPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toThrow(/missing a required setting: DIEZMOSSV_DEPLOY_TARGET/);
+    for (const path of [absentPath, emptyPath]) {
+      expectSanitizedFailure(() =>
+        loadPrivateDeployConfig({
+          target: "staging",
+          env: { DIEZMOSSV_DEPLOY_CONFIG: path },
+          repositoryRoot: fixture.repositoryRoot
+        }), fixture
+      );
+    }
+  });
+
   it("rejects a deploy file selected for the other target without disclosure", () => {
     const fixture = deploymentFixture({ target: "staging" });
 
@@ -100,10 +191,6 @@ describe("private deployment configuration", () => {
     }],
     ["config mode 0644", (fixture: Fixture) => {
       chmodSync(fixture.configPath, 0o644);
-      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
-    }],
-    ["config mode 0400", (fixture: Fixture) => {
-      chmodSync(fixture.configPath, 0o400);
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
     ["config mode 0700", (fixture: Fixture) => {
@@ -167,10 +254,6 @@ describe("private deployment configuration", () => {
     }],
     ["logo mode 0644", (fixture: Fixture) => {
       chmodSync(fixture.logoPath, 0o644);
-      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
-    }],
-    ["logo mode 0400", (fixture: Fixture) => {
-      chmodSync(fixture.logoPath, 0o400);
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
     ["logo mode 0700", (fixture: Fixture) => {
@@ -240,8 +323,27 @@ describe("private operator credentials", () => {
     ).toEqual({ email: "operator@example.invalid", password: "password-fixture" });
   });
 
-  it.each([["0400", 0o400], ["0700", 0o700]])(
-    "rejects operator env mode %s instead of exact 0600",
+  it("accepts a stricter read-only operator env", () => {
+    const fixture = deploymentFixture();
+    const credentialsPath = join(fixture.privateRoot, "operator.env");
+    writeFileSync(
+      credentialsPath,
+      "STAGING_EMAIL=operator@example.invalid\nSTAGING_PASSWORD=password-fixture\n",
+      { mode: 0o600 }
+    );
+    chmodSync(credentialsPath, 0o400);
+
+    expect(
+      loadOperatorCredentials({
+        target: "staging",
+        env: { DIEZMOSSV_OPERATOR_ENV_FILE: credentialsPath },
+        repositoryRoot: fixture.repositoryRoot
+      })
+    ).toEqual({ email: "operator@example.invalid", password: "password-fixture" });
+  });
+
+  it.each([["0644", 0o644], ["0700", 0o700]])(
+    "rejects operator env mode %s",
     (_modeLabel, mode) => {
       const fixture = deploymentFixture();
       const credentialsPath = join(fixture.privateRoot, "operator.env");

@@ -44,8 +44,12 @@ export function loadPrivateDeployConfig({
     assertDonationLaneConfigured({
       environment: { VITE_GIVEBUTTER_CAMPAIGN: campaign }
     });
-  } catch {
-    throw sanitizedError("The private deploy campaign is invalid");
+  } catch (error) {
+    // The lane assertion names only the setting and the public placeholder, never the
+    // configured value, so its more specific diagnostic survives the boundary.
+    throw sanitizedError(
+      error instanceof Error ? error.message : "The private deploy campaign is invalid"
+    );
   }
 
   const originValue = requiredValue(parsed, "DIEZMOSSV_APP_ORIGIN", "deploy config");
@@ -162,8 +166,13 @@ function assertPrivateFile(path, repositoryRoot, label) {
   if (isInside(resolvedRepository, resolvedPath)) {
     throw sanitizedError(`The private ${label} must stay outside the repository`);
   }
-  if ((stat.mode & 0o777) !== 0o600) {
-    throw sanitizedError(`The private ${label} must have owner-only permissions (0600)`);
+  // Owner-only data: no group or other bits, and never executable. Both 0600 and the
+  // stricter read-only 0400 qualify.
+  if ((stat.mode & 0o177) !== 0) {
+    throw sanitizedError(`The private ${label} must have owner-only permissions (0600 or 0400)`);
+  }
+  if ((stat.mode & 0o400) === 0) {
+    throw sanitizedError(`The private ${label} must be readable by its owner`);
   }
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
     throw sanitizedError(`The private ${label} must be owned by the current user`);
@@ -171,10 +180,12 @@ function assertPrivateFile(path, repositoryRoot, label) {
   return resolvedPath;
 }
 
+// The key names are already public — the README documents every one of them — so naming
+// the missing key is safe and makes the failure actionable. The value never appears.
 function requiredValue(parsed, key, label) {
   const value = parsed[key]?.trim();
   if (!value) {
-    throw sanitizedError(`The private ${label} is missing a required setting`);
+    throw sanitizedError(`The private ${label} is missing a required setting: ${key}`);
   }
   return value;
 }
