@@ -80,8 +80,16 @@ describe("private deployment configuration", () => {
       symlinkSync(fixture.configPath, path);
       return { DIEZMOSSV_DEPLOY_CONFIG: path };
     }],
-    ["config mode", (fixture: Fixture) => {
+    ["config mode 0644", (fixture: Fixture) => {
       chmodSync(fixture.configPath, 0o644);
+      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
+    }],
+    ["config mode 0400", (fixture: Fixture) => {
+      chmodSync(fixture.configPath, 0o400);
+      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
+    }],
+    ["config mode 0700", (fixture: Fixture) => {
+      chmodSync(fixture.configPath, 0o700);
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
     ["missing key", (fixture: Fixture) => {
@@ -131,8 +139,16 @@ describe("private deployment configuration", () => {
       );
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
-    ["logo mode", (fixture: Fixture) => {
+    ["logo mode 0644", (fixture: Fixture) => {
       chmodSync(fixture.logoPath, 0o644);
+      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
+    }],
+    ["logo mode 0400", (fixture: Fixture) => {
+      chmodSync(fixture.logoPath, 0o400);
+      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
+    }],
+    ["logo mode 0700", (fixture: Fixture) => {
+      chmodSync(fixture.logoPath, 0o700);
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
     }],
     ["SVG bytes", (fixture: Fixture) => {
@@ -197,6 +213,28 @@ describe("private operator credentials", () => {
       })
     ).toEqual({ email: "operator@example.invalid", password: "password-fixture" });
   });
+
+  it.each([["0400", 0o400], ["0700", 0o700]])(
+    "rejects operator env mode %s instead of exact 0600",
+    (_modeLabel, mode) => {
+      const fixture = deploymentFixture();
+      const credentialsPath = join(fixture.privateRoot, "operator.env");
+      writeFileSync(
+        credentialsPath,
+        "STAGING_EMAIL=operator@example.invalid\nSTAGING_PASSWORD=password-fixture\n",
+        { mode: 0o600 }
+      );
+      chmodSync(credentialsPath, mode);
+
+      expectSanitizedFailure(() =>
+        loadOperatorCredentials({
+          target: "staging",
+          env: { DIEZMOSSV_OPERATOR_ENV_FILE: credentialsPath },
+          repositoryRoot: fixture.repositoryRoot
+        }), fixture
+      );
+    }
+  );
 
   it("rejects relative, repository-contained, symlinked, permissive, and incomplete files without disclosure", () => {
     const fixture = deploymentFixture();

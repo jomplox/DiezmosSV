@@ -157,7 +157,7 @@ function assertPrivateFile(path, repositoryRoot, label) {
   if (isInside(resolvedRepository, resolvedPath)) {
     throw sanitizedError(`The private ${label} must stay outside the repository`);
   }
-  if ((stat.mode & 0o077) !== 0) {
+  if ((stat.mode & 0o777) !== 0o600) {
     throw sanitizedError(`The private ${label} must have owner-only permissions (0600)`);
   }
   if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {

@@ -519,6 +519,35 @@ describe("renderDtePdf branding logo", () => {
     expect(Buffer.from(pdf).toString("latin1")).not.toContain("/Subtype /Image");
     expect(readFileSync(txtPath, "utf8")).toContain("COMPROBANTE DE DONACIÓN");
   });
+
+  it("emits exactly one production event when a signature-valid stored raster fails embedding", async () => {
+    const archive = new FakeArchiveBucket();
+    await archive.put("branding/donor-logo", corruptJpegBytes(), {
+      httpMetadata: { contentType: "image/jpeg" }
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const logo = await loadPdfBrandingLogo({
+        APP_ENV: "production",
+        ARCHIVE: archive as unknown as R2Bucket
+      });
+      expect(logo).toMatchObject({ format: "jpeg" });
+      expect(consoleError).not.toHaveBeenCalled();
+
+      const pdf = await renderDtePdf(testDocument(), logo);
+
+      expect(Buffer.from(pdf).toString("latin1")).not.toContain("/Subtype /Image");
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith({
+        event: "operational_alert",
+        app_env: "production",
+        alert_kind: "branding_logo_fallback",
+        entity_type: "credentials"
+      });
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });
 
 function renderPpm(pdf: Uint8Array, prefix: string): { width: number; height: number; pixels: Buffer } {

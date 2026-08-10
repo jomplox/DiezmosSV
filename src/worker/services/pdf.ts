@@ -23,10 +23,11 @@ const LOGO_HEIGHT = 42;
 export interface PdfBrandingLogo {
   bytes: Uint8Array;
   format: "png" | "jpeg";
+  appEnv?: string;
 }
 
-// Only the ARCHIVE binding is needed; kept structural so callers (and tests) can pass
-// a bare object, mirroring branding.ts's BrandingOriginEnv.
+// Only the ARCHIVE binding and optional APP_ENV token are needed; kept structural so
+// callers (and tests) can pass a bare object, mirroring branding.ts's BrandingOriginEnv.
 export interface BrandingLogoArchiveEnv {
   ARCHIVE?: R2Bucket;
   APP_ENV?: string;
@@ -48,7 +49,7 @@ export async function loadPdfBrandingLogo(env: BrandingLogoArchiveEnv): Promise<
     if (object) {
       const bytes = new Uint8Array(await object.arrayBuffer());
       const format = embeddableLogoFormat(bytes);
-      logo = format ? { bytes, format } : null;
+      logo = format ? { bytes, format, appEnv: env.APP_ENV } : null;
     }
   } catch {
     logo = null;
@@ -125,6 +126,9 @@ async function embedBrandingLogo(pdf: PDFDocument, logo: PdfBrandingLogo | null 
   } catch {
     // Truncated, corrupt, or a variant pdf-lib rejects (e.g. interlaced PNG): the
     // document still has to be issued, so fall through to the built-in vector.
+    if (logo.appEnv === "production") {
+      logOperationalAlert({ APP_ENV: logo.appEnv } as import("../types").Env, "branding_logo_fallback", "credentials");
+    }
     return null;
   }
 }
