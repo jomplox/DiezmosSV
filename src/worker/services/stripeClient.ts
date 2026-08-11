@@ -64,14 +64,20 @@ export function createStripeGateway(configuration: StripeRuntimeConfiguration): 
     } : {})
   });
   return configuration.mock
-    ? new MockStripeGateway(stripe, configuration.webhookSecret)
-    : new ApiStripeGateway(stripe, configuration.webhookSecret);
+    ? new MockStripeGateway(stripe, webhookSecrets(configuration))
+    : new ApiStripeGateway(stripe, webhookSecrets(configuration));
+}
+
+function webhookSecrets(configuration: StripeRuntimeConfiguration): string[] {
+  return configuration.webhookSecretNext
+    ? [configuration.webhookSecret, configuration.webhookSecretNext]
+    : [configuration.webhookSecret];
 }
 
 class ApiStripeGateway implements StripeGateway {
   constructor(
     private readonly stripe: Stripe,
-    private readonly webhookSecret: string
+    private readonly webhookSecrets: string[]
   ) {}
 
   async createCheckoutSession(
@@ -105,18 +111,22 @@ class ApiStripeGateway implements StripeGateway {
     signature: string,
     receivedAtSeconds?: number
   ): Promise<Stripe.Event> {
-    try {
-      return await this.stripe.webhooks.constructEventAsync(
-        rawBody,
-        signature,
-        this.webhookSecret,
-        Stripe.webhooks.DEFAULT_TOLERANCE,
-        Stripe.createSubtleCryptoProvider(),
-        receivedAtSeconds
-      );
-    } catch {
-      throw new StripeWebhookSignatureError();
+    for (const webhookSecret of this.webhookSecrets) {
+      try {
+        return await this.stripe.webhooks.constructEventAsync(
+          rawBody,
+          signature,
+          webhookSecret,
+          Stripe.webhooks.DEFAULT_TOLERANCE,
+          Stripe.createSubtleCryptoProvider(),
+          receivedAtSeconds
+        );
+      } catch {
+        // The caller receives one generic rejection after all configured rotation
+        // candidates fail. Never log or expose which secret matched.
+      }
     }
+    throw new StripeWebhookSignatureError();
   }
 }
 

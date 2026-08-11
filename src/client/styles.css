@@ -1741,6 +1741,34 @@ select,
   min-width: 0;
 }
 
+.stripe-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.stripe-status-grid > div,
+.stripe-webhook-health {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.stripe-status-grid span,
+.stripe-webhook-health small {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
+.stripe-rotation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .panel-head {
   display: flex;
   align-items: flex-start;

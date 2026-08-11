@@ -158,6 +158,7 @@ describe("Stripe Checkout donation contract", () => {
       apiKey: "rk_test_fixture",
       publishableKey: "pk_test_fixture",
       webhookSecret: "whsec_fixture",
+      webhookSecretNext: null,
       paymentMethodConfigurationId: "pmc_fixture",
       billingPortalConfigurationId: "bpc_fixture",
       legalName: "Example Nonprofit",
@@ -166,6 +167,15 @@ describe("Stripe Checkout donation contract", () => {
       livemode: false,
       mock: false
     });
+
+    expect(resolveStripeConfiguration({
+      ...valid,
+      STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_fixture"
+    }).webhookSecretNext).toBe("whsec_next_fixture");
+    expect(() => resolveStripeConfiguration({
+      ...valid,
+      STRIPE_WEBHOOK_SECRET_NEXT: "invalid"
+    })).toThrow(StripeConfigurationError);
 
     for (const override of [
       { STRIPE_RESTRICTED_KEY: "sk_test_not_restricted" },
@@ -222,6 +232,19 @@ describe("Stripe Checkout donation contract", () => {
       expect(() => resolveStripeConfiguration({ ...valid, ...override }))
         .toThrow(StripeConfigurationError);
     }
+  });
+
+  it("carries a syntactically valid staged webhook secret into mock verification overlap", () => {
+    expect(resolveStripeConfiguration({
+      APP_ENV: "local",
+      STRIPE_MOCK_MODE: "1",
+      STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_fixture"
+    }).webhookSecretNext).toBe("whsec_next_fixture");
+    expect(() => resolveStripeConfiguration({
+      APP_ENV: "local",
+      STRIPE_MOCK_MODE: "1",
+      STRIPE_WEBHOOK_SECRET_NEXT: "invalid"
+    })).toThrow(StripeConfigurationError);
   });
 
   it("permits deterministic mock mode only outside production", () => {

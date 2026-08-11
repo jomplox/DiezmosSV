@@ -90,6 +90,40 @@ describe("Stripe SDK boundary", () => {
     )).rejects.toBeInstanceOf(StripeWebhookSignatureError);
   });
 
+  it("accepts active and staged webhook signatures without revealing which secret matched", async () => {
+    const payload = JSON.stringify({
+      id: "evt_rotation_fixture",
+      object: "event",
+      api_version: STRIPE_API_VERSION,
+      created: 1786363200,
+      data: { object: { id: "cs_test_fixture", object: "checkout.session" } },
+      livemode: false,
+      pending_webhooks: 1,
+      request: null,
+      type: "checkout.session.completed"
+    });
+    const active = "whsec_active_fixture";
+    const next = "whsec_next_fixture";
+    const configuration = {
+      ...resolveStripeConfiguration({ APP_ENV: "local", STRIPE_MOCK_MODE: "1" }),
+      webhookSecret: active,
+      webhookSecretNext: next
+    };
+    const gateway = createStripeGateway(configuration);
+    const activeSignature = Stripe.webhooks.generateTestHeaderString({ payload, secret: active, timestamp: 1786363200 });
+    const nextSignature = Stripe.webhooks.generateTestHeaderString({ payload, secret: next, timestamp: 1786363200 });
+
+    await expect(gateway.constructWebhookEvent(payload, activeSignature, 1786363200))
+      .resolves.toMatchObject({ id: "evt_rotation_fixture" });
+    await expect(gateway.constructWebhookEvent(payload, nextSignature, 1786363200))
+      .resolves.toMatchObject({ id: "evt_rotation_fixture" });
+    const rejection = await gateway.constructWebhookEvent(payload, "t=1,v1=forged", 1786363200)
+      .catch((error: unknown) => error);
+    expect(rejection).toBeInstanceOf(StripeWebhookSignatureError);
+    expect(String(rejection)).not.toContain("active");
+    expect(String(rejection)).not.toContain("next");
+  });
+
   it("routes Stripe API calls through the configured local-only bridge", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       id: "cs_test_proxy_fixture",

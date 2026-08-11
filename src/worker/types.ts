@@ -24,6 +24,7 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     STRIPE_API_PROXY_URL?: string;
     STRIPE_PUBLISHABLE_KEY?: string;
     STRIPE_WEBHOOK_SECRET?: string;
+    STRIPE_WEBHOOK_SECRET_NEXT?: string;
     STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?: string;
     STRIPE_BILLING_PORTAL_CONFIGURATION_ID?: string;
     STRIPE_US_LEGAL_NAME?: string;

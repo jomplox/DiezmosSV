@@ -332,6 +332,35 @@ interface StripeWebhookEventRow {
   attempt_count: number;
 }
 
+export interface StripeWebhookHealthRecord {
+  receivedAt: string;
+  eventType: string;
+  status: "PROCESSING" | "PROCESSED" | "FAILED";
+  livemode: boolean;
+}
+
+export async function getLatestStripeWebhookHealth(
+  db: D1Database
+): Promise<StripeWebhookHealthRecord | null> {
+  const row = await db.prepare(
+    `SELECT received_at, event_type, status, livemode
+       FROM stripe_webhook_events
+      ORDER BY received_at DESC, id DESC
+      LIMIT 1`
+  ).first<{
+    received_at: string;
+    event_type: string;
+    status: "PROCESSING" | "PROCESSED" | "FAILED";
+    livemode: 0 | 1;
+  }>();
+  return row ? {
+    receivedAt: row.received_at,
+    eventType: row.event_type,
+    status: row.status,
+    livemode: row.livemode === 1
+  } : null;
+}
+
 export async function claimStripeWebhookEvent(
   db: D1Database,
   input: {

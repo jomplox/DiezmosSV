@@ -1,9 +1,69 @@
 import { describe, expect, it, vi } from "vitest";
-import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, credentialStatus } from "../../src/worker/services/credentials";
+import {
+  StripeCredentialValidationError,
+  bootstrapCloudflareWriterToken,
+  buildCredentialSecretPatch,
+  buildStripeCredentialSecretPatch,
+  buildStripeWebhookStagePatch,
+  credentialStatus
+} from "../../src/worker/services/credentials";
 import type { CredentialUpdateInput } from "../../src/worker/services/credentials";
 import type { Env } from "../../src/worker/types";
 
 describe("credential status", () => {
+  it("reports every Stripe runtime value without serializing protected values", () => {
+    const status = credentialStatus(env({
+      APP_ENV: "staging",
+      STRIPE_RESTRICTED_KEY: "rk_test_private",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_private",
+      STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+      STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_private",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_private",
+      STRIPE_US_LEGAL_NAME: "Private Legal Name",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
+    }));
+
+    expect(status.groups.stripe.ready).toBe(true);
+    expect(status.groups.stripe.items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "STRIPE_RESTRICTED_KEY", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_PUBLISHABLE_KEY", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_WEBHOOK_SECRET", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_WEBHOOK_SECRET_NEXT", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_LEGAL_NAME", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_EIN", configured: true, protected: true }),
+      expect.objectContaining({
+        name: "STRIPE_US_TIME_ZONE",
+        configured: true,
+        displayValue: "America/New_York"
+      })
+    ]));
+    expect(status.stripeOperational).toEqual({
+      appEnv: "staging",
+      mode: "Pruebas",
+      mockMode: false,
+      localProxyConfigured: true
+    });
+    const serialized = JSON.stringify(status);
+    for (const protectedValue of [
+      "rk_test_private", "pk_test_private", "whsec_active_private", "whsec_next_private",
+      "pmc_private", "bpc_private", "Private Legal Name", "12-3456789"
+    ]) {
+      expect(serialized).not.toContain(protectedValue);
+    }
+  });
+
+  it("labels the exact local Stripe mock flag as simulated readiness", () => {
+    const status = credentialStatus(env({ APP_ENV: "local", STRIPE_MOCK_MODE: "1" }));
+
+    expect(status.groups.stripe.ready).toBe(true);
+    expect(status.stripeOperational).toMatchObject({ mode: "Simulado", mockMode: true });
+  });
+
   it("reports readiness, exposes allowlisted operational values, and keeps deployment credentials write-only", () => {
     const status = credentialStatus(env({
       APP_ENV: "staging",
@@ -146,6 +206,79 @@ describe("credential status", () => {
 });
 
 describe("credential secret patch", () => {
+  it("maps only nonblank Stripe replacements and never permits direct active-webhook replacement", () => {
+    const patch = buildStripeCredentialSecretPatch({
+      restrictedKey: " rk_test_new ",
+      publishableKey: "pk_test_new",
+      paymentMethodConfigurationId: "pmc_new",
+      billingPortalConfigurationId: "bpc_new",
+      legalName: " Example Nonprofit ",
+      ein: "12-3456789",
+      timeZone: "America/Chicago",
+      activeWebhookSecret: "whsec_must_be_ignored"
+    } as never, env({ APP_ENV: "staging" }));
+
+    expect(patch).toEqual({
+      STRIPE_RESTRICTED_KEY: { type: "secret_text", name: "STRIPE_RESTRICTED_KEY", text: "rk_test_new" },
+      STRIPE_PUBLISHABLE_KEY: { type: "secret_text", name: "STRIPE_PUBLISHABLE_KEY", text: "pk_test_new" },
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: { type: "secret_text", name: "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID", text: "pmc_new" },
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: { type: "secret_text", name: "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", text: "bpc_new" },
+      STRIPE_US_LEGAL_NAME: { type: "secret_text", name: "STRIPE_US_LEGAL_NAME", text: "Example Nonprofit" },
+      STRIPE_US_EIN: { type: "secret_text", name: "STRIPE_US_EIN", text: "12-3456789" },
+      STRIPE_US_TIME_ZONE: { type: "secret_text", name: "STRIPE_US_TIME_ZONE", text: "America/Chicago" }
+    });
+    expect(patch).not.toHaveProperty("STRIPE_WEBHOOK_SECRET");
+    expect(patch).not.toHaveProperty("STRIPE_WEBHOOK_SECRET_NEXT");
+  });
+
+  it("validates Stripe prefixes, key mode, legal identity, and timezone against submitted and existing peers", () => {
+    const staging = env({ APP_ENV: "staging", STRIPE_RESTRICTED_KEY: "rk_test_existing" });
+    expect(buildStripeCredentialSecretPatch({ publishableKey: "pk_test_new" }, staging))
+      .toEqual({ STRIPE_PUBLISHABLE_KEY: expect.objectContaining({ text: "pk_test_new" }) });
+
+    for (const input of [
+      { restrictedKey: "sk_test_broad" },
+      { restrictedKey: "rk_live_wrong" },
+      { publishableKey: "pk_live_wrong" },
+      { paymentMethodConfigurationId: "acct_not_pmc" },
+      { billingPortalConfigurationId: "pmc_not_bpc" },
+      { legalName: "A".repeat(201) },
+      { ein: "00-0000000" },
+      { timeZone: "Mars/Olympus_Mons" }
+    ]) {
+      expect(() => buildStripeCredentialSecretPatch(input, staging)).toThrow(StripeCredentialValidationError);
+    }
+    expect(() => buildStripeCredentialSecretPatch(
+      { restrictedKey: "rk_test_new" },
+      env({ APP_ENV: "staging", STRIPE_PUBLISHABLE_KEY: "pk_live_existing" })
+    )).toThrow(StripeCredentialValidationError);
+    expect(() => buildStripeCredentialSecretPatch(
+      { restrictedKey: "rk_test_new", publishableKey: "pk_live_new" },
+      staging
+    )).toThrow(StripeCredentialValidationError);
+    expect(() => buildStripeCredentialSecretPatch(
+      { restrictedKey: "rk_test_new" },
+      env({ APP_ENV: "preview" })
+    )).toThrow(StripeCredentialValidationError);
+    expect(buildStripeCredentialSecretPatch(
+      { timeZone: "America/New_York" },
+      env({ APP_ENV: "staging", STRIPE_PUBLISHABLE_KEY: "pk_live_stale" })
+    )).toEqual({
+      STRIPE_US_TIME_ZONE: expect.objectContaining({ text: "America/New_York" })
+    });
+  });
+
+  it("stages only a syntactically valid next webhook secret", () => {
+    expect(buildStripeWebhookStagePatch(" whsec_next ")).toEqual({
+      STRIPE_WEBHOOK_SECRET_NEXT: {
+        type: "secret_text",
+        name: "STRIPE_WEBHOOK_SECRET_NEXT",
+        text: "whsec_next"
+      }
+    });
+    expect(() => buildStripeWebhookStagePatch("not-a-secret")).toThrow(StripeCredentialValidationError);
+  });
+
   it("maps entered test credentials and certificate into Cloudflare secret names", () => {
     const patch = buildCredentialSecretPatch({
       environment: "test",

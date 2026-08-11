@@ -197,6 +197,7 @@ export class InMemoryD1 {
   readonly settings: Array<Record<string, unknown>> = [];
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
+  readonly stripeWebhookEvents: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
   wompiIssuanceFailureLookupCount = 0;
   wompiIssuanceRetryClaimCount = 0;
@@ -401,6 +402,17 @@ export class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("FROM stripe_webhook_events") &&
+      this.sql.includes("ORDER BY received_at DESC")
+    ) {
+      return (this.db.stripeWebhookEvents
+        .slice()
+        .sort((left, right) =>
+          String(right.received_at).localeCompare(String(left.received_at)) ||
+          String(right.id).localeCompare(String(left.id))
+        )[0] ?? null) as T | null;
+    }
     if (
       this.sql.includes("INSERT INTO operational_alert_deliveries") &&
       this.sql.includes("RETURNING id, claim_token")

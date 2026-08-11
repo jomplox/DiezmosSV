@@ -44,9 +44,20 @@ const status: CredentialStatus = {
       label: "Emisor",
       ready: true,
       items: []
+    },
+    stripe: {
+      label: "Stripe EE. UU.",
+      ready: true,
+      items: []
     }
   },
-  certificateExpiresAt: null
+  certificateExpiresAt: null,
+  stripeOperational: {
+    appEnv: "staging",
+    mode: "Pruebas",
+    mockMode: false,
+    localProxyConfigured: false
+  }
 };
 
 describe("credentialSectionState", () => {
@@ -107,6 +118,7 @@ describe("credentialSectionState", () => {
   test("marks a section ready when all mapped secret groups are ready", () => {
     expect(credentialSectionState("wompi", status)).toBe("ready");
     expect(credentialSectionState("emisor", status)).toBe("ready");
+    expect(credentialSectionState("stripe", status)).toBe("ready");
   });
 });
 

@@ -71,6 +71,7 @@ import {
   failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
   finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
   finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
+  getLatestStripeWebhookHealth as getLatestStripeWebhookHealthRepository,
   getStripeCheckoutById as getStripeCheckoutByIdRepository,
   getStripeCheckoutByRequestId as getStripeCheckoutByRequestIdRepository,
   getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
@@ -84,7 +85,8 @@ import {
   updateStripeSubscriptionStatus as updateStripeSubscriptionStatusRepository,
   type StripeAcknowledgmentClaim,
   type StripeCheckoutRecord,
-  type StripeGiftRecord
+  type StripeGiftRecord,
+  type StripeWebhookHealthRecord
 } from "./repository/stripeDonations";
 import {
   claimStripeAnnualStatementDelivery as claimStripeAnnualStatementDeliveryRepository,
@@ -369,6 +371,10 @@ export class Repository {
     input: Parameters<typeof finalizeStripeWebhookEventRepository>[1]
   ): Promise<boolean> {
     return finalizeStripeWebhookEventRepository(this.db, input);
+  }
+
+  async getLatestStripeWebhookHealth(): Promise<StripeWebhookHealthRecord | null> {
+    return getLatestStripeWebhookHealthRepository(this.db);
   }
 
   async recordStripeGiftAndAcknowledgment(

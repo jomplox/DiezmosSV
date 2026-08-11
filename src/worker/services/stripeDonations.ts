@@ -34,6 +34,7 @@ export interface StripeRuntimeConfiguration {
   apiProxyUrl: string | null;
   publishableKey: string;
   webhookSecret: string;
+  webhookSecretNext: string | null;
   paymentMethodConfigurationId: string;
   billingPortalConfigurationId: string;
   legalName: string;
@@ -48,6 +49,7 @@ export interface StripeConfigurationEnv {
   STRIPE_API_PROXY_URL?: string;
   STRIPE_PUBLISHABLE_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  STRIPE_WEBHOOK_SECRET_NEXT?: string;
   STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?: string;
   STRIPE_BILLING_PORTAL_CONFIGURATION_ID?: string;
   STRIPE_US_LEGAL_NAME?: string;
@@ -198,6 +200,7 @@ export function resolveStripeConfiguration(
       apiProxyUrl: null,
       publishableKey: "pk_test_mock",
       webhookSecret: "whsec_mock",
+      webhookSecretNext: optionalWebhookSecret(env.STRIPE_WEBHOOK_SECRET_NEXT),
       paymentMethodConfigurationId: "pmc_mock",
       billingPortalConfigurationId: "bpc_mock",
       legalName: "Nonprofit Test Fixture",
@@ -224,6 +227,7 @@ export function resolveStripeConfiguration(
   if (!webhookSecret.startsWith("whsec_")) {
     throw new StripeConfigurationError("invalid_webhook_secret");
   }
+  const webhookSecretNext = optionalWebhookSecret(env.STRIPE_WEBHOOK_SECRET_NEXT);
   const paymentMethodConfigurationId = requiredValue(
     env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID,
     "missing_payment_method_configuration"
@@ -251,6 +255,7 @@ export function resolveStripeConfiguration(
     apiProxyUrl,
     publishableKey,
     webhookSecret,
+    webhookSecretNext,
     paymentMethodConfigurationId,
     billingPortalConfigurationId,
     legalName,
@@ -321,6 +326,14 @@ function requiredValue(value: unknown, code: string): string {
     throw new StripeConfigurationError(code);
   }
   return normalized;
+}
+
+function optionalWebhookSecret(value: unknown): string | null {
+  const secret = stringValue(value) || null;
+  if (secret && (!secret.startsWith("whsec_") || secret.length <= "whsec_".length)) {
+    throw new StripeConfigurationError("invalid_next_webhook_secret");
+  }
+  return secret;
 }
 
 function stringValue(value: unknown): string {

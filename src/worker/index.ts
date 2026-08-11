@@ -4,7 +4,20 @@ import { certificateExpiry, signMhDocument } from "./domain/signer";
 import { ambienteFromWompi, isApprovedDonation, normalizeWompiWebhook, verifyWompiHash, WompiPayloadError, wompiHashHeader, wompiWebhookFromPaymentLink } from "./domain/wompi";
 import { ALERT_EMAIL_SETTING_KEY, normalizeAlertRecipients, sendOperationalAlert } from "./services/alerts";
 import { AuthError, AuthService, BootstrapUnavailableError, PASSWORD_RESET_TTL_MINUTES, PasswordPolicyError, PasswordResetError, requireRole, type AuthUser, type Role, UserNotFoundError } from "./services/auth";
-import { bootstrapCloudflareWriterToken, buildCredentialSecretPatch, CredentialWriterConfigError, credentialStatus, patchCloudflareWorkerSecrets, type CredentialUpdateInput } from "./services/credentials";
+import {
+  CredentialWriterConfigError,
+  StripeCredentialValidationError,
+  bootstrapCloudflareWriterToken,
+  buildCredentialSecretPatch,
+  buildStripeCredentialSecretPatch,
+  buildStripeWebhookCancellationPatch,
+  buildStripeWebhookPromotionPatch,
+  buildStripeWebhookStagePatch,
+  credentialStatus,
+  patchCloudflareWorkerSecrets,
+  type CredentialUpdateInput,
+  type StripeCredentialUpdateInput
+} from "./services/credentials";
 import {
   applyIntentDatos,
   clientIpFrom,
@@ -2850,6 +2863,10 @@ const authRoutes: Array<Route<ApiRouteContext>> = [
 const settingsRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/credentials", role: "OWNER", handler: handleCredentials },
   { pattern: "/api/credentials/writer-token", role: "OWNER", handler: handleCredentialWriterToken },
+  { pattern: "/api/settings/stripe", role: "OWNER", handler: handleStripeSettings },
+  { pattern: "/api/settings/stripe/webhook-secret/stage", role: "OWNER", handler: handleStripeWebhookSecretStage },
+  { pattern: "/api/settings/stripe/webhook-secret/promote", role: "OWNER", handler: handleStripeWebhookSecretPromote },
+  { pattern: "/api/settings/stripe/webhook-secret/cancel", role: "OWNER", handler: handleStripeWebhookSecretCancel },
   {
     pattern: "/api/settings/emission-environment",
     role: ({ request }) => request.method === "GET" ? "VIEWER" : request.method === "PUT" ? "OWNER" : null,
@@ -3627,6 +3644,138 @@ async function handleCredentials(ctx: ApiRouteContext): Promise<Response> {
     }
     return jsonResponse({ error: "credential_update_failed", message: error instanceof Error ? error.message : String(error) }, { status: 502 });
   }
+}
+
+async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method === "GET") {
+    const status = credentialStatus(ctx.env);
+    const latest = await ctx.repo.getLatestStripeWebhookHealth();
+    const deploymentLivemode = ctx.env.APP_ENV === "production";
+    const webhookHealth = latest ? {
+      state: "observed" as const,
+      lastReceivedAt: latest.receivedAt,
+      eventType: latest.eventType,
+      processingStatus: latest.status,
+      livemodeMatches: latest.livemode === deploymentLivemode,
+      verifiedByProcessedEvent: latest.status === "PROCESSED" && latest.livemode === deploymentLivemode
+    } : {
+      state: "none" as const,
+      label: "Sin eventos recibidos"
+    };
+    return jsonResponse({
+      stripe: {
+        credentials: status.groups.stripe,
+        operational: status.stripeOperational,
+        webhookHealth
+      }
+    });
+  }
+  if (ctx.request.method !== "POST") {
+    return methodNotAllowed();
+  }
+  const input = (await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  })) as StripeCredentialUpdateInput;
+  try {
+    const patch = buildStripeCredentialSecretPatch(input, ctx.env);
+    if (Object.keys(patch).length === 0) {
+      return jsonResponse({ error: "no_stripe_credentials_supplied" }, { status: 400 });
+    }
+    const result = await patchCloudflareWorkerSecrets(ctx.env, patch);
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: ctx.actor!.id,
+      action: "STRIPE_CREDENTIALS_UPDATED",
+      entityType: "credentials",
+      entityId: "stripe",
+      summary: "Configuración de Stripe EE. UU. actualizada",
+      metadata: { updated: result.updated, deleted: result.deleted }
+    });
+    return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted });
+  } catch (error) {
+    return stripeCredentialMutationError(error);
+  }
+}
+
+async function handleStripeWebhookSecretStage(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method !== "POST") return methodNotAllowed();
+  const body = await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  });
+  const value = typeof body.webhookSecretNext === "string" ? body.webhookSecretNext : "";
+  try {
+    return await applyStripeWebhookSecretAction(
+      ctx,
+      buildStripeWebhookStagePatch(value),
+      "STRIPE_WEBHOOK_SECRET_STAGED",
+      "Secreto siguiente del webhook de Stripe preparado",
+      "stage"
+    );
+  } catch (error) {
+    return stripeCredentialMutationError(error);
+  }
+}
+
+async function handleStripeWebhookSecretPromote(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method !== "POST") return methodNotAllowed();
+  try {
+    return await applyStripeWebhookSecretAction(
+      ctx,
+      buildStripeWebhookPromotionPatch(ctx.env),
+      "STRIPE_WEBHOOK_SECRET_PROMOTED",
+      "Secreto siguiente del webhook de Stripe promovido",
+      "promote"
+    );
+  } catch (error) {
+    return stripeCredentialMutationError(error);
+  }
+}
+
+async function handleStripeWebhookSecretCancel(ctx: ApiRouteContext): Promise<Response> {
+  if (ctx.request.method !== "POST") return methodNotAllowed();
+  try {
+    return await applyStripeWebhookSecretAction(
+      ctx,
+      buildStripeWebhookCancellationPatch(),
+      "STRIPE_WEBHOOK_SECRET_CANCELED",
+      "Secreto siguiente del webhook de Stripe descartado",
+      "cancel"
+    );
+  } catch (error) {
+    return stripeCredentialMutationError(error);
+  }
+}
+
+async function applyStripeWebhookSecretAction(
+  ctx: ApiRouteContext,
+  patch: ReturnType<typeof buildStripeWebhookStagePatch>,
+  action: string,
+  summary: string,
+  rotationAction: "stage" | "promote" | "cancel"
+): Promise<Response> {
+  const result = await patchCloudflareWorkerSecrets(ctx.env, patch);
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action,
+    entityType: "credentials",
+    entityId: "stripe_webhook_secret",
+    summary,
+    metadata: { action: rotationAction, updated: result.updated, deleted: result.deleted }
+  });
+  return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted });
+}
+
+function stripeCredentialMutationError(error: unknown): Response {
+  if (error instanceof StripeCredentialValidationError) {
+    return jsonResponse({ error: error.code }, { status: 400 });
+  }
+  if (error instanceof CredentialWriterConfigError) {
+    return jsonResponse({ error: "credential_writer_not_configured", message: error.message }, { status: 503 });
+  }
+  return jsonResponse({ error: "stripe_credential_update_failed" }, { status: 502 });
 }
 
 async function handleCredentialWriterToken(ctx: ApiRouteContext): Promise<Response> {

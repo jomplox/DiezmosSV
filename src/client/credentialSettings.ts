@@ -15,6 +15,7 @@ export type CredentialSettingsSectionId =
   | "ambiente"
   | "mh"
   | "wompi"
+  | "stripe"
   | "emisor"
   | "correo"
   | "plantillas"
@@ -49,6 +50,12 @@ export const credentialSettingsSections: CredentialSettingsSection[] = [
     label: "Wompi",
     description: "Webhook entrante de pagos.",
     groupIds: ["wompi"]
+  },
+  {
+    id: "stripe",
+    label: "Stripe EE. UU.",
+    description: "Configuración y salud del webhook de EE. UU.",
+    groupIds: ["stripe"]
   },
   {
     id: "emisor",

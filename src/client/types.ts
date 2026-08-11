@@ -184,7 +184,7 @@ export interface CredentialStatusItem {
   protected?: boolean;
 }
 
-interface CredentialStatusGroup {
+export interface CredentialStatusGroup {
   label: string;
   ready: boolean;
   items: CredentialStatusItem[];
@@ -199,6 +199,28 @@ export interface CredentialStatus {
   };
   groups: Record<string, CredentialStatusGroup>;
   certificateExpiresAt: string | null;
+  stripeOperational: StripeOperationalStatus;
+}
+
+export interface StripeOperationalStatus {
+  appEnv: string;
+  mode: "Simulado" | "Pruebas" | "Producción";
+  mockMode: boolean;
+  localProxyConfigured: boolean;
+}
+
+export interface StripeSettingsState {
+  credentials: CredentialStatusGroup;
+  operational: StripeOperationalStatus;
+  webhookHealth: {
+    state: "none" | "observed";
+    label?: string;
+    lastReceivedAt?: string;
+    eventType?: string;
+    processingStatus?: "PROCESSING" | "PROCESSED" | "FAILED";
+    livemodeMatches?: boolean;
+    verifiedByProcessedEvent?: boolean;
+  };
 }
 
 export interface EmissionEnvironmentState {
