@@ -91,6 +91,10 @@ export const STRIPE_CHECKOUT_PATH = "/api/donations/stripe/checkout";
 export const STRIPE_PORTAL_PATH = "/api/donations/stripe/portal";
 export const STRIPE_RESULT_PATH = "/donar/stripe/resultado";
 export const STRIPE_US_COUNTRY_CODE = "US";
+export type StripeGiftType = "TITHE" | "OFFERING";
+export const STRIPE_GIFT_TYPE_LABEL = "Tipo de entrega";
+export const STRIPE_GIFT_TYPE_TITHE_LABEL = "Diezmo";
+export const STRIPE_GIFT_TYPE_OFFERING_LABEL = "Ofrenda";
 export const STRIPE_MONTHLY_LABEL = "Frecuencia de la entrega";
 export const STRIPE_FREQ_ONCE_LABEL = "Única";
 export const STRIPE_FREQ_MONTHLY_LABEL = "Mensual";
@@ -112,11 +116,13 @@ export function stripeCheckoutBody(input: {
   requestId: string;
   amount: string;
   monthly: boolean;
-}): { requestId: string; amount: string; frequency: "once" | "monthly" } {
+  giftType: StripeGiftType;
+}): { requestId: string; amount: string; frequency: "once" | "monthly"; giftType: "tithe" | "offering" } {
   return {
     requestId: input.requestId,
     amount: input.amount.trim(),
-    frequency: input.monthly ? "monthly" : "once"
+    frequency: input.monthly ? "monthly" : "once",
+    giftType: input.giftType === "TITHE" ? "tithe" : "offering"
   };
 }
 
@@ -305,8 +311,8 @@ export function isDonarGraciasPath(pathname: string): boolean {
   return pathname === "/donar/gracias" || pathname === "/donar/gracias/";
 }
 
-// The amount rule alone: shared by both doors' Paso 1 (the US door has no gift
-// type, so its Paso 1 gates on this only).
+// The amount rule is shared by both doors' Paso 1. The U.S. door keeps its own
+// explicit Stripe gift type state, while the SV validator below uses form.giftType.
 export function donationAmountValidationMessage(amount: string): string {
   const parsed = Number.parseFloat(amount.trim());
   if (!amount.trim() || !Number.isFinite(parsed)) {
@@ -362,8 +368,8 @@ export function firstDonationFieldError(
   return null;
 }
 
-// Paso 1 (SV door): diezmo/ofrenda choice + amount. The US door has no gift
-// type, so its Paso 1 uses donationAmountValidationMessage alone.
+// Paso 1 (SV door): diezmo/ofrenda choice + amount. The U.S. door uses its own
+// Stripe gift type state and shares donationAmountValidationMessage for its amount.
 export function donationStep1FieldErrors(input: Pick<DonationFormInput, "giftType" | "amount">): DonationFieldErrors {
   const errors: DonationFieldErrors = {};
   // The SV form requires the donor to state whether the gift is a diezmo or an

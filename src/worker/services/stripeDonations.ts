@@ -1,5 +1,5 @@
 import type Stripe from "stripe";
-import type { StripeGiftFrequency } from "../storage/repository/stripeDonations";
+import type { StripeGiftFrequency, StripeGiftType } from "../storage/repository/stripeDonations";
 
 const MIN_AMOUNT_CENTS = 100;
 const MAX_AMOUNT_CENTS = 500_000;
@@ -26,6 +26,7 @@ export interface ValidatedStripeCheckoutInput {
   requestId: string;
   amountCents: number;
   frequency: StripeGiftFrequency;
+  giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
 }
 
 export interface StripeRuntimeConfiguration {
@@ -98,7 +99,18 @@ export function validateStripeCheckoutInput(body: unknown): ValidatedStripeCheck
       "Seleccione si desea realizar una entrega única o mensual."
     );
   }
-  return { requestId, amountCents, frequency };
+  const giftType = body.giftType === "tithe"
+    ? "TITHE"
+    : body.giftType === "offering"
+      ? "OFFERING"
+      : null;
+  if (!giftType) {
+    throw new StripeDonationValidationError(
+      "invalid_gift_type",
+      "Seleccione si su entrega es diezmo u ofrenda."
+    );
+  }
+  return { requestId, amountCents, frequency, giftType };
 }
 
 export async function integrationIdentifierForRequest(requestId: string): Promise<string> {
@@ -118,6 +130,7 @@ export function buildStripeCheckoutSessionParams(input: {
   requestId: string;
   amountCents: number;
   frequency: StripeGiftFrequency;
+  giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
   organizationName: string;
   appOrigin: string;
   paymentMethodConfigurationId: string;
@@ -128,6 +141,7 @@ export function buildStripeCheckoutSessionParams(input: {
   const metadata: Stripe.MetadataParam = {
     checkout_id: input.checkoutId,
     frequency,
+    gift_type: input.giftType === "TITHE" ? "tithe" : "offering",
     lane: "eeuu_501c3"
   };
   const priceData: Stripe.Checkout.SessionCreateParams.LineItem.PriceData = {

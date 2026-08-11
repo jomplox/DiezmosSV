@@ -86,6 +86,26 @@ describe("Stripe signed webhooks", () => {
     expect(count(database, "stripe_acknowledgment_deliveries")).toBe(1);
   });
 
+  it("rejects Checkout metadata whose gift type conflicts with the durable reservation", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "b7bac362-3ae3-478f-8bf9-f4ebfd1aeeb0",
+      amount: 50,
+      frequency: "once",
+      giftType: "offering"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const event = stripeEvent("evt_checkout_gift_type_conflict", "checkout.session.completed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 5000,
+      frequency: "once",
+      paymentIntentId: "pi_gift_type_conflict",
+      giftType: "tithe"
+    }));
+    expect((await sendSignedWebhook(workerEnv, event)).status).toBe(500);
+    expect(count(database, "stripe_gifts")).toBe(0);
+  });
+
   it("settles every monthly invoice once even when invoice delivery precedes Checkout completion", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "993b9407-9e16-4915-90ec-7f95855b8fab",
@@ -171,7 +191,7 @@ describe("Stripe signed webhooks", () => {
     const canceled = stripeEvent("evt_subscription_deleted", "customer.subscription.deleted", {
       id: "sub_fixture",
       object: "subscription",
-      metadata: { checkout_id: row.id, lane: "eeuu_501c3", frequency: "monthly" }
+      metadata: { checkout_id: row.id, lane: "eeuu_501c3", frequency: "monthly", gift_type: "tithe" }
     });
     expect((await sendSignedWebhook(workerEnv, canceled)).status).toBe(200);
     expect(checkoutRow(database, checkout.sessionId).subscription_status).toBe("CANCELED");
@@ -277,7 +297,7 @@ describe("Stripe signed webhooks", () => {
 
 async function createCheckout(
   workerEnv: Env,
-  body: { requestId: string; amount: number; frequency: "once" | "monthly" }
+  body: { requestId: string; amount: number; frequency: "once" | "monthly"; giftType?: "tithe" | "offering" }
 ): Promise<{ sessionId: string }> {
   const response = await worker.fetch(new Request(`${origin}/api/donations/stripe/checkout`, {
     method: "POST",
@@ -286,7 +306,7 @@ async function createCheckout(
       Origin: origin,
       "CF-Connecting-IP": "203.0.113.50"
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify({ giftType: "tithe", ...body })
   }), workerEnv);
   expect(response.status).toBe(201);
   return await response.json() as { sessionId: string };
@@ -334,6 +354,7 @@ function checkoutSession(input: {
   amountCents: number;
   frequency: "once" | "monthly";
   paymentIntentId: string | null;
+  giftType?: "tithe" | "offering";
   paid?: boolean;
   status?: "complete" | "expired";
 }): Record<string, unknown> {
@@ -358,6 +379,7 @@ function checkoutSession(input: {
     metadata: {
       checkout_id: input.checkoutId,
       frequency: input.frequency,
+      gift_type: input.giftType ?? "tithe",
       lane: "eeuu_501c3"
     }
   };
@@ -388,6 +410,7 @@ function invoice(input: {
         metadata: {
           checkout_id: input.checkoutId,
           frequency: "monthly",
+          gift_type: "tithe",
           lane: "eeuu_501c3"
         }
       }

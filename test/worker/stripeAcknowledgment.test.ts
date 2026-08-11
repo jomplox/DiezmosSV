@@ -153,8 +153,9 @@ async function seedGift(repo: Repository): Promise<void> {
   await repo.reserveStripeCheckout({
     id: "stripe_checkout_fixture",
     requestId: "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5",
-    requestFingerprint: "once:5000",
+    requestFingerprint: "once:tithe:5000",
     frequency: "ONCE",
+    giftType: "TITHE",
     amountCents: 5000,
     livemode: false,
     rateLimitClaimId: null,
@@ -170,6 +171,7 @@ async function seedGift(repo: Repository): Promise<void> {
     stripeInvoiceId: null,
     stripeSubscriptionId: null,
     frequency: "ONCE",
+    giftType: "TITHE",
     amountCents: 5000,
     donorName: "Ana Ejemplo",
     donorEmail: "ana@example.org",

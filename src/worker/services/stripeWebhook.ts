@@ -105,6 +105,7 @@ async function processCheckoutSessionEvent(
       stripeInvoiceId: null,
       stripeSubscriptionId: null,
       frequency: "ONCE",
+      giftType: requiredCheckoutGiftType(updated),
       amountCents: updated.amount_cents,
       donorName: updated.donor_name,
       donorEmail: updated.donor_email,
@@ -128,6 +129,7 @@ async function processInvoicePaidEvent(
     throw new StripeWebhookEventError("monthly_checkout_not_found");
   }
   assertEventMode(checkout, event.livemode);
+  assertMonthlyMetadata(context, checkout);
   const amountPaid = positiveInteger(invoice.amount_paid, "invoice_amount_invalid");
   if (amountPaid !== checkout.amount_cents || invoice.currency !== "usd") {
     throw new StripeWebhookEventError("invoice_amount_mismatch");
@@ -156,6 +158,7 @@ async function processInvoicePaidEvent(
     stripeInvoiceId: invoiceId,
     stripeSubscriptionId: context.subscriptionId,
     frequency: "MONTHLY",
+    giftType: requiredCheckoutGiftType(updated),
     amountCents: amountPaid,
     donorName: updated.donor_name,
     donorEmail: updated.donor_email,
@@ -177,6 +180,7 @@ async function processInvoiceFailedEvent(
     throw new StripeWebhookEventError("monthly_checkout_not_found");
   }
   assertEventMode(checkout, event.livemode);
+  assertMonthlyMetadata(context, checkout);
   const updated = await repo.updateStripeCheckoutFromInvoice({
     id: checkout.id,
     stripeCustomerId: optionalStripeId(invoice.customer, "cus_"),
@@ -235,7 +239,11 @@ async function processSubscriptionDeletedEvent(
   requireObjectType(subscription, "subscription");
   const subscriptionId = stripeId(subscription.id, "sub_");
   const metadata = optionalRecord(subscription.metadata);
-  if (metadata?.lane !== "eeuu_501c3" || metadata.frequency !== "monthly") {
+  if (
+    metadata?.lane !== "eeuu_501c3"
+    || metadata.frequency !== "monthly"
+    || (metadata.gift_type !== "tithe" && metadata.gift_type !== "offering")
+  ) {
     throw new StripeWebhookEventError("subscription_metadata_invalid");
   }
   const checkoutId = stripeId(metadata.checkout_id, "stripe_checkout_");
@@ -244,6 +252,9 @@ async function processSubscriptionDeletedEvent(
     throw new StripeWebhookEventError("subscription_checkout_conflict");
   }
   assertEventMode(checkout, event.livemode);
+  if (metadata.gift_type !== (requiredCheckoutGiftType(checkout) === "TITHE" ? "tithe" : "offering")) {
+    throw new StripeWebhookEventError("subscription_metadata_gift_type_mismatch");
+  }
   if (!await repo.updateStripeSubscriptionStatus({
     stripeSubscriptionId: subscriptionId,
     status: "CANCELED",
@@ -277,11 +288,13 @@ function assertCheckoutIdentity(
 ): void {
   const metadata = optionalRecord(session.metadata);
   const expectedFrequency = checkout.frequency === "MONTHLY" ? "monthly" : "once";
+  const expectedGiftType = checkout.gift_type === "TITHE" ? "tithe" : "offering";
   const expectedMode = checkout.frequency === "MONTHLY" ? "subscription" : "payment";
   if (
     session.client_reference_id !== checkout.id
     || metadata?.checkout_id !== checkout.id
     || metadata.frequency !== expectedFrequency
+    || metadata.gift_type !== expectedGiftType
     || metadata.lane !== "eeuu_501c3"
     || session.mode !== expectedMode
     || session.currency !== "usd"
@@ -300,6 +313,7 @@ function assertEventMode(checkout: StripeCheckoutRecord, eventLivemode: boolean)
 function invoiceSubscriptionContext(invoice: Record<string, unknown>): {
   checkoutId: string;
   subscriptionId: string;
+  giftType: "tithe" | "offering";
 } {
   const parent = optionalRecord(invoice.parent);
   const details = optionalRecord(parent?.subscription_details);
@@ -307,13 +321,32 @@ function invoiceSubscriptionContext(invoice: Record<string, unknown>): {
   if (!details
     || parent?.type !== "subscription_details"
     || metadata?.lane !== "eeuu_501c3"
-    || metadata.frequency !== "monthly") {
+    || metadata.frequency !== "monthly"
+    || (metadata.gift_type !== "tithe" && metadata.gift_type !== "offering")) {
     throw new StripeWebhookEventError("invoice_metadata_invalid");
   }
   return {
     checkoutId: stripeId(metadata.checkout_id, "stripe_checkout_"),
-    subscriptionId: stripeId(details.subscription, "sub_")
+    subscriptionId: stripeId(details.subscription, "sub_"),
+    giftType: metadata.gift_type
   };
+}
+
+function requiredCheckoutGiftType(checkout: StripeCheckoutRecord): "TITHE" | "OFFERING" {
+  if (checkout.gift_type === "TITHE" || checkout.gift_type === "OFFERING") {
+    return checkout.gift_type;
+  }
+  throw new StripeWebhookEventError("checkout_gift_type_invalid");
+}
+
+function assertMonthlyMetadata(
+  context: { giftType: "tithe" | "offering" },
+  checkout: StripeCheckoutRecord
+): void {
+  const expectedGiftType = requiredCheckoutGiftType(checkout) === "TITHE" ? "tithe" : "offering";
+  if (context.giftType !== expectedGiftType) {
+    throw new StripeWebhookEventError("invoice_metadata_gift_type_mismatch");
+  }
 }
 
 function invoicePaymentIntentId(invoice: Record<string, unknown>): string | null {

@@ -227,7 +227,7 @@ describe("donar form validation", () => {
       expect(donationStep1ValidationMessage({ giftType: "OFRENDA", amount: "5.00" })).toBe("");
     });
 
-    it("the amount rule is reusable alone (US Paso 1 has no gift type)", () => {
+    it("the amount rule is reusable alone for the U.S. Paso 1", () => {
       expect(donationAmountValidationMessage("")).toBe("Ingrese un monto válido en dólares.");
       expect(donationAmountValidationMessage("abc")).toBe("Ingrese un monto válido en dólares.");
       expect(donationAmountValidationMessage("0.99")).toBe("El monto mínimo de donación es $1.00.");

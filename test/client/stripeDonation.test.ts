@@ -35,17 +35,19 @@ describe("Stripe donor browser contract", () => {
     expect(STRIPE_US_COUNTRY_CODE).toBe("US");
   });
 
-  it("builds only the amount, frequency, and idempotent browser request identifier", () => {
+  it("builds the explicit gift type with amount, frequency, and idempotent browser request identifier", () => {
     const requestId = "11111111-1111-4111-8111-111111111111";
-    expect(stripeCheckoutBody({ requestId, amount: " 25.00 ", monthly: false })).toEqual({
+    expect(stripeCheckoutBody({ requestId, amount: " 25.00 ", monthly: false, giftType: "TITHE" })).toEqual({
       requestId,
       amount: "25.00",
-      frequency: "once"
+      frequency: "once",
+      giftType: "tithe"
     });
-    expect(stripeCheckoutBody({ requestId, amount: "50", monthly: true })).toEqual({
+    expect(stripeCheckoutBody({ requestId, amount: "50", monthly: true, giftType: "OFFERING" })).toEqual({
       requestId,
       amount: "50",
-      frequency: "monthly"
+      frequency: "monthly",
+      giftType: "offering"
     });
   });
 
@@ -87,6 +89,7 @@ describe("Stripe donor page source contract", () => {
     expect(donarSource).toContain("stripeCheckoutBody(");
     expect(donarSource).toContain("crypto.randomUUID()");
     expect(donarSource).toContain("stripeAttemptRef.current");
+    expect(donarSource).toContain("giftType: stripeGiftType");
     expect(donarSource).toContain("<StripeDonationForm");
     expect(donarSource).not.toContain("window.location.assign");
   });
@@ -120,6 +123,16 @@ describe("Stripe donor page source contract", () => {
     expect(`${usBlock}\n${resultSource}`).not.toMatch(
       /\b(?:pagar|pago|comprar|compra|cliente|precio|costo|checkout|carrito|orden)\b/i
     );
+  });
+
+  it("offers the U.S. gift type and frequency choices without demoting the ceremonial title", () => {
+    expect(donationSource).toContain('STRIPE_GIFT_TYPE_LABEL = "Tipo de entrega"');
+    expect(donationSource).toContain('STRIPE_GIFT_TYPE_TITHE_LABEL = "Diezmo"');
+    expect(donationSource).toContain('STRIPE_GIFT_TYPE_OFFERING_LABEL = "Ofrenda"');
+    expect(donarSource).toContain("Su entrega se realizará cada mes hasta que usted la cancele.");
+    expect(donarSource).toContain("Continuar con su ofrenda");
+    expect(donarSource).toContain("${summaryLabel} · ${frequencyLabel} · ${donarAmountDisplay(form.amount)}");
+    expect(donarSource).toContain("<h1 className=\"donar-wizard-title\">");
   });
 
   it("mounts the result page anonymously and includes it in the donor reveal gate", () => {

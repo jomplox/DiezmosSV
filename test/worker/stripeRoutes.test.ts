@@ -69,6 +69,14 @@ describe("Stripe public donation routes", () => {
     });
     expect(conflict.response.status).toBe(409);
     expect(conflict.body).toMatchObject({ error: "stripe_checkout_request_conflict" });
+
+    const giftTypeConflict = await createCheckout(workerEnv, {
+      requestId,
+      amount: 50,
+      frequency: "once",
+      giftType: "offering"
+    });
+    expect(giftTypeConflict.response.status).toBe(409);
   });
 
   it("reclaims a failed Session reservation with the same request identity", async () => {
@@ -155,6 +163,7 @@ describe("Stripe public donation routes", () => {
     await expect(open.json()).resolves.toEqual({
       status: "OPEN",
       frequency: "MONTHLY",
+      giftType: "TITHE",
       amountCents: 2500,
       currency: "usd",
       canManageRecurring: false,
@@ -174,6 +183,7 @@ describe("Stripe public donation routes", () => {
     await expect(completed.json()).resolves.toEqual({
       status: "PAID",
       frequency: "MONTHLY",
+      giftType: "TITHE",
       amountCents: 2500,
       currency: "usd",
       canManageRecurring: true,
@@ -257,7 +267,7 @@ async function createCheckout(
     {
       method: "POST",
       headers: { ...jsonHeaders(), "CF-Connecting-IP": ip },
-      body: JSON.stringify(body)
+      body: JSON.stringify({ giftType: "tithe", ...body })
     }
   ), workerEnv);
   return {

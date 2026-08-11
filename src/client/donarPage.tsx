@@ -48,6 +48,9 @@ import {
   STRIPE_CHECKOUT_PATH,
   STRIPE_FREQ_MONTHLY_LABEL,
   STRIPE_FREQ_ONCE_LABEL,
+  STRIPE_GIFT_TYPE_LABEL,
+  STRIPE_GIFT_TYPE_OFFERING_LABEL,
+  STRIPE_GIFT_TYPE_TITHE_LABEL,
   STRIPE_MONTHLY_LABEL,
   DONATION_STEP1_FIELD_ORDER,
   DONATION_STEP2_FIELD_ORDER,
@@ -76,7 +79,8 @@ import {
   type DonationField,
   type DonationFieldErrors,
   type DonationFormInput,
-  type DonorDocumentType
+  type DonorDocumentType,
+  type StripeGiftType
 } from "./donation";
 import { StripeDonationForm, type StripeCheckoutClientConfig } from "./stripeDonationForm";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
@@ -231,7 +235,7 @@ const emptyDonationForm: DonationFormInput = {
   amount: "",
   // Diezmo is preselected on mount: the SV Paso 1 segmented control lands checked,
   // so the "elija un tipo" validation is only ever a safety net. The donor can still
-  // switch to Ofrenda. (The US door ignores giftType entirely.)
+  // switch to Ofrenda. The U.S. door keeps its independent Stripe gift type state.
   giftType: "DIEZMO",
   donorDocumentType: "13",
   donorDocument: "",
@@ -454,10 +458,11 @@ export function DonarPage() {
   // donor card. Seeded with the client-side default so the line renders before (and if)
   // the /api/branding fetch resolves; replaced with the configured value when it does.
   const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
-  // US-donor (Stripe) path state: gift frequency (Única | Mensual segmented
-  // control), the stable identifier for one amount/frequency attempt, and the
+  // US-donor (Stripe) path state: gift type + frequency (stacked segmented
+  // control), the stable identifier for one amount/frequency/gift-type attempt, and the
   // promise that initializes Stripe Embedded Checkout inside Paso 2.
   const [monthly, setMonthly] = useState(false);
+  const [stripeGiftType, setStripeGiftType] = useState<StripeGiftType>("TITHE");
   const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
   const [stripeSessionAttempt, setStripeSessionAttempt] = useState<{
     fingerprint: string;
@@ -488,12 +493,11 @@ export function DonarPage() {
   const displayStep = usDonation && step > DONAR_STEP_COUNT_US ? DONAR_STEP_COUNT_US : step;
   // The Paso 3 (and US handoff) summary label: what the donor chose on Paso 1.
   const summaryLabel = usDonation
-    ? monthly
-      ? STRIPE_FREQ_MONTHLY_LABEL
-      : STRIPE_FREQ_ONCE_LABEL
+    ? stripeGiftType === "TITHE" ? STRIPE_GIFT_TYPE_TITHE_LABEL : STRIPE_GIFT_TYPE_OFFERING_LABEL
     : form.giftType
       ? DONAR_GIFT_TYPE_LABEL[form.giftType]
       : "";
+  const frequencyLabel = monthly ? STRIPE_FREQ_MONTHLY_LABEL : STRIPE_FREQ_ONCE_LABEL;
 
   // Choose a door: record it in ?ruta (composing with — never clobbering — any
   // existing query) so a refresh keeps the door, then swap the view. null returns
@@ -516,6 +520,7 @@ export function DonarPage() {
     // Stripe path forever.
     setForm((current) => ({ ...current, foreignResident: false, pais: "" }));
     setMonthly(false);
+    setStripeGiftType("TITHE");
     stripeAttemptRef.current = null;
     setStripeSessionAttempt(null);
     setStep(1);
@@ -775,8 +780,8 @@ export function DonarPage() {
     };
   }, [stage, intent, verifyingWompiClose]);
 
-  // Paso 1 → Paso 2. The SV door gates on gift type + amount; the US door (no
-  // gift type) gates on the amount alone.
+  // Paso 1 → Paso 2. The SV and U.S. doors both gate on amount; U.S. gift type
+  // is always an explicit state choice and travels in the Stripe request.
   function continueFromMonto(event: FormEvent) {
     event.preventDefault();
     const amountMessage = donationAmountValidationMessage(form.amount);
@@ -893,11 +898,11 @@ export function DonarPage() {
   }
 
   // Initialize Stripe's hosted embedded form. The request identifier remains
-  // stable across transport retries for the same amount/frequency fingerprint;
+  // stable across transport retries for the same amount/frequency/gift-type fingerprint;
   // a terminal Session conflict clears it so retry receives a fresh identity.
   function stripeFingerprint(): string {
     const amountCents = Math.round(Number.parseFloat(form.amount.trim()) * 100);
-    return `${monthly ? "monthly" : "once"}:${amountCents}`;
+    return `${monthly ? "monthly" : "once"}:${stripeGiftType.toLowerCase()}:${amountCents}`;
   }
 
   function createStripeSessionAttempt() {
@@ -910,7 +915,7 @@ export function DonarPage() {
     const requestId = attempt.requestId;
     const session = donarApi<StripeCheckoutClientConfig>(STRIPE_CHECKOUT_PATH, {
         method: "POST",
-        body: stripeCheckoutBody({ requestId, amount: form.amount, monthly })
+        body: stripeCheckoutBody({ requestId, amount: form.amount, monthly, giftType: stripeGiftType })
       }).catch((err: unknown) => {
         if (
           err instanceof DonarApiError
@@ -1020,7 +1025,9 @@ export function DonarPage() {
   const summary = (
     <div className="donar-summary">
       <span className="donar-summary-line">
-        {summaryLabel} · {donarAmountDisplay(form.amount)}
+        {usDonation
+          ? `${summaryLabel} · ${frequencyLabel} · ${donarAmountDisplay(form.amount)}`
+          : `${summaryLabel} · ${donarAmountDisplay(form.amount)}`}
       </span>
       <button ref={summaryEditRef} type="button" className="donar-summary-edit" onClick={editAmount}>
         {DONAR_EDIT_LABEL}
@@ -1083,7 +1090,18 @@ export function DonarPage() {
         {step === 1 && (
           <form className="donar-form donar-step" onSubmit={continueFromMonto}>
             {usDonation ? (
-              <div className="donar-segment" role="radiogroup" aria-label={STRIPE_MONTHLY_LABEL}>
+              <>
+                <div className="donar-segment" role="radiogroup" aria-label={STRIPE_GIFT_TYPE_LABEL}>
+                  <label className={stripeGiftType === "TITHE" ? "donar-segment-option active" : "donar-segment-option"}>
+                    <input type="radio" name="stripe-gift-type" value="tithe" checked={stripeGiftType === "TITHE"} onChange={() => setStripeGiftType("TITHE")} />
+                    <span>{STRIPE_GIFT_TYPE_TITHE_LABEL}</span>
+                  </label>
+                  <label className={stripeGiftType === "OFFERING" ? "donar-segment-option active" : "donar-segment-option"}>
+                    <input type="radio" name="stripe-gift-type" value="offering" checked={stripeGiftType === "OFFERING"} onChange={() => setStripeGiftType("OFFERING")} />
+                    <span>{STRIPE_GIFT_TYPE_OFFERING_LABEL}</span>
+                  </label>
+                </div>
+                <div className="donar-segment" role="radiogroup" aria-label={STRIPE_MONTHLY_LABEL}>
                 <label className={monthly ? "donar-segment-option" : "donar-segment-option active"}>
                   <input type="radio" name="donar-frequency" value="once" checked={!monthly} onChange={() => setMonthly(false)} />
                   <span>{STRIPE_FREQ_ONCE_LABEL}</span>
@@ -1092,7 +1110,9 @@ export function DonarPage() {
                   <input type="radio" name="donar-frequency" value="monthly" checked={monthly} onChange={() => setMonthly(true)} />
                   <span>{STRIPE_FREQ_MONTHLY_LABEL}</span>
                 </label>
-              </div>
+                </div>
+                {monthly && <p className="donar-stripe-monthly-note">Su entrega se realizará cada mes hasta que usted la cancele.</p>}
+              </>
             ) : (
               <div
                 className="donar-segment"
@@ -1175,7 +1195,7 @@ export function DonarPage() {
               </p>
             )}
             <button className="primary" type="submit">
-              {DONAR_CONTINUE_LABEL}
+              {usDonation ? stripeGiftType === "TITHE" ? "Continuar con su diezmo" : "Continuar con su ofrenda" : DONAR_CONTINUE_LABEL}
             </button>
           </form>
         )}

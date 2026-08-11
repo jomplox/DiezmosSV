@@ -8,6 +8,10 @@ const migrationPath = resolve(
   import.meta.dirname,
   "../../migrations/0032_stripe_us_donations.sql"
 );
+const giftTypeMigrationPath = resolve(
+  import.meta.dirname,
+  "../../migrations/0033_stripe_gift_type.sql"
+);
 
 describe("Stripe U.S. donation persistence", () => {
   const openDatabases: DatabaseSync[] = [];
@@ -150,6 +154,31 @@ describe("Stripe U.S. donation persistence", () => {
     expect(() => insertAcknowledgment(database, "ack_bad", "missing_gift"))
       .toThrow(/FOREIGN KEY constraint failed/);
   });
+
+  it("marks 0032 rows UNSPECIFIED but rejects omitted or UNSPECIFIED gift types for new rows", () => {
+    const database = track(openDatabases, migratedDatabaseThrough("0032"));
+    insertLegacyCheckout(database, "legacy_checkout", "legacy_request", "legacy_fingerprint");
+    insertLegacyGift(database, "legacy_gift", "legacy_pi", "legacy_checkout");
+    expect(existsSync(giftTypeMigrationPath)).toBe(true);
+    database.exec(readFileSync(giftTypeMigrationPath, "utf8"));
+
+    expect(database.prepare("SELECT gift_type FROM stripe_checkout_sessions WHERE id = 'legacy_checkout'").get())
+      .toEqual({ gift_type: "UNSPECIFIED" });
+    expect(database.prepare("SELECT gift_type FROM stripe_gifts WHERE id = 'legacy_gift'").get())
+      .toEqual({ gift_type: "UNSPECIFIED" });
+    expect(() => database.prepare(
+      `INSERT INTO stripe_checkout_sessions (id, request_id, request_fingerprint, frequency, amount_cents, livemode, status, payment_status)
+       VALUES ('new_omitted', 'new_request', 'new_fingerprint', 'ONCE', 5000, 0, 'CREATING', 'UNPAID')`
+    ).run()).toThrow(/gift_type_required/);
+    expect(() => database.prepare(
+      `INSERT INTO stripe_checkout_sessions (id, request_id, request_fingerprint, frequency, amount_cents, livemode, status, payment_status, gift_type)
+       VALUES ('new_unspecified', 'new_request_two', 'new_fingerprint_two', 'ONCE', 5000, 0, 'CREATING', 'UNPAID', 'UNSPECIFIED')`
+    ).run()).toThrow(/gift_type_required/);
+    expect(() => database.prepare(
+      `INSERT INTO stripe_gifts (id, source_type, source_id, frequency, amount_cents, settled_at, status, gift_type)
+       VALUES ('new_invalid', 'PAYMENT_INTENT', 'pi_invalid', 'ONCE', 5000, '2026-08-10T12:00:00.000Z', 'PAID', 'OTHER')`
+    ).run()).toThrow(/CHECK constraint failed/);
+  });
 });
 
 function track(databases: DatabaseSync[], database: DatabaseSync): DatabaseSync {
@@ -173,21 +202,41 @@ function insertCheckout(
   id: string,
   requestId: string,
   fingerprint: string,
-  overrides: { frequency?: string; currency?: string; amountCents?: number } = {}
+  overrides: { frequency?: string; currency?: string; amountCents?: number; giftType?: string } = {}
 ): void {
   database.prepare(
     `INSERT INTO stripe_checkout_sessions (
        id, request_id, request_fingerprint, frequency, amount_cents, currency,
-       livemode, status, payment_status
-     ) VALUES (?, ?, ?, ?, ?, ?, 0, 'CREATING', 'UNPAID')`
+       livemode, status, payment_status, gift_type
+     ) VALUES (?, ?, ?, ?, ?, ?, 0, 'CREATING', 'UNPAID', ?)`
   ).run(
     id,
     requestId,
     fingerprint,
     overrides.frequency ?? "ONCE",
     overrides.amountCents ?? 5000,
-    overrides.currency ?? "usd"
+    overrides.currency ?? "usd",
+    overrides.giftType ?? "TITHE"
   );
+}
+
+function insertLegacyCheckout(database: DatabaseSync, id: string, requestId: string, fingerprint: string): void {
+  database.prepare(
+    `INSERT INTO stripe_checkout_sessions (
+       id, request_id, request_fingerprint, frequency, amount_cents, currency,
+       livemode, status, payment_status
+     ) VALUES (?, ?, ?, 'ONCE', 5000, 'usd', 0, 'CREATING', 'UNPAID')`
+  ).run(id, requestId, fingerprint);
+}
+
+function insertLegacyGift(database: DatabaseSync, id: string, sourceId: string, checkoutId: string): void {
+  database.prepare(
+    `INSERT INTO stripe_gifts (
+       id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+       frequency, amount_cents, currency, settled_at, status, refunded_amount_cents
+     ) VALUES (?, 'PAYMENT_INTENT', ?, ?, ?, 'ONCE', 5000, 'usd',
+       '2026-08-10T12:00:00.000Z', 'PAID', 0)`
+  ).run(id, sourceId, checkoutId, sourceId);
 }
 
 function insertWebhook(database: DatabaseSync, id: string, status = "PROCESSING"): void {
@@ -203,15 +252,15 @@ function insertGift(
   id: string,
   sourceId: string,
   checkoutId: string,
-  overrides: { refundedAmountCents?: number } = {}
+  overrides: { refundedAmountCents?: number; giftType?: string } = {}
 ): void {
   database.prepare(
     `INSERT INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
-       frequency, amount_cents, currency, settled_at, status, refunded_amount_cents
+       frequency, amount_cents, currency, settled_at, status, refunded_amount_cents, gift_type
      ) VALUES (?, 'PAYMENT_INTENT', ?, ?, ?, 'ONCE', 5000, 'usd',
-       '2026-08-10T12:00:00.000Z', 'PAID', ?)`
-  ).run(id, sourceId, checkoutId, sourceId, overrides.refundedAmountCents ?? 0);
+       '2026-08-10T12:00:00.000Z', 'PAID', ?, ?)`
+  ).run(id, sourceId, checkoutId, sourceId, overrides.refundedAmountCents ?? 0, overrides.giftType ?? "TITHE");
 }
 
 function insertAcknowledgment(database: DatabaseSync, id: string, giftId: string): void {

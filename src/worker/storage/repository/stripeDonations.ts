@@ -1,4 +1,5 @@
 export type StripeGiftFrequency = "ONCE" | "MONTHLY";
+export type StripeGiftType = "TITHE" | "OFFERING" | "UNSPECIFIED";
 export type StripeCheckoutStatus = "CREATING" | "OPEN" | "COMPLETE" | "EXPIRED" | "FAILED";
 export type StripePaymentStatus = "UNPAID" | "PAID" | "NO_PAYMENT_REQUIRED";
 
@@ -10,6 +11,7 @@ export interface StripeCheckoutRecord {
   request_fingerprint: string;
   stripe_session_id: string | null;
   frequency: StripeGiftFrequency;
+  gift_type: StripeGiftType;
   amount_cents: number;
   currency: "usd";
   livemode: 0 | 1;
@@ -39,6 +41,7 @@ export interface StripeGiftRecord {
   stripe_invoice_id: string | null;
   stripe_subscription_id: string | null;
   frequency: StripeGiftFrequency;
+  gift_type: StripeGiftType;
   amount_cents: number;
   currency: "usd";
   donor_name: string | null;
@@ -60,6 +63,7 @@ export interface StripeAcknowledgmentClaim {
   donor_name: string | null;
   donor_email: string | null;
   frequency: StripeGiftFrequency;
+  gift_type: StripeGiftType;
   amount_cents: number;
   settled_at: string;
 }
@@ -78,6 +82,7 @@ export async function reserveStripeCheckout(
     requestId: string;
     requestFingerprint: string;
     frequency: StripeGiftFrequency;
+    giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
     amountCents: number;
     livemode: boolean;
     rateLimitClaimId: string | null;
@@ -89,14 +94,15 @@ export async function reserveStripeCheckout(
 }> {
   const inserted = await db.prepare(
     `INSERT OR IGNORE INTO stripe_checkout_sessions (
-       id, request_id, request_fingerprint, frequency, amount_cents, currency,
+       id, request_id, request_fingerprint, frequency, gift_type, amount_cents, currency,
        livemode, status, payment_status, rate_limit_claim_id, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, 'usd', ?, 'CREATING', 'UNPAID', ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, 'usd', ?, 'CREATING', 'UNPAID', ?, ?, ?)`
   ).bind(
     input.id,
     input.requestId,
     input.requestFingerprint,
     input.frequency,
+    input.giftType,
     input.amountCents,
     input.livemode ? 1 : 0,
     input.rateLimitClaimId,
@@ -112,6 +118,7 @@ export async function reserveStripeCheckout(
   }
   const matches = record.request_fingerprint === input.requestFingerprint
     && record.frequency === input.frequency
+    && record.gift_type === input.giftType
     && record.amount_cents === input.amountCents
     && record.livemode === (input.livemode ? 1 : 0);
   return { kind: matches ? "EXISTING" : "CONFLICT", record };
@@ -441,6 +448,7 @@ export async function recordStripeGiftAndAcknowledgment(
     stripeInvoiceId: string | null;
     stripeSubscriptionId: string | null;
     frequency: StripeGiftFrequency;
+    giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
     amountCents: number;
     donorName: string | null;
     donorEmail: string | null;
@@ -451,10 +459,10 @@ export async function recordStripeGiftAndAcknowledgment(
   const giftStatement = db.prepare(
     `INSERT OR IGNORE INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
-       stripe_invoice_id, stripe_subscription_id, frequency, amount_cents,
+       stripe_invoice_id, stripe_subscription_id, frequency, gift_type, amount_cents,
        currency, donor_name, donor_email, settled_at, status,
        refunded_amount_cents, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, 'PAID', 0, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, 'PAID', 0, ?, ?)`
   ).bind(
     input.giftId,
     input.sourceType,
@@ -464,6 +472,7 @@ export async function recordStripeGiftAndAcknowledgment(
     input.stripeInvoiceId,
     input.stripeSubscriptionId,
     input.frequency,
+    input.giftType,
     input.amountCents,
     input.donorName,
     input.donorEmail,
@@ -501,6 +510,7 @@ function stripeGiftMatches(
     && record.stripe_invoice_id === input.stripeInvoiceId
     && record.stripe_subscription_id === input.stripeSubscriptionId
     && record.frequency === input.frequency
+    && record.gift_type === input.giftType
     && record.amount_cents === input.amountCents;
 }
 
@@ -542,7 +552,7 @@ export async function claimNextStripeAcknowledgment(
     `SELECT delivery.id, delivery.gift_id, delivery.status,
             delivery.attempt_count, delivery.processing_claim_id,
             delivery.dispatch_started_at, gift.donor_name, gift.donor_email,
-            gift.frequency, gift.amount_cents, gift.settled_at
+            gift.frequency, gift.gift_type, gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
       WHERE delivery.id = ? AND delivery.processing_claim_id = ?`

@@ -1328,7 +1328,7 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
     throw error;
   }
 
-  const fingerprint = `${input.frequency.toLowerCase()}:${input.amountCents}`;
+  const fingerprint = `${input.frequency.toLowerCase()}:${input.giftType.toLowerCase()}:${input.amountCents}`;
   const existing = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
   let checkout: import("./storage/repository").StripeCheckoutRecord;
   if (existing) {
@@ -1369,6 +1369,7 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       requestId: input.requestId,
       requestFingerprint: fingerprint,
       frequency: input.frequency,
+      giftType: input.giftType,
       amountCents: input.amountCents,
       livemode: stripeConfiguration.livemode,
       rateLimitClaimId,
@@ -1396,6 +1397,7 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
         requestId: input.requestId,
         amountCents: input.amountCents,
         frequency: input.frequency,
+        giftType: input.giftType,
         organizationName,
         appOrigin: resolveAppOrigin(ctx.env, ctx.url),
         paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
@@ -1495,6 +1497,7 @@ function assertCreatedStripeCheckout(
     || session.currency !== "usd"
     || session.metadata.checkout_id !== checkout.id
     || session.metadata.lane !== "eeuu_501c3"
+    || session.metadata.gift_type !== (checkout.gift_type === "TITHE" ? "tithe" : "offering")
   ) {
     throw new Error("Stripe Checkout response did not match the reserved donation");
   }
@@ -1551,6 +1554,7 @@ async function handleStripeCheckoutStatus(ctx: ApiRouteContext): Promise<Respons
   return jsonResponse({
     status,
     frequency: checkout.frequency,
+    giftType: checkout.gift_type,
     amountCents: checkout.amount_cents,
     currency: checkout.currency,
     canManageRecurring,

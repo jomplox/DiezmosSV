@@ -32,7 +32,8 @@ describe("Stripe donation repository", () => {
     expect(first.record).toMatchObject({
       id: "stripe_checkout_one",
       request_id: "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5",
-      request_fingerprint: "once:5000",
+      request_fingerprint: "once:tithe:5000",
+      gift_type: "TITHE",
       status: "CREATING"
     });
 
@@ -200,6 +201,7 @@ describe("Stripe donation repository", () => {
       stripeInvoiceId: null,
       stripeSubscriptionId: null,
       frequency: "ONCE" as const,
+      giftType: "TITHE" as const,
       amountCents: 5000,
       donorName: "Donante Ejemplo",
       donorEmail: "donante@example.org",
@@ -237,6 +239,7 @@ describe("Stripe donation repository", () => {
       stripeInvoiceId: null,
       stripeSubscriptionId: null,
       frequency: "ONCE",
+      giftType: "TITHE",
       amountCents: 5000,
       donorName: "Donante Ejemplo",
       donorEmail: "donante@example.org",
@@ -290,6 +293,7 @@ describe("Stripe donation repository", () => {
       stripeInvoiceId: null,
       stripeSubscriptionId: null,
       frequency: "ONCE",
+      giftType: "TITHE",
       amountCents: 5000,
       donorName: "Donante Ejemplo",
       donorEmail: "donante@example.org",
@@ -330,8 +334,9 @@ function checkoutInput(overrides: Partial<Parameters<typeof reserveStripeCheckou
   return {
     id: "stripe_checkout_one",
     requestId: "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5",
-    requestFingerprint: "once:5000",
+    requestFingerprint: "once:tithe:5000",
     frequency: "ONCE" as const,
+    giftType: "TITHE" as const,
     amountCents: 5000,
     livemode: false,
     rateLimitClaimId: "rate_claim_one",

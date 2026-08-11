@@ -541,36 +541,38 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   // Door 2 (EE. UU.) opens the US wizard — no extranjero toggle anywhere.
   await page.getByRole("button", { name: "EE. UU." }).click();
 
-  // Paso 1 — Monto. The US flow shares the title (its flag badge is aria-hidden
-  // SVG) and a 2-step count; the monthly toggle is the segmented control (Única |
-  // Mensual, real radios).
+  // Paso 1 keeps the complete choice explicit: gift type then frequency.
   await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
   // The assurance subtitle names the US tax-deductible receipt in formal IRS terms.
   await expect(
     page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.")
   ).toBeVisible();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "Tipo de entrega" })).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Diezmo" })).toBeChecked();
+  await page.getByRole("radio", { name: "Ofrenda" }).check();
   await expect(page.getByRole("radiogroup", { name: "Frecuencia de la entrega" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
   await page.getByRole("radio", { name: "Mensual" }).check();
+  await expect(page.getByText("Su entrega se realizará cada mes hasta que usted la cancele.")).toBeVisible();
   await expect(page.getByLabel("Monto")).not.toBeFocused();
 
   // The extranjero mechanics and SV fields are skipped entirely.
   await expect(page.getByLabel("Resido en el extranjero")).toHaveCount(0);
   await expect(page.getByLabel("Número de documento")).toHaveCount(0);
   await expect(page.getByLabel("Departamento")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Continuar con su/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Continuar con su ofrenda" })).toBeVisible();
 
   // A quick-amount chip fills the shared hero input.
   await expect(page.getByRole("button", { name: "$25", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "$100", exact: true }).click();
   await expect(page.getByLabel("Monto")).toHaveValue("100.00");
-  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
 
   // Paso 2 reviews the choice and immediately prepares the in-page Stripe form.
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
-  await expect(page.getByText("Mensual · $100.00")).toBeVisible();
+  await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
   await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
   await expect(page.locator(".donar-intro")).toContainText("organización estadounidense 501(c)(3)");
   await expect(
@@ -584,8 +586,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await page.getByRole("button", { name: /Atrás/ }).click();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByLabel("Monto")).toHaveValue("100.00");
+  await expect(page.getByRole("radio", { name: "Ofrenda" })).toBeChecked();
   await expect(page.getByRole("radio", { name: "Mensual" })).toBeChecked();
-  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
 
   // A transport failure remains on Paso 2; retry reuses the exact UUID.
   await expect(page.getByRole("alert")).toContainText("No pudimos preparar su entrega con Stripe");
@@ -638,9 +641,9 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
 
   expect(checkoutBodies).toHaveLength(3);
-  expect(checkoutBodies[0]).toMatchObject({ amount: "100.00", frequency: "monthly" });
+  expect(checkoutBodies[0]).toMatchObject({ amount: "100.00", frequency: "monthly", giftType: "offering" });
   expect(checkoutBodies[1]).toEqual(checkoutBodies[0]);
-  expect(checkoutBodies[2]).toMatchObject({ amount: "100.00", frequency: "monthly" });
+  expect(checkoutBodies[2]).toMatchObject({ amount: "100.00", frequency: "monthly", giftType: "offering" });
   expect(checkoutBodies[2].requestId).not.toBe(checkoutBodies[0].requestId);
   expect(String(checkoutBodies[0].requestId)).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i

@@ -3727,6 +3727,14 @@ pre {
   outline-offset: 2px;
 }
 
+.donar-stripe-monthly-note {
+  margin: 0;
+  color: #595959;
+  font-size: 14px;
+  line-height: 1.45;
+  text-align: center;
+}
+
 /* THE HERO: the amount is the screen. "$" prefix + giant Gotham numerals. */
 .donar-hero-amount {
   display: flex;

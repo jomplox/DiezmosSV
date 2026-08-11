@@ -15,13 +15,15 @@ describe("Stripe Checkout donation contract", () => {
     expect(validateStripeCheckoutInput({
       requestId,
       amount: "50.25",
-      frequency: "once"
-    })).toEqual({ requestId, amountCents: 5025, frequency: "ONCE" });
+      frequency: "once",
+      giftType: "tithe"
+    })).toEqual({ requestId, amountCents: 5025, frequency: "ONCE", giftType: "TITHE" });
     expect(validateStripeCheckoutInput({
       requestId,
       amount: 25,
-      frequency: "monthly"
-    })).toEqual({ requestId, amountCents: 2500, frequency: "MONTHLY" });
+      frequency: "monthly",
+      giftType: "offering"
+    })).toEqual({ requestId, amountCents: 2500, frequency: "MONTHLY", giftType: "OFFERING" });
 
     for (const body of [
       { requestId: "not-a-uuid", amount: 50, frequency: "once" },
@@ -30,7 +32,9 @@ describe("Stripe Checkout donation contract", () => {
       { requestId, amount: "1.001", frequency: "once" },
       { requestId, amount: 1.001, frequency: "once" },
       { requestId, amount: 5000.01, frequency: "once" },
-      { requestId, amount: 50, frequency: "weekly" }
+      { requestId, amount: 50, frequency: "weekly", giftType: "tithe" },
+      { requestId, amount: 50, frequency: "once" },
+      { requestId, amount: 50, frequency: "once", giftType: "UNSPECIFIED" }
     ]) {
       expect(() => validateStripeCheckoutInput(body)).toThrow(StripeDonationValidationError);
     }
@@ -43,6 +47,7 @@ describe("Stripe Checkout donation contract", () => {
       requestId,
       amountCents: 5025,
       frequency: "ONCE",
+      giftType: "TITHE",
       organizationName: "Organización de Prueba",
       appOrigin: "https://donations.example.invalid",
       paymentMethodConfigurationId: "pmc_fixture",
@@ -65,12 +70,14 @@ describe("Stripe Checkout donation contract", () => {
       metadata: {
         checkout_id: "stripe_checkout_fixture",
         frequency: "once",
+        gift_type: "tithe",
         lane: "eeuu_501c3"
       },
       payment_intent_data: {
         metadata: {
           checkout_id: "stripe_checkout_fixture",
           frequency: "once",
+          gift_type: "tithe",
           lane: "eeuu_501c3"
         }
       },
@@ -100,6 +107,7 @@ describe("Stripe Checkout donation contract", () => {
       requestId,
       amountCents: 10000,
       frequency: "MONTHLY",
+      giftType: "OFFERING",
       organizationName: "Organización de Prueba",
       appOrigin: "https://donations.example.invalid/",
       paymentMethodConfigurationId: "pmc_fixture",
@@ -113,6 +121,7 @@ describe("Stripe Checkout donation contract", () => {
       metadata: {
         checkout_id: "stripe_checkout_monthly",
         frequency: "monthly",
+        gift_type: "offering",
         lane: "eeuu_501c3"
       }
     });
