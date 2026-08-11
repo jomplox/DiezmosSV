@@ -33,6 +33,18 @@ import {
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
+import { createStripeGateway, StripeWebhookSignatureError } from "./services/stripeClient";
+import {
+  StripeConfigurationError,
+  StripeDonationValidationError,
+  STRIPE_API_VERSION,
+  buildStripeCheckoutSessionParams,
+  integrationIdentifierForRequest,
+  resolveStripeConfiguration,
+  validateStripeCheckoutInput
+} from "./services/stripeDonations";
+import { processStripeWebhookEvent, StripeWebhookEventError } from "./services/stripeWebhook";
+import { deliverNextStripeAcknowledgment } from "./services/stripeAcknowledgment";
 import { logWorkerError } from "./services/observability";
 import { stagingSmokeRunId } from "./services/stagingSmoke";
 import {
@@ -155,6 +167,7 @@ const BOOTSTRAP_TOKEN_PATTERN = /^bt_[A-Za-z0-9_-]{43}$/;
 const PUBLIC_JSON_BODY_LIMIT_BYTES = 16 * 1024;
 const AUTHENTICATED_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 const WOMPI_WEBHOOK_BODY_LIMIT_BYTES = 64 * 1024;
+const STRIPE_WEBHOOK_BODY_LIMIT_BYTES = 256 * 1024;
 const INVALIDATION_REQUEST_KEYS = new Set(["tipoAnulacion", "motivoAnulacion", "codigoGeneracionR"]);
 const FISCAL_CORRECTION_REQUEST_KEYS = new Set(["correctionRequestId", "receptor"]);
 
@@ -257,10 +270,12 @@ function redirectToCanonicalDocument(env: Env, url: URL): Response | null {
   const isAdminPath = url.pathname === "/admin" || url.pathname.startsWith("/admin/");
   const isGraciasPath =
     url.pathname === "/donar/gracias" || url.pathname === "/donar/gracias/";
+  const isStripeResultPath =
+    url.pathname === "/donar/stripe/resultado" || url.pathname === "/donar/stripe/resultado/";
 
   if (shouldCanonicalizeOrigin) {
     const target = new URL(canonicalOrigin);
-    if (isAdminPath || isGraciasPath) {
+    if (isAdminPath || isGraciasPath || isStripeResultPath) {
       target.pathname = url.pathname;
       target.search = url.search;
     } else if (url.pathname === "/donar" || url.pathname === "/donar/") {
@@ -279,6 +294,7 @@ function redirectToCanonicalDocument(env: Env, url: URL): Response | null {
     url.pathname === "/" ||
     isAdminPath ||
     isGraciasPath ||
+    isStripeResultPath ||
     url.pathname.startsWith("/assets/")
   ) {
     return null;
@@ -352,7 +368,11 @@ function emergencyDonationShutdownResponse(request: Request, env: Env, url: URL)
   }
   if (
     request.method === "POST" &&
-    (url.pathname === "/api/donations/intent" || url.pathname.startsWith("/api/donations/intent/"))
+    (
+      url.pathname === "/api/donations/intent"
+      || url.pathname.startsWith("/api/donations/intent/")
+      || url.pathname === "/api/donations/stripe/checkout"
+    )
   ) {
     return jsonResponse(
       { error: "donation_intake_disabled" },
@@ -388,6 +408,9 @@ export default {
       }
       if (url.pathname === "/webhooks/wompi") {
         return await handleWompiWebhook(request, env);
+      }
+      if (url.pathname === "/webhooks/stripe") {
+        return await handleStripeWebhook(request, env, ctx);
       }
       const documentRedirect = redirectToCanonicalDocument(env, url);
       if (documentRedirect) {
@@ -581,6 +604,16 @@ async function handleScheduled(event: ScheduledEvent, env: Env): Promise<void> {
   const now = nowIso();
   await repo.deleteExpiredLoginRateLimits(now);
   await repo.deleteExpiredSecurityRateLimitClaims(now);
+  if (env.STRIPE_MOCK_MODE === "1" || env.STRIPE_RESTRICTED_KEY?.trim()) {
+    try {
+      for (let processed = 0; processed < 25; processed += 1) {
+        const result = await deliverNextStripeAcknowledgment(env, repo);
+        if (!result.processed) break;
+      }
+    } catch (error) {
+      logWorkerError(env, "stripe_acknowledgment_sweep_failed", error);
+    }
+  }
   const pipeline = new IssuancePipeline(env);
   try {
     await pipeline.retryDeferredTransmissions();
@@ -844,6 +877,98 @@ async function handleWompiWebhook(request: Request, env: Env): Promise<Response>
     inserted: ingested.inserted,
     queued: ingested.queued
   }, { status: ingested.inserted ? 202 : 200 });
+}
+
+async function handleStripeWebhook(
+  request: Request,
+  env: Env,
+  executionContext?: ExecutionContext
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return methodNotAllowed();
+  }
+  const signature = request.headers.get("stripe-signature")?.trim();
+  if (!signature) {
+    return jsonResponse({ error: "invalid_stripe_signature" }, { status: 400 });
+  }
+  let configuration;
+  try {
+    configuration = resolveStripeConfiguration(env);
+  } catch (error) {
+    if (error instanceof StripeConfigurationError) {
+      return jsonResponse({ error: "stripe_webhook_unavailable" }, { status: 503 });
+    }
+    throw error;
+  }
+  const rawBody = await readBodyText(request, STRIPE_WEBHOOK_BODY_LIMIT_BYTES);
+  let event;
+  try {
+    event = await createStripeGateway(configuration).constructWebhookEvent(rawBody, signature);
+  } catch (error) {
+    if (error instanceof StripeWebhookSignatureError) {
+      return jsonResponse({ error: "invalid_stripe_signature" }, { status: 400 });
+    }
+    throw error;
+  }
+  if (
+    event.livemode !== configuration.livemode
+    || event.api_version !== STRIPE_API_VERSION
+    || !/^evt_[A-Za-z0-9_-]{4,250}$/.test(event.id)
+  ) {
+    return jsonResponse({ error: "invalid_stripe_event_context" }, { status: 400 });
+  }
+
+  const repo = new Repository(env.DB, auditContextFrom(request));
+  const claimId = newId("stripe_event_claim");
+  const claimed = await repo.claimStripeWebhookEvent({
+    eventId: event.id,
+    eventType: event.type,
+    livemode: event.livemode,
+    claimId,
+    now: nowIso()
+  });
+  if (claimed.kind === "DUPLICATE") {
+    return jsonResponse({ received: true });
+  }
+  if (claimed.kind === "BUSY") {
+    return jsonResponse({ error: "stripe_event_in_progress" }, { status: 409 });
+  }
+  if (claimed.kind === "CONFLICT") {
+    return jsonResponse({ error: "stripe_event_conflict" }, { status: 400 });
+  }
+
+  try {
+    await processStripeWebhookEvent(repo, event, nowIso());
+    const finalized = await repo.finalizeStripeWebhookEvent({
+      eventId: event.id,
+      claimId,
+      outcome: "PROCESSED",
+      now: nowIso()
+    });
+    if (!finalized) {
+      throw new StripeWebhookEventError("event_claim_lost");
+    }
+    const acknowledgmentTask = deliverNextStripeAcknowledgment(env, repo)
+      .catch((error) => logWorkerError(env, "stripe_acknowledgment_delivery_failed", error));
+    if (executionContext) {
+      executionContext.waitUntil(acknowledgmentTask);
+    } else {
+      await acknowledgmentTask;
+    }
+    return jsonResponse({ received: true });
+  } catch (error) {
+    await repo.finalizeStripeWebhookEvent({
+      eventId: event.id,
+      claimId,
+      outcome: "FAILED",
+      failureCode: error instanceof StripeWebhookEventError
+        ? error.code
+        : "stripe_event_processing_failed",
+      now: nowIso()
+    });
+    logWorkerError(env, "stripe_webhook_processing_failed", error);
+    return jsonResponse({ error: "stripe_event_processing_failed" }, { status: 500 });
+  }
 }
 
 interface TrustedWompiIngestionSource {
@@ -1166,6 +1291,327 @@ async function handleCreateDonationIntent(ctx: ApiRouteContext): Promise<Respons
       return jsonResponse({ error: "wompi_link_failed", message: "No se pudo generar el enlace de pago. Intente de nuevo en unos minutos." }, { status: 502 });
     }
     throw error;
+  }
+}
+
+async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  assertDeploymentCanCollectPayments(ctx.env);
+
+  let input;
+  try {
+    input = validateStripeCheckoutInput(await readJsonObject(ctx.request, {
+      limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES,
+      malformed: "empty-object"
+    }));
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return donationBodyTooLargeResponse();
+    }
+    if (error instanceof StripeDonationValidationError) {
+      return jsonResponse({ error: error.code, message: error.message }, { status: 400 });
+    }
+    throw error;
+  }
+
+  let stripeConfiguration;
+  try {
+    stripeConfiguration = resolveStripeConfiguration(ctx.env);
+  } catch (error) {
+    if (error instanceof StripeConfigurationError) {
+      return jsonResponse(
+        { error: "stripe_unavailable", message: "La entrega por Stripe no está disponible en este momento." },
+        { status: 503 }
+      );
+    }
+    throw error;
+  }
+
+  const fingerprint = `${input.frequency.toLowerCase()}:${input.amountCents}`;
+  const existing = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
+  let checkout: import("./storage/repository").StripeCheckoutRecord;
+  if (existing) {
+    if (existing.request_fingerprint !== fingerprint) {
+      return stripeCheckoutConflictResponse();
+    }
+    if (existing.status !== "FAILED" && existing.status !== "CREATING") {
+      return existingStripeCheckoutResponse(existing, stripeConfiguration);
+    }
+    const reclaimed = await ctx.repo.reclaimStripeCheckoutCreation({
+      id: existing.id,
+      now: nowIso()
+    });
+    if (!reclaimed) {
+      return existingStripeCheckoutResponse(existing, stripeConfiguration);
+    }
+    checkout = reclaimed;
+  } else {
+    const clientIp = clientIpFrom(ctx.request);
+    const claimNow = nowIso();
+    const rateLimitClaimId = await ctx.repo.claimDonationIntentRateLimit(
+      await rateLimitKey(clientIp),
+      clientIp,
+      claimNow,
+      intentThrottleSinceIso(),
+      intentThrottleExpiresIso(),
+      INTENT_THROTTLE_LIMIT
+    );
+    if (!rateLimitClaimId) {
+      return jsonResponse(
+        { error: "too_many_attempts", message: "Demasiados intentos. Espere 15 minutos e intente de nuevo." },
+        { status: 429 }
+      );
+    }
+
+    const reservation = await ctx.repo.reserveStripeCheckout({
+      id: newId("stripe_checkout"),
+      requestId: input.requestId,
+      requestFingerprint: fingerprint,
+      frequency: input.frequency,
+      amountCents: input.amountCents,
+      livemode: stripeConfiguration.livemode,
+      rateLimitClaimId,
+      now: claimNow
+    });
+    if (reservation.kind === "CONFLICT") {
+      return stripeCheckoutConflictResponse();
+    }
+    if (reservation.kind === "EXISTING") {
+      return existingStripeCheckoutResponse(reservation.record, stripeConfiguration);
+    }
+    checkout = reservation.record;
+  }
+
+  const organizationName = parseBrandingSettings(
+    await ctx.repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    null,
+    null
+  ).displayName;
+  const gateway = createStripeGateway(stripeConfiguration);
+  try {
+    const session = await gateway.createCheckoutSession(
+      buildStripeCheckoutSessionParams({
+        checkoutId: checkout.id,
+        requestId: input.requestId,
+        amountCents: input.amountCents,
+        frequency: input.frequency,
+        organizationName,
+        appOrigin: resolveAppOrigin(ctx.env, ctx.url),
+        paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
+        integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
+      }),
+      `stripe-checkout:${input.requestId}`
+    );
+    assertCreatedStripeCheckout(session, checkout);
+    const completed = await ctx.repo.completeStripeCheckoutCreation({
+      id: checkout.id,
+      stripeSessionId: session.id,
+      expiresAt: new Date(session.expiresAt * 1000).toISOString(),
+      now: nowIso()
+    });
+    if (!completed || !session.clientSecret) {
+      throw new Error("Stripe Checkout reservation lost before finalization");
+    }
+    return jsonResponse(
+      {
+        sessionId: session.id,
+        clientSecret: session.clientSecret,
+        publishableKey: stripeConfiguration.publishableKey,
+        mock: stripeConfiguration.mock
+      },
+      { status: 201, headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (error) {
+    await ctx.repo.failStripeCheckoutCreation({
+      id: checkout.id,
+      errorCode: "stripe_checkout_create_failed",
+      now: nowIso()
+    });
+    logWorkerError(ctx.env, "stripe_checkout_create_failed", error);
+    return jsonResponse(
+      { error: "stripe_checkout_failed", message: "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo." },
+      { status: 502, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+async function existingStripeCheckoutResponse(
+  checkout: import("./storage/repository").StripeCheckoutRecord,
+  configuration: ReturnType<typeof resolveStripeConfiguration>
+): Promise<Response> {
+  if (checkout.status === "CREATING") {
+    return jsonResponse(
+      { error: "stripe_checkout_in_progress", message: "Su entrega se está preparando. Inténtelo de nuevo en un momento." },
+      { status: 409, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  if (checkout.status !== "OPEN" || !checkout.stripe_session_id) {
+    return jsonResponse(
+      { error: "stripe_checkout_unavailable", message: "Inicie una nueva entrega para continuar con Stripe." },
+      { status: 409, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  try {
+    const session = await createStripeGateway(configuration)
+      .retrieveCheckoutSession(checkout.stripe_session_id);
+    assertStripeEmbeddedSession(session);
+    return jsonResponse(
+      {
+        sessionId: session.id,
+        clientSecret: session.clientSecret,
+        publishableKey: configuration.publishableKey,
+        mock: configuration.mock
+      },
+      { headers: { "Cache-Control": "no-store" } }
+    );
+  } catch (error) {
+    return jsonResponse(
+      { error: "stripe_checkout_unavailable", message: "No pudimos recuperar su entrega con Stripe. Inténtelo de nuevo." },
+      { status: 502, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+}
+
+function stripeCheckoutConflictResponse(): Response {
+  return jsonResponse(
+    {
+      error: "stripe_checkout_request_conflict",
+      message: "Esta solicitud ya corresponde a otra entrega. Inicie una nueva entrega para continuar."
+    },
+    { status: 409, headers: { "Cache-Control": "no-store" } }
+  );
+}
+
+function assertCreatedStripeCheckout(
+  session: import("./services/stripeClient").StripeCheckoutSnapshot,
+  checkout: import("./storage/repository").StripeCheckoutRecord
+): void {
+  const expectedMode = checkout.frequency === "MONTHLY" ? "subscription" : "payment";
+  if (
+    session.livemode !== Boolean(checkout.livemode)
+    || session.mode !== expectedMode
+    || session.amountTotal !== checkout.amount_cents
+    || session.currency !== "usd"
+    || session.metadata.checkout_id !== checkout.id
+    || session.metadata.lane !== "eeuu_501c3"
+  ) {
+    throw new Error("Stripe Checkout response did not match the reserved donation");
+  }
+  assertStripeEmbeddedSession(session);
+}
+
+function assertStripeEmbeddedSession(
+  session: import("./services/stripeClient").StripeCheckoutSnapshot
+): asserts session is import("./services/stripeClient").StripeCheckoutSnapshot & { clientSecret: string } {
+  if (session.url !== null || !session.clientSecret || !session.clientSecret.startsWith(`${session.id}_secret_`)) {
+    throw new Error("Stripe Embedded Checkout Session client secret was rejected");
+  }
+}
+
+function assertStripeHostedUrl(
+  raw: string | null,
+  kind: "checkout" | "billing",
+  mock: boolean
+): asserts raw is string {
+  if (!raw) throw new Error("Stripe hosted URL is missing");
+  const parsed = new URL(raw);
+  const expectedHost = kind === "checkout"
+    ? (mock ? "checkout.stripe.test" : "checkout.stripe.com")
+    : (mock ? "billing.stripe.test" : "billing.stripe.com");
+  if (
+    parsed.protocol !== "https:"
+    || parsed.hostname !== expectedHost
+    || parsed.username
+    || parsed.password
+    || parsed.port
+  ) {
+    throw new Error("Stripe hosted URL was rejected");
+  }
+}
+
+async function handleStripeCheckoutStatus(ctx: ApiRouteContext): Promise<Response> {
+  const sessionId = ctx.params[0];
+  if (!/^cs_(?:test|live)_[A-Za-z0-9_-]{8,200}$/.test(sessionId)) {
+    return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+  }
+  const checkout = await ctx.repo.getStripeCheckoutBySessionId(sessionId);
+  if (!checkout) {
+    return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+  }
+  const status = checkout.status === "COMPLETE" && checkout.payment_status === "PAID"
+    ? "PAID"
+    : checkout.status === "COMPLETE"
+      ? "PENDING"
+      : checkout.status;
+  const canManageRecurring = checkout.frequency === "MONTHLY"
+    && checkout.payment_status === "PAID"
+    && Boolean(checkout.stripe_customer_id)
+    && checkout.subscription_status !== "CANCELED";
+  return jsonResponse({
+    status,
+    frequency: checkout.frequency,
+    amountCents: checkout.amount_cents,
+    currency: checkout.currency,
+    canManageRecurring,
+    recurringStatus: checkout.subscription_status
+  }, { headers: { "Cache-Control": "no-store" } });
+}
+
+async function handleStripePortal(ctx: ApiRouteContext): Promise<Response> {
+  const rejected = rejectUnsafePublicDonationMutation(ctx.request, ctx.url);
+  if (rejected) return rejected;
+  let body: Record<string, unknown>;
+  try {
+    body = await readJsonObject(ctx.request, {
+      limitBytes: PUBLIC_JSON_BODY_LIMIT_BYTES,
+      malformed: "empty-object"
+    });
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return donationBodyTooLargeResponse();
+    }
+    throw error;
+  }
+  const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  if (!/^cs_(?:test|live)_[A-Za-z0-9_-]{8,200}$/.test(sessionId)) {
+    return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+  }
+  const checkout = await ctx.repo.getStripeCheckoutBySessionId(sessionId);
+  if (
+    !checkout
+    || checkout.frequency !== "MONTHLY"
+    || checkout.payment_status !== "PAID"
+    || !checkout.stripe_customer_id
+  ) {
+    return jsonResponse(
+      { error: "stripe_portal_unavailable", message: "La administración de su entrega mensual aún no está disponible." },
+      { status: 409, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  let configuration;
+  try {
+    configuration = resolveStripeConfiguration(ctx.env);
+  } catch (error) {
+    if (error instanceof StripeConfigurationError) {
+      return jsonResponse({ error: "stripe_portal_unavailable" }, { status: 503 });
+    }
+    throw error;
+  }
+  try {
+    const portal = await createStripeGateway(configuration).createBillingPortalSession({
+      customerId: checkout.stripe_customer_id,
+      configurationId: configuration.billingPortalConfigurationId,
+      returnUrl: `${resolveAppOrigin(ctx.env, ctx.url)}/donar/stripe/resultado?session_id=${encodeURIComponent(sessionId)}`
+    });
+    assertStripeHostedUrl(portal.url, "billing", configuration.mock);
+    return jsonResponse(portal, { headers: { "Cache-Control": "no-store" } });
+  } catch (error) {
+    logWorkerError(ctx.env, "stripe_portal_create_failed", error);
+    return jsonResponse(
+      { error: "stripe_portal_unavailable", message: "No pudimos abrir la administración de su entrega mensual." },
+      { status: 502, headers: { "Cache-Control": "no-store" } }
+    );
   }
 }
 
@@ -2263,7 +2709,10 @@ const publicRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/branding/donor-logo", handler: handleDonorBrandingLogo },
   { method: "POST", pattern: "/api/donations/intent", handler: handleCreateDonationIntent },
   { method: "POST", pattern: /^\/api\/donations\/intent\/([^/]+)\/datos$/, handler: handleDonationIntentDatos },
-  { method: "GET", pattern: /^\/api\/donations\/intent\/([^/]+)\/status$/, handler: handleDonationIntentStatus }
+  { method: "GET", pattern: /^\/api\/donations\/intent\/([^/]+)\/status$/, handler: handleDonationIntentStatus },
+  { method: "POST", pattern: "/api/donations/stripe/checkout", handler: handleCreateStripeCheckout },
+  { method: "GET", pattern: /^\/api\/donations\/stripe\/session\/([^/]+)$/, handler: handleStripeCheckoutStatus },
+  { method: "POST", pattern: "/api/donations/stripe/portal", handler: handleStripePortal }
 ];
 
 const authRoutes: Array<Route<ApiRouteContext>> = [

@@ -1,4 +1,18 @@
 WOMPI_API_SECRET="replace-with-wompi-secret"
+# Deterministic local-only Stripe transport. Production rejects this setting.
+STRIPE_MOCK_MODE="1"
+# For a real sandbox smoke test, remove STRIPE_MOCK_MODE and provide these through
+# an untracked owner-only .dev.vars file. Use a restricted key, never an sk_ key.
+# STRIPE_RESTRICTED_KEY="rk_test_replace-with-restricted-key"
+# STRIPE_PUBLISHABLE_KEY="pk_test_replace-with-publishable-key"
+# STRIPE_WEBHOOK_SECRET="whsec_replace-with-endpoint-secret"
+# STRIPE_PAYMENT_METHOD_CONFIGURATION_ID="pmc_replace-with-donor-safe-config"
+# STRIPE_BILLING_PORTAL_CONFIGURATION_ID="bpc_replace-with-spanish-portal-config"
+# STRIPE_US_LEGAL_NAME="Replace with exact US 501(c)(3) legal name"
+# STRIPE_US_EIN="00-0000000"
+# Optional only when local workerd cannot make outbound HTTPS requests. Run
+# `npm run dev:stripe-api-proxy`; staging and production reject this override.
+# STRIPE_API_PROXY_URL="http://127.0.0.1:8791"
 # OAuth client-credentials for minting single-use Wompi payment links (donor checkout).
 # Obtain from the Wompi dashboard; used against https://id.wompi.sv/connect/token.
 # WOMPI_CLIENT_ID="replace-with-wompi-client-id"

@@ -44,17 +44,16 @@ export const DONAR_VERIFYING_NOTICE_DELAY_MS = 20_000;
 export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
 
 export const DONAR_AMOUNT_CHIPS = [50, 150, 250, 500] as const;
-// The US door's quick amounts bridge toward the Givebutter campaign's own presets
-// ($100–$2,000): the chip prefills the embed, so wildly different anchors on two
-// consecutive screens read as a mistake. $50 keeps an accessible low option.
+// The US door keeps $50 accessible while offering round anchors suitable for a
+// one-time or monthly Stripe Embedded Checkout form.
 export const DONAR_AMOUNT_CHIPS_US = [50, 100, 250, 500] as const;
 const DONAR_MIN_AMOUNT = 1;
 
-// ── Step wizard (Givebutter-style structure, monochrome Gotham skin) ─────────
+// ── Step wizard (one concern per screen, monochrome Gotham skin) ─────────────
 //
 // The single long form became one concern per screen. SV door: Paso 1 monto,
-// Paso 2 datos, Paso 3 pago (Wompi handoff). US door: Paso 1 monto (Única |
-// Mensual), Paso 2 the embedded Givebutter giving form.
+// Paso 2 datos, Paso 3 entrega (Wompi handoff). US door: Paso 1 monto (Única |
+// Mensual), Paso 2 Stripe's hosted Checkout embedded inside the page.
 export const DONAR_STEP_COUNT_SV = 3;
 export const DONAR_STEP_COUNT_US = 2;
 // Wizard chrome. The step indicator is plain "Paso n de m" (Gotham Book, gray).
@@ -82,70 +81,87 @@ export function donarAmountDisplay(amount: string): string {
   return formatCents(Math.round((Number.isFinite(parsed) ? parsed : 0) * 100));
 }
 
-// ── US donors → Givebutter / configured US nonprofit ───────────────
+// ── US donors → Stripe / connected US nonprofit ────────────────────────────
 //
-// A US-resident donor gets NO Salvadoran CDE (useless to a US taxpayer); their
-// gift belongs on the US 501c3's books and yields a US-deductible receipt from
-// Givebutter. When "Resido en el extranjero" is checked AND país === "US", the SV
-// fiscal fields collapse and the embedded Givebutter giving form takes over. No
-// backend involvement: no intent, no webhook, no migration.
-//
-// The campaign slug is BUILD configuration, never a literal in the source: set
-// VITE_GIVEBUTTER_CAMPAIGN before `npm run build` (which every cf:deploy:* script
-// runs) and the deployment's own campaign is baked into the client bundle. Unset, the
-// neutral placeholder below keeps a fresh clone runnable.
-//
-// The env bag is read defensively because this module is also loaded OUTSIDE Vite —
-// the vitest suites and the Playwright spec import it directly, and there
-// `import.meta.env` (or `import.meta` itself) can be undefined.
-const GIVEBUTTER_CAMPAIGN_FALLBACK = "example-campaign";
-const buildEnv: Record<string, string | undefined> =
-  typeof import.meta === "object" && import.meta !== null
-    ? ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {})
-    : {};
-export const GIVEBUTTER_CAMPAIGN = buildEnv.VITE_GIVEBUTTER_CAMPAIGN?.trim() || GIVEBUTTER_CAMPAIGN_FALLBACK;
-// The hosted campaign page sends x-frame-options: sameorigin, so /donar must iframe
-// Givebutter's purpose-built embed URL instead of the campaign page itself.
-export const GIVEBUTTER_EMBED_BASE_URL = `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`;
-// The CAT-020 código for Estados Unidos: the only foreign country that routes to
-// Givebutter (every other país stays on the Wompi + CDE path).
-export const GIVEBUTTER_US_COUNTRY_CODE = "US";
-// Same probe budget as the Wompi widget: if the direct iframe has not loaded
-// within this window, show the hosted-page fallback.
-export const GIVEBUTTER_RENDER_TIMEOUT_MS = 4_000;
+// A US-resident donor gets no Salvadoran CDE. Their one-time or monthly gift is
+// recorded on the connected US 501(c)(3) account and completed in our Spanish
+// Stripe Embedded Checkout. Dynamic method eligibility remains server/account
+// configuration: browser code intentionally sends no method list.
+export const STRIPE_CHECKOUT_PATH = "/api/donations/stripe/checkout";
+export const STRIPE_PORTAL_PATH = "/api/donations/stripe/portal";
+export const STRIPE_RESULT_PATH = "/donar/stripe/resultado";
+export const STRIPE_US_COUNTRY_CODE = "US";
+export const STRIPE_MONTHLY_LABEL = "Frecuencia de la entrega";
+export const STRIPE_FREQ_ONCE_LABEL = "Única";
+export const STRIPE_FREQ_MONTHLY_LABEL = "Mensual";
+export const STRIPE_CANCELED_MESSAGE =
+  "Su entrega no se completó. Puede revisar los datos e intentarlo de nuevo cuando desee.";
+export const STRIPE_RESULT_POLL_INTERVAL_MS = 5_000;
+export const STRIPE_RESULT_POLL_TIMEOUT_MS = 3 * 60 * 1_000;
 
-// The US door funds the SAME mother church as the SV door — the 501c3 is only the
-// US giving vehicle, never a different beneficiary. Build the attribution from the
-// public branding record so a reusable build never ships a demo organization name.
-export function givebutterIntro(organizationName: string | null): string {
+// The US door funds the same mother church as the SV door. The 501(c)(3) is the
+// giving vehicle, never a different beneficiary, and its legal identity is supplied
+// by the Stripe acknowledgment rather than fabricated from the church display name.
+export function stripeIntro(organizationName: string | null): string {
   const name = organizationName?.trim();
-  if (!name) {
-    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
-  }
-  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
+  const beneficiary = name ? `${name} en El Salvador` : "esta iglesia en El Salvador";
+  return `Su diezmo u ofrenda apoya a ${beneficiary}. La entrega se realiza en EE. UU. a través de una organización estadounidense 501(c)(3), que enviará su recibo por correo electrónico.`;
 }
-// "GiveButter" is the brand style (capital G, capital B) and is the anchor text — no
-// raw URL is ever shown to the donor.
-export const GIVEBUTTER_FALLBACK_HINT = "¿Problemas con el formulario? Done en GiveButter";
-export const GIVEBUTTER_FALLBACK_CTA = "Donar en GiveButter";
-export const GIVEBUTTER_MONTHLY_LABEL = "Donación mensual";
-// The monthly toggle restyled as the Paso 1 segmented control (Única | Mensual).
-// GIVEBUTTER_MONTHLY_LABEL stays as the radiogroup's accessible name.
-export const GIVEBUTTER_FREQ_ONCE_LABEL = "Única";
-export const GIVEBUTTER_FREQ_MONTHLY_LABEL = "Mensual";
-// Shown under the EE. UU. door's Givebutter block: the widget is English-only.
-export const GIVEBUTTER_ENGLISH_NOTICE = "El formulario se muestra en inglés.";
+
+export function stripeCheckoutBody(input: {
+  requestId: string;
+  amount: string;
+  monthly: boolean;
+}): { requestId: string; amount: string; frequency: "once" | "monthly" } {
+  return {
+    requestId: input.requestId,
+    amount: input.amount.trim(),
+    frequency: input.monthly ? "monthly" : "once"
+  };
+}
+
+export function stripeSessionPath(sessionId: string): string {
+  return `/api/donations/stripe/session/${encodeURIComponent(sessionId)}`;
+}
+
+export function isStripeResultPath(pathname: string): boolean {
+  return pathname === STRIPE_RESULT_PATH || pathname === `${STRIPE_RESULT_PATH}/`;
+}
+
+export function stripeSessionIdFromSearch(search: string): string | null {
+  const value = new URLSearchParams(search).get("session_id")?.trim() ?? "";
+  return /^cs_(?:test|live)_[A-Za-z0-9_-]{8,200}$/.test(value) ? value : null;
+}
+
+export function isStripeHostedUrl(
+  raw: string,
+  kind: "checkout" | "billing",
+  allowTestHost = false
+): boolean {
+  try {
+    const parsed = new URL(raw);
+    const productionHost = kind === "checkout" ? "checkout.stripe.com" : "billing.stripe.com";
+    const testHost = kind === "checkout" ? "checkout.stripe.test" : "billing.stripe.test";
+    return parsed.protocol === "https:"
+      && !parsed.username
+      && !parsed.password
+      && !parsed.port
+      && (parsed.hostname === productionHost || (allowTestHost && parsed.hostname === testHost));
+  } catch {
+    return false;
+  }
+}
 
 // ── Two-door donation landing ───────────────────────────────────────────────
 //
 // /donar opens on a chooser: the donor picks where their gift goes before any
 // form appears. Card 1 (El Salvador y el mundo) opens the existing SV fiscal
-// (Wompi + CDE) form; Card 2 (EE. UU.) opens the Givebutter block directly,
+// (Wompi + CDE) form; Card 2 (EE. UU.) opens Stripe Embedded Checkout directly,
 // skipping the extranjero mechanics. A "Cambiar opción" link returns here.
 export type DonarDoor = "sv" | "eeuu";
 
 export const DONAR_LANDING_HEADING = "Diezmos y Ofrendas";
-// Official support contact for BOTH lanes (SV fiscal + EE. UU./Givebutter). Rendered
+// Official support contact for both lanes (SV fiscal + EE. UU./Stripe). Rendered
 // as a discreet mailto line at the bottom of every donor screen and in email footers.
 export const DONAR_SUPPORT_EMAIL = "legacy-contact-1@example.com";
 // Residence-based framing: the doors differ by the donor's residence / payment rail /
@@ -184,8 +200,7 @@ export function doorFromSearch(search: string): DonarDoor | null {
 }
 
 // The ?ruta value for a chosen door (null clears it). Used to compose the query
-// via history.replaceState WITHOUT clobbering the Givebutter amount/frequency
-// prefill the US path already writes.
+// via history.replaceState without clobbering other donor query parameters.
 export function routeParamForDoor(door: DonarDoor | null): string | null {
   if (door === "sv") {
     return DONAR_ROUTE_SV;
@@ -196,52 +211,10 @@ export function routeParamForDoor(door: DonarDoor | null): string | null {
   return null;
 }
 
-// True when the donor is a US resident, i.e. the Givebutter path should replace the
+// True when the donor is a US resident, i.e. the Stripe path should replace the
 // SV fiscal form. Amount is orthogonal (checked separately before mounting).
 export function isUsDonation(form: Pick<DonationFormInput, "foreignResident" | "pais">): boolean {
-  return form.foreignResident && form.pais === GIVEBUTTER_US_COUNTRY_CODE;
-}
-
-// Normalizes the entered monto to a plain dollar string for Givebutter URL prefill.
-// Returns "" for a blank/invalid amount so the caller can omit the query param.
-function givebutterAmountParam(amount: string): string {
-  const parsed = Number.parseFloat(amount.trim());
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return "";
-  }
-  // Whole dollars render without a trailing ".00"; cents are preserved.
-  return Number.isInteger(parsed) ? String(parsed) : String(parsed);
-}
-
-// Query params shared by the Givebutter iframe and hosted-page fallback. Monthly
-// maps to frequency=monthly; a one-time gift carries no frequency param.
-export function givebutterPrefillParams(input: { amount: string; monthly: boolean }): Record<string, string> {
-  const params: Record<string, string> = {};
-  const amount = givebutterAmountParam(input.amount);
-  if (amount) {
-    params.amount = amount;
-  }
-  if (input.monthly) {
-    params.frequency = "monthly";
-  }
-  return params;
-}
-
-// The frameable Givebutter embed URL discovered from their widget's elements API
-// (2026-07-07). goalBar=false matches the official widget's generated iframe src.
-export function givebutterEmbedUrl(input: { amount: string; monthly: boolean }): string {
-  const params = new URLSearchParams(givebutterPrefillParams(input));
-  params.set("goalBar", "false");
-  return `${GIVEBUTTER_EMBED_BASE_URL}?${params.toString()}`;
-}
-
-// The mandatory hosted-page fallback link. Works with the vanity slug in all cases
-// (Givebutter resolves the slug in share URLs), so it is safe even if the embed
-// endpoint changes in the future.
-export function givebutterHostedUrl(input: { amount: string; monthly: boolean }): string {
-  const params = new URLSearchParams(givebutterPrefillParams(input));
-  const query = params.toString();
-  return query ? `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?${query}` : `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}`;
+  return form.foreignResident && form.pais === STRIPE_US_COUNTRY_CODE;
 }
 
 export const DONAR_THANK_YOU_TITLE = "Dios le bendiga. Su aportación fue recibida.";
@@ -394,7 +367,7 @@ export function firstDonationFieldError(
 export function donationStep1FieldErrors(input: Pick<DonationFormInput, "giftType" | "amount">): DonationFieldErrors {
   const errors: DonationFieldErrors = {};
   // The SV form requires the donor to state whether the gift is a diezmo or an
-  // ofrenda before anything else. (The US/Givebutter path renders no fiscal form and
+  // ofrenda before anything else. (The US/Stripe path renders no fiscal form and
   // never reaches this validator.)
   if (input.giftType !== "DIEZMO" && input.giftType !== "OFRENDA") {
     errors.giftType = "Seleccione si es diezmo u ofrenda.";

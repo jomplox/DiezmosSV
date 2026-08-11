@@ -155,6 +155,13 @@ describe("static document security policy", () => {
       await expect(response.text(), pathname).resolves.toBe("");
     }
 
+    const stripeResult = await worker.fetch(
+      new Request("https://donations.example.invalid/donar/stripe/resultado?session_id=cs_live_existing_fixture"),
+      testEnv
+    );
+    expect(stripeResult.status).toBe(200);
+    await expect(stripeResult.text()).resolves.toBe("asset:/donar/stripe/resultado");
+
     const admin = await worker.fetch(
       new Request("https://donations.example.invalid/admin"),
       testEnv
@@ -171,7 +178,7 @@ describe("static document security policy", () => {
     );
     expect(webhook.status).toBe(401);
     await expect(webhook.json()).resolves.toEqual({ error: "invalid_wompi_hash" });
-    expect(assetFetch).toHaveBeenCalledTimes(1);
+    expect(assetFetch).toHaveBeenCalledTimes(2);
   });
 
   it("serves only the donor, admin, callback, and asset paths while redirecting other documents", async () => {

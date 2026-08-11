@@ -63,6 +63,30 @@ import {
   type IntentDatosInput
 } from "./repository/donationIntents";
 import {
+  applyStripeRefund as applyStripeRefundRepository,
+  attachStripeInvoicePaymentIntent as attachStripeInvoicePaymentIntentRepository,
+  claimNextStripeAcknowledgment as claimNextStripeAcknowledgmentRepository,
+  claimStripeWebhookEvent as claimStripeWebhookEventRepository,
+  completeStripeCheckoutCreation as completeStripeCheckoutCreationRepository,
+  failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
+  finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
+  finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
+  getStripeCheckoutById as getStripeCheckoutByIdRepository,
+  getStripeCheckoutByRequestId as getStripeCheckoutByRequestIdRepository,
+  getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
+  getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
+  markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
+  reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
+  recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
+  reserveStripeCheckout as reserveStripeCheckoutRepository,
+  updateStripeCheckoutFromEvent as updateStripeCheckoutFromEventRepository,
+  updateStripeCheckoutFromInvoice as updateStripeCheckoutFromInvoiceRepository,
+  updateStripeSubscriptionStatus as updateStripeSubscriptionStatusRepository,
+  type StripeAcknowledgmentClaim,
+  type StripeCheckoutRecord,
+  type StripeGiftRecord
+} from "./repository/stripeDonations";
+import {
   claimEmailDelivery as claimEmailDeliveryRepository,
   claimManualEmailDelivery as claimManualEmailDeliveryRepository,
   claimOperationalAlertDelivery as claimOperationalAlertDeliveryRepository,
@@ -222,6 +246,12 @@ export type {
   ReceiptEmailDeliveryState
 } from "./repository/deliveries";
 export type { DteDocumentListPage } from "./repository/dteDocuments";
+export type {
+  StripeAcknowledgmentClaim,
+  StripeCheckoutRecord,
+  StripeGiftFrequency,
+  StripeGiftRecord
+} from "./repository/stripeDonations";
 export {
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
@@ -256,6 +286,112 @@ export class Repository {
 
   async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
     return setSetting(this.db, key, value, updatedBy);
+  }
+
+  async reserveStripeCheckout(
+    input: Parameters<typeof reserveStripeCheckoutRepository>[1]
+  ): ReturnType<typeof reserveStripeCheckoutRepository> {
+    return reserveStripeCheckoutRepository(this.db, input);
+  }
+
+  async getStripeCheckoutByRequestId(requestId: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutByRequestIdRepository(this.db, requestId);
+  }
+
+  async getStripeCheckoutBySessionId(sessionId: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutBySessionIdRepository(this.db, sessionId);
+  }
+
+  async getStripeCheckoutById(id: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutByIdRepository(this.db, id);
+  }
+
+  async completeStripeCheckoutCreation(
+    input: Parameters<typeof completeStripeCheckoutCreationRepository>[1]
+  ): Promise<boolean> {
+    return completeStripeCheckoutCreationRepository(this.db, input);
+  }
+
+  async failStripeCheckoutCreation(
+    input: Parameters<typeof failStripeCheckoutCreationRepository>[1]
+  ): Promise<boolean> {
+    return failStripeCheckoutCreationRepository(this.db, input);
+  }
+
+  async reclaimStripeCheckoutCreation(
+    input: Parameters<typeof reclaimStripeCheckoutCreationRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return reclaimStripeCheckoutCreationRepository(this.db, input);
+  }
+
+  async updateStripeCheckoutFromEvent(
+    input: Parameters<typeof updateStripeCheckoutFromEventRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeCheckoutFromEventRepository(this.db, input);
+  }
+
+  async updateStripeSubscriptionStatus(
+    input: Parameters<typeof updateStripeSubscriptionStatusRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeSubscriptionStatusRepository(this.db, input);
+  }
+
+  async updateStripeCheckoutFromInvoice(
+    input: Parameters<typeof updateStripeCheckoutFromInvoiceRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeCheckoutFromInvoiceRepository(this.db, input);
+  }
+
+  async claimStripeWebhookEvent(
+    input: Parameters<typeof claimStripeWebhookEventRepository>[1]
+  ): ReturnType<typeof claimStripeWebhookEventRepository> {
+    return claimStripeWebhookEventRepository(this.db, input);
+  }
+
+  async finalizeStripeWebhookEvent(
+    input: Parameters<typeof finalizeStripeWebhookEventRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeWebhookEventRepository(this.db, input);
+  }
+
+  async recordStripeGiftAndAcknowledgment(
+    input: Parameters<typeof recordStripeGiftAndAcknowledgmentRepository>[1]
+  ): Promise<{ inserted: boolean; record: StripeGiftRecord }> {
+    return recordStripeGiftAndAcknowledgmentRepository(this.db, input);
+  }
+
+  async applyStripeRefund(
+    input: Parameters<typeof applyStripeRefundRepository>[1]
+  ): Promise<StripeGiftRecord | null> {
+    return applyStripeRefundRepository(this.db, input);
+  }
+
+  async getStripeGiftBySourceId(sourceId: string): Promise<StripeGiftRecord | null> {
+    return getStripeGiftBySourceIdRepository(this.db, sourceId);
+  }
+
+  async attachStripeInvoicePaymentIntent(
+    input: Parameters<typeof attachStripeInvoicePaymentIntentRepository>[1]
+  ): Promise<StripeGiftRecord | null> {
+    return attachStripeInvoicePaymentIntentRepository(this.db, input);
+  }
+
+  async claimNextStripeAcknowledgment(
+    input: Parameters<typeof claimNextStripeAcknowledgmentRepository>[1]
+  ): Promise<StripeAcknowledgmentClaim | null> {
+    return claimNextStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async markStripeAcknowledgmentDispatchStarted(
+    input: Parameters<typeof markStripeAcknowledgmentDispatchStartedRepository>[1]
+  ): Promise<boolean> {
+    return markStripeAcknowledgmentDispatchStartedRepository(this.db, input);
+  }
+
+  async finalizeStripeAcknowledgment(
+    input: Parameters<typeof finalizeStripeAcknowledgmentRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeAcknowledgmentRepository(this.db, input);
   }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {

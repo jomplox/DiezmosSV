@@ -40,7 +40,7 @@ describe("remote deploy and migration scripts", () => {
     }
   });
 
-  it("routes each deployment build through the private configuration wrapper", () => {
+  it("routes each deployment build through the private branding configuration wrapper", () => {
     expect(packageJson.scripts["build:private"]).toBe("node scripts/run-private-build.mjs");
     expect(packageJson.scripts["cf:deploy:staging"]).toContain(
       "npm run build:private -- --env staging"
@@ -48,12 +48,9 @@ describe("remote deploy and migration scripts", () => {
     expect(packageJson.scripts["cf:deploy:prod"]).toContain(
       "npm run build:private -- --env production"
     );
-    expect(packageJson.scripts["cf:deploy:prod"]).not.toContain(
-      "assert-donation-lane-config"
-    );
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/assert-donation-lane-config.mjs"))
-    ).toBe(true);
+    ).toBe(false);
     expect(
       existsSync(resolve(import.meta.dirname, "../../scripts/run-private-build.mjs"))
     ).toBe(true);

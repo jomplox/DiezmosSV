@@ -3428,7 +3428,7 @@ pre {
 }
 
 /* Public donor-checkout pages (/donar, /donar/gracias). Mobile-first, monochrome
-   Gotham minimalism in Givebutter's structural language: one concern per screen
+   Gotham minimalism with one concern per screen
    inside a soft-shadowed rounded card, a segmented control on top, the amount as
    the hero, and a full-width black continue button. Black text on white, gray
    borders (#ddd/#eee), secondary text #595959. The ONLY color on the landing
@@ -3571,7 +3571,7 @@ pre {
   text-align: center;
 }
 
-/* Primary donor button: full-width black fill, Givebutter's 50px+ rhythm. */
+/* Primary donor button: full-width black fill with a generous 50px+ rhythm. */
 .donar-card .primary {
   background: #000000;
   color: #ffffff;
@@ -3925,19 +3925,26 @@ pre {
   text-decoration: underline;
 }
 
-/* Paso 3: the Wompi checkout embedded directly in the wizard card. On mobile
-   the frame stays within the visible viewport so Wompi's fixed confirmation
-   dialog remains visible and its document scrolls internally. From 520px onward
-   Wompi's sizeUpdate can expand the frame to its full content height. */
-.donar-embed {
+/* Shared hosted-provider boundary. Both Wompi's iframe and Stripe Embedded
+   Checkout use the same full-bleed mobile surface and card-edge alignment on
+   larger screens; only the provider-owned content inside it differs. */
+.donar-hosted-surface {
+  display: block;
+  box-sizing: border-box;
   width: 100vw;
   max-width: none;
   margin-inline: calc((100% - 100vw) / 2);
-  height: min(78vh, 820px);
-  transition: none;
   border: 1px solid #e5e5e5;
   border-radius: 12px;
   background: #ffffff;
+  overflow: hidden;
+}
+
+/* Wompi alone needs a capped iframe height so its fixed confirmation dialog
+   remains visible while its hosted document scrolls internally. */
+.donar-embed {
+  height: min(78vh, 820px);
+  transition: none;
 }
 
 @media (max-width: 519px) {
@@ -3947,7 +3954,7 @@ pre {
 }
 
 @media (min-width: 520px) {
-  .donar-embed {
+  .donar-hosted-surface {
     width: calc(100% + 80px);
     margin-inline: -40px;
   }
@@ -4142,40 +4149,130 @@ pre {
   border-color: transparent;
 }
 
-/* US-donor Givebutter block: the US partner explanation + embedded giving form. */
-.donar-givebutter {
+/* US-donor Stripe Embedded Checkout flow. Stripe owns and updates the complete
+   form inside its secure embed; the surrounding handoff shell is shared with
+   Wompi. */
+.donar-stripe {
   display: grid;
   gap: 14px;
 }
 
-.donar-givebutter-frame {
-  width: min(100%, 440px);
-  /* 760px clears Givebutter's tallest checkout step without the ~250px of dead
-     space 860px left between the form's Continue and the fallback link. */
-  min-height: 760px;
-  border: 0;
-  justify-self: center;
-  background: #fff;
+.donar-stripe-loading {
+  min-height: 360px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #595959;
+  font-size: 14px;
+  text-align: center;
 }
 
-/* Givebutter cannot be localized: the widget always renders in English. */
-.donar-english-notice {
-  font-size: 12px;
-  color: #595959;
+.donar-stripe-load-error {
+  min-height: 260px;
+  display: grid;
+  gap: 12px;
+  align-content: center;
+  justify-items: center;
+  padding: 24px;
+}
+
+.donar-stripe-load-error .secondary {
+  min-height: 46px;
+  border: 1px solid #000000;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #000000;
+  font-weight: 700;
+}
+
+.donar-stripe-embedded {
+  display: grid;
+  gap: 16px;
+  min-height: 360px;
+}
+
+.donar-stripe-disclosure {
   margin: 0;
-  text-align: center;
-}
-
-.donar-givebutter-fallback {
-  text-align: center;
-  text-decoration: none;
-}
-
-.donar-givebutter-hint {
-  font-size: 12px;
   color: #595959;
+  font-size: 12px;
+  line-height: 1.5;
   text-align: center;
-  justify-self: center;
+}
+
+.donar-stripe-mock-banner {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px dashed #9b9b9b;
+  border-radius: 10px;
+  background: #fafafa;
+  color: #333333;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.donar-stripe-hosted-preview {
+  display: grid;
+  gap: 14px;
+  padding: clamp(22px, 5vw, 34px);
+  background: #ffffff;
+  text-align: left;
+}
+
+.donar-stripe-hosted-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #635bff;
+  font-size: 19px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.donar-stripe-hosted-brand span:last-child {
+  color: #767676;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.donar-stripe-hosted-preview h2,
+.donar-stripe-hosted-preview p {
+  margin: 0;
+}
+
+.donar-stripe-hosted-preview h2 {
+  color: #171717;
+  font-size: 18px;
+  line-height: 1.3;
+}
+
+.donar-stripe-hosted-preview p {
+  color: #595959;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.donar-stripe-hosted-skeleton {
+  display: grid;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.donar-stripe-hosted-skeleton span {
+  display: block;
+  height: 48px;
+  border: 1px solid #e5e5e5;
+  border-radius: 9px;
+  background: linear-gradient(90deg, #fafafa, #f2f2f2 50%, #fafafa);
+}
+
+.donar-stripe-hosted-skeleton span:first-child {
+  width: 62%;
 }
 
 .donar-thanks {
@@ -4188,6 +4285,52 @@ pre {
 
 .donar-thanks h1 {
   color: #000000;
+}
+
+.donar-stripe-result {
+  gap: 16px;
+}
+
+.donar-stripe-result h2 {
+  margin: 0;
+  font-size: clamp(21px, 5vw, 28px);
+  line-height: 1.2;
+}
+
+.donar-result-icon {
+  margin-top: 4px;
+}
+
+.donar-result-checking {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+}
+
+.donar-result-checking h2,
+.donar-result-checking p {
+  margin: 0;
+}
+
+.donar-result-checking p {
+  margin-top: 6px;
+  color: #595959;
+  line-height: 1.45;
+}
+
+.donar-stripe-trust {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #595959;
+  font-size: 12px;
+}
+
+.donar-result-return {
+  color: #303030;
+  font-size: 13px;
+  text-decoration: underline;
 }
 
 .donar-thanks-amount {
@@ -4243,7 +4386,7 @@ pre {
     border-radius: 0;
     box-shadow: none;
   }
-  .donar-embed {
+  .donar-hosted-surface {
     border: 0;
     border-radius: 0;
   }

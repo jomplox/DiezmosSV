@@ -457,7 +457,7 @@ export function ContactsExportPanel({
       <div className="panel-head">
         <div>
           <h2>Contactos para CRM</h2>
-          <p>Exporte los datos de contacto de sus donantes para importarlos en un CRM como GiveButter.</p>
+          <p>Exporte los datos de contacto de sus donantes para importarlos en su CRM.</p>
         </div>
         <Users size={20} />
       </div>

@@ -1,0 +1,91 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const root = resolve(import.meta.dirname, "../..");
+const read = (path: string) => readFileSync(resolve(root, path), "utf8");
+const english = read("README.md");
+const spanish = read("README.es.md");
+const runbook = read("docs/stripe-us-giving.md");
+const localArtifacts = read("docs/local-private-artifacts.md");
+const devVars = read(".dev.vars.example");
+const publicWrangler = read("wrangler.toml");
+
+const requiredRuntimeNames = [
+  "STRIPE_RESTRICTED_KEY",
+  "STRIPE_PUBLISHABLE_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID",
+  "STRIPE_BILLING_PORTAL_CONFIGURATION_ID",
+  "STRIPE_US_LEGAL_NAME",
+  "STRIPE_US_EIN"
+] as const;
+
+describe("Stripe US giving provisioning documentation", () => {
+  it("mirrors the runtime-only configuration contract in both canonical READMEs", () => {
+    for (const document of [english, spanish]) {
+      for (const name of requiredRuntimeNames) expect(document).toContain(name);
+      expect(document).toContain("STRIPE_MOCK_MODE");
+      expect(document).toContain("docs/stripe-us-giving.md");
+      expect(document).not.toMatch(/givebutter/i);
+      expect(document).not.toContain("VITE_STRIPE");
+    }
+  });
+
+  it("documents dynamic eligible methods with BNPL excluded by account configuration", () => {
+    expect(runbook).toContain("payment_method_configuration");
+    expect(runbook).toContain("payment_method_types");
+    expect(runbook).toMatch(/dinámic/i);
+    expect(runbook).toMatch(/BNPL/);
+    for (const financingMethod of ["Affirm", "Afterpay/Clearpay", "Klarna", "Scalapay", "Sunbit", "Zip"]) {
+      expect(runbook).toContain(financingMethod);
+    }
+    expect(runbook).toMatch(/elegibilidad.*donante|donante.*elegibilidad/is);
+    expect(runbook).toMatch(/dominio.*Apple Pay|Apple Pay.*dominio/is);
+  });
+
+  it("pins least privilege, environment separation, and the owner-only handoff", () => {
+    expect(runbook).toContain("rk_test_");
+    expect(runbook).toContain("rk_live_");
+    expect(runbook).toContain("pk_test_");
+    expect(runbook).toContain("pk_live_");
+    expect(runbook).toMatch(/publicable.*navegador|navegador.*publicable/is);
+    expect(runbook).not.toContain("sk_live_");
+    expect(runbook).toMatch(/Checkout Sessions.*Write/is);
+    expect(runbook).toMatch(/Billing Portal.*Write/is);
+    expect(runbook).toMatch(/sandbox.*antes.*live/is);
+    expect(runbook).toMatch(/no.*cambiar.*live|no.*modificar.*live/is);
+    expect(runbook).toContain("Cloudflare secret");
+  });
+
+  it("lists every event consumed by the signed idempotent webhook", () => {
+    for (const event of [
+      "checkout.session.completed",
+      "checkout.session.async_payment_succeeded",
+      "checkout.session.async_payment_failed",
+      "checkout.session.expired",
+      "invoice.paid",
+      "invoice.payment_failed",
+      "invoice_payment.paid",
+      "customer.subscription.deleted",
+      "charge.refunded"
+    ]) {
+      expect(runbook).toContain(event);
+    }
+    expect(runbook).toContain("/webhooks/stripe");
+    expect(runbook).toMatch(/firma.*cuerpo crudo|cuerpo crudo.*firma/is);
+  });
+
+  it("keeps mock mode local/staging-only and out of production examples", () => {
+    expect(devVars).toContain('STRIPE_MOCK_MODE="1"');
+    expect(publicWrangler).toMatch(/\[vars\][\s\S]*STRIPE_MOCK_MODE\s*=\s*"1"/);
+    const production = publicWrangler.slice(publicWrangler.indexOf("[env.production]"));
+    expect(production).not.toContain("STRIPE_MOCK_MODE");
+    expect(runbook).toMatch(/STRIPE_MOCK_MODE.*prohibid/is);
+  });
+
+  it("removes the obsolete client campaign value from private artifacts", () => {
+    expect(localArtifacts).not.toMatch(/givebutter|VITE_GIVEBUTTER/i);
+    expect(localArtifacts).toMatch(/Stripe.*runtime|runtime.*Stripe/is);
+  });
+});

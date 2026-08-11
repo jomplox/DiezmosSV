@@ -20,6 +20,15 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     WOMPI_API_SECRET?: string;
     WOMPI_CLIENT_ID?: string;
     WOMPI_CLIENT_SECRET?: string;
+    STRIPE_RESTRICTED_KEY?: string;
+    STRIPE_API_PROXY_URL?: string;
+    STRIPE_PUBLISHABLE_KEY?: string;
+    STRIPE_WEBHOOK_SECRET?: string;
+    STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?: string;
+    STRIPE_BILLING_PORTAL_CONFIGURATION_ID?: string;
+    STRIPE_US_LEGAL_NAME?: string;
+    STRIPE_US_EIN?: string;
+    STRIPE_MOCK_MODE?: string;
     MH_CERT_XML?: string;
     MH_CERT_XML_PART_1?: string;
     MH_CERT_XML_PART_2?: string;
@@ -244,7 +253,7 @@ export type DonationIntentDocumentType = "36" | "13" | "37" | "03" | "02";
 // Donor-facing "Tipo" on the SV (Wompi/CDE) flow: is the gift a diezmo or an
 // ofrenda? Informational only — the legal CDE descripcion stays "DONACIÓN" — but it
 // drives the Wompi payment-sheet product name and a CDE apéndice line. Nullable
-// everywhere: the US (Givebutter) path and legacy rows never carry it
+// everywhere: the US Stripe path and legacy rows never carry it
 // (mirrors the CHECK constraint from migration 0012).
 export type DonationGiftType = "DIEZMO" | "OFRENDA";
 

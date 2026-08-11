@@ -83,7 +83,7 @@ export interface ValidatedIntentInput extends ValidatedDonorData {
   amountCents: number;
   // Diezmo vs Ofrenda. The /donar SV form client-validates this as required and
   // always sends it; the server ACCEPTS absent (null) so legacy callers and the US
-  // (Givebutter) path — which never send it — keep working. Present-but-invalid is
+  // (Stripe) path — which never sends it — keeps working. Present-but-invalid is
   // rejected (invalid_gift_type).
   giftType: DonationGiftType | null;
 }

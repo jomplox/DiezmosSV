@@ -55,6 +55,44 @@ export interface BrandingEmailOptions {
   logoUrl?: string | null;
 }
 
+export interface StripeAcknowledgmentEmailInput {
+  donorName: string;
+  amountLabel: string;
+  settledDateLabel: string;
+  frequencyLabel: string;
+  legalName: string;
+  ein: string;
+  organizationName: string;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
+}
+
+export function stripeAcknowledgmentEmailHtml(input: StripeAcknowledgmentEmailInput): string {
+  return emailDocument(
+    input.organizationName,
+    "Constancia de donación en EE. UU.",
+    input.brandColor ?? DEFAULT_BRAND_COLOR,
+    input.supportEmail,
+    input.logoUrl,
+    [
+      paragraphs(
+        `Estimado(a) ${input.donorName}:\n\n` +
+        `Gracias por su donación voluntaria. Conserve este correo como constancia de su entrega.`
+      ),
+      detailsCard([
+        ["Organización legal", input.legalName],
+        ["EIN", input.ein],
+        ["Fecha", input.settledDateLabel],
+        ["Monto", input.amountLabel],
+        ["Frecuencia", input.frequencyLabel]
+      ]),
+      note("No se proporcionaron bienes ni servicios a cambio de esta donación."),
+      footNote("Conserve este correo con sus registros. Consulte con su asesor sobre la aplicación a su situación fiscal.")
+    ]
+  );
+}
+
 export function passwordResetEmailHtml(
   name: string,
   link: string,

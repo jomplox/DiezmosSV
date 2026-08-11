@@ -376,11 +376,9 @@ describe("remote provisioning documentation", () => {
   );
 
   it.each(releaseSafetyReadmes)(
-    "does not override the persistent production campaign in the %s",
+    "keeps the removed client campaign configuration out of the %s",
     (_name, document) => {
-      expect(document).not.toMatch(
-        /^FISCAL_CUTOVER_QUIESCED=1\s+VITE_GIVEBUTTER_CAMPAIGN=[^\n]+\s+npm run cf:deploy:prod\s*$/m
-      );
+      expect(document).not.toMatch(/givebutter|VITE_GIVEBUTTER/i);
     }
   );
 

@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { DONAR_VERIFYING_NOTICE_DELAY_MS, GIVEBUTTER_CAMPAIGN } from "../src/client/donation";
+import { DONAR_VERIFYING_NOTICE_DELAY_MS } from "../src/client/donation";
 
 /**
  * End-to-end test for the PUBLIC donor-checkout pages against a REAL local
@@ -7,9 +7,9 @@ import { DONAR_VERIFYING_NOTICE_DELAY_MS, GIVEBUTTER_CAMPAIGN } from "../src/cli
  * render WITHOUT a session, so — unlike smoke.spec.ts — there is no bootstrap /
  * login step.
  *
- * The donor flow is a step wizard (Givebutter-style): Paso 1 monto (segmented
+ * The donor flow is a step wizard: Paso 1 monto (segmented
  * control + hero amount input), Paso 2 datos, Paso 3 the Wompi handoff. The US
- * door shares Paso 1 and reveals the embedded Givebutter form on Paso 2.
+ * door shares Paso 1 and mounts Stripe Embedded Checkout inside Paso 2.
  *
  * In mock mode (MOCK_EXTERNAL_SERVICES="true") the backend returns deterministic
  * mock Wompi links (https://mock.wompi.sv/...). Paso 3 embeds the checkout page
@@ -28,9 +28,6 @@ const DONOR = {
   dui: "10000001-9"
 };
 
-// The Givebutter campaign slug is build configuration (VITE_GIVEBUTTER_CAMPAIGN), so the
-// URL-shape assertions below interpolate whatever the app under test was built with.
-const CAMPAIGN_PATTERN = GIVEBUTTER_CAMPAIGN.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // A configured display name for the branding stub: distinct from the seeded demo
 // organization, so "the stub was honored" stays a real assertion.
 const BRANDING_DISPLAY_NAME = "Iglesia Ejemplo Central";
@@ -50,9 +47,12 @@ test.beforeEach(async ({ context }) => {
   await context.route("https://mock.wompi.sv/**", (route) =>
     route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock wompi hosted flow</body></html>" })
   );
-  // Stub the Givebutter hosted + embed pages so the iframe path stays offline-safe.
-  await context.route("https://givebutter.com/**", (route) =>
-    route.fulfill({ status: 200, contentType: "text/html", body: "<html><body>mock givebutter hosted flow</body></html>" })
+  // Billing Portal and result-return destinations stay offline-safe in browser tests.
+  await context.route("https://checkout.stripe.test/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: "<html lang=\"es\"><body>Entrega segura de Stripe simulada</body></html>" })
+  );
+  await context.route("https://billing.stripe.test/**", (route) =>
+    route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: "<html lang=\"es\"><body>Administración mensual simulada</body></html>" })
   );
 });
 
@@ -104,7 +104,7 @@ test("uses neutral donor attribution when public branding has no configured name
   await page.getByLabel("Monto").fill("100.00");
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
-  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501c3");
+  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
 });
 
@@ -486,7 +486,40 @@ test("Paso 2 reports every invalid field at once and clears each error as it is 
   await expect(page.getByText("Seleccione un municipio.")).toBeVisible();
 });
 
-test("the EE. UU. door shares Paso 1 and reveals the Givebutter embed", async ({ page }) => {
+test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", async ({ page }) => {
+  const checkoutBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (checkoutBodies.length === 1) {
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo." })
+      });
+      return;
+    }
+    if (checkoutBodies.length === 2) {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "stripe_checkout_unavailable",
+          message: "Inicie una nueva entrega para continuar con Stripe."
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: "cs_test_browser_fixture",
+        clientSecret: "cs_test_browser_fixture_secret_mock",
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    });
+  });
   await page.route("**/api/branding", (route) =>
     route.fulfill({
       status: 200,
@@ -517,9 +550,9 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter embed", async ({
     page.getByText("Recibirá un recibo oficial deducible de impuestos (IRS 501c3) en su dirección de correo electrónico.")
   ).toBeVisible();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
-  await expect(page.getByRole("radiogroup", { name: "Donación mensual" })).toBeVisible();
+  await expect(page.getByRole("radiogroup", { name: "Frecuencia de la entrega" })).toBeVisible();
   await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
-  await expect(page.getByRole("radio", { name: "Mensual" })).toBeVisible();
+  await page.getByRole("radio", { name: "Mensual" }).check();
   await expect(page.getByLabel("Monto")).not.toBeFocused();
 
   // The extranjero mechanics and SV fields are skipped entirely.
@@ -528,53 +561,168 @@ test("the EE. UU. door shares Paso 1 and reveals the Givebutter embed", async ({
   await expect(page.getByLabel("Departamento")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Continuar con su/ })).toHaveCount(0);
 
-  // A quick-amount chip fills the hero input. The US door's anchors bridge toward
-  // the Givebutter campaign presets ($100–$2,000) instead of the SV $5–$50 scale.
+  // A quick-amount chip fills the shared hero input.
   await expect(page.getByRole("button", { name: "$25", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "$100", exact: true }).click();
   await expect(page.getByLabel("Monto")).toHaveValue("100.00");
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
-  // Paso 2 — the donor's real Paso 2/3 is the Givebutter giving form. A summary
-  // line with Editar sits above the 501c3 explanation and the embed.
+  // Paso 2 reviews the choice and immediately prepares the in-page Stripe form.
   await expect(page.getByText("Paso 2 de 2")).toBeVisible();
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
-  await expect(page.getByText("Única · $100.00")).toBeVisible();
-  await expect(page.getByText(`Friends of ${BRANDING_DISPLAY_NAME}`)).toBeVisible();
-  await expect(page.getByText("El formulario se muestra en inglés.")).toBeVisible();
-  const givebutterFrame = page.locator("iframe.donar-givebutter-frame");
-  await expect(givebutterFrame).toBeVisible();
-  await expect(givebutterFrame).toHaveAttribute("src", new RegExp(`^https://givebutter\\.com/embed/c/${CAMPAIGN_PATTERN}\\?`));
-  await expect(givebutterFrame).toHaveAttribute("src", /amount=100/);
-  await expect(givebutterFrame).toHaveAttribute("src", /goalBar=false/);
+  await expect(page.getByText("Mensual · $100.00")).toBeVisible();
+  await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
+  await expect(page.locator(".donar-intro")).toContainText("organización estadounidense 501(c)(3)");
+  await expect(
+    page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
+  ).toHaveCount(0);
 
   // The escape hatch back to the SV fiscal form is GONE.
   await expect(page.getByText("¿Necesita comprobante fiscal salvadoreño (CDE)?")).toHaveCount(0);
-
-  // The always-visible hint uses the human "GiveButter" anchor text (no raw URL),
-  // carrying the Paso 1 amount as the prefill.
-  const hint = page.getByRole("link", { name: "¿Problemas con el formulario? Done en GiveButter" });
-  await expect(hint).toHaveAttribute("href", new RegExp(`^https://givebutter\\.com/${CAMPAIGN_PATTERN}\\?`));
-  await expect(hint).toHaveAttribute("href", /amount=100/);
-
-  // The direct iframe loaded, so the slow-load CTA is not shown.
-  await expect(page.getByRole("link", { name: "Donar en GiveButter" })).toHaveCount(0);
 
   // "← Atrás" returns to Paso 1 with the wizard state intact...
   await page.getByRole("button", { name: /Atrás/ }).click();
   await expect(page.getByText("Paso 1 de 2")).toBeVisible();
   await expect(page.getByLabel("Monto")).toHaveValue("100.00");
-  await expect(page.locator("iframe.donar-givebutter-frame")).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Mensual" })).toBeChecked();
+  await page.getByRole("button", { name: "Continuar", exact: true }).click();
 
-  // ...and "← Cambiar opción" (Paso 1 only) returns to the two-door chooser.
-  await page.getByRole("button", { name: /Cambiar opción/ }).click();
-  await expect(page.getByRole("button", { name: "El Salvador y el mundo" })).toBeVisible();
-  await expect(page.locator("iframe.donar-givebutter-frame")).toHaveCount(0);
+  // A transport failure remains on Paso 2; retry reuses the exact UUID.
+  await expect(page.getByRole("alert")).toContainText("No pudimos preparar su entrega con Stripe");
+  await page.getByRole("button", { name: "Intentar de nuevo" }).click();
+  await expect(page.getByRole("alert")).toContainText("Inicie una nueva entrega");
+  await page.getByRole("button", { name: "Intentar de nuevo" }).click();
+
+  // Local mock mode preserves the Stripe-hosted boundary without pretending to
+  // expose a hand-maintained subset of wallets, fields, or payment methods.
+  await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+  const hostedPreview = page.getByRole("heading", { name: "Formulario seguro alojado por Stripe" });
+  await expect(hostedPreview).toBeVisible();
+  await expect(page.getByText(/cada opción elegible para la persona donante/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apple Pay" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Google Pay" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Link" })).toHaveCount(0);
+  await expect(page.getByLabel("Correo electrónico")).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Tarjeta" })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Cuenta bancaria de EE. UU." })).toHaveCount(0);
+
+  // Stripe reuses the Wompi handoff shell: the hosted surface is full-bleed on
+  // mobile and aligns to the raised card edges on tablet/desktop. Only the
+  // provider-owned content inside that boundary differs.
+  await expect(page.locator(".donar-stripe > .donar-handoff")).toBeVisible();
+  const stripeEmbed = page.locator(".donar-stripe-embedded");
+  const mobileViewport = { width: 393, height: 852 };
+  await page.setViewportSize(mobileViewport);
+  const mobileStripeBox = await stripeEmbed.boundingBox();
+  expect(mobileStripeBox).not.toBeNull();
+  expect(mobileStripeBox!.x).toBeCloseTo(0, 1);
+  expect(mobileStripeBox!.x + mobileStripeBox!.width).toBeCloseTo(mobileViewport.width, 1);
+  expect(await stripeEmbed.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { borderWidth: style.borderTopWidth, borderRadius: style.borderRadius };
+  })).toEqual({ borderWidth: "0px", borderRadius: "0px" });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(mobileViewport.width);
+
+  const desktopViewport = { width: 671, height: 944 };
+  await page.setViewportSize(desktopViewport);
+  const desktopCardBox = await page.locator(".donar-card").boundingBox();
+  const desktopStripeBox = await stripeEmbed.boundingBox();
+  expect(desktopCardBox).not.toBeNull();
+  expect(desktopStripeBox).not.toBeNull();
+  expect(desktopCardBox!.width).toBeCloseTo(560, 1);
+  expect(desktopStripeBox!.x).toBeCloseTo(desktopCardBox!.x + 1, 1);
+  expect(desktopStripeBox!.x + desktopStripeBox!.width).toBeCloseTo(
+    desktopCardBox!.x + desktopCardBox!.width - 1,
+    1
+  );
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(desktopViewport.width);
+
+  expect(checkoutBodies).toHaveLength(3);
+  expect(checkoutBodies[0]).toMatchObject({ amount: "100.00", frequency: "monthly" });
+  expect(checkoutBodies[1]).toEqual(checkoutBodies[0]);
+  expect(checkoutBodies[2]).toMatchObject({ amount: "100.00", frequency: "monthly" });
+  expect(checkoutBodies[2].requestId).not.toBe(checkoutBodies[0].requestId);
+  expect(String(checkoutBodies[0].requestId)).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  );
+  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8787\/(?:donar)?\?ruta=eeuu$/);
 });
 
-test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns to the SV datos", async ({ page }) => {
+test("a canceled Stripe handoff returns to a neutral Spanish retry state", async ({ page }) => {
+  await page.goto("/donar?ruta=eeuu&cancelado=1");
+  await expect(page.getByText("Su entrega no se completó. Puede revisar los datos e intentarlo de nuevo cuando desee.")).toBeVisible();
+  await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
+  await expect(page.getByLabel("Monto")).toHaveValue("");
+});
+
+test("the Stripe result waits for durable confirmation and opens Spanish recurring management", async ({ page }) => {
+  const sessionId = "cs_test_result_fixture";
+  let statusReads = 0;
+  let portalBody: Record<string, unknown> | null = null;
+  await page.route("**/api/donations/stripe/session/**", async (route) => {
+    statusReads += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: statusReads === 1 ? "PENDING" : "PAID",
+        frequency: "MONTHLY",
+        amountCents: 10000,
+        currency: "usd",
+        canManageRecurring: statusReads > 1,
+        recurringStatus: "ACTIVE"
+      })
+    });
+  });
+  await page.route("**/api/donations/stripe/portal", async (route) => {
+    portalBody = route.request().postDataJSON() as Record<string, unknown>;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ url: "https://billing.stripe.test/session/browser_fixture" })
+    });
+  });
+
+  await page.goto(`/donar/stripe/resultado?session_id=${sessionId}`);
+  await expect(page.getByRole("heading", { name: "Diezmos y Ofrendas" })).toBeVisible();
+  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Confirmando su entrega…" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText("$100.00 USD")).toBeVisible();
+  await Promise.all([
+    page.waitForURL("https://billing.stripe.test/**"),
+    page.getByRole("button", { name: "Administrar mi entrega mensual" }).click()
+  ]);
+  expect(portalBody).toEqual({ sessionId });
+  await expect(page.getByText("Administración mensual simulada")).toBeVisible();
+});
+
+test("the Stripe result narrates a canceled monthly gift without implying future deliveries", async ({ page }) => {
+  await page.route("**/api/donations/stripe/session/**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        status: "PAID",
+        frequency: "MONTHLY",
+        amountCents: 10000,
+        currency: "usd",
+        canManageRecurring: false,
+        recurringStatus: "CANCELED"
+      })
+    })
+  );
+
+  await page.goto("/donar/stripe/resultado?session_id=cs_test_canceled_fixture");
+  await expect(page.getByRole("heading", { name: "Dios le bendiga. Su aportación fue recibida." })).toBeVisible();
+  await expect(page.getByText(/Su entrega mensual está cancelada/)).toBeVisible();
+  await expect(page.getByText(/no se programarán nuevas aportaciones/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Administrar mi entrega mensual" })).toHaveCount(0);
+});
+
+test("extranjero + USA on the SV form forwards to Stripe, and Atrás returns to the SV datos", async ({ page }) => {
   // Regression: a donor on the SV door who checks "Resido en el extranjero" and picks
-  // Estados Unidos is forwarded to the Givebutter path (intended), but used to be
+  // Estados Unidos is forwarded to the Stripe path (intended), but used to be
   // TRAPPED there — Atrás only walked the US steps and re-picking the SV door kept the
   // lingering foreignResident+US form state, re-forwarding forever.
   await page.goto("/donar?ruta=sv");
@@ -582,7 +730,7 @@ test("extranjero + USA on the SV form forwards to Givebutter, and Atrás returns
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await page.getByLabel("Número de documento").fill("10000001-9");
 
-  // Forward: extranjero + Estados Unidos → the US (Givebutter) path takes over
+  // Forward: extranjero + Estados Unidos → the US (Stripe) path takes over
   // (the step label under the title reads "Su entrega").
   await page.getByLabel("Resido en el extranjero").check();
   await page.getByLabel("País").selectOption({ label: "Estados Unidos" });

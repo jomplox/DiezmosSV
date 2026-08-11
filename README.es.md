@@ -138,8 +138,8 @@ Solo se emiten los eventos con `ResultadoTransaccion = ExitosaAprobada`. Todo lo
 Wompi o al donante queda registrado en D1 y en la bitácora de auditoría.
 
 La página pública `/donar` abre con una portada de dos puertas: **El Salvador y el mundo** dirige al
-formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige directamente al bloque de Givebutter para un
-comprobante deducible en EE. UU. (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige a Stripe Embedded Checkout en español y dentro de la misma página sobre la
+cuenta 501(c)(3) estadounidense para entregas únicas o mensuales (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -310,7 +310,7 @@ Las pruebas unitarias cubren, entre otras áreas:
 - Limitación de tasa de autenticación, restablecimiento de contraseña y plantillas de correo con marca
 - Propiedad del claim de corrección fiscal, reserva del número de control y recuperación
 - Agrupación, filtros y límites de exportación CSV del explorador de donantes
-- Scripts de guarda del despliegue (`assert-fiscal-cutover`, `assert-donation-lane-config`,
+- Scripts de guarda del despliegue (`assert-fiscal-cutover`, configuración privada de release/marca,
   configuración privada de wrangler, preflight de migraciones de D1)
 
 CI (`.github/workflows/ci.yml`) ejecuta dos jobs en los push a `main` y `codex/**`, y en los pull
@@ -368,7 +368,6 @@ fuera de este repositorio y sin enlaces simbólicos:
 ```dotenv
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
-VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
@@ -408,6 +407,13 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env stagin
 node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env staging   # token opcional del proveedor alternativo
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env staging
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_RESTRICTED_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PUBLISHABLE_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_WEBHOOK_SECRET --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PAYMENT_METHOD_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_BILLING_PORTAL_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_LEGAL_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_EIN --env staging
 
 # Migre y despliegue con los scripts de npm, que usan la misma envoltura privada.
 npm run cf:migrate:staging
@@ -432,7 +438,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/run-private-build.mjs`, que aplica `scripts/assert-donation-lane-config.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
+| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el origen y el raster del donante pasan validación. Los valores de Stripe son solo de runtime y nunca se inyectan en Vite. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -563,20 +569,27 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `EMAIL` (binding) | Binding `send_email` de Cloudflare usado para enviar los correos del comprobante con los adjuntos PDF/JSON. Los bindings remotos de raíz, staging y producción se declaran únicamente en la configuración privada seleccionada. |
 | `ARCHIVE` (binding) | Binding del bucket de R2 para la exportación mensual de retención legal y los objetos del logo de marca blanca. La configuración de ejemplo versionada nombra `diezmossv-local-archive-example`, `diezmossv-staging-archive-example` y `diezmossv-production-archive-example`; los nombres reales de bucket pertenecen únicamente a la configuración privada seleccionada. |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Marcador opcional `"true"` que se define después de confirmar que Cloudflare Email Sending puede alcanzar direcciones externas de donantes. El ejemplo versionado ya lo define para `staging`; local y producción lo dejan sin definir. |
-| `DONATION_INTAKE_DISABLED` | Interruptor de emergencia del carril público de donaciones. Cuando vale exactamente `"true"`, `POST /api/donations/intent` y `/api/donations/intent/*` responden `503 donation_intake_disabled`, y `/`, `/donar` y `/donar/gracias` sirven un documento vacío y cerrado. Se evalúa antes del router de la API, así que el webhook de Wompi, la tubería de emisión y el panel de administración siguen funcionando — las donaciones en curso igual reciben su CDE. El ejemplo versionado lo fija en `"true"` para `production`; sin definir o con cualquier otro valor, la recepción queda abierta. |
+| `DONATION_INTAKE_DISABLED` | Interruptor de emergencia para nueva recepción pública. Cuando vale exactamente `"true"`, las mutaciones de intentos Wompi y `POST /api/donations/stripe/checkout` responden `503 donation_intake_disabled`; `/`, `/donar` y `/donar/gracias` sirven un documento vacío y cerrado. La página de resultado de Stripe, lecturas de estado, webhook, recibos y Billing Portal siguen disponibles para no dejar varado a un donante existente o mensual. El webhook de Wompi, la tubería de emisión y el panel de administración también siguen funcionando. El ejemplo versionado lo fija en `"true"` para `production`; sin definir o con cualquier otro valor, la recepción queda abierta. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | Endpoints de MH disponibles solo para el carril de credenciales del despliegue. `MH_AUTH_URL_TEST_FALLBACK` es el respaldo acotado de autenticación central para cuentas TEST tras el código 106 de MH; no es una capacidad de transmisión en PROD. |
 | `MH_USER_AGENT` | Encabezado User-Agent enviado a MH. |
 | `EMISOR_CONFIG_JSON` | La configuración del emisor de demostración/local vive en el archivo de entorno privado seleccionado; el valor remoto real se define como secreto de Cloudflare. |
+| `STRIPE_RESTRICTED_KEY` | Clave de servidor `rk_test_…` (staging) o `rk_live_…` (producción), con privilegios mínimos para Checkout Sessions y Billing Portal. Se rechazan las claves amplias `sk_…`. |
+| `STRIPE_PUBLISHABLE_KEY` | Clave segura para el navegador `pk_test_…` (staging) o `pk_live_…` (producción), devuelta por el Worker solo con una sesión de Embedded Checkout creada; debe coincidir con el ambiente de la clave restringida. |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_…` propio del ambiente, usado para verificar el cuerpo crudo exacto recibido en `/webhooks/stripe`. |
+| `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | `pmc_…` activo del carril de EE. UU. Habilita métodos elegibles dinámicos y excluye todo BNPL/financiamiento sin publicar código. |
+| `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` para la ruta en español de administración de la entrega mensual. |
+| `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Identidad legal exacta de la 501(c)(3) estadounidense que aparece en el recibo en español. |
+| `STRIPE_MOCK_MODE` | Transporte determinista solo para local/staging cuando vale `"1"`; producción lo rechaza. Nunca lo coloque en una configuración de producción. |
+| `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
-**Vars de tiempo de build** - las lee Vite y quedan incrustadas en el bundle del cliente. Los scripts
-de despliegue ejecutan la envoltura vinculada al ambiente
-`npm run build:private -- --env staging|production`, que obtiene la campaña del archivo de despliegue
-exclusivo del dueño; `npm run build` sin envoltura queda para clones públicos y pruebas. **No** son
-vars del Worker ni secretos: todo lo que se defina aquí viaja al navegador:
-
-| Variable | Propósito |
-|---|---|
-| `VITE_GIVEBUTTER_CAMPAIGN` | Slug de la campaña de Givebutter para la puerta de donantes de **EE. UU.** Es el segmento de ruta tanto en `https://givebutter.com/embed/c/<slug>` (el formulario de donación embebido) como en `https://givebutter.com/<slug>` (el enlace alojado de respaldo). Sin definir, el cliente recurre al marcador `example-campaign`, de modo que un clon nuevo funciona sin apuntar a la campaña real de nadie. Defínalo antes de compilar cualquier despliegue que atienda donantes de EE. UU. |
+**Frontera de tiempo de build.** La envoltura vinculada al ambiente
+`npm run build:private -- --env staging|production` valida el archivo externo de release/marca, pero
+no inyecta ningún valor de proveedor en Vite. Las claves, IDs de configuración, identidad legal y
+política BNPL de Stripe son configuración de runtime del Worker. Solo la clave publicable se devuelve
+al navegador, junto con una sesión de Embedded Checkout creada; la clave restringida y el secreto del webhook
+nunca salen del Worker. Colocar cualquiera en un valor `VITE_*` está prohibido porque fijaría el ambiente
+de la cuenta en el bundle público. Vea el handoff completo de sandbox/live en
+[`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
 
 La entrega de correo remota en staging/producción selecciona exactamente un proveedor antes del envío.
 Cuando ambos están configurados, defina `EMAIL_ARBITRARY_RECIPIENTS=true` solo después de que el
@@ -704,32 +717,29 @@ intento guarda los códigos `00/00/00` de "Otro (Para extranjeros)" (CAT-008/012
 `donor_pais`; el CDE emitido marca al receptor con `codDomiciliado: 2` y el `codPais` del intento, y
 el PDF imprime el complemento + el nombre del país en lugar de las etiquetas de relleno del catálogo.
 
-**Donantes de EE. UU. → Givebutter (sin CDE — a propósito).** Cuando "Resido en el extranjero" está
-marcado **y el país es Estados Unidos (`US`)**, los campos fiscales SV desaparecen por completo y la
-página embebe el formulario de donación de **Givebutter** para la campaña configurada del despliegue
-(vea `VITE_GIVEBUTTER_CAMPAIGN` en la [referencia de configuración](#-referencia-de-configuración)),
-operada por la 501(c)(3) estadounidense que sirve de vehículo de donación en EE. UU. para la iglesia.
-Un contribuyente estadounidense necesita un comprobante deducible en EE. UU., no un CDE salvadoreño, y
-la aportación corresponde a los libros de la entidad estadounidense — por eso estas donaciones fluyen
-enteramente por Givebutter y **nunca tocan Wompi, la tabla de intentos, el webhook ni la tubería del
-CDE**. **No hay participación del backend**: no se crea ningún intento, no existe ninguna migración y
-Givebutter envía por correo su propio comprobante tributario. La página embebe directamente el iframe
-enmarcable de Givebutter `https://givebutter.com/embed/c/<campaign>` — **no** el script de
-`widgets.givebutter.com` — para que no se ejecute JavaScript de terceros en el origen de la
-aplicación. (La página alojada de la campaña envía `x-frame-options: sameorigin`, y por eso se usa la
-URL de embebido en lugar de la página de campaña.) El monto elegido más un control segmentado
-**"Donación mensual"** (**Única** | **Mensual**, un radiogroup cuyo nombre accesible sigue siendo
-"Donación mensual") se precargan en la URL del iframe — `frequency=monthly` se envía solo para una
-aportación mensual, y una aportación única no lleva parámetro de frecuencia. Un aviso corto indica que
-el formulario embebido está en inglés. El texto introductorio del bloque se compone en tiempo de
-ejecución a partir del propio registro de marca del despliegue, nunca de un literal, de modo que un
-build reutilizable jamás publique el nombre de otra organización. Si el formulario embebido no carga
-en unos ~4 s, se muestra un enlace prominente **"Donar en GiveButter"** hacia
-`https://givebutter.com/<campaign>?amount=…` (abre en una pestaña nueva); una versión pequeña de ese
-enlace, **"Done en GiveButter"**, está siempre presente debajo del formulario (GiveButter es el texto
-del enlace — no se muestra ninguna URL cruda). **No hay puerta de escape** de regreso al formulario
-SV: el donante eligió deliberadamente la puerta de EE. UU., y **"← Cambiar opción"** es el camino de
-vuelta. Las constantes de Givebutter (campaña, URL de embebido) viven en `src/client/donation.ts`.
+**Donantes de EE. UU. → Stripe (sin CDE — a propósito).** Cuando el donante elige la puerta
+**EE. UU.**, o marca "Resido en el extranjero" y selecciona Estados Unidos (`US`), desaparecen los
+campos fiscales salvadoreños. El donante elige **Única** o **Mensual**, revisa el monto y completa el formulario
+alojado por Stripe en español, embebido en la misma página sobre la cuenta 501(c)(3) estadounidense
+conectada. Un contribuyente estadounidense necesita un recibo de EE. UU., no un CDE salvadoreño, por lo que
+este carril **nunca toca Wompi, `donation_intents` ni la tubería del CDE**.
+
+El Worker crea una Embedded Checkout Session idempotente con un `payment_method_configuration` dedicado; el
+código del navegador nunca envía `payment_method_types`. Stripe muestra así todos los métodos
+habilitados que sean elegibles para el donante, dispositivo, monto USD y flujo único/mensual, mientras
+la configuración de la cuenta excluye BNPL y otros métodos de financiamiento. Stripe firma el cuerpo
+crudo del webhook; el Worker valida ambiente, versión de API, monto, moneda, metadatos del carril e
+identificadores antes de guardar en D1 el historial durable de sesiones y entregas. La página de
+resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
+Cada factura mensual cobrada produce una sola entrega, y Billing Portal ofrece la ruta de administración
+recurrente. La aplicación envía el recibo 501(c)(3) en español con el nombre legal e EIN configurados a
+través de su cerca durable de correo.
+
+La configuración de test y live es exclusiva del dueño y solo de runtime. Ningún secreto o ID de
+Stripe se incrusta en el cliente; solo se devuelve la clave publicable del ambiente con una sesión creada.
+La configuración dinámica/BNPL, permisos mínimos de clave, eventos
+exactos del webhook, gates de sandbox, rollback y handoff live están documentados en
+[`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
 
 Ambas puertas financian a la **misma** iglesia madre en El Salvador — la 501(c)(3) estadounidense es
 solo el vehículo de donación en EE. UU., nunca un beneficiario distinto; el texto se basa en la

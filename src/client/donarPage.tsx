@@ -44,13 +44,11 @@ import {
   DONAR_WIDGET_LOADING_MESSAGE,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
-  GIVEBUTTER_ENGLISH_NOTICE,
-  GIVEBUTTER_FALLBACK_CTA,
-  GIVEBUTTER_FALLBACK_HINT,
-  GIVEBUTTER_FREQ_MONTHLY_LABEL,
-  GIVEBUTTER_FREQ_ONCE_LABEL,
-  GIVEBUTTER_MONTHLY_LABEL,
-  GIVEBUTTER_RENDER_TIMEOUT_MS,
+  STRIPE_CANCELED_MESSAGE,
+  STRIPE_CHECKOUT_PATH,
+  STRIPE_FREQ_MONTHLY_LABEL,
+  STRIPE_FREQ_ONCE_LABEL,
+  STRIPE_MONTHLY_LABEL,
   DONATION_STEP1_FIELD_ORDER,
   DONATION_STEP2_FIELD_ORDER,
   clearDonationFieldErrors,
@@ -67,9 +65,8 @@ import {
   firstDonationFieldError,
   doorFromSearch,
   draftMatchesForm,
-  givebutterEmbedUrl,
-  givebutterIntro,
-  givebutterHostedUrl,
+  stripeCheckoutBody,
+  stripeIntro,
   graciasDisplayFromSearch,
   isUsDonation,
   routeParamForDoor,
@@ -81,6 +78,7 @@ import {
   type DonationFormInput,
   type DonorDocumentType
 } from "./donation";
+import { StripeDonationForm, type StripeCheckoutClientConfig } from "./stripeDonationForm";
 import { catalogOptionLabel, userFacingErrorMessage } from "./displayText";
 import { brandingDonorLogoSrc, parseBrandingResponse } from "./branding";
 import { ORG_LOGO_PATHS, ORG_LOGO_VIEW_BOX } from "../worker/services/orgLogo";
@@ -93,17 +91,28 @@ import { formatNit, isValidNitFormat } from "../shared/nit";
 // App.tsx so the donor wizard owns its own module. Both routes render WITHOUT
 // a session (App.tsx keeps only the thin path branch that mounts them).
 //
-// Layout: a 3-step wizard in Givebutter's structural language — one concern per
+// Layout: a step wizard with one concern per
 // screen inside a soft-shadowed 16px card — skinned in the monochrome Gotham brand.
 // SV door:  Paso 1 monto (segmented Diezmo|Ofrenda + hero amount input),
 //           Paso 2 datos (documento + geografía), Paso 3 entrega (Wompi handoff).
 // US door:  Paso 1 monto (segmented Única|Mensual + the same hero input),
-//           Paso 2 the embedded Givebutter giving form.
+//           Paso 2 Stripe's hosted Checkout embedded inside our page.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Unauthenticated fetch for the two public donation endpoints. Mirrors App's
 // api() helper with an empty token (no Authorization header) and the same
 // user-facing error mapping.
+class DonarApiError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = "DonarApiError";
+  }
+}
+
 async function donarApi<T>(path: string, options: { method?: string; body?: unknown; headers?: Record<string, string> } = {}): Promise<T> {
   const response = await fetch(path, {
     method: options.method ?? "GET",
@@ -112,7 +121,11 @@ async function donarApi<T>(path: string, options: { method?: string; body?: unkn
   });
   const data = (await response.json().catch(() => ({}))) as { message?: unknown; error?: unknown };
   if (!response.ok) {
-    throw new Error(userFacingErrorMessage(String(data.message ?? data.error ?? `HTTP ${response.status}`)));
+    throw new DonarApiError(
+      userFacingErrorMessage(String(data.message ?? data.error ?? `HTTP ${response.status}`)),
+      typeof data.error === "string" ? data.error : "",
+      response.status
+    );
   }
   return data as T;
 }
@@ -257,7 +270,7 @@ interface DonarDraftIntent {
 
 // The built-in default logo, reusing the vector paths shared with the worker's PDF
 // renderer (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
-function OrganizationLogo({ organizationName }: { organizationName: string | null }) {
+export function OrganizationLogo({ organizationName }: { organizationName: string | null }) {
   return (
     <svg
       className="donar-logo"
@@ -395,7 +408,7 @@ function clampEmbedHeight(height: number): number {
 // every donor card, visually subordinate to the giving flow. The address is the church's
 // configured branding supportEmail; DONAR_SUPPORT_EMAIL is the client-side default used
 // until the fetched branding arrives (and if the fetch fails).
-function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: string }) {
+export function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: string }) {
   return (
     <p className="donar-support">
       ¿Dudas o necesita ayuda? Escríbanos a <a href={`mailto:${supportEmail}`}>{supportEmail}</a>
@@ -403,7 +416,7 @@ function DonarSupport({ supportEmail = DONAR_SUPPORT_EMAIL }: { supportEmail?: s
   );
 }
 
-// Public donation wizard + Wompi/Givebutter handoff. Renders WITHOUT a session.
+// Public donation wizard + Wompi handoff / Stripe Embedded Checkout. Renders without an app session.
 export function DonarPage() {
   const [form, setForm] = useState<DonationFormInput>(emptyDonationForm);
   // Server/global failures only (intent POST errors, the closed state). Field
@@ -426,7 +439,7 @@ export function DonarPage() {
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
-  // the Givebutter wizard directly, skipping the extranjero mechanics.
+  // the Stripe wizard directly, skipping the extranjero mechanics.
   const [door, setDoor] = useState<DonarDoor | null>(() => doorFromSearch(window.location.search));
   // White-label logo for the landing chooser. When a church has uploaded a logo the
   // donor page shows it in place of the built-in vector logo; the vector stays as the
@@ -441,10 +454,17 @@ export function DonarPage() {
   // donor card. Seeded with the client-side default so the line renders before (and if)
   // the /api/branding fetch resolves; replaced with the configured value when it does.
   const [supportEmail, setSupportEmail] = useState(DONAR_SUPPORT_EMAIL);
-  // US-donor (Givebutter) path state: gift frequency (Única | Mensual segmented
-  // control) and the load-probe fallback for the embedded giving frame.
+  // US-donor (Stripe) path state: gift frequency (Única | Mensual segmented
+  // control), the stable identifier for one amount/frequency attempt, and the
+  // promise that initializes Stripe Embedded Checkout inside Paso 2.
   const [monthly, setMonthly] = useState(false);
-  const [givebutterFrameStatus, setGivebutterFrameStatus] = useState<"loading" | "ready" | "delayed">("loading");
+  const stripeAttemptRef = useRef<{ fingerprint: string; requestId: string } | null>(null);
+  const [stripeSessionAttempt, setStripeSessionAttempt] = useState<{
+    fingerprint: string;
+    sequence: number;
+    session: Promise<StripeCheckoutClientConfig>;
+  } | null>(null);
+  const stripeSessionSequenceRef = useRef(0);
   // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
   // (spinner), "ready" once it has, "delayed" when the render budget elapses first
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
@@ -459,18 +479,18 @@ export function DonarPage() {
   const heroInputRef = useRef<HTMLInputElement | null>(null);
   const summaryEditRef = useRef<HTMLButtonElement | null>(null);
 
-  // When to render the Givebutter wizard instead of the SV fiscal steps: the EE.
+  // When to render the Stripe wizard instead of the SV fiscal steps: the EE.
   // UU. door, OR the país=US safety net on the SV form (harmless belt-and-braces).
   // "← Cambiar opción" is the only way back — the donor deliberately chose the door.
   const usDonation = door === "eeuu" || isUsDonation(form);
-  const givebutterFrameUrl = givebutterEmbedUrl({ amount: form.amount, monthly });
+  const stripeCanceled = usDonation && new URLSearchParams(window.location.search).get("cancelado") === "1";
   const stepCount = usDonation ? DONAR_STEP_COUNT_US : DONAR_STEP_COUNT_SV;
   const displayStep = usDonation && step > DONAR_STEP_COUNT_US ? DONAR_STEP_COUNT_US : step;
-  // The Paso 3 (and US embed) summary label: what the donor chose on Paso 1.
+  // The Paso 3 (and US handoff) summary label: what the donor chose on Paso 1.
   const summaryLabel = usDonation
     ? monthly
-      ? GIVEBUTTER_FREQ_MONTHLY_LABEL
-      : GIVEBUTTER_FREQ_ONCE_LABEL
+      ? STRIPE_FREQ_MONTHLY_LABEL
+      : STRIPE_FREQ_ONCE_LABEL
     : form.giftType
       ? DONAR_GIFT_TYPE_LABEL[form.giftType]
       : "";
@@ -480,6 +500,7 @@ export function DonarPage() {
   // to the chooser.
   const chooseDoor = (next: DonarDoor | null) => {
     const params = new URLSearchParams(window.location.search);
+    params.delete("cancelado");
     const route = routeParamForDoor(next);
     if (route) {
       params.set(DONAR_ROUTE_PARAM, route);
@@ -492,9 +513,11 @@ export function DonarPage() {
     // values survive on purpose — going back must never lose the donor's data — with
     // ONE exception: the extranjero+país pair is cleared, because leftover
     // foreignResident+US state would re-forward an explicit SV-door choice to the
-    // Givebutter path forever.
+    // Stripe path forever.
     setForm((current) => ({ ...current, foreignResident: false, pais: "" }));
     setMonthly(false);
+    stripeAttemptRef.current = null;
+    setStripeSessionAttempt(null);
     setStep(1);
     setError("");
     setFieldErrors({});
@@ -591,7 +614,7 @@ export function DonarPage() {
 
   // Warm DNS + TLS to Wompi's checkout host once the donor commits to the SV/Wompi
   // path, so the Paso 3 embed skips connection setup (a few hundred ms on mobile
-  // networks). The chooser and the EE. UU./Givebutter path must not disclose
+  // networks). The chooser and the EE. UU./Stripe path must not disclose
   // third-party network metadata to Wompi before that flow is actually chosen.
   useEffect(() => {
     if (door !== "sv" || usDonation) {
@@ -605,28 +628,6 @@ export function DonarPage() {
     link.href = DONAR_WOMPI_CHECKOUT_ORIGIN;
     document.head.appendChild(link);
   }, [door, usDonation]);
-
-  // While the US embed step is active: the direct Givebutter iframe receives the
-  // chosen amount/frequency in its own src. No Givebutter script executes on our
-  // origin, and the host /donar URL stays clean.
-  useEffect(() => {
-    if (!usDonation || step < 2) {
-      return;
-    }
-    let cancelled = false;
-    setGivebutterFrameStatus("loading");
-
-    const probe = window.setTimeout(() => {
-      if (!cancelled) {
-        setGivebutterFrameStatus((status) => (status === "ready" ? status : "delayed"));
-      }
-    }, GIVEBUTTER_RENDER_TIMEOUT_MS);
-
-    return () => {
-      cancelled = true;
-      window.clearTimeout(probe);
-    };
-  }, [usDonation, step, givebutterFrameUrl]);
 
   // Listen for the thank-you page's postMessage (fired when it runs inside the
   // widget iframe modal) so we can swap to the thank-you state directly.
@@ -791,7 +792,12 @@ export function DonarPage() {
     }
     setFieldErrors({});
     setError("");
-    if (!usDonation) {
+    if (usDonation) {
+      const fingerprint = stripeFingerprint();
+      if (stripeSessionAttempt?.fingerprint !== fingerprint) {
+        setStripeSessionAttempt(createStripeSessionAttempt());
+      }
+    } else {
       // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
       // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
       // submit. Never blocks the step change; a failure just leaves draftIntent null and
@@ -886,6 +892,47 @@ export function DonarPage() {
     }
   }
 
+  // Initialize Stripe's hosted embedded form. The request identifier remains
+  // stable across transport retries for the same amount/frequency fingerprint;
+  // a terminal Session conflict clears it so retry receives a fresh identity.
+  function stripeFingerprint(): string {
+    const amountCents = Math.round(Number.parseFloat(form.amount.trim()) * 100);
+    return `${monthly ? "monthly" : "once"}:${amountCents}`;
+  }
+
+  function createStripeSessionAttempt() {
+    const fingerprint = stripeFingerprint();
+    let attempt = stripeAttemptRef.current;
+    if (!attempt || attempt.fingerprint !== fingerprint) {
+      attempt = { fingerprint, requestId: crypto.randomUUID() };
+      stripeAttemptRef.current = attempt;
+    }
+    const requestId = attempt.requestId;
+    const session = donarApi<StripeCheckoutClientConfig>(STRIPE_CHECKOUT_PATH, {
+        method: "POST",
+        body: stripeCheckoutBody({ requestId, amount: form.amount, monthly })
+      }).catch((err: unknown) => {
+        if (
+          err instanceof DonarApiError
+          && err.status === 409
+          && err.code === "stripe_checkout_unavailable"
+        ) {
+          stripeAttemptRef.current = null;
+        }
+        throw new Error(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
+      });
+    stripeSessionSequenceRef.current += 1;
+    return {
+      fingerprint,
+      sequence: stripeSessionSequenceRef.current,
+      session
+    };
+  }
+
+  function retryStripeSession() {
+    setStripeSessionAttempt(createStripeSessionAttempt());
+  }
+
   // "← Atrás": one step back. Leaving Paso 3 abandons the created intent (a new
   // one is created on the next entry) and unmounts the widget cleanly. Leaving Paso 2
   // for Paso 1 KEEPS the held draft: if the donor returns without editing amount/tipo,
@@ -901,7 +948,7 @@ export function DonarPage() {
       setStep(2);
       return;
     }
-    // Form-driven Givebutter takeover (SV door + extranjero USA): Atrás returns to the
+    // Form-driven Stripe takeover (SV door + extranjero USA): Atrás returns to the
     // SV datos screen where the choice was made — clearing the país drops usDonation,
     // so this same step re-renders as the SV Paso 2 with every dato intact and the
     // extranjero checkbox still set. Without this, Atrás only walked the US steps and
@@ -920,6 +967,8 @@ export function DonarPage() {
     setError("");
     setFieldErrors({});
     setIntent(null);
+    stripeAttemptRef.current = null;
+    setStripeSessionAttempt(null);
     abandonDraftIntent();
     setStage("form");
     setStep(1);
@@ -1034,14 +1083,14 @@ export function DonarPage() {
         {step === 1 && (
           <form className="donar-form donar-step" onSubmit={continueFromMonto}>
             {usDonation ? (
-              <div className="donar-segment" role="radiogroup" aria-label={GIVEBUTTER_MONTHLY_LABEL}>
+              <div className="donar-segment" role="radiogroup" aria-label={STRIPE_MONTHLY_LABEL}>
                 <label className={monthly ? "donar-segment-option" : "donar-segment-option active"}>
                   <input type="radio" name="donar-frequency" value="once" checked={!monthly} onChange={() => setMonthly(false)} />
-                  <span>{GIVEBUTTER_FREQ_ONCE_LABEL}</span>
+                  <span>{STRIPE_FREQ_ONCE_LABEL}</span>
                 </label>
                 <label className={monthly ? "donar-segment-option active" : "donar-segment-option"}>
                   <input type="radio" name="donar-frequency" value="monthly" checked={monthly} onChange={() => setMonthly(true)} />
-                  <span>{GIVEBUTTER_FREQ_MONTHLY_LABEL}</span>
+                  <span>{STRIPE_FREQ_MONTHLY_LABEL}</span>
                 </label>
               </div>
             ) : (
@@ -1097,8 +1146,7 @@ export function DonarPage() {
             </div>
 
             <div className="donar-chips">
-              {/* The US door's anchors bridge toward the Givebutter campaign presets
-                  ($100–$2,000) so consecutive screens don't disagree on scale. */}
+              {/* The US door keeps accessible, round anchors for either frequency. */}
               {(usDonation ? DONAR_AMOUNT_CHIPS_US : DONAR_AMOUNT_CHIPS).map((chip) => (
                 <button
                   key={chip}
@@ -1115,6 +1163,10 @@ export function DonarPage() {
               ))}
             </div>
             <DonarFieldError field="amount" errors={fieldErrors} />
+
+            {step === 1 && stripeCanceled && (
+              <p className="auth-notice" role="status">{STRIPE_CANCELED_MESSAGE}</p>
+            )}
 
             {error && (
               <p className="error donar-error" role="alert">
@@ -1218,10 +1270,12 @@ export function DonarPage() {
                   options={DONAR_FOREIGN_COUNTRIES}
                   frequentOptions={DONAR_FREQUENT_COUNTRIES}
                   onChange={(pais) => {
-                    // Switching country away from US must leave the Givebutter path
-                    // cleanly (the prefill effect cleanup restores the URL).
+                    // Switching country away from US must leave the Stripe path cleanly.
                     setMonthly(false);
                     update({ pais });
+                    if (pais === "US") {
+                      setStripeSessionAttempt(createStripeSessionAttempt());
+                    }
                   }}
                   ariaLabel="País"
                   id={donarFieldDomId("pais")}
@@ -1282,47 +1336,25 @@ export function DonarPage() {
           </form>
         )}
 
-        {/* US embed step — the donor's Paso 2/3 is the real Givebutter giving
-            form. Compact summary (with Editar back to Paso 1) above the embed so
-            the transition into Givebutter's own card feels continuous. */}
+        {/* US Stripe step — our Spanish composition stays on this page while Stripe
+            owns the embedded form and dynamically renders eligible methods. */}
         {step === 2 && usDonation && (
-          <div className="donar-givebutter donar-step">
+          <div className="donar-stripe donar-step">
             {summary}
-            <p className="donar-intro">{givebutterIntro(organizationName)}</p>
-            <p className="donar-english-notice">{GIVEBUTTER_ENGLISH_NOTICE}</p>
-
-            <iframe
-              className="donar-givebutter-frame"
-              title="Formulario de donación Givebutter"
-              src={givebutterFrameUrl}
-              allow="payment *; clipboard-write"
-              referrerPolicy="strict-origin-when-cross-origin"
-              onLoad={() => setGivebutterFrameStatus("ready")}
-            />
-
-            {givebutterFrameStatus === "delayed" && (
-              <a
-                className="primary donar-givebutter-fallback"
-                href={givebutterHostedUrl({ amount: form.amount, monthly })}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                {GIVEBUTTER_FALLBACK_CTA}
-              </a>
-            )}
-
-            <a
-              className="donar-givebutter-hint"
-              href={givebutterHostedUrl({ amount: form.amount, monthly })}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              {GIVEBUTTER_FALLBACK_HINT}
-            </a>
+            <div className="donar-handoff">
+              <p className="donar-intro">{stripeIntro(organizationName)}</p>
+              {stripeSessionAttempt && (
+                <StripeDonationForm
+                  key={stripeSessionAttempt.sequence}
+                  session={stripeSessionAttempt.session}
+                  onRetry={retryStripeSession}
+                />
+              )}
+            </div>
           </div>
         )}
 
-        {/* Paso 3 — Pago (SV door). Summary line above the existing Wompi
+        {/* Paso 3 — Entrega (SV door). Summary line above the existing Wompi
             handoff: embedded checkout iframe, manual backup, polling, neutral close. */}
         {step === 3 && !usDonation && (
           <div className="donar-step">
@@ -1359,7 +1391,7 @@ export function DonarPage() {
                   </div>
                 )}
                 <iframe
-                  className="donar-embed"
+                  className="donar-hosted-surface donar-embed"
                   src={widgetUrlFrom(intent.urlEnlaceLargo)}
                   title="Entrega segura con Wompi"
                   style={embedHeight ? { height: embedHeight } : undefined}

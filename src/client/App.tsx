@@ -41,8 +41,9 @@ import { filterAuditEntries } from "./auditFilter";
 import { createLatestRequestGate, filterPreCdeFailures } from "./preCdeFailures";
 import { defaultInvalidationForm, invalidationFormValidationMessage, invalidationRequestBody, type InvalidationFormInput } from "./invalidationForm";
 import { passwordResetConfirmValidationMessage } from "./passwordReset";
-import { isDonarGraciasPath, isDonarPath } from "./donation";
+import { isDonarGraciasPath, isDonarPath, isStripeResultPath } from "./donation";
 import { DonarGraciasPage, DonarPage } from "./donarPage";
+import { StripeResultPage } from "./stripeResultPage";
 import { type CredentialSettingsSectionId } from "./credentialSettings";
 import { AnalyticsView } from "./analyticsView";
 import { analyticsRangePresets, type AnalyticsRangePreset, type GiftTypeFilter } from "./analytics";
@@ -298,6 +299,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
   if (isDonarGraciasPath(pathname)) {
     return <DonarGraciasPage />;
+  }
+  if (isStripeResultPath(pathname)) {
+    return <StripeResultPage />;
   }
 
   const [token, setToken] = useState(() => localStorage.getItem("diezmos_token") ?? "");

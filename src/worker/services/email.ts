@@ -18,6 +18,11 @@ export interface EmailDeliveryResult {
   providerDeliveryId: string | null;
 }
 
+export interface StripeAcknowledgmentDeliveryResult {
+  providerResponse: unknown;
+  providerDeliveryId: string | null;
+}
+
 export function emailDeliveryAuditEvidence(
   result: EmailDeliveryResult
 ): Omit<EmailDeliveryResult, "providerResponse"> {
@@ -297,6 +302,32 @@ export class EmailService {
     return this.dispatch(payload, [
       { filename: input.filename, type: "application/pdf", disposition: "attachment", content: input.pdfBytes }
     ]);
+  }
+
+  async sendStripeAcknowledgment(
+    input: {
+      toEmail: string;
+      subject: string;
+      text: string;
+      html: string;
+      idempotencyKey: string;
+    },
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<StripeAcknowledgmentDeliveryResult> {
+    const payload: EmailPayload = {
+      from: this.resolveFrom(),
+      to: input.toEmail,
+      idempotencyKey: input.idempotencyKey,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: []
+    };
+    const providerResponse = await this.dispatch(payload, [], beforeProviderDispatch);
+    return {
+      providerResponse,
+      providerDeliveryId: deliveryIdFromProvider(providerResponse)
+    };
   }
 
   async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {

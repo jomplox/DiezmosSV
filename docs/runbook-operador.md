@@ -109,16 +109,24 @@ propio donante en el formulario, no tomados del aviso de pago.
 pago de Wompi. Esas donaciones no aparecen en la lista de **Donaciones en línea** porque no pasaron
 por el formulario.
 
-**Donantes en Estados Unidos (NO reciben CDE — es intencional).** Si en /donar el donante marca
-«Resido en el extranjero» y elige **Estados Unidos**, desaparecen los campos fiscales salvadoreños y
-la página muestra el formulario de **Givebutter** de la organización aliada en Estados Unidos, una
-entidad 501c3 estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
-no un CDE salvadoreño, así que esas donaciones se procesan por completo en Givebutter: **no pasan por
-Wompi, no generan una donación en línea, no aparecen en la lista de Exportar y no se emite ningún CDE.**
-El propio Givebutter le envía al donante su recibo. Si el formulario incrustado no carga, el enlace
-**«Done en GiveButter»** abre la página alojada de Givebutter en una pestaña nueva. Si algún donante
-de EE. UU. le escribe preguntando por su CDE, la respuesta correcta es que su donación se procesó en
-EE. UU. y su recibo proviene de Givebutter y de la organización aliada, no del sistema salvadoreño.
+**Donantes en Estados Unidos (NO reciben CDE — es intencional).** La puerta **EE. UU.** y el caso
+«Resido en el extranjero» + **Estados Unidos** usan Stripe en la cuenta 501(c)(3) estadounidense
+conectada. El donante elige una entrega única o mensual, revisa el monto y continúa a la página segura
+de Stripe en español.
+Stripe muestra solamente los métodos habilitados y elegibles para esa persona; las opciones pueden
+variar por dispositivo, ubicación, monto y frecuencia. Los métodos de financiamiento BNPL deben
+permanecer desactivados en la configuración de Stripe.
+
+Estas entregas **no pasan por Wompi, no crean un intento Wompi, no aparecen en la lista fiscal de
+Exportar y no emiten ningún CDE salvadoreño.** El sistema confirma el evento firmado de Stripe, guarda
+la entrega en su historial separado y envía por correo el recibo 501(c)(3) con el nombre legal y EIN de
+la entidad estadounidense. Una entrega mensual puede administrarse desde el botón **«Administrar mi
+entrega mensual»** de la página de confirmación. Si un donante pregunta por su CDE, explique que su
+entrega se registró en
+EE. UU. y que su recibo estadounidense llega por correo; no intente emitirle un CDE manualmente.
+
+La configuración técnica, eventos de webhook, prueba sandbox y handoff live están en
+[`docs/stripe-us-giving.md`](stripe-us-giving.md).
 
 > **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
 > `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del
