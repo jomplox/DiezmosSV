@@ -73,6 +73,32 @@ describe("Stripe annual statement repository", () => {
     ]);
   });
 
+  it("rejects an impossible negative-net gift even when another gift offsets the donor aggregate", async () => {
+    seedGift(database, {
+      id: "negative_net",
+      donorEmail: "corrupt@example.org",
+      amountCents: 100,
+      settledAt: "2025-04-01T12:00:00.000Z"
+    });
+    seedGift(database, {
+      id: "positive_offset",
+      donorEmail: "corrupt@example.org",
+      amountCents: 1_000,
+      settledAt: "2025-05-01T12:00:00.000Z"
+    });
+    database.exec("PRAGMA ignore_check_constraints = ON");
+    database.prepare(
+      "UPDATE stripe_gifts SET refunded_amount_cents = 200, status = 'REFUNDED' WHERE id = 'negative_net'"
+    ).run();
+    database.exec("PRAGMA ignore_check_constraints = OFF");
+
+    await expect(listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: null,
+      limit: 50
+    })).rejects.toThrow(/negative net amount/i);
+  });
+
   it("uses a stable bounded keyset cursor and a single-donor exact read", async () => {
     for (let index = 0; index < 55; index += 1) {
       seedGift(database, {

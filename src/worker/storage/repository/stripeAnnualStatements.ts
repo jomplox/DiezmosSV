@@ -22,6 +22,19 @@ export async function listStripeAnnualStatementDonorTargets(
   if (!Number.isInteger(options.limit) || options.limit <= 0) {
     throw new RangeError("Stripe annual statement target limit must be a positive integer");
   }
+  const impossibleNet = await db.prepare(
+    `SELECT gift.id
+       FROM stripe_gifts AS gift
+       JOIN stripe_checkout_sessions AS checkout ON checkout.id = gift.checkout_id
+      WHERE gift.settled_at >= ? AND gift.settled_at < ?
+        AND checkout.livemode = ?
+        AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
+        AND gift.amount_cents - gift.refunded_amount_cents < 0
+      LIMIT 1`
+  ).bind(range.startIso, range.endIso, options.livemode ? 1 : 0).first<{ id: string }>();
+  if (impossibleNet) {
+    throw new Error("Stripe annual statement contains a negative net amount");
+  }
   const pageSize = Math.min(options.limit, 50);
   const bindings: Array<string | number> = [
     range.startIso,
