@@ -81,6 +81,126 @@ async function loadCompatibility() {
 }
 
 describe("legacy Wompi issuance migration compatibility", () => {
+  it("upgrades the original 0009 donation intents without losing document correlation or data", async () => {
+    const { migrateSchemaCompatibility } = await loadCompatibility();
+    const database = databaseThrough("0008");
+    database.exec(originalDonationIntentsMigration());
+    recordMigration(database, "0009_donation_intents.sql");
+    database.prepare(
+      `INSERT INTO donation_intents (
+         id, status, amount_cents, donor_name, donor_document_type,
+         donor_document, donor_email, donor_phone, direccion_departamento,
+         direccion_municipio, direccion_distrito, direccion_complemento,
+         wompi_id_enlace, wompi_url_enlace, client_ip, created_at, updated_at,
+         expires_at
+       ) VALUES (
+         'legacy_intent', 'COMPLETED', 12345, 'Donante Legado', '13',
+         '01234567-8', 'legado@example.org', '+503 7000-1234', '06', '23',
+         '01', 'Avenida Legado 123', 987654,
+         'https://checkout.wompi.example/legacy', '203.0.113.42',
+         '2026-07-01T01:02:03.004Z', '2026-07-01T02:03:04.005Z',
+         '2026-07-02T01:02:03.004Z'
+       )`
+    ).run();
+    const originalColumns = [
+      "id",
+      "status",
+      "amount_cents",
+      "donor_name",
+      "donor_document_type",
+      "donor_document",
+      "donor_email",
+      "donor_phone",
+      "direccion_departamento",
+      "direccion_municipio",
+      "direccion_distrito",
+      "direccion_complemento",
+      "wompi_id_enlace",
+      "wompi_url_enlace",
+      "client_ip",
+      "created_at",
+      "updated_at",
+      "expires_at"
+    ];
+    const legacySnapshot = database.prepare(
+      `SELECT ${originalColumns.join(", ")} FROM donation_intents
+       WHERE id = 'legacy_intent'`
+    ).get();
+
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(appliedMigrations(database)).toEqual(migrationFiles());
+    expect(database.prepare(
+      `SELECT type, "notnull" AS nullable_flag, dflt_value
+       FROM pragma_table_info('donation_intents')
+       WHERE name = 'document_id'`
+    ).all()).toEqual([{ type: "TEXT", nullable_flag: 0, dflt_value: null }]);
+    expect(database.prepare("PRAGMA index_list('donation_intents')").all())
+      .toContainEqual(expect.objectContaining({
+        name: "idx_donation_intents_document_id",
+        unique: 0,
+        partial: 0
+      }));
+    expect(database.prepare(
+      "PRAGMA index_info('idx_donation_intents_document_id')"
+    ).all().map((row) => row.name)).toEqual(["document_id"]);
+    const indexSql = database.prepare(
+      `SELECT sql FROM sqlite_schema
+       WHERE type = 'index' AND name = 'idx_donation_intents_document_id'`
+    ).get()?.sql;
+    expect(sqlTokens(indexSql)).toEqual(sqlTokens(
+      "CREATE INDEX idx_donation_intents_document_id ON donation_intents(document_id)"
+    ));
+    expect(database.prepare(
+      `SELECT ${originalColumns.join(", ")} FROM donation_intents
+       WHERE id = 'legacy_intent'`
+    ).get()).toEqual(legacySnapshot);
+    expect(database.prepare(
+      "SELECT document_id FROM donation_intents WHERE id = 'legacy_intent'"
+    ).get()).toEqual({ document_id: null });
+
+    database.prepare(
+      "UPDATE donation_intents SET document_id = 'document_after_upgrade' WHERE id = 'legacy_intent'"
+    ).run();
+    const repository = new Repository(sqliteD1(database));
+    await expect(
+      repository.getCompletedIntentForDocument("document_after_upgrade")
+    ).resolves.toEqual({ id: "legacy_intent" });
+
+    const afterFirstRun = compatibilityFingerprint(database);
+    const rowAfterFirstRun = database.prepare(
+      `SELECT ${originalColumns.join(", ")}, document_id
+       FROM donation_intents WHERE id = 'legacy_intent'`
+    ).get();
+    await runCompatibility(database, migrateSchemaCompatibility);
+
+    expect(appliedMigrations(database)).toEqual(migrationFiles());
+    expect(compatibilityFingerprint(database)).toEqual(afterFirstRun);
+    expect(database.prepare(
+      `SELECT ${originalColumns.join(", ")}, document_id
+       FROM donation_intents WHERE id = 'legacy_intent'`
+    ).get()).toEqual(rowAfterFirstRun);
+    database.close();
+  });
+
+  it("repairs document correlation for databases that applied the original 0009", async () => {
+    const { buildCompatibilityPlan } = await loadCompatibility();
+    const plan = buildCompatibilityPlan({
+      appliedMigrations: ["0009_donation_intents.sql"],
+      tableColumns: {
+        donation_intents: [{ name: "id", type: "TEXT", notnull: 0 }]
+      },
+      tableIndexes: {},
+      schemaObjects: {},
+      tableSql: {},
+      duplicateCounts: {}
+    });
+
+    expect(plan.statements).toContain(
+      "ALTER TABLE donation_intents ADD COLUMN document_id TEXT;"
+    );
+  });
+
   it("allowlists all 0023 columns, unique indexes, and the reservation trigger", async () => {
     const { REQUIRED_SCHEMA_MANIFEST } = await loadCompatibility();
     expect(
@@ -1500,6 +1620,48 @@ function databaseThrough(prefix: string): DatabaseSync {
     recordMigration(database, name);
   }
   return database;
+}
+
+function originalDonationIntentsMigration(): string {
+  return `-- Donor-checkout Task 1: a validated donation intent is persisted before the
+-- worker mints a single-use Wompi payment link, and the later payment webhook is
+-- correlated back to it. The id doubles as identificadorEnlaceComercio on the link.
+CREATE TABLE IF NOT EXISTS donation_intents (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN (
+    'PENDING',
+    'LINK_CREATED',
+    'COMPLETED',
+    'EXPIRED'
+  )),
+  amount_cents INTEGER NOT NULL,
+  donor_name TEXT NOT NULL,
+  donor_document_type TEXT NOT NULL CHECK (donor_document_type IN ('13', '37')),
+  donor_document TEXT NOT NULL,
+  donor_email TEXT NOT NULL,
+  donor_phone TEXT,
+  direccion_departamento TEXT NOT NULL,
+  direccion_municipio TEXT NOT NULL,
+  direccion_distrito TEXT NOT NULL,
+  direccion_complemento TEXT NOT NULL,
+  wompi_id_enlace INTEGER,
+  wompi_url_enlace TEXT,
+  client_ip TEXT,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+  expires_at TEXT NOT NULL
+);
+
+-- Sweep of PENDING intents past their expiry filters on (status, expires_at).
+CREATE INDEX IF NOT EXISTS idx_donation_intents_status_expires_at ON donation_intents(status, expires_at);
+-- Per-IP throttle counts recent intents by created_at.
+CREATE INDEX IF NOT EXISTS idx_donation_intents_created_at ON donation_intents(created_at);`;
+}
+
+function sqlTokens(sql: unknown): string[] {
+  return String(sql)
+    .match(/[A-Za-z_][A-Za-z0-9_]*|[(),]/g)
+    ?.map((token) => token.toLowerCase()) ?? [];
 }
 
 function initialLegacyIssuanceMigration(): string {
