@@ -1,5 +1,5 @@
 import { formatCents } from "../../shared/money";
-import type { Repository, StripeGiftFrequency } from "../storage/repository";
+import type { Repository, StripeGiftFrequency, StripeGiftType } from "../storage/repository";
 import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { loadEmailBranding } from "./branding";
@@ -14,6 +14,7 @@ export interface StripeAcknowledgmentContentInput {
   donorName: string | null;
   amountCents: number;
   frequency: StripeGiftFrequency;
+  giftType: StripeGiftType;
   settledAt: string;
   legalName: string;
   ein: string;
@@ -30,12 +31,18 @@ export function stripeAcknowledgmentContent(
     timeZone: "UTC"
   }).format(new Date(input.settledAt));
   const frequencyLabel = input.frequency === "MONTHLY" ? "Mensual" : "Única";
+  const giftTypeLabel = input.giftType === "TITHE"
+    ? "Diezmo"
+    : input.giftType === "OFFERING"
+      ? "Ofrenda"
+      : "No especificado";
   const text =
     `Estimado(a) ${donorName}:\n\n` +
     `Gracias por su donación voluntaria de ${amountLabel}.\n\n` +
-    `Organización legal: ${input.legalName}\n` +
-    `EIN ${input.ein}\n` +
-    `Fecha: ${settledDateLabel}\n` +
+      `Organización legal: ${input.legalName}\n` +
+      `EIN ${input.ein}\n` +
+      `Fecha: ${settledDateLabel}\n` +
+      `Tipo: ${giftTypeLabel}\n` +
     `Frecuencia: ${frequencyLabel}\n\n` +
     `No se proporcionaron bienes ni servicios a cambio de esta donación.\n\n` +
     `Conserve este correo con sus registros. Consulte con su asesor sobre la aplicación a su situación fiscal.`;
@@ -46,6 +53,7 @@ export function stripeAcknowledgmentContent(
       donorName,
       amountLabel,
       settledDateLabel,
+      giftTypeLabel,
       frequencyLabel,
       legalName: input.legalName,
       ein: input.ein,
@@ -91,6 +99,7 @@ export async function deliverNextStripeAcknowledgment(
       donorName: claim.donor_name,
       amountCents: claim.amount_cents,
       frequency: claim.frequency,
+      giftType: claim.gift_type,
       settledAt: claim.settled_at,
       legalName: configuration.legalName,
       ein: configuration.ein,

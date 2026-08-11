@@ -39,6 +39,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       donorName: "Ana <Ejemplo>",
       amountCents: 5000,
       frequency: "ONCE",
+      giftType: "TITHE",
       settledAt: "2026-08-10T12:00:00.000Z",
       legalName: "Friends & Example",
       ein: "12-3456789",
@@ -54,11 +55,14 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(content.text).toContain("Friends & Example");
     expect(content.text).toContain("EIN 12-3456789");
     expect(content.text).toContain("$50.00 USD");
+    expect(content.text).toContain("Tipo: Diezmo");
     expect(content.text).toContain("10 de agosto de 2026");
     expect(content.text).toContain("No se proporcionaron bienes ni servicios a cambio de esta donación.");
     expect(content.text).toContain("Conserve este correo");
     expect(content.html).toContain("Friends &amp; Example");
     expect(content.html).toContain("Ana &lt;Ejemplo&gt;");
+    expect(content.html).toContain("Diezmo");
+    expect(content.text).not.toMatch(/\b(?:MH|CDE)\b|Ministerio de Hacienda|validez fiscal/i);
     expect(content.html).not.toContain("Ana <Ejemplo>");
   });
 

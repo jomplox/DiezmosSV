@@ -87,6 +87,17 @@ import {
   type StripeGiftRecord
 } from "./repository/stripeDonations";
 import {
+  claimStripeAnnualStatementDelivery as claimStripeAnnualStatementDeliveryRepository,
+  finalizeStripeAnnualStatementDelivery as finalizeStripeAnnualStatementDeliveryRepository,
+  listStripeAnnualStatementDonorGifts as listStripeAnnualStatementDonorGiftsRepository,
+  listStripeAnnualStatementDonorTargets as listStripeAnnualStatementDonorTargetsRepository,
+  markStripeAnnualStatementDispatchStarted as markStripeAnnualStatementDispatchStartedRepository,
+  reserveStripeAnnualStatementDelivery as reserveStripeAnnualStatementDeliveryRepository,
+  type StripeAnnualStatementDeliveryRecord,
+  type StripeAnnualStatementDonorTarget,
+  type StripeAnnualStatementGift
+} from "./repository/stripeAnnualStatements";
+import {
   claimEmailDelivery as claimEmailDeliveryRepository,
   claimManualEmailDelivery as claimManualEmailDeliveryRepository,
   claimOperationalAlertDelivery as claimOperationalAlertDeliveryRepository,
@@ -250,8 +261,14 @@ export type {
   StripeAcknowledgmentClaim,
   StripeCheckoutRecord,
   StripeGiftFrequency,
+  StripeGiftType,
   StripeGiftRecord
 } from "./repository/stripeDonations";
+export type {
+  StripeAnnualStatementDeliveryRecord,
+  StripeAnnualStatementDonorTarget,
+  StripeAnnualStatementGift
+} from "./repository/stripeAnnualStatements";
 export {
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
@@ -392,6 +409,45 @@ export class Repository {
     input: Parameters<typeof finalizeStripeAcknowledgmentRepository>[1]
   ): Promise<boolean> {
     return finalizeStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async listStripeAnnualStatementDonorTargets(
+    range: { startIso: string; endIso: string },
+    options: Parameters<typeof listStripeAnnualStatementDonorTargetsRepository>[2]
+  ): Promise<StripeAnnualStatementDonorTarget[]> {
+    return listStripeAnnualStatementDonorTargetsRepository(this.db, range, options);
+  }
+
+  async listStripeAnnualStatementDonorGifts(
+    range: { startIso: string; endIso: string },
+    livemode: boolean,
+    donorKey: string
+  ): Promise<StripeAnnualStatementGift[]> {
+    return listStripeAnnualStatementDonorGiftsRepository(this.db, range, livemode, donorKey);
+  }
+
+  async reserveStripeAnnualStatementDelivery(
+    input: Parameters<typeof reserveStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<StripeAnnualStatementDeliveryRecord> {
+    return reserveStripeAnnualStatementDeliveryRepository(this.db, input);
+  }
+
+  async claimStripeAnnualStatementDelivery(
+    input: Parameters<typeof claimStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<StripeAnnualStatementDeliveryRecord | null> {
+    return claimStripeAnnualStatementDeliveryRepository(this.db, input);
+  }
+
+  async markStripeAnnualStatementDispatchStarted(
+    input: Parameters<typeof markStripeAnnualStatementDispatchStartedRepository>[1]
+  ): Promise<boolean> {
+    return markStripeAnnualStatementDispatchStartedRepository(this.db, input);
+  }
+
+  async finalizeStripeAnnualStatementDelivery(
+    input: Parameters<typeof finalizeStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeAnnualStatementDeliveryRepository(this.db, input);
   }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {

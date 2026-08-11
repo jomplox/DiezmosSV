@@ -8,6 +8,7 @@
 # the local queue within a few seconds.
 MOCK_EXTERNAL_SERVICES="true"
 STRIPE_MOCK_MODE="1"
+STRIPE_US_TIME_ZONE="America/New_York"
 BOOTSTRAP_OWNER_TOKEN="bt_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 WOMPI_API_SECRET="ci-dummy-wompi-secret"
 WOMPI_CLIENT_ID="ci-dummy-wompi-client-id"

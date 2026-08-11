@@ -59,6 +59,7 @@ export interface StripeAcknowledgmentEmailInput {
   donorName: string;
   amountLabel: string;
   settledDateLabel: string;
+  giftTypeLabel: string;
   frequencyLabel: string;
   legalName: string;
   ein: string;
@@ -85,10 +86,54 @@ export function stripeAcknowledgmentEmailHtml(input: StripeAcknowledgmentEmailIn
         ["EIN", input.ein],
         ["Fecha", input.settledDateLabel],
         ["Monto", input.amountLabel],
+        ["Tipo", input.giftTypeLabel],
         ["Frecuencia", input.frequencyLabel]
       ]),
       note("No se proporcionaron bienes ni servicios a cambio de esta donación."),
       footNote("Conserve este correo con sus registros. Consulte con su asesor sobre la aplicación a su situación fiscal.")
+    ]
+  );
+}
+
+export interface StripeAnnualStatementEmailInput {
+  organizationName: string;
+  donorName: string;
+  year: number;
+  count: number;
+  netTotalLabel: string;
+  corrected: boolean;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
+}
+
+export function stripeAnnualStatementEmailHtml(input: StripeAnnualStatementEmailInput): string {
+  const title = input.corrected
+    ? "Constancia anual corregida de donaciones — EE. UU."
+    : "Constancia anual de donaciones — EE. UU.";
+  const correction = input.corrected
+    ? note("Esta versión corregida reemplaza la constancia anterior para el mismo año.")
+    : "";
+  return emailDocument(
+    input.organizationName,
+    title,
+    input.brandColor ?? DEFAULT_BRAND_COLOR,
+    input.supportEmail,
+    input.logoUrl,
+    [
+      paragraphs(
+        `Estimado(a) ${input.donorName}:\n\n` +
+        `Adjuntamos su constancia anual de donaciones correspondiente a ${input.year}. ` +
+        `El documento resume las donaciones registradas para sus archivos.`
+      ),
+      correction,
+      detailsCard([
+        ["Año", String(input.year)],
+        ["Donaciones", String(input.count)],
+        ["Total neto", input.netTotalLabel]
+      ]),
+      note("No se proporcionaron bienes ni servicios a cambio de estas donaciones."),
+      footNote("Conserve este documento con sus registros. Este mensaje no constituye asesoría fiscal.")
     ]
   );
 }

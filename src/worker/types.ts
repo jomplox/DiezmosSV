@@ -28,6 +28,7 @@ export type Env = Pick<CloudflareBindings, "DB" | "ASSETS" | "ARCHIVE"> &
     STRIPE_BILLING_PORTAL_CONFIGURATION_ID?: string;
     STRIPE_US_LEGAL_NAME?: string;
     STRIPE_US_EIN?: string;
+    STRIPE_US_TIME_ZONE?: string;
     STRIPE_MOCK_MODE?: string;
     MH_CERT_XML?: string;
     MH_CERT_XML_PART_1?: string;

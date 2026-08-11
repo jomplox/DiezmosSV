@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { certificateEmailHtml, dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml } from "../../src/worker/services/emailHtml";
+import { certificateEmailHtml, dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml, stripeAnnualStatementEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
@@ -28,6 +28,14 @@ describe("HTML email rendering", () => {
         count: 3,
         totalLabel: "$100.00",
         isTestEnvironment: false
+      }),
+      stripeAnnualStatementEmailHtml({
+        organizationName: "Misión ExampleOrganization",
+        donorName: "María",
+        year: 2025,
+        count: 2,
+        netTotalLabel: "$75.00",
+        corrected: false
       })
     ];
 
@@ -47,6 +55,22 @@ describe("HTML email rendering", () => {
     expect(html).toContain("6CAE5F7E-A590-4573-8EF2-FE48B14796C4");
     expect(html).toContain("$25.50");
     expect(html).not.toContain("{{");
+  });
+
+  it("keeps the U.S. annual email materially separate from the SV fiscal dossier", () => {
+    const html = stripeAnnualStatementEmailHtml({
+      organizationName: "Misión ExampleOrganization",
+      donorName: "María",
+      year: 2025,
+      count: 2,
+      netTotalLabel: "$75.00",
+      corrected: true
+    });
+
+    expect(html).toContain("Constancia anual corregida de donaciones — EE. UU.");
+    expect(html).toContain("No se proporcionaron bienes ni servicios");
+    expect(html).toContain("registros");
+    expect(html).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b|validez fiscal/i);
   });
 
   it("marks test-environment documents as having no fiscal validity", () => {
