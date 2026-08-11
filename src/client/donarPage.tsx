@@ -966,14 +966,17 @@ export function DonarPage() {
     setStep(1);
   }
 
-  // The summary's "Editar": straight back to Paso 1 (amount), abandoning any intent and
-  // any background-minted draft (the amount is about to change).
+  // The summary's "Editar": straight back to Paso 1. A U.S. Stripe attempt is kept
+  // until a changed fingerprint replaces it; the SV draft is abandoned because its
+  // amount/type may be edited before continuing.
   function editAmount() {
     setError("");
     setFieldErrors({});
     setIntent(null);
-    stripeAttemptRef.current = null;
-    setStripeSessionAttempt(null);
+    if (!usDonation) {
+      stripeAttemptRef.current = null;
+      setStripeSessionAttempt(null);
+    }
     abandonDraftIntent();
     setStage("form");
     setStep(1);

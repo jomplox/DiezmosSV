@@ -596,6 +596,13 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByRole("alert")).toContainText("Inicie una nueva entrega");
   await page.getByRole("button", { name: "Intentar de nuevo" }).click();
 
+  // Editar without changing the amount, gift type, or frequency must reuse the
+  // current Stripe attempt without another Checkout-session request.
+  await expect(page.getByRole("button", { name: "Editar" })).toBeVisible();
+  await page.getByRole("button", { name: "Editar" }).click();
+  await expect(page.getByText("Paso 1 de 2")).toBeVisible();
+  await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
+
   // Local mock mode preserves the Stripe-hosted boundary without pretending to
   // expose a hand-maintained subset of wallets, fields, or payment methods.
   await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
