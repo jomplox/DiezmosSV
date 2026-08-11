@@ -81,6 +81,13 @@ import {
   SingleDonorSendError,
   type AnnualCertificateSendRequest
 } from "./services/certificate";
+import {
+  buildStripeAnnualStatementPreview,
+  sendStripeAnnualStatements,
+  StripeAnnualStatementConfigurationError,
+  StripeAnnualStatementSingleDonorError,
+  type StripeAnnualStatementSendRequest
+} from "./services/stripeAnnualStatement";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
 import { CAT012_DEPARTMENTS, CAT020_COUNTRIES, CAT022_DOCUMENT_TYPES, findCatalogOption } from "../shared/catalogs";
 import { aggregateDonorContacts, buildContactsCsv, resolveContactColumns, contactsCsvFilename } from "./services/contacts";
@@ -2432,6 +2439,119 @@ async function handleAnnualCertificateSend(ctx: ApiRouteContext): Promise<Respon
   return jsonResponse(result);
 }
 
+function stripeAnnualStatementParameter(value: string | null): string | null {
+  const normalized = value?.trim() ?? "";
+  return normalized && normalized.length <= 320 ? normalized : null;
+}
+
+function stripeAnnualStatementLivemode(ctx: ApiRouteContext): boolean | Response {
+  try {
+    return resolveStripeConfiguration(ctx.env).livemode;
+  } catch (error) {
+    if (error instanceof StripeConfigurationError) {
+      return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });
+    }
+    throw error;
+  }
+}
+
+async function handleStripeAnnualStatementPreview(ctx: ApiRouteContext): Promise<Response> {
+  const yearParam = ctx.url.searchParams.get("year");
+  const yearError = certificateYearError(yearParam, new Date());
+  if (yearError) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_year", message: yearError }, { status: 400 });
+  }
+  const afterParam = ctx.url.searchParams.get("after");
+  if (afterParam !== null && !stripeAnnualStatementParameter(afterParam)) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_cursor" }, { status: 400 });
+  }
+  const searchParam = ctx.url.searchParams.get("q");
+  if (searchParam !== null && !stripeAnnualStatementParameter(searchParam)) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_search" }, { status: 400 });
+  }
+  const livemode = stripeAnnualStatementLivemode(ctx);
+  if (livemode instanceof Response) return livemode;
+  try {
+    return jsonResponse(await buildStripeAnnualStatementPreview(ctx.env, ctx.repo, Number(yearParam), livemode, afterParam));
+  } catch (error) {
+    if (error instanceof StripeAnnualStatementConfigurationError) {
+      return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });
+    }
+    throw error;
+  }
+}
+
+async function handleStripeAnnualStatementSend(ctx: ApiRouteContext): Promise<Response> {
+  const yearParam = ctx.url.searchParams.get("year");
+  const yearError = certificateYearError(yearParam, new Date());
+  if (yearError) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_year", message: yearError }, { status: 400 });
+  }
+  const rawBody = (await readBodyText(ctx.request, AUTHENTICATED_JSON_BODY_LIMIT_BYTES)).trim();
+  let body: Record<string, unknown> = {};
+  if (rawBody) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawBody);
+    } catch {
+      throw new InvalidJsonBodyError();
+    }
+    if (!isRecord(parsed)) {
+      return jsonResponse({ error: "invalid_stripe_annual_statement_send_request" }, { status: 400 });
+    }
+    body = parsed;
+  }
+  if (Object.keys(body).some((key) => key !== "donor" && key !== "after")) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_send_request" }, { status: 400 });
+  }
+  const hasDonor = Object.hasOwn(body, "donor");
+  const hasAfter = Object.hasOwn(body, "after");
+  const donor = hasDonor && typeof body.donor === "string" ? stripeAnnualStatementParameter(body.donor) : null;
+  const after = hasAfter && typeof body.after === "string" ? stripeAnnualStatementParameter(body.after) : null;
+  if ((hasDonor && !donor) || (hasAfter && !after) || (donor && after)) {
+    return jsonResponse({ error: "invalid_stripe_annual_statement_send_request" }, { status: 400 });
+  }
+  const livemode = stripeAnnualStatementLivemode(ctx);
+  if (livemode instanceof Response) return livemode;
+  const sendRequest: StripeAnnualStatementSendRequest = donor ? { donor } : after ? { after } : {};
+  let result;
+  try {
+    result = await sendStripeAnnualStatements(ctx.env, ctx.repo, Number(yearParam), livemode, ctx.actor!.id, sendRequest);
+  } catch (error) {
+    if (error instanceof StripeAnnualStatementSingleDonorError) {
+      return jsonResponse({
+        error: error.status === 404 ? "stripe_annual_statement_donor_not_found" : "stripe_annual_statement_donor_unavailable",
+        message: error.message
+      }, { status: error.status });
+    }
+    if (error instanceof StripeAnnualStatementConfigurationError) {
+      return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });
+    }
+    throw error;
+  }
+  await ctx.repo.createAudit({
+    actorType: "USER",
+    actorId: ctx.actor!.id,
+    action: "STRIPE_ANNUAL_STATEMENTS_RUN",
+    entityType: "stripe_annual_statement_run",
+    entityId: `${result.year}:${result.livemode ? "live" : "test"}`,
+    summary: result.mode === "single"
+      ? `Constancia de EE. UU. ${result.year} enviada individualmente: ${result.sent} enviada, ${result.review} en revisión`
+      : `Tanda de constancias de EE. UU. ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas, ${result.review} en revisión`,
+    metadata: {
+      mode: result.mode,
+      livemode: result.livemode,
+      processed: result.processed,
+      sent: result.sent,
+      skipped: result.skipped,
+      failed: result.failed,
+      review: result.review,
+      hasMore: result.hasMore
+    }
+  });
+  return jsonResponse(result);
+}
+
 async function handleAudit(ctx: ApiRouteContext): Promise<Response> {
   const actor = ctx.actor!;
   const entityType = ctx.url.searchParams.get("entityType");
@@ -2803,7 +2923,9 @@ const exportRoutes: Array<Route<ApiRouteContext>> = [
   { method: "GET", pattern: "/api/exports/contacts", role: "ADMIN", handler: handleContactsExport },
   { method: "GET", pattern: "/api/exports/donors.csv", role: "ADMIN", handler: handleDonorExport },
   { method: "GET", pattern: "/api/certificates/annual", role: "ADMIN", handler: handleAnnualCertificatePreview },
-  { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend }
+  { method: "POST", pattern: "/api/certificates/annual/send", role: "ADMIN", handler: handleAnnualCertificateSend },
+  { method: "GET", pattern: "/api/statements/stripe/annual", role: "ADMIN", handler: handleStripeAnnualStatementPreview },
+  { method: "POST", pattern: "/api/statements/stripe/annual/send", role: "ADMIN", handler: handleStripeAnnualStatementSend }
 ];
 
 const operationsRoutes: Array<Route<ApiRouteContext>> = [

@@ -209,6 +209,39 @@ export interface EmissionEnvironmentState {
   allowedEnvironments: Array<"00" | "01">;
 }
 
+export interface StripeAnnualStatementPreviewDonor {
+  donorKey: string;
+  donorName: string;
+  donorEmail: string | null;
+  hasEmail: boolean;
+  count: number;
+  grossTotalLabel: string;
+  refundedTotalLabel: string;
+  netTotalLabel: string;
+}
+
+export interface StripeAnnualStatementPreview {
+  year: number;
+  livemode: boolean;
+  timeZone: string;
+  donors: StripeAnnualStatementPreviewDonor[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface StripeAnnualStatementSendResult {
+  year: number;
+  livemode: boolean;
+  mode: "bulk" | "single";
+  processed: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  review: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
 export interface EmailTemplateValue {
   subject: string;
   body: string;

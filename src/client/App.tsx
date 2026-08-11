@@ -29,7 +29,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -105,7 +105,9 @@ import {
   type ContactsPeriod,
   contactsPeriodRange,
   ExportPanel,
-  OnlineDonationsPanel
+  OnlineDonationsPanel,
+  StripeAnnualStatementPanel,
+  stripeStatementPreviewPath
 } from "./exportsPanel";
 import {
   DetailPanel,
@@ -140,6 +142,13 @@ interface CertificateBulkRequest {
 }
 
 interface CertificateBulkTraversal extends CertificateBulkRequest {
+  started: boolean;
+  hasMore: boolean;
+}
+
+interface StripeStatementPreviewRequest extends CertificatePreviewRequest {}
+interface StripeStatementBulkRequest extends CertificateBulkRequest {}
+interface StripeStatementBulkTraversal extends StripeStatementBulkRequest {
   started: boolean;
   hasMore: boolean;
 }
@@ -395,6 +404,18 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const certificateOperationClaimsRef = useRef(new Map<string, symbol>());
   const certificateSearchInputGenerationRef = useRef(0);
+  const [stripeStatementYear, setStripeStatementYear] = useState(() => String(new Date().getFullYear()));
+  const [stripeStatementSearch, setStripeStatementSearch] = useState("");
+  const [debouncedStripeStatementSearch, setDebouncedStripeStatementSearch] = useState("");
+  const [settledStripeStatementSearchRevision, setSettledStripeStatementSearchRevision] = useState(0);
+  const [stripeStatementPreview, setStripeStatementPreview] = useState<StripeAnnualStatementPreview | null>(null);
+  const [stripeStatementPreviewCursor, setStripeStatementPreviewCursor] = useState<string | null>(null);
+  const [stripeStatementBulkHasMore, setStripeStatementBulkHasMore] = useState(false);
+  const [stripeStatementBulkTraversalStarted, setStripeStatementBulkTraversalStarted] = useState(false);
+  const stripeStatementPreviewRequestRef = useRef<StripeStatementPreviewRequest>({ generation: 0, year: stripeStatementYear, search: debouncedStripeStatementSearch, cursor: null });
+  const stripeStatementBulkTraversalRef = useRef<StripeStatementBulkTraversal>({ generation: 0, year: stripeStatementYear, cursor: null, started: false, hasMore: false });
+  const stripeStatementOperationClaimsRef = useRef(new Map<string, symbol>());
+  const stripeStatementSearchInputGenerationRef = useRef(0);
   const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
@@ -474,6 +495,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     };
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
+    const stripePreviewRequest = stripeStatementPreviewRequestRef.current;
+    stripeStatementPreviewRequestRef.current = { ...stripePreviewRequest, generation: stripePreviewRequest.generation + 1, cursor: null };
+    const stripeBulkTraversal = stripeStatementBulkTraversalRef.current;
+    stripeStatementBulkTraversalRef.current = { ...stripeBulkTraversal, generation: stripeBulkTraversal.generation + 1, cursor: null, started: false, hasMore: false };
+    stripeStatementOperationClaimsRef.current.clear();
+    stripeStatementSearchInputGenerationRef.current += 1;
     automaticRefreshFlightRef.current = null;
     runActionOwnerRef.current = null;
   }, []);
@@ -554,6 +581,23 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }, [certificateSearch]);
 
   useEffect(() => {
+    const nextSearch = stripeStatementSearch.trim();
+    const inputGeneration = stripeStatementSearchInputGenerationRef.current;
+    const handle = window.setTimeout(() => {
+      if (stripeStatementSearchInputGenerationRef.current !== inputGeneration) return;
+      const current = stripeStatementPreviewRequestRef.current;
+      if (current.search !== nextSearch) {
+        stripeStatementPreviewRequestRef.current = { generation: current.generation + 1, year: current.year, search: nextSearch, cursor: null };
+        setStripeStatementPreview(null);
+        setStripeStatementPreviewCursor(null);
+      }
+      setDebouncedStripeStatementSearch(nextSearch);
+      setSettledStripeStatementSearchRevision(inputGeneration);
+    }, DOCUMENT_SEARCH_DEBOUNCE_MS);
+    return () => window.clearTimeout(handle);
+  }, [stripeStatementSearch]);
+
+  useEffect(() => {
     document.querySelector(".sidebar nav button.active")?.scrollIntoView?.({ block: "nearest", inline: "center" });
   }, [view]);
 
@@ -570,7 +614,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       exportEndDate,
       certificateYear,
       debouncedCertificateSearch,
-      certificateSearchInputGenerationRef.current
+      certificateSearchInputGenerationRef.current,
+      stripeStatementYear,
+      debouncedStripeStatementSearch,
+      stripeStatementSearchInputGenerationRef.current
     ]);
     const currentFlight = automaticRefreshFlightRef.current;
     if (currentFlight?.key === refreshKey) {
@@ -583,7 +630,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       return;
     }
     dispatchAutomaticRefresh(refreshKey, false);
-  }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch, settledCertificateSearchRevision]);
+  }, [token, status, debouncedQuery, view, exportStartDate, exportEndDate, certificateYear, debouncedCertificateSearch, settledCertificateSearchRevision, stripeStatementYear, debouncedStripeStatementSearch, settledStripeStatementSearchRevision]);
 
   // Effective analytics range: a non-custom preset supplies its own bounds; the custom
   // preset uses the two date inputs. Keeps the fetch effect independent of which mode.
@@ -904,37 +951,59 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             (reason: unknown) => ({ status: "rejected" as const, reason })
           )
         : Promise.resolve(null);
+      const currentStripeStatementInput = stripeStatementPreviewRequestRef.current;
+      const stripeStatementRequest = currentStripeStatementInput.year === stripeStatementYear
+        && currentStripeStatementInput.search === debouncedStripeStatementSearch
+        ? beginStripeStatementPreviewReplacement(stripeStatementYear, debouncedStripeStatementSearch)
+        : null;
+      const stripeStatementResultPromise = stripeStatementRequest
+        ? accountApi<StripeAnnualStatementPreview>(stripeStatementPreviewPath(
+            stripeStatementRequest.year,
+            stripeStatementRequest.search,
+            stripeStatementRequest.cursor
+          )).then(
+            (value) => ({ status: "fulfilled" as const, value }),
+            (reason: unknown) => ({ status: "rejected" as const, reason })
+          )
+        : Promise.resolve(null);
       const [
         f960Preview,
         certificateResult,
+        stripeStatementResult,
         donationIntentResult,
         backupsResult,
         environmentResult
       ] = await Promise.all([
         accountApi<F960Preview>(`/api/exports/f960?${params}`),
         certificateResultPromise,
+        stripeStatementResultPromise,
         accountApi<{ intents: DonationIntentListItem[] }>("/api/donations/intents"),
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
-      if (certificateRequest && certificateResult?.status === "fulfilled") {
-        commitRefreshState(control, () => {
-          setExportPreview(f960Preview);
-          commitCertificatePreview(certificateRequest, certificateResult.value, false);
-          setDonationIntents(donationIntentResult.intents);
-          setBackups(backupsResult.months);
-          setEmissionEnvironment(environmentResult.emissionEnvironment);
-        });
-      } else if (
+      if (
         certificateRequest
         && certificateResult?.status === "rejected"
         && isCurrentCertificatePreviewRequest(certificateRequest)
         && (!control || control.isOwner())
       ) {
         throw certificateResult.reason;
+      } else if (
+        stripeStatementRequest
+        && stripeStatementResult?.status === "rejected"
+        && isCurrentStripeStatementPreviewRequest(stripeStatementRequest)
+        && (!control || control.isOwner())
+      ) {
+        throw stripeStatementResult.reason;
       } else {
         commitRefreshState(control, () => {
           setExportPreview(f960Preview);
+          if (certificateRequest && certificateResult?.status === "fulfilled") {
+            commitCertificatePreview(certificateRequest, certificateResult.value, false);
+          }
+          if (stripeStatementRequest && stripeStatementResult?.status === "fulfilled") {
+            commitStripeStatementPreview(stripeStatementRequest, stripeStatementResult.value, false);
+          }
           setDonationIntents(donationIntentResult.intents);
           setBackups(backupsResult.months);
           setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -1005,11 +1074,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     runActionOwnerRef.current = null;
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
+    stripeStatementOperationClaimsRef.current.clear();
+    stripeStatementSearchInputGenerationRef.current += 1;
     automaticRefreshFlightRef.current = null;
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
+    setSettledStripeStatementSearchRevision(stripeStatementSearchInputGenerationRef.current);
     const certificateResetYear = String(new Date().getFullYear());
     invalidateCertificatePreview(certificateResetYear, "");
     resetCertificateBulkTraversal(certificateResetYear);
+    invalidateStripeStatementPreview(certificateResetYear, "");
+    resetStripeStatementBulkTraversal(certificateResetYear);
     setView("documents");
     setDocuments([]);
     clearPreCdeFailures();
@@ -1050,6 +1124,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setCertificateYear(certificateResetYear);
     setCertificateSearch("");
     setDebouncedCertificateSearch("");
+    setStripeStatementYear(certificateResetYear);
+    setStripeStatementSearch("");
+    setDebouncedStripeStatementSearch("");
     setContactsPeriod("todo");
     setContactsFrom(currentMonthStartValue());
     setContactsTo(todayDateValue());
@@ -1616,6 +1693,156 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function releaseCertificateOperation(key: string, token: symbol): void {
     if (ownsCertificateOperation(key, token)) {
       certificateOperationClaimsRef.current.delete(key);
+    }
+  }
+
+  function claimStripeStatementOperation(key: string): symbol | null {
+    if (stripeStatementOperationClaimsRef.current.has(key)) return null;
+    const token = Symbol(key);
+    stripeStatementOperationClaimsRef.current.set(key, token);
+    return token;
+  }
+
+  function ownsStripeStatementOperation(key: string, token: symbol): boolean {
+    return stripeStatementOperationClaimsRef.current.get(key) === token;
+  }
+
+  function releaseStripeStatementOperation(key: string, token: symbol): void {
+    if (ownsStripeStatementOperation(key, token)) stripeStatementOperationClaimsRef.current.delete(key);
+  }
+
+  function beginStripeStatementPreviewReplacement(year: string, search: string): StripeStatementPreviewRequest {
+    const request = { generation: stripeStatementPreviewRequestRef.current.generation + 1, year, search, cursor: null };
+    stripeStatementPreviewRequestRef.current = request;
+    setStripeStatementPreviewCursor(null);
+    return request;
+  }
+
+  function isCurrentStripeStatementPreviewRequest(request: StripeStatementPreviewRequest): boolean {
+    const current = stripeStatementPreviewRequestRef.current;
+    return current.generation === request.generation && current.year === request.year && current.search === request.search && current.cursor === request.cursor;
+  }
+
+  function commitStripeStatementPreview(request: StripeStatementPreviewRequest, page: StripeAnnualStatementPreview, append: boolean): boolean {
+    if (!isCurrentStripeStatementPreviewRequest(request)) return false;
+    stripeStatementPreviewRequestRef.current = { ...request, cursor: page.nextCursor };
+    setStripeStatementPreview((currentPreview) => {
+      if (!isCurrentStripeStatementPreviewRequest({ ...request, cursor: page.nextCursor })) return currentPreview;
+      return append && currentPreview?.year === page.year ? { ...page, donors: [...currentPreview.donors, ...page.donors] } : page;
+    });
+    setStripeStatementPreviewCursor((currentCursor) => isCurrentStripeStatementPreviewRequest({ ...request, cursor: page.nextCursor }) ? page.nextCursor : currentCursor);
+    return true;
+  }
+
+  function invalidateStripeStatementPreview(year: string, search: string): void {
+    const current = stripeStatementPreviewRequestRef.current;
+    stripeStatementPreviewRequestRef.current = { generation: current.generation + 1, year, search, cursor: null };
+    setStripeStatementPreview(null);
+    setStripeStatementPreviewCursor(null);
+  }
+
+  function resetStripeStatementBulkTraversal(year: string): void {
+    const current = stripeStatementBulkTraversalRef.current;
+    stripeStatementBulkTraversalRef.current = { generation: current.generation + 1, year, cursor: null, started: false, hasMore: false };
+    setStripeStatementBulkHasMore(false);
+    setStripeStatementBulkTraversalStarted(false);
+  }
+
+  function isCurrentStripeStatementBulkRequest(request: StripeStatementBulkRequest): boolean {
+    const current = stripeStatementBulkTraversalRef.current;
+    return current.generation === request.generation && current.year === request.year && (current.started ? current.cursor : null) === request.cursor;
+  }
+
+  async function sendStripeAnnualStatements() {
+    const traversal = stripeStatementBulkTraversalRef.current;
+    if (traversal.started && (!traversal.hasMore || !traversal.cursor)) {
+      setToast("El recorrido de EE. UU. actual ya terminó. Inicie uno nuevo para volver a revisar el año.");
+      return;
+    }
+    const request: StripeStatementBulkRequest = { generation: traversal.generation, year: traversal.year, cursor: traversal.started ? traversal.cursor : null };
+    const claimKey = JSON.stringify(["bulk", request.generation, request.year, request.cursor]);
+    const claimToken = claimStripeStatementOperation(claimKey);
+    if (!claimToken) return;
+    if (!window.confirm("Se enviará una tanda de hasta 10 constancias de EE. UU. a donantes con correo. ¿Desea continuar?")) {
+      releaseStripeStatementOperation(claimKey, claimToken);
+      return;
+    }
+    try {
+      await runAction("stripe-statements-send", async (control) => {
+        const result = await accountApi<StripeAnnualStatementSendResult>(`/api/statements/stripe/annual/send?year=${request.year}`, { method: "POST", body: request.cursor ? { after: request.cursor } : {} });
+        if (!isCurrentStripeStatementBulkRequest(request) || !ownsStripeStatementOperation(claimKey, claimToken)) return;
+        control.commit(() => {
+          stripeStatementBulkTraversalRef.current = { generation: request.generation, year: request.year, cursor: result.nextCursor, started: true, hasMore: result.hasMore };
+          setStripeStatementBulkTraversalStarted(true);
+          setStripeStatementBulkHasMore(result.hasMore);
+          setToast(`Constancias de EE. UU. ${result.year}: ${result.sent} enviadas, ${result.skipped} omitidas, ${result.failed} fallidas, ${result.review} en revisión.`);
+        });
+      }, () => isCurrentStripeStatementBulkRequest(request) && ownsStripeStatementOperation(claimKey, claimToken));
+    } finally {
+      releaseStripeStatementOperation(claimKey, claimToken);
+    }
+  }
+
+  async function loadMoreStripeStatementPreview() {
+    if (!stripeStatementPreview?.hasMore || !stripeStatementPreviewCursor) return;
+    const request = { ...stripeStatementPreviewRequestRef.current };
+    if (request.cursor !== stripeStatementPreviewCursor) return;
+    const claimKey = JSON.stringify(["preview-page", request.generation, request.year, request.search, request.cursor]);
+    const claimToken = claimStripeStatementOperation(claimKey);
+    if (!claimToken) return;
+    try {
+      await runAction("stripe-statements-preview-more", async (control) => {
+        const page = await accountApi<StripeAnnualStatementPreview>(stripeStatementPreviewPath(request.year, request.search, request.cursor));
+        if (ownsStripeStatementOperation(claimKey, claimToken)) control.commit(() => commitStripeStatementPreview(request, page, true));
+      }, () => isCurrentStripeStatementPreviewRequest(request) && ownsStripeStatementOperation(claimKey, claimToken));
+    } finally {
+      releaseStripeStatementOperation(claimKey, claimToken);
+    }
+  }
+
+  function startNewStripeStatementTraversal() {
+    resetStripeStatementBulkTraversal(stripeStatementYear);
+    setToast("Recorrido de constancias de EE. UU. reiniciado.");
+  }
+
+  function changeStripeStatementYear(year: string) {
+    invalidateStripeStatementPreview(year, stripeStatementPreviewRequestRef.current.search);
+    resetStripeStatementBulkTraversal(year);
+    setStripeStatementYear(year);
+  }
+
+  function changeStripeStatementSearch(value: string) {
+    stripeStatementSearchInputGenerationRef.current += 1;
+    invalidateStripeStatementPreview(stripeStatementPreviewRequestRef.current.year, value.trim());
+    setStripeStatementSearch(value);
+  }
+
+  async function sendStripeStatementDonor(donor: StripeAnnualStatementPreviewDonor) {
+    const preview = stripeStatementPreview;
+    if (!preview || !donor.hasEmail) return;
+    const previewRequest = { ...stripeStatementPreviewRequestRef.current };
+    if (previewRequest.year !== String(preview.year)) return;
+    const claimKey = JSON.stringify(["single", previewRequest.generation, previewRequest.year]);
+    const claimToken = claimStripeStatementOperation(claimKey);
+    if (!claimToken) return;
+    if (!window.confirm(`Se enviará la constancia de EE. UU. del año ${preview.year} a ${donor.donorName}. ¿Desea continuar?`)) {
+      releaseStripeStatementOperation(claimKey, claimToken);
+      return;
+    }
+    let activePreviewRequest = previewRequest;
+    try {
+      await runAction(`stripe-statements-send-${donor.donorKey}`, async (control) => {
+        const result = await accountApi<StripeAnnualStatementSendResult>(`/api/statements/stripe/annual/send?year=${preview.year}`, { method: "POST", body: { donor: donor.donorKey } });
+        if (!isCurrentStripeStatementPreviewRequest(activePreviewRequest) || !ownsStripeStatementOperation(claimKey, claimToken)) return;
+        if (!control.commit(() => {
+          setToast(result.sent > 0 ? `Constancia de EE. UU. ${result.year} enviada a ${donor.donorName}.` : `No se pudo enviar la constancia a ${donor.donorName}.`);
+          activePreviewRequest = beginStripeStatementPreviewReplacement(previewRequest.year, previewRequest.search);
+        })) return;
+        const refreshed = await accountApi<StripeAnnualStatementPreview>(stripeStatementPreviewPath(activePreviewRequest.year, activePreviewRequest.search, activePreviewRequest.cursor));
+        if (ownsStripeStatementOperation(claimKey, claimToken)) control.commit(() => commitStripeStatementPreview(activePreviewRequest, refreshed, false));
+      }, () => isCurrentStripeStatementPreviewRequest(activePreviewRequest) && ownsStripeStatementOperation(claimKey, claimToken));
+    } finally {
+      releaseStripeStatementOperation(claimKey, claimToken);
     }
   }
 
@@ -2532,6 +2759,22 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               onSendDonor={sendDonorCertificate}
               onLoadMore={loadMoreCertificatePreview}
               onResetBulk={startNewCertificateTraversal}
+            />
+            <StripeAnnualStatementPanel
+              year={stripeStatementYear}
+              yearOptions={certificateYearOptions()}
+              preview={stripeStatementPreview}
+              search={stripeStatementSearch}
+              busy={busy === "stripe-statements-send"}
+              rowBusy={busy}
+              bulkTraversalStarted={stripeStatementBulkTraversalStarted}
+              bulkHasMore={stripeStatementBulkHasMore}
+              onYearChange={changeStripeStatementYear}
+              onSearchChange={changeStripeStatementSearch}
+              onSend={sendStripeAnnualStatements}
+              onSendDonor={sendStripeStatementDonor}
+              onLoadMore={loadMoreStripeStatementPreview}
+              onResetBulk={startNewStripeStatementTraversal}
             />
             <ContactsExportPanel
               environment={emissionEnvironment?.environment ?? null}

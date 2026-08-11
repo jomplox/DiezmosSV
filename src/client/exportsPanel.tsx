@@ -13,7 +13,9 @@ import type {
   BackupMonth,
   BackupVerifyResult,
   DonationIntentListItem,
-  EmissionEnvironmentState
+  EmissionEnvironmentState,
+  StripeAnnualStatementPreview,
+  StripeAnnualStatementPreviewDonor
 } from "./types";
 import { openNativeDatePicker } from "./datePicker";
 import { donationIntentStatusLabel, environmentLabel } from "./displayText";
@@ -277,6 +279,106 @@ export function certificatePreviewPath(year: string, search: string, after?: str
   return `/api/certificates/annual?year=${year}${searchParam}${afterParam}`;
 }
 
+export function stripeStatementPreviewPath(year: string, search: string, after?: string | null): string {
+  const trimmed = search.trim();
+  const searchParam = trimmed ? `&q=${encodeURIComponent(trimmed)}` : "";
+  const afterParam = after ? `&after=${encodeURIComponent(after)}` : "";
+  return `/api/statements/stripe/annual?year=${year}${searchParam}${afterParam}`;
+}
+
+export function StripeAnnualStatementPanel({
+  year,
+  yearOptions,
+  preview,
+  search,
+  busy,
+  rowBusy,
+  bulkTraversalStarted,
+  bulkHasMore,
+  onYearChange,
+  onSearchChange,
+  onSend,
+  onSendDonor,
+  onLoadMore,
+  onResetBulk
+}: {
+  year: string;
+  yearOptions: number[];
+  preview: StripeAnnualStatementPreview | null;
+  search: string;
+  busy: boolean;
+  rowBusy: string;
+  bulkTraversalStarted: boolean;
+  bulkHasMore: boolean;
+  onYearChange: (year: string) => void;
+  onSearchChange: (value: string) => void;
+  onSend: () => Promise<void>;
+  onSendDonor: (donor: StripeAnnualStatementPreviewDonor) => Promise<void>;
+  onLoadMore: () => Promise<void>;
+  onResetBulk: () => void;
+}) {
+  const donors = preview?.donors ?? [];
+  const anySending = busy || rowBusy.startsWith("stripe-statements-send") || rowBusy === "stripe-statements-preview-more";
+  const bulkComplete = bulkTraversalStarted && !bulkHasMore;
+  return (
+    <section className="single-panel export-panel">
+      <div className="panel-head">
+        <div>
+          <h2>EE. UU. — Stripe</h2>
+          <p>Constancia anual de donaciones para EE. UU.</p>
+        </div>
+        <FileSpreadsheet size={20} />
+      </div>
+      <p className="hint">Es un 501(c)(3) acknowledgment; no es un expediente CDE salvadoreño.</p>
+      <div className="export-controls">
+        <label className="date-field">
+          <span>Año</span>
+          <select value={year} onChange={(event) => onYearChange(event.target.value)}>
+            {yearOptions.map((option) => <option key={option} value={String(option)}>{option}</option>)}
+          </select>
+        </label>
+        <button className="primary" disabled={anySending || bulkComplete} onClick={() => void onSend()}>
+          <Download size={16} />
+          {busy ? "Enviando" : bulkTraversalStarted ? "Enviar siguiente tanda" : "Enviar primera tanda"}
+        </button>
+        {bulkTraversalStarted && <button className="ghost" disabled={anySending} onClick={onResetBulk}>Iniciar nuevo recorrido</button>}
+      </div>
+      <p className="hint">Se enviará a los donantes con correo. Los donantes sin correo aparecen en la vista previa pero se omiten al enviar.</p>
+      {bulkTraversalStarted && bulkHasMore && <p className="hint">Quedan donantes por procesar.</p>}
+      <div className="certificate-search">
+        <input
+          type="search"
+          value={search}
+          placeholder="Buscar donante o correo"
+          onChange={(event) => onSearchChange(event.target.value)}
+          aria-label="Buscar donante o correo de EE. UU."
+        />
+      </div>
+      <div className="table-scroll export-table certificate-table">
+        <table>
+          <thead><tr><th>Donante</th><th className="numeric">Donaciones</th><th className="numeric">Total neto</th><th>Correo</th><th>Enviar</th></tr></thead>
+          <tbody>
+            {donors.map((donor) => {
+              const rowSending = rowBusy === `stripe-statements-send-${donor.donorKey}`;
+              return (
+                <tr key={donor.donorKey}>
+                  <td><StackedCell primary={donor.donorName} secondary={donor.donorEmail ?? ""} /></td>
+                  <td className="numeric">{donor.count}</td>
+                  <td className="numeric">{donor.netTotalLabel}</td>
+                  <td>{donor.hasEmail ? "Sí" : "—"}</td>
+                  <td><button className="ghost" disabled={!donor.hasEmail || rowSending || anySending} onClick={() => void onSendDonor(donor)}><Download size={14} />{rowSending ? "Enviando" : "Enviar"}</button></td>
+                </tr>
+              );
+            })}
+            {donors.length === 0 && <tr><td colSpan={5}>{search.trim() ? "Ningún donante coincide con la búsqueda." : "Sin donaciones de Stripe para este año."}</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {preview?.hasMore && <button className="ghost" disabled={anySending} onClick={() => void onLoadMore()}>{rowBusy === "stripe-statements-preview-more" ? "Cargando" : "Ver más donantes"}</button>}
+    </section>
+  );
+}
+
 export function AnnualCertificatePanel({
   year,
   yearOptions,
@@ -317,7 +419,8 @@ export function AnnualCertificatePanel({
     <section className="single-panel export-panel">
       <div className="panel-head">
         <div>
-          <h2>Constancia anual de donaciones</h2>
+          <h2>El Salvador — CDE</h2>
+          <p>Constancia anual de donaciones</p>
           <p>Envíe a cada donante el resumen de sus donaciones aceptadas del año.</p>
         </div>
         <FileSpreadsheet size={20} />
