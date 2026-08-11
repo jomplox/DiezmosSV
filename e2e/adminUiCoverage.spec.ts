@@ -136,7 +136,7 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
       });
       return;
     }
-    if (url.pathname === "/api/statements/stripe/annual") {
+    if (url.pathname === "/api/statements/stripe/annual" && request.method() === "GET") {
       await fulfillJson(route, {
         year: Number(url.searchParams.get("year") ?? 2026),
         livemode: false,
@@ -176,7 +176,7 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
       });
       return;
     }
-    if (url.pathname === "/api/settings/stripe") {
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
       await fulfillJson(route, {
         stripe: {
           credentials: { label: "Stripe EE. UU.", ready: false, items: [] },

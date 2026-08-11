@@ -134,31 +134,16 @@ async function installAdminApp(page: Page, handleCertificate: CertificateHandler
     if (await handleCertificate(route, url)) {
       return;
     }
-    if (url.pathname === "/api/statements/stripe/annual") {
+    if (url.pathname === "/api/statements/stripe/annual" && route.request().method() === "GET") {
       const year = Number(url.searchParams.get("year"));
-      if (route.request().method() === "POST") {
-        await fulfillJson(route, {
-          year,
-          livemode: false,
-          mode: "bulk",
-          processed: 0,
-          sent: 0,
-          skipped: 0,
-          failed: 0,
-          review: 0,
-          hasMore: false,
-          nextCursor: null
-        });
-      } else {
-        await fulfillJson(route, {
-          year,
-          livemode: false,
-          timeZone: "America/New_York",
-          donors: [],
-          hasMore: false,
-          nextCursor: null
-        });
-      }
+      await fulfillJson(route, {
+        year,
+        livemode: false,
+        timeZone: "America/New_York",
+        donors: [],
+        hasMore: false,
+        nextCursor: null
+      });
       return;
     }
     if (url.pathname === "/api/branding") {

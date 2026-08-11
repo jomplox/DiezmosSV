@@ -10,6 +10,8 @@ const runbook = read("docs/stripe-us-giving.md");
 const localArtifacts = read("docs/local-private-artifacts.md");
 const devVars = read(".dev.vars.example");
 const publicWrangler = read("wrangler.toml");
+const annualCertificateRaces = read("e2e/annualCertificateRaces.spec.ts");
+const adminUiCoverage = read("e2e/adminUiCoverage.spec.ts");
 
 const requiredRuntimeNames = [
   "STRIPE_RESTRICTED_KEY",
@@ -117,6 +119,23 @@ describe("Stripe US giving provisioning documentation", () => {
     const production = publicWrangler.slice(publicWrangler.indexOf("[env.production]"));
     expect(production).not.toContain("STRIPE_MOCK_MODE");
     expect(runbook).toMatch(/STRIPE_MOCK_MODE.*prohibid/is);
+  });
+
+  it("keeps the staged webhook secret and U.S. statement timezone in local examples", () => {
+    expect(devVars).toContain('STRIPE_WEBHOOK_SECRET_NEXT="whsec_replace-with-next-endpoint-secret"');
+    expect(devVars).toContain('STRIPE_US_TIME_ZONE="America/New_York"');
+  });
+
+  it("keeps U.S. annual fixture hydration read-only", () => {
+    expect(annualCertificateRaces).toContain(
+      'url.pathname === "/api/statements/stripe/annual" && route.request().method() === "GET"'
+    );
+    expect(adminUiCoverage).toContain(
+      'url.pathname === "/api/statements/stripe/annual" && request.method() === "GET"'
+    );
+    expect(adminUiCoverage).toContain(
+      'url.pathname === "/api/settings/stripe" && request.method() === "GET"'
+    );
   });
 
   it("removes the obsolete client campaign value from private artifacts", () => {
