@@ -138,6 +138,41 @@ describe("Stripe annual statement repository", () => {
     expect(exact.map((target) => target.donorKey)).toEqual(["donor03@example.org"]);
   });
 
+  it("filters before grouping and cursor pagination with literal LIKE characters", async () => {
+    seedGift(database, { id: "ana_name", donorEmail: "ana@example.org", donorName: "Ana Search", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "email_match", donorEmail: "contains-needle@example.org", donorName: "Otra", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "percent", donorEmail: "percent@example.org", donorName: "100% Literal", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "underscore", donorEmail: "underscore@example.org", donorName: "A_B Literal", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "slash", donorEmail: "slash@example.org", donorName: "C\\D Literal", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "nonmatch", donorEmail: "other@example.org", donorName: "No coincide", settledAt: "2025-06-01T12:00:00.000Z" });
+
+    const targets = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: null,
+      limit: 50,
+      query: "NEEDLE"
+    });
+    expect(targets.map((target) => target.donorKey)).toEqual(["contains-needle@example.org"]);
+
+    for (const [query, donorKey] of [["%", "percent@example.org"], ["_", "underscore@example.org"], ["\\", "slash@example.org"]]) {
+      const literal = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+        livemode: false,
+        afterDonorKey: null,
+        limit: 50,
+        query
+      });
+      expect(literal.map((target) => target.donorKey)).toEqual([donorKey]);
+    }
+
+    const after = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: "ana@example.org",
+      limit: 50,
+      query: "search"
+    });
+    expect(after).toEqual([]);
+  });
+
   it("converges concurrent identical reservations and creates corrected revision lineage", async () => {
     const base = reservation({ id: "delivery_a", snapshotHash: "a".repeat(64), snapshotJson: '{"version":1}' });
     const [first, duplicate] = await Promise.all([

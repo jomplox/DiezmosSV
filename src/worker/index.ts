@@ -2472,7 +2472,7 @@ async function handleStripeAnnualStatementPreview(ctx: ApiRouteContext): Promise
   const livemode = stripeAnnualStatementLivemode(ctx);
   if (livemode instanceof Response) return livemode;
   try {
-    return jsonResponse(await buildStripeAnnualStatementPreview(ctx.env, ctx.repo, Number(yearParam), livemode, afterParam));
+    return jsonResponse(await buildStripeAnnualStatementPreview(ctx.env, ctx.repo, Number(yearParam), livemode, afterParam, searchParam));
   } catch (error) {
     if (error instanceof StripeAnnualStatementConfigurationError) {
       return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });

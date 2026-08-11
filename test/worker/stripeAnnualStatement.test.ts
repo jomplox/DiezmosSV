@@ -172,6 +172,15 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     expect(next.donors).toEqual([expect.objectContaining({ donorKey: "gift:gift_no_email", hasEmail: false })]);
   });
 
+  it("threads a trimmed preview query to the grouped Stripe donor search", async () => {
+    seedGift(database, gift({ id: "gift_match", donor_email: "match@example.org", donor_name: "Ana Matching" }));
+    seedGift(database, gift({ id: "gift_nonmatch", donor_email: "other@example.org", donor_name: "No coincide" }));
+
+    const preview = await buildStripeAnnualStatementPreview(workerEnv, repo, 2025, false, null, "  MATCHING  ");
+
+    expect(preview.donors).toEqual([expect.objectContaining({ donorKey: "match@example.org", donorName: "Ana Matching" })]);
+  });
+
   it("deduplicates an identical send and emits a corrected revision after a durable refund", async () => {
     seedGift(database, gift({ id: "gift_send", amount_cents: 10_000 }));
 

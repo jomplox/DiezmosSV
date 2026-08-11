@@ -17,7 +17,7 @@ export interface StripeAnnualStatementDonorTarget {
 export async function listStripeAnnualStatementDonorTargets(
   db: D1Database,
   range: { startIso: string; endIso: string },
-  options: { livemode: boolean; afterDonorKey: string | null; limit: number; donorKey?: string | null }
+  options: { livemode: boolean; afterDonorKey: string | null; limit: number; donorKey?: string | null; query?: string | null }
 ): Promise<StripeAnnualStatementDonorTarget[]> {
   if (!Number.isInteger(options.limit) || options.limit <= 0) {
     throw new RangeError("Stripe annual statement target limit must be a positive integer");
@@ -41,6 +41,17 @@ export async function listStripeAnnualStatementDonorTargets(
     range.endIso,
     options.livemode ? 1 : 0
   ];
+  const query = options.query?.trim().toLowerCase() ?? "";
+  const searchFilter = query
+    ? ` AND (
+              LOWER(COALESCE(NULLIF(TRIM(gift.donor_name), ''), '')) LIKE ? ESCAPE '\\'
+              OR NULLIF(LOWER(TRIM(gift.donor_email)), '') LIKE ? ESCAPE '\\'
+            )`
+    : "";
+  if (query) {
+    const literalLike = `%${query.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
+    bindings.push(literalLike, literalLike);
+  }
   let targetFilter = "";
   if (options.donorKey) {
     targetFilter = "WHERE donor_key = ?";
@@ -67,6 +78,7 @@ export async function listStripeAnnualStatementDonorTargets(
         WHERE gift.settled_at >= ? AND gift.settled_at < ?
           AND checkout.livemode = ?
           AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
+          ${searchFilter}
      ),
      ranked AS (
        SELECT filtered.*,

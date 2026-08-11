@@ -303,12 +303,14 @@ export async function buildStripeAnnualStatementPreview(
   repo: Repository,
   year: number,
   livemode: boolean,
-  after?: string | null
+  after?: string | null,
+  query?: string | null
 ): Promise<StripeAnnualStatementPreview> {
   const window = stripeUsYearWindow(env, year);
   const targets = await repo.listStripeAnnualStatementDonorTargets(window, {
     livemode,
     afterDonorKey: after?.trim() || null,
+    query: query?.trim() || null,
     limit: STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE
   });
   const hasMore = targets.length > STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE;
