@@ -2,7 +2,9 @@
 
 Esta integración pertenece exclusivamente a la puerta **EE. UU. 501(c)(3)**. Wompi y la emisión DTE siguen siendo la única ruta de El Salvador; una entrega de Stripe nunca crea un `donation_intent`, nunca pasa por Wompi y nunca genera un CDE salvadoreño.
 
-El navegador solicita una Checkout Session al Worker y monta Stripe Embedded Checkout dentro de la página. Stripe aloja, compone y actualiza el formulario completo en español, incluidos los campos, billeteras y métodos elegibles; la aplicación solo controla el paso de monto/frecuencia y el marco exterior. La confirmación no se infiere del regreso del navegador: `/donar/stripe/resultado` consulta el estado durable en D1, alimentado por un webhook firmado e idempotente. Las entregas mensuales se registran una vez por `invoice.paid` y se administran mediante Stripe Billing Portal.
+El navegador solicita una Checkout Session al Worker y monta Stripe Embedded Checkout dentro de la página. Stripe aloja, compone y actualiza el formulario completo en español, incluidos los campos, billeteras y métodos elegibles; la aplicación conserva el paso exterior de **Tipo de entrega** (Diezmo u Ofrenda), monto y frecuencia (Única o Mensual). La selección se incluye en la sesión y sus metadatos; el Worker no inventa una selección ausente. La confirmación no se infiere del regreso del navegador: `/donar/stripe/resultado` consulta el estado durable en D1, alimentado por un webhook firmado e idempotente. Las entregas mensuales se registran una vez por `invoice.paid` y se administran mediante Stripe Billing Portal.
+
+Cada entrega estadounidense recibe un acuse inmediato 501(c)(3) en español, con la entidad legal, EIN, fecha, monto, tipo y frecuencia, y la declaración de que no se proporcionaron bienes ni servicios. La pantalla **Exportar** separa **El Salvador — CDE** de **EE. UU. — Stripe**: el segundo genera la **Constancia anual de donaciones — EE. UU.** a partir de entregas Stripe liquidadas, netas de reembolsos y agrupadas por el año calendario de `STRIPE_US_TIME_ZONE`. Es una constancia estadounidense, no un CDE ni un expediente fiscal salvadoreño; el carril SV sigue usando solamente CDE aceptados y su dossier existente.
 
 ## Por qué Embedded Checkout y no un Payment Link
 
@@ -70,6 +72,39 @@ Las claves restringidas reducen el alcance de una exposición y deben permanecer
 Stripe debe firmar el **cuerpo crudo** recibido en `/webhooks/stripe`; no se debe analizar ni reconstruir JSON antes de verificar la firma. Cada `event.id` se reclama en `stripe_webhook_events`, con reintento seguro y sin guardar el cuerpo crudo. Una reclamación de webhook o creación de Checkout abandonada se recupera después de una concesión de cinco minutos, conservando la misma identidad e idempotency key y con un máximo de tres intentos de creación. La identidad de sesión, ambiente, moneda USD, monto, frecuencia y metadatos `lane=eeuu_501c3` se validan antes de cambiar estado.
 
 Una entrega única se identifica por PaymentIntent. Cada entrega mensual se identifica por factura, de modo que `invoice.paid` produce exactamente un registro por renovación aunque Stripe reintente o entregue eventos fuera de orden. Los recibos 501(c)(3) se despachan con su propia cerca durable e idempotente; una reclamación anterior al envío puede recuperarse, pero un resultado ambiguo posterior al inicio del envío queda en `stripe_acknowledgment_deliveries.status='REVIEW'` en vez de arriesgar un duplicado. El operador debe conciliar manualmente cualquier fila `REVIEW` con el proveedor de correo antes de decidir una nueva entrega.
+
+Las constancias anuales usan una cerca y una instantánea independientes. Una fila sin correo puede aparecer en la vista previa, pero no se envía. Un reembolso cambia la instantánea y permite una constancia corregida claramente identificada; un resultado desconocido después de iniciar un envío queda en revisión, no se reintenta como si no hubiese ocurrido.
+
+## Configuración Stripe EE. UU. en el panel
+
+Solo el rol **Propietario** usa **Configuración → Stripe EE. UU.**. El panel muestra presencia y estado operacional seguro; ningún secreto, ID de cuenta, cuerpo de webhook, ID de objeto Stripe, dato del donante ni detalle interno de error vuelve al navegador. **Configurado** significa únicamente que existe un valor en el runtime: no demuestra propiedad de la cuenta ni funcionamiento con Stripe. Solo una última entrega de webhook procesada y con `livemode` compatible permite el estado **Verificado por último evento procesado**.
+
+Los valores son de reemplazo por escritura y se limpian al guardar; los vacíos no cambian el runtime. El único valor visible y editable es la zona IANA `STRIPE_US_TIME_ZONE`.
+
+| Campo | Uso y manejo desde el panel |
+|---|---|
+| `STRIPE_RESTRICTED_KEY` | Clave restringida servidor-only; reemplazo de solo escritura. Debe ser `rk_test_…` o `rk_live_…` coherente con `APP_ENV` y la clave publicable. |
+| `STRIPE_PUBLISHABLE_KEY` | Clave publicable por ambiente; reemplazo de solo escritura y estado solamente. |
+| `STRIPE_WEBHOOK_SECRET` | Secreto activo `whsec_…`; estado solamente. No hay reemplazo directo. |
+| `STRIPE_WEBHOOK_SECRET_NEXT` | Secreto `whsec_…` preparado, de solo escritura, para rotación escalonada. |
+| `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | ID `pmc_…`, de solo escritura y estado solamente; la aplicación no verifica su cuenta o propiedad. |
+| `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | ID `bpc_…`, de solo escritura y estado solamente; la aplicación no verifica su cuenta o propiedad. |
+| `STRIPE_US_LEGAL_NAME` / `STRIPE_US_EIN` | Identidad exacta de la entidad estadounidense para acuses y constancias; reemplazo de solo escritura. |
+| `STRIPE_US_TIME_ZONE` | Zona IANA de los años y fechas de constancias; valor visible y editable. |
+
+`APP_ENV`, el modo (`Simulado`, `Pruebas` o `Producción`) y el estado del proxy local son diagnósticos de solo lectura. `STRIPE_MOCK_MODE` y `STRIPE_API_PROXY_URL` son controles del despliegue/local y no se editan desde el navegador. Payment Method Configuration, Billing Portal y la exclusión de BNPL se administran en Stripe Dashboard por el propietario de la cuenta: el panel no tiene botones que pretendan cambiar Stripe.
+
+El panel deriva y permite copiar la URL de webhook `<origen actual>/webhooks/stripe`. Su salud solo presenta el último instante recibido, tipo de evento, estado de procesamiento y coincidencia de `livemode`; **Sin eventos recibidos** no es un fallo. No afirma proveedor verificado para una configuración ID ni para una clave solo porque su prefijo sea válido.
+
+Las rutas OWNER que implementan esta interfaz son:
+
+- `GET /api/settings/stripe` — presencia segura, diagnóstico y salud resumida;
+- `POST /api/settings/stripe` — reemplaza únicamente valores Stripe no vacíos y no-webhook;
+- `POST /api/settings/stripe/webhook-secret/stage` — escribe solo `STRIPE_WEBHOOK_SECRET_NEXT`;
+- `POST /api/settings/stripe/webhook-secret/promote` — promueve en un parche atómico y elimina el valor preparado;
+- `POST /api/settings/stripe/webhook-secret/cancel` — elimina solo el valor preparado.
+
+Para una rotación, primero prepare `STRIPE_WEBHOOK_SECRET_NEXT`; mientras exista, la verificación acepta el secreto activo o el preparado sin revelar cuál coincidió. Después de que Stripe entregue y el panel muestre un evento compatible procesado, promueva explícitamente el preparado. Cancele únicamente el valor preparado si se abandona el cambio. Si falla la promoción, falta el escritor de secretos o el resultado remoto es desconocido, conserve el secreto activo y trate el resultado como incierto: no repita ni borre valores hasta que el propietario concilie el estado de Cloudflare. Las auditorías guardan solo nombres de variables y la acción.
 
 ## Verificación obligatoria antes de live
 

@@ -576,9 +576,11 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `STRIPE_RESTRICTED_KEY` | Clave de servidor `rk_test_…` (staging) o `rk_live_…` (producción), con privilegios mínimos para Checkout Sessions y Billing Portal. Se rechazan las claves amplias `sk_…`. |
 | `STRIPE_PUBLISHABLE_KEY` | Clave segura para el navegador `pk_test_…` (staging) o `pk_live_…` (producción), devuelta por el Worker solo con una sesión de Embedded Checkout creada; debe coincidir con el ambiente de la clave restringida. |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` propio del ambiente, usado para verificar el cuerpo crudo exacto recibido en `/webhooks/stripe`. |
+| `STRIPE_WEBHOOK_SECRET_NEXT` | `whsec_…` preparado y de solo escritura para una rotación dual; se acepta junto al activo hasta que un OWNER lo promueva o cancele explícitamente. |
 | `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | `pmc_…` activo del carril de EE. UU. Habilita métodos elegibles dinámicos y excluye todo BNPL/financiamiento sin publicar código. |
 | `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` para la ruta en español de administración de la entrega mensual. |
 | `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Identidad legal exacta de la 501(c)(3) estadounidense que aparece en el recibo en español. |
+| `STRIPE_US_TIME_ZONE` | Zona IANA que define el año calendario y las fechas de aportación de la constancia anual estadounidense; solo es visible/editable para OWNER. |
 | `STRIPE_MOCK_MODE` | Transporte determinista solo para local/staging cuando vale `"1"`; producción lo rechaza. Nunca lo coloque en una configuración de producción. |
 | `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
@@ -719,27 +721,45 @@ el PDF imprime el complemento + el nombre del país en lugar de las etiquetas de
 
 **Donantes de EE. UU. → Stripe (sin CDE — a propósito).** Cuando el donante elige la puerta
 **EE. UU.**, o marca "Resido en el extranjero" y selecciona Estados Unidos (`US`), desaparecen los
-campos fiscales salvadoreños. El donante elige **Única** o **Mensual**, revisa el monto y completa el formulario
-alojado por Stripe en español, embebido en la misma página sobre la cuenta 501(c)(3) estadounidense
-conectada. Un contribuyente estadounidense necesita un recibo de EE. UU., no un CDE salvadoreño, por lo que
-este carril **nunca toca Wompi, `donation_intents` ni la tubería del CDE**.
+campos fiscales salvadoreños. El donante elige explícitamente **Tipo de entrega** (**Diezmo** u
+**Ofrenda**) y **Frecuencia** (**Única** o **Mensual**), revisa el monto y continúa al formulario Stripe
+Embedded Checkout en español dentro de la cuenta 501(c)(3) estadounidense conectada. El Worker crea una
+Checkout Session idempotente para esa selección y la verifica de nuevo mediante webhooks firmados; la página
+de resultado lee el estado durable de D1, no el regreso del navegador. Un contribuyente estadounidense
+necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
+`donation_intents` ni la tubería del CDE**.
 
 El Worker crea una Embedded Checkout Session idempotente con un `payment_method_configuration` dedicado; el
 código del navegador nunca envía `payment_method_types`. Stripe muestra así todos los métodos
 habilitados que sean elegibles para el donante, dispositivo, monto USD y flujo único/mensual, mientras
 la configuración de la cuenta excluye BNPL y otros métodos de financiamiento. Stripe firma el cuerpo
-crudo del webhook; el Worker valida ambiente, versión de API, monto, moneda, metadatos del carril e
-identificadores antes de guardar en D1 el historial durable de sesiones y entregas. La página de
-resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
+crudo del webhook; el Worker valida ambiente, versión de API, monto, moneda, metadatos del carril, tipo de
+entrega, frecuencia e identificadores antes de guardar en D1 el historial durable de sesiones y entregas. La
+página de resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
 Cada factura mensual cobrada produce una sola entrega, y Billing Portal ofrece la ruta de administración
-recurrente. La aplicación envía el recibo 501(c)(3) en español con el nombre legal e EIN configurados a
-través de su cerca durable de correo.
+recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, tipo,
+frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La
+**Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
+netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
 
 La configuración de test y live es exclusiva del dueño y solo de runtime. Ningún secreto o ID de
 Stripe se incrusta en el cliente; solo se devuelve la clave publicable del ambiente con una sesión creada.
 La configuración dinámica/BNPL, permisos mínimos de clave, eventos
 exactos del webhook, gates de sandbox, rollback y handoff live están documentados en
 [`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
+
+**Configuración OWNER y frontera live.** **Configuración → Stripe EE. UU.** muestra solo presencia para
+`STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME` y `STRIPE_US_EIN`; solo expone la
+no-secreta `STRIPE_US_TIME_ZONE`. «Configurado» no significa verificado por el proveedor: configuración de
+métodos, Billing Portal y propiedad de cuenta siguen sin verificar por la aplicación. La dirección derivada
+`/webhooks/stripe` y la salud resumida del último evento son de solo lectura; únicamente un evento
+procesado con `livemode` compatible muestra «Verificado por último evento procesado». El secreto preparado
+se escribe y luego se promueve o cancela explícitamente; un fallo o resultado remoto desconocido de promoción
+se concilia antes de repetir o borrar. Las pruebas locales deterministas y este código no modifican una cuenta
+Stripe live. Registrar el webhook live, Payment Method Configuration, Billing Portal y la exclusión BNPL sigue
+siendo un cutover del propietario después de UAT sandbox.
 
 Ambas puertas financian a la **misma** iglesia madre en El Salvador — la 501(c)(3) estadounidense es
 solo el vehículo de donación en EE. UU., nunca un beneficiario distinto; el texto se basa en la
@@ -858,13 +878,13 @@ Exportar, Configuración.
   agrupadas en America/El_Salvador (UTC-6 fijo). Los CDE emitidos a mano (rápido/avanzado) se excluyen
   **por diseño** — no llevan `wompi_event_id`. Las respuestas están acotadas por filas y por bytes,
   así que un rango de fechas excesivo le pide acotarlo en vez de fundir el Worker.
-- **Exportar** agrupa la suite de reportes: exportaciones F960 (JSON/CSV/XLSX), las últimas 50
-  donaciones en línea, la **Constancia anual de donaciones** (enviar a cada donante un resumen anual
-  con la marca de la organización de sus donaciones aceptadas — por donante o en lote, con cada envío
-  auditado), **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
+- **Exportar** mantiene dos carriles legales: **El Salvador — CDE** conserva F960 y su dossier de CDE
+  aceptados, mientras **EE. UU. — Stripe** previsualiza/envía la distinta **Constancia anual de
+  donaciones — EE. UU.** desde entregas Stripe liquidadas. No es un documento fiscal salvadoreño. La
+  suite restante incluye las últimas 50 donaciones en línea, **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
   CRM) y **Respaldos mensuales** (explorar y verificar las instantáneas legales mensuales en R2,
   descargar un mes como ZIP de hasta 32 MiB).
-- **Configuración** está organizada en secciones: Ambiente, MH, Wompi, **Notificaciones de Wompi**
+- **Configuración** está organizada en secciones: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de Wompi**
   (correos y teléfonos de notificación del comercio, más si Wompi mismo le escribe al donante —
   apagado por defecto, porque la aplicación envía el CDE), Emisor, Correo, Plantillas y **Marca** —
   marca blanca con nombre visible, color de acento, correo de soporte y dos logos (panel y cara al
@@ -876,7 +896,7 @@ Exportar, Configuración.
 | `VIEWER` (Consulta) | Leer documentos, intentos de donación en línea, fallos de emisión previos al CDE, el historial de contingencia, la bitácora de auditoría y Analítica. |
 | `OPERATOR` (Operador) | Además: CDE rápido, reenviar correo, reintentar fallos (de CDE y previos al CDE), **correcciones fiscales y reemisión**, e iniciar una invalidación. |
 | `ADMIN` (Administrador) | Además: gestionar usuarios y roles, el explorador **Donantes** y su exportación CSV, y la suite **Exportar** — F960, constancias anuales, contactos para CRM, respaldos mensuales. |
-| `OWNER` (Propietario) | Además: el espacio de trabajo **Configuración** — credenciales, ambiente de emisión, plantillas de correo, ajustes de notificación de Wompi, marca (Marca), dirección de alertas y exportación de retención bajo demanda. Solo un owner puede otorgar el rol de owner o modificar a otro owner. |
+| `OWNER` (Propietario) | Además: el espacio de trabajo **Configuración** — credenciales, controles Stripe EE. UU. de secreto preparado, ambiente de emisión, plantillas de correo, ajustes de notificación de Wompi, marca (Marca), dirección de alertas y exportación de retención bajo demanda. Solo un owner puede otorgar el rol de owner o modificar a otro owner. |
 
 > La navegación se filtra por rol para **Donantes** y **Exportar** (ADMIN) y para **Configuración**
 > (OWNER). **Usuarios** siempre está visible, pero su contenido está restringido a ADMIN: un usuario

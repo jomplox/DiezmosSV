@@ -7,6 +7,8 @@ STRIPE_US_TIME_ZONE="America/New_York"
 # STRIPE_RESTRICTED_KEY="rk_test_replace-with-restricted-key"
 # STRIPE_PUBLISHABLE_KEY="pk_test_replace-with-publishable-key"
 # STRIPE_WEBHOOK_SECRET="whsec_replace-with-endpoint-secret"
+# Stage a replacement first; the OWNER-only panel promotes or cancels it safely.
+# STRIPE_WEBHOOK_SECRET_NEXT="whsec_replace-with-next-endpoint-secret"
 # STRIPE_PAYMENT_METHOD_CONFIGURATION_ID="pmc_replace-with-donor-safe-config"
 # STRIPE_BILLING_PORTAL_CONFIGURATION_ID="bpc_replace-with-spanish-portal-config"
 # STRIPE_US_LEGAL_NAME="Replace with exact US 501(c)(3) legal name"

@@ -136,6 +136,17 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
       });
       return;
     }
+    if (url.pathname === "/api/statements/stripe/annual") {
+      await fulfillJson(route, {
+        year: Number(url.searchParams.get("year") ?? 2026),
+        livemode: false,
+        timeZone: "America/New_York",
+        donors: [],
+        hasMore: false,
+        nextCursor: null
+      });
+      return;
+    }
     if (url.pathname === "/api/donations/intents") {
       await fulfillJson(route, { intents: [] });
       return;
@@ -154,7 +165,28 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
             writerMissing: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
           },
           groups: {},
-          certificateExpiresAt: null
+          certificateExpiresAt: null,
+          stripeOperational: {
+            appEnv: "staging",
+            mode: "Pruebas",
+            mockMode: false,
+            localProxyConfigured: false
+          }
+        }
+      });
+      return;
+    }
+    if (url.pathname === "/api/settings/stripe") {
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: false, items: [] },
+          operational: {
+            appEnv: "staging",
+            mode: "Pruebas",
+            mockMode: false,
+            localProxyConfigured: false
+          },
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
         }
       });
       return;
@@ -241,11 +273,11 @@ test("covers every owner navigation surface with accessible filters and no app r
 
   await openView(page, "Exportar");
   await expect(page.getByRole("heading", { name: "F960" })).toBeVisible();
-  await expect(page.getByRole("searchbox", { name: "Buscar donante o correo" })).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Buscar donante o correo", exact: true })).toBeVisible();
 
   await openView(page, "Configuración");
   const settingsNavigation = page.getByRole("navigation", { name: "Secciones de credenciales" });
-  await expect(settingsNavigation.getByRole("button")).toHaveCount(7);
+  await expect(settingsNavigation.getByRole("button")).toHaveCount(8);
   await expect(page.getByRole("button", { name: "Producción 01" }).first()).toBeDisabled();
 
   expect(harness.unhandledApiRequests).toEqual([]);

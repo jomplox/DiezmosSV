@@ -558,9 +558,11 @@ selected private config and are duplicated per Wrangler environment:
 | `STRIPE_RESTRICTED_KEY` | Server-only `rk_test_…` (staging) or `rk_live_…` (production) key with least privilege for Checkout Sessions and Billing Portal. Broad `sk_…` keys are rejected. |
 | `STRIPE_PUBLISHABLE_KEY` | Browser-safe `pk_test_…` (staging) or `pk_live_…` (production) key returned by the Worker only with a created Embedded Checkout Session; it must match the restricted key's environment. |
 | `STRIPE_WEBHOOK_SECRET` | Environment-specific `whsec_…` used to verify the exact raw body received at `/webhooks/stripe`. |
+| `STRIPE_WEBHOOK_SECRET_NEXT` | Write-only staged `whsec_…` for a dual-secret webhook rotation. It is accepted alongside the active secret until an OWNER explicitly promotes or cancels it. |
 | `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | Active `pmc_…` for the US donor lane. It enables dynamic eligible methods and excludes every BNPL/financing method without a code release. |
 | `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` for the Spanish monthly-gift management path. |
 | `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Exact US 501(c)(3) legal identity printed in the Spanish acknowledgment. |
+| `STRIPE_US_TIME_ZONE` | IANA timezone used to define the U.S. annual-statement calendar year and contribution dates. It is visible/editable only in the OWNER settings panel. |
 | `STRIPE_MOCK_MODE` | Deterministic local/staging-only transport when exactly `"1"`; production rejects it. Never place it in a production config. |
 | `STRIPE_API_PROXY_URL` | Optional loopback-only HTTP bridge for local `workerd` environments without outbound HTTPS. Run `npm run dev:stripe-api-proxy`; staging, production, non-loopback hosts, credentials, and URL paths are rejected. |
 
@@ -690,25 +692,43 @@ the complemento + country name instead of the placeholder catalog labels.
 
 **US donors → Stripe (no CDE — deliberate).** When the donor chooses the **EE. UU.** door, or checks
 "Resido en el extranjero" and selects Estados Unidos (`US`), the Salvadoran fiscal fields collapse.
-The donor chooses **Única** or **Mensual**, reviews the amount, and completes Stripe's Spanish hosted form
-embedded inside the page on the connected US 501(c)(3) account. A US taxpayer needs a US acknowledgment,
-not a Salvadoran CDE, so this lane **never touches Wompi, `donation_intents`, or the CDE pipeline**.
+The donor explicitly chooses **Tipo de entrega** (**Diezmo** or **Ofrenda**) and **Frecuencia** (**Única** or
+**Mensual**) before reviewing the amount and continuing to Stripe's Spanish Embedded Checkout form inside
+the page on the connected US 501(c)(3) account. The Worker creates one idempotent Checkout Session for that
+selection and verifies it again through signed Stripe webhooks; the result page reads durable D1 state instead
+of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
+**never touches Wompi, `donation_intents`, or the CDE pipeline**.
 
 The Worker creates an idempotent Embedded Checkout Session using a dedicated
 `payment_method_configuration`; browser code never sends `payment_method_types`. Stripe Checkout therefore
 shows every enabled method that is eligible for the donor, device, USD amount, and one-time/monthly
 flow, while the account configuration excludes BNPL and other financing methods. Stripe signs the
 raw webhook body; the Worker validates environment, API version, amount, currency, lane metadata,
-and identifiers before recording durable session/gift history in D1. The Spanish result page polls
+gift type, frequency, and identifiers before recording durable session/gift history in D1. The Spanish result page polls
 that durable state rather than trusting the browser redirect. Each paid monthly invoice becomes one
-gift, and Billing Portal provides the recurring-management path. The app sends the Spanish 501(c)(3)
-acknowledgment with the configured legal name and EIN through its durable email fence.
+gift, and Billing Portal provides the recurring-management path. The app sends a distinct Spanish
+501(c)(3) immediate acknowledgment with the configured legal name, EIN, type, frequency, date, amount,
+and no-goods-or-services statement through its durable email fence. Its **Constancia anual de donaciones —
+EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
+`STRIPE_US_TIME_ZONE`; it is never a Salvadoran CDE or a Salvadoran annual dossier.
 
 Both test and live setup are owner-only and runtime-only. No Stripe secret or configuration ID is
 baked into the client; only the environment-matched publishable key is returned with a created Session.
 Dynamic-method/BNPL configuration, least-privilege key permissions, exact
 webhook events, sandbox gates, rollback, and the live handoff are documented in
 [`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
+
+**OWNER settings and live boundary.** **Configuración → Stripe EE. UU.** lists presence-only status for
+`STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, and `STRIPE_US_EIN`; it exposes only
+the non-secret `STRIPE_US_TIME_ZONE`. “Configurado” does not mean provider-verified: payment-method,
+Billing Portal, and account ownership remain unverified by the app. The derived `/webhooks/stripe` address
+and sanitized latest-event health are read-only; only a successfully processed, mode-matching event earns
+“Verificado por último evento procesado.” The staged secret is written, then explicitly promoted or
+cancelled; a failed or unknown remote promotion outcome must be reconciled before any retry or deletion.
+Local deterministic tests and this code do not modify a live Stripe account. Registering the live webhook,
+Payment Method Configuration, Billing Portal, and BNPL exclusion remains an owner cutover after sandbox UAT.
 
 Both doors fund the **same** mother church in El Salvador — the US 501(c)(3) is only the US giving
 vehicle, never a different beneficiary; the copy is residence-based, not
@@ -823,12 +843,13 @@ Configuración.
   America/El_Salvador (fixed UTC-6). Hand-issued CDEs (quick/advanced) are excluded **by design** —
   they carry no `wompi_event_id`. Responses are row- and byte-bounded, so an oversized date range
   asks you to narrow it instead of melting the Worker.
-- **Exportar** bundles the reporting suite: F960 exports (JSON/CSV/XLSX), the last 50 online
-  donations, the **Constancia anual de donaciones** (send each donor a branded annual summary of
-  accepted donations — per donor or in bulk, every send audited), **Contactos para CRM** (aggregate
+- **Exportar** keeps two legal reporting lanes: **El Salvador — CDE** retains F960 and its accepted-CDE
+  dossier, while **EE. UU. — Stripe** previews/sends the distinct **Constancia anual de donaciones —
+  EE. UU.** from settled Stripe gifts. It is not a Salvadoran fiscal document. The remaining suite includes
+  the last 50 online donations, **Contactos para CRM** (aggregate
   donor contact export for CRM import), and **Respaldos mensuales** (browse and verify the monthly
   R2 legal snapshots, download a month as a ZIP up to 32 MiB).
-- **Configuración** is organized in sections: Ambiente, MH, Wompi, **Notificaciones de
+- **Configuración** is organized in sections: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de
   Wompi** (merchant notification emails and phones, plus whether Wompi itself emails
   the donor — off by default, because the app sends the CDE), Emisor, Correo,
   Plantillas, and **Marca** — white-label branding with a display name, accent color,
@@ -840,7 +861,7 @@ Configuración.
 | `VIEWER` (Consulta) | Read documents, online-donation intents, pre-CDE issuance failures, the contingency history, the audit log, and Analítica. |
 | `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), **fiscal corrections and reissue**, and initiate invalidation. |
 | `ADMIN` (Administrador) | Also: manage users and roles, the **Donantes** explorer and its CSV export, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
-| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
+| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, Stripe EE. UU. staged-secret controls, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
 
 > Navigation is filtered by role for **Donantes**, **Exportar** (ADMIN) and
 > **Configuración** (OWNER). **Usuarios** is always visible but its body is

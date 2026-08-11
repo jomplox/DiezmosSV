@@ -15,10 +15,12 @@ const requiredRuntimeNames = [
   "STRIPE_RESTRICTED_KEY",
   "STRIPE_PUBLISHABLE_KEY",
   "STRIPE_WEBHOOK_SECRET",
+  "STRIPE_WEBHOOK_SECRET_NEXT",
   "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID",
   "STRIPE_BILLING_PORTAL_CONFIGURATION_ID",
   "STRIPE_US_LEGAL_NAME",
-  "STRIPE_US_EIN"
+  "STRIPE_US_EIN",
+  "STRIPE_US_TIME_ZONE"
 ] as const;
 
 describe("Stripe US giving provisioning documentation", () => {
@@ -74,6 +76,39 @@ describe("Stripe US giving provisioning documentation", () => {
     }
     expect(runbook).toContain("/webhooks/stripe");
     expect(runbook).toMatch(/firma.*cuerpo crudo|cuerpo crudo.*firma/is);
+  });
+
+  it("documents the complete U.S. gift, reporting, and safe owner-control contract", () => {
+    for (const document of [english, spanish]) {
+      for (const term of [
+        "Diezmo",
+        "Ofrenda",
+        "Única",
+        "Mensual",
+        "Embedded Checkout",
+        "Constancia anual",
+        "STRIPE_WEBHOOK_SECRET_NEXT"
+      ]) {
+        expect(document).toContain(term);
+      }
+    }
+    expect(english).toMatch(/not a Salvadoran CDE|never a Salvadoran CDE/i);
+    expect(spanish).toMatch(/no un CDE salvadoreño|nunca es un CDE/i);
+
+    for (const route of [
+      "GET /api/settings/stripe",
+      "POST /api/settings/stripe",
+      "POST /api/settings/stripe/webhook-secret/stage",
+      "POST /api/settings/stripe/webhook-secret/promote",
+      "POST /api/settings/stripe/webhook-secret/cancel"
+    ]) {
+      expect(runbook).toContain(route);
+    }
+
+    expect(runbook).toMatch(/Configurado.*no.*verificad|no.*verificad.*Configurado/is);
+    expect(runbook).toMatch(/desconocid|ambiguo|incierto/is);
+    expect(runbook).toMatch(/Payment Method Configuration.*BNPL|BNPL.*Payment Method Configuration/is);
+    expect(runbook).toMatch(/prueba.*live|live.*prueba/is);
   });
 
   it("keeps mock mode local/staging-only and out of production examples", () => {

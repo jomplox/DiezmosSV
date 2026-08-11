@@ -134,6 +134,33 @@ async function installAdminApp(page: Page, handleCertificate: CertificateHandler
     if (await handleCertificate(route, url)) {
       return;
     }
+    if (url.pathname === "/api/statements/stripe/annual") {
+      const year = Number(url.searchParams.get("year"));
+      if (route.request().method() === "POST") {
+        await fulfillJson(route, {
+          year,
+          livemode: false,
+          mode: "bulk",
+          processed: 0,
+          sent: 0,
+          skipped: 0,
+          failed: 0,
+          review: 0,
+          hasMore: false,
+          nextCursor: null
+        });
+      } else {
+        await fulfillJson(route, {
+          year,
+          livemode: false,
+          timeZone: "America/New_York",
+          donors: [],
+          hasMore: false,
+          nextCursor: null
+        });
+      }
+      return;
+    }
     if (url.pathname === "/api/branding") {
       await fulfillJson(route, {});
       return;
@@ -176,7 +203,7 @@ async function installAdminApp(page: Page, handleCertificate: CertificateHandler
   page.on("dialog", (dialog) => void dialog.accept());
   await page.goto("/admin");
   await page.getByRole("button", { name: "Exportar" }).click();
-  await expect(page.getByRole("heading", { name: "Constancia anual de donaciones" })).toBeVisible();
+  await expect(certificatePanel(page)).toBeVisible();
 }
 
 async function settleReact(page: Page): Promise<void> {
@@ -185,16 +212,26 @@ async function settleReact(page: Page): Promise<void> {
   }));
 }
 
-function certificateYearSelect(page: Page) {
+function certificatePanel(page: Page) {
   return page
-    .getByRole("heading", { name: "Constancia anual de donaciones" })
-    .locator("xpath=ancestor::section[1]")
-    .locator("select")
-    .first();
+    .getByRole("heading", { name: "El Salvador — CDE" })
+    .locator("xpath=ancestor::section[1]");
+}
+
+function certificateYearSelect(page: Page) {
+  return certificatePanel(page).locator("select").first();
+}
+
+function certificateButton(page: Page, name: string) {
+  return certificatePanel(page).getByRole("button", { name });
+}
+
+function certificateSearch(page: Page) {
+  return certificatePanel(page).getByPlaceholder("Buscar donante o correo", { exact: true });
 }
 
 async function nativeDoubleClick(page: Page, accessibleName: string): Promise<void> {
-  await page.getByRole("button", { name: accessibleName }).evaluate((button) => {
+  await certificateButton(page, accessibleName).evaluate((button) => {
     (button as HTMLButtonElement).click();
     (button as HTMLButtonElement).click();
   });
@@ -231,15 +268,15 @@ test("ignores a delayed old-year bulk result and starts the new year without its
   });
 
   await expect(page.getByText("Base 2026")).toBeVisible();
-  await page.getByRole("button", { name: "Enviar primera tanda" }).click();
+  await certificateButton(page, "Enviar primera tanda").click();
   await expect.poll(() => oldBulkRequestSeen).toBe(true);
 
   await certificateYearSelect(page).selectOption("2025");
   await expect(page.getByText("Base 2025")).toBeVisible();
   oldBulk.release();
 
-  await expect(page.getByRole("button", { name: "Enviar primera tanda" })).toBeEnabled();
-  await page.getByRole("button", { name: "Enviar primera tanda" }).click();
+  await expect(certificateButton(page, "Enviar primera tanda")).toBeEnabled();
+  await certificateButton(page, "Enviar primera tanda").click();
   await expect.poll(() => newYearBodies.length).toBe(1);
   expect(newYearBodies).toEqual([{}]);
 });
@@ -278,11 +315,11 @@ test("never appends a delayed old-year continuation after a year and search rese
   await expect.poll(() => oldPageRequestSeen).toBe(true);
 
   await certificateYearSelect(page).selectOption("2025");
-  await page.getByPlaceholder("Buscar donante o correo").fill("nuevo");
+  await certificateSearch(page).fill("nuevo");
   await expect(page.getByText("Search 2025")).toBeVisible();
   oldPage.release();
 
-  await expect(page.getByRole("button", { name: "Enviar primera tanda" })).toBeEnabled();
+  await expect(certificateButton(page, "Enviar primera tanda")).toBeEnabled();
   expect(await page.getByText("Late 2026").count()).toBe(0);
   await expect(page.getByText("Search 2025")).toBeVisible();
 });
@@ -309,7 +346,7 @@ test("keeps the newest base preview when search responses finish out of order", 
   });
 
   await expect(page.getByText("Initial result")).toBeVisible();
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("old");
   await expect.poll(() => oldSearchRequestSeen).toBe(true);
   await search.fill("new");
@@ -397,7 +434,7 @@ test("invalidates the visible preview as soon as raw search changes and rejects 
   await expect.poll(() => oldPageRequestSeen).toBe(true);
 
   try {
-    await page.getByPlaceholder("Buscar donante o correo").fill("nuevo");
+    await certificateSearch(page).fill("nuevo");
     expect(await page.getByText("Raw base result").count()).toBe(0);
 
     oldPage.release();
@@ -446,7 +483,7 @@ test("keeps an old continuation stale when the year changes during the raw-searc
   await expect.poll(() => oldPageRequestSeen).toBe(true);
 
   try {
-    await page.getByPlaceholder("Buscar donante o correo").fill("nuevo");
+    await certificateSearch(page).fill("nuevo");
     await certificateYearSelect(page).selectOption("2025");
     oldPage.release();
 
@@ -530,7 +567,7 @@ test("suppresses a stale bulk HTTP error but still surfaces the current generati
   });
 
   await expect(page.getByText("Bulk error 2026")).toBeVisible();
-  await page.getByRole("button", { name: "Enviar primera tanda" }).click();
+  await certificateButton(page, "Enviar primera tanda").click();
   await expect.poll(() => staleBulkSeen).toBe(true);
 
   try {
@@ -538,10 +575,10 @@ test("suppresses a stale bulk HTTP error but still surfaces the current generati
     await expect(page.getByText("Bulk error 2025")).toBeVisible();
     staleBulk.release();
     await expect.poll(() => staleBulkCompleted).toBe(true);
-    await expect(page.getByRole("button", { name: "Enviar primera tanda" })).toBeEnabled();
+    await expect(certificateButton(page, "Enviar primera tanda")).toBeEnabled();
     expect(await page.getByText("STALE BULK ERROR").count()).toBe(0);
 
-    await page.getByRole("button", { name: "Enviar primera tanda" }).click();
+    await certificateButton(page, "Enviar primera tanda").click();
     await expect(page.getByText("CURRENT BULK ERROR")).toBeVisible();
   } finally {
     staleBulk.release();
@@ -596,7 +633,7 @@ test("suppresses a stale base-preview HTTP error after a newer search succeeds",
   });
 
   await expect(page.getByText("Base before errors")).toBeVisible();
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("old");
   await expect.poll(() => staleBaseSeen).toBe(true);
   await search.fill("new");
@@ -628,7 +665,7 @@ test("still surfaces a current base-preview HTTP error", async ({ page }) => {
   });
 
   await expect(page.getByText("Base before current error")).toBeVisible();
-  await page.getByPlaceholder("Buscar donante o correo").fill("broken");
+  await certificateSearch(page).fill("broken");
   await expect(page.getByText("CURRENT BASE ERROR")).toBeVisible();
 });
 
@@ -769,11 +806,11 @@ test("claims a bulk generation and cursor synchronously so two native clicks dis
     await expect.poll(() => bodies.length).toBeGreaterThanOrEqual(1);
     await settleReact(page);
     expect(bodies).toEqual([{}]);
-    await expect(page.getByRole("button", { name: "Enviando" })).toBeDisabled();
+    await expect(certificateButton(page, "Enviando")).toBeDisabled();
   } finally {
     bulk.release();
   }
-  await expect(page.getByRole("button", { name: "Iniciar nuevo recorrido" })).toBeVisible();
+  await expect(certificateButton(page, "Iniciar nuevo recorrido")).toBeVisible();
 });
 
 test("claims preview pagination synchronously so two native clicks dispatch one continuation GET", async ({ page }) => {
@@ -805,7 +842,7 @@ test("claims preview pagination synchronously so two native clicks dispatch one 
     await expect.poll(() => continuationUrls.length).toBeGreaterThanOrEqual(1);
     await settleReact(page);
     expect(continuationUrls).toHaveLength(1);
-    await expect(page.getByRole("button", { name: "Cargando" })).toBeDisabled();
+    await expect(certificateButton(page, "Cargando")).toBeDisabled();
   } finally {
     nextPage.release();
   }
@@ -871,17 +908,17 @@ test("keeps bulk traversal independent from search and explicitly starts over wi
   });
 
   await expect(page.getByText("Independent base")).toBeVisible();
-  await page.getByRole("button", { name: "Enviar primera tanda" }).click();
-  await expect(page.getByRole("button", { name: "Enviar siguiente tanda" })).toBeVisible();
+  await certificateButton(page, "Enviar primera tanda").click();
+  await expect(certificateButton(page, "Enviar siguiente tanda")).toBeVisible();
 
-  await page.getByPlaceholder("Buscar donante o correo").fill("nuevo");
+  await certificateSearch(page).fill("nuevo");
   await expect(page.getByText("Independent search")).toBeVisible();
-  await page.getByRole("button", { name: "Enviar siguiente tanda" }).click();
+  await certificateButton(page, "Enviar siguiente tanda").click();
   await expect.poll(() => bodies.length).toBe(2);
   expect(bodies[1]).toEqual({ after: "bulk-independent-cursor" });
 
-  await page.getByRole("button", { name: "Iniciar nuevo recorrido" }).click();
-  await page.getByRole("button", { name: "Enviar primera tanda" }).click();
+  await certificateButton(page, "Iniciar nuevo recorrido").click();
+  await certificateButton(page, "Enviar primera tanda").click();
   await expect.poll(() => bodies.length).toBe(3);
   expect(bodies[2]).toEqual({});
 });
@@ -944,7 +981,7 @@ test("refreshes a settled search revision when raw input returns to the same tri
 
   await expect(page.getByText("Restored settled search")).toBeVisible();
   expect(previewGets).toEqual([{ year: "2026", search: null, hasSearch: false }]);
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
 
   await search.fill("temporary");
   expect(await page.getByText("Restored settled search").count()).toBe(0);
@@ -1107,7 +1144,7 @@ test("coalesces a settled-equality search with an immediate year refresh", async
     return true;
   });
 
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("A");
   await expect(page.getByText("Coalesced 2026 A")).toBeVisible();
   capture = true;
@@ -1175,7 +1212,7 @@ test("retries the settled year refresh after its current bundle fails", async ({
     return true;
   });
 
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("A");
   await expect(page.getByText("Retried 2026 A")).toBeVisible();
   capture = true;
@@ -1235,7 +1272,7 @@ test("discards a queued identical follower when its pending leader succeeds", as
     return true;
   });
 
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("A");
   await expect(page.getByText("Pending success 2026 A")).toBeVisible();
   capture = true;
@@ -1294,7 +1331,7 @@ test("stops after one queued retry failure and surfaces the current error", asyn
     return true;
   });
 
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("A");
   await expect(page.getByText("Unexpected retry 0")).toBeVisible();
   capture = true;
@@ -1398,7 +1435,7 @@ test("keeps every newer export bundle value when an older certificate finishes l
 
   await expect(page.getByText("Initial bundle certificate")).toBeVisible();
   capture = true;
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("old");
   await expect.poll(() => oldCertificateSeen).toBe(true);
   await search.fill("new");
@@ -1476,7 +1513,7 @@ test("keeps the newer document page when an older automatic document request fin
 
   await expect(page.getByText("Initial document preview")).toBeVisible();
   capture = true;
-  const search = page.getByPlaceholder("Buscar donante o correo");
+  const search = certificateSearch(page);
   await search.fill("old");
   await expect.poll(() => oldDocumentsSeen).toBe(true);
   await search.fill("new");
