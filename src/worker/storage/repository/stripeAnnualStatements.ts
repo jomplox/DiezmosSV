@@ -14,6 +14,22 @@ export interface StripeAnnualStatementDonorTarget {
   netCents: number;
 }
 
+const SEARCH_CANDIDATE_PAGE_SIZE = 100;
+
+interface StripeAnnualStatementTargetRow {
+  donor_key: string;
+  donor_name: string;
+  donor_email: string | null;
+  gift_count: number;
+  gross_cents: number;
+  refunded_cents: number;
+  net_cents: number;
+}
+
+interface StripeAnnualStatementSearchTargetRow extends StripeAnnualStatementTargetRow {
+  donor_names_json: string;
+}
+
 export async function listStripeAnnualStatementDonorTargets(
   db: D1Database,
   range: { startIso: string; endIso: string },
@@ -36,22 +52,11 @@ export async function listStripeAnnualStatementDonorTargets(
     throw new Error("Stripe annual statement contains a negative net amount");
   }
   const pageSize = Math.min(options.limit, 50);
-  const bindings: Array<string | number> = [
-    range.startIso,
-    range.endIso,
-    options.livemode ? 1 : 0
-  ];
-  const query = options.query?.trim().toLowerCase() ?? "";
-  const searchFilter = query
-    ? ` AND (
-              LOWER(COALESCE(NULLIF(TRIM(gift.donor_name), ''), '')) LIKE ? ESCAPE '\\'
-              OR NULLIF(LOWER(TRIM(gift.donor_email)), '') LIKE ? ESCAPE '\\'
-            )`
-    : "";
+  const query = normalizedSearch(options.query);
   if (query) {
-    const literalLike = `%${query.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-    bindings.push(literalLike, literalLike);
+    return listSearchTargets(db, range, options, pageSize, query);
   }
+  const bindings: Array<string | number> = [range.startIso, range.endIso, options.livemode ? 1 : 0];
   let targetFilter = "";
   if (options.donorKey) {
     targetFilter = "WHERE donor_key = ?";
@@ -78,7 +83,6 @@ export async function listStripeAnnualStatementDonorTargets(
         WHERE gift.settled_at >= ? AND gift.settled_at < ?
           AND checkout.livemode = ?
           AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
-          ${searchFilter}
      ),
      ranked AS (
        SELECT filtered.*,
@@ -103,28 +107,111 @@ export async function listStripeAnnualStatementDonorTargets(
        ${targetFilter}
       ORDER BY donor_key
       LIMIT ?`
-  ).bind(...bindings, pageSize + 1).all<{
-    donor_key: string;
-    donor_name: string;
-    donor_email: string | null;
-    gift_count: number;
-    gross_cents: number;
-    refunded_cents: number;
-    net_cents: number;
-  }>();
-  return (rows.results ?? []).map((row) => {
-    const netCents = Number(row.net_cents);
-    if (netCents < 0) throw new Error("Stripe annual statement contains a negative net amount");
-    return {
-      donorKey: row.donor_key,
-      donorName: row.donor_name,
-      donorEmail: row.donor_email,
-      count: Number(row.gift_count),
-      grossCents: Number(row.gross_cents),
-      refundedCents: Number(row.refunded_cents),
-      netCents
-    };
-  });
+  ).bind(...bindings, pageSize + 1).all<StripeAnnualStatementTargetRow>();
+  return (rows.results ?? []).map(targetFromRow);
+}
+
+async function listSearchTargets(
+  db: D1Database,
+  range: { startIso: string; endIso: string },
+  options: { livemode: boolean; afterDonorKey: string | null; limit: number; donorKey?: string | null },
+  pageSize: number,
+  query: string
+): Promise<StripeAnnualStatementDonorTarget[]> {
+  const targets: StripeAnnualStatementDonorTarget[] = [];
+  let afterDonorKey = options.donorKey ? null : options.afterDonorKey;
+  do {
+    const bindings: Array<string | number> = [range.startIso, range.endIso, options.livemode ? 1 : 0];
+    const targetFilter = options.donorKey
+      ? "WHERE donor_key = ?"
+      : afterDonorKey
+        ? "WHERE donor_key > ?"
+        : "";
+    if (options.donorKey) bindings.push(options.donorKey);
+    else if (afterDonorKey) bindings.push(afterDonorKey);
+    const rows = await db.prepare(
+      `/* stripe_annual_statement_search_targets */
+       WITH filtered AS (
+         SELECT gift.id,
+                NULLIF(LOWER(TRIM(gift.donor_email)), '') AS normalized_email,
+                NULLIF(TRIM(gift.donor_name), '') AS normalized_name,
+                gift.amount_cents,
+                gift.refunded_amount_cents,
+                gift.settled_at,
+                CASE
+                  WHEN NULLIF(TRIM(gift.donor_email), '') IS NULL THEN 'gift:' || gift.id
+                  ELSE LOWER(TRIM(gift.donor_email))
+                END AS donor_key
+           FROM stripe_gifts AS gift
+           JOIN stripe_checkout_sessions AS checkout ON checkout.id = gift.checkout_id
+          WHERE gift.settled_at >= ? AND gift.settled_at < ?
+            AND checkout.livemode = ?
+            AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
+       ),
+       ranked AS (
+         SELECT filtered.*,
+                ROW_NUMBER() OVER (PARTITION BY donor_key ORDER BY settled_at, id) AS donor_row
+           FROM filtered
+       ),
+       grouped AS (
+         SELECT donor_key,
+                MAX(CASE WHEN donor_row = 1
+                  THEN COALESCE(normalized_name, normalized_email, 'Donante') END) AS donor_name,
+                MAX(CASE WHEN donor_row = 1 THEN normalized_email END) AS donor_email,
+                json_group_array(normalized_name) AS donor_names_json,
+                COUNT(*) AS gift_count,
+                SUM(amount_cents) AS gross_cents,
+                SUM(refunded_amount_cents) AS refunded_cents,
+                SUM(amount_cents - refunded_amount_cents) AS net_cents
+           FROM ranked
+          GROUP BY donor_key
+       )
+       SELECT donor_key, donor_name, donor_email, donor_names_json, gift_count,
+              gross_cents, refunded_cents, net_cents
+         FROM grouped
+         ${targetFilter}
+        ORDER BY donor_key
+        LIMIT ?`
+    ).bind(...bindings, SEARCH_CANDIDATE_PAGE_SIZE).all<StripeAnnualStatementSearchTargetRow>();
+    const candidates = rows.results ?? [];
+    for (const candidate of candidates) {
+      if (matchesSearchTarget(candidate, query)) {
+        targets.push(targetFromRow(candidate));
+        if (targets.length > pageSize) return targets;
+      }
+    }
+    if (options.donorKey || candidates.length < SEARCH_CANDIDATE_PAGE_SIZE) return targets;
+    afterDonorKey = candidates.at(-1)?.donor_key ?? null;
+  } while (afterDonorKey);
+  return targets;
+}
+
+function normalizedSearch(value: string | null | undefined): string {
+  return (value ?? "").trim().normalize("NFKC").toLocaleLowerCase();
+}
+
+function matchesSearchTarget(row: StripeAnnualStatementSearchTargetRow, query: string): boolean {
+  if (normalizedSearch(row.donor_email).includes(query)) return true;
+  try {
+    const names = JSON.parse(row.donor_names_json) as Array<string | null>;
+    return names.some((name) => normalizedSearch(name).includes(query));
+  } catch {
+    throw new Error("Stripe annual statement search candidate names are invalid");
+  }
+}
+
+function targetFromRow(row: StripeAnnualStatementTargetRow): StripeAnnualStatementDonorTarget {
+  const netCents = Number(row.net_cents);
+  if (netCents < 0) throw new Error("Stripe annual statement contains a negative net amount");
+  return {
+    donorKey: row.donor_key,
+    donorName: row.donor_name,
+    donorEmail: row.donor_email,
+    count: Number(row.gift_count),
+    grossCents: Number(row.gross_cents),
+    refundedCents: Number(row.refunded_cents),
+    netCents
+  };
 }
 
 export async function listStripeAnnualStatementDonorGifts(

@@ -34,4 +34,31 @@ describe("Stripe annual statement UI contract", () => {
       expect(appSource).toContain(name);
     }
   });
+
+  it("shares an annual-report operation lock with the Salvadoran lane", () => {
+    expect(appSource).toContain("annualReportOperationClaimsRef");
+    expect(appSource).toContain("claimAnnualReportOperation");
+    expect(appSource).toContain("releaseAnnualReportOperation");
+    expect(appSource).toContain("annualReportBusy");
+    expect(appSource).toContain("annualReportOperationClaimsRef.current.size > 0");
+    expect(appSource.match(/busy={annualReportBusy}/g)).toHaveLength(2);
+
+    const stripeClaimStart = appSource.indexOf("function claimStripeStatementOperation");
+    const stripeClaimEnd = appSource.indexOf("function ownsStripeStatementOperation", stripeClaimStart);
+    expect(appSource.slice(stripeClaimStart, stripeClaimEnd)).toContain("claimAnnualReportOperation");
+
+    const svClaimStart = appSource.indexOf("function claimCertificateOperation");
+    const svClaimEnd = appSource.indexOf("function ownsCertificateOperation", svClaimStart);
+    expect(appSource.slice(svClaimStart, svClaimEnd)).toContain("claimAnnualReportOperation");
+  });
+
+  it("commits each fulfilled export lane before surfacing a different preview failure", () => {
+    const exportsStart = appSource.indexOf('if (view === "exports" && can(user, "ADMIN"))');
+    const exportsEnd = appSource.indexOf("function automaticRefreshControl", exportsStart);
+    const exportsSource = appSource.slice(exportsStart, exportsEnd);
+    expect(exportsSource).toContain("const previewFailure");
+    expect(exportsSource).toContain("commitStripeStatementPreview");
+    expect(exportsSource).toContain("throw previewFailure");
+    expect(exportsSource.indexOf("commitRefreshState(control")).toBeLessThan(exportsSource.indexOf("throw previewFailure"));
+  });
 });

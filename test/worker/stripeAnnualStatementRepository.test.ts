@@ -140,7 +140,11 @@ describe("Stripe annual statement repository", () => {
 
   it("filters before grouping and cursor pagination with literal LIKE characters", async () => {
     seedGift(database, { id: "ana_name", donorEmail: "ana@example.org", donorName: "Ana Search", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "ana_renamed", donorEmail: "ana@example.org", donorName: "Ana Actualizada", amountCents: 2_000, settledAt: "2025-07-01T12:00:00.000Z" });
     seedGift(database, { id: "email_match", donorEmail: "contains-needle@example.org", donorName: "Otra", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "accented", donorEmail: "angela@example.org", donorName: "Ángela", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "cursor_alpha", donorEmail: "alpha@example.org", donorName: "Alpha Match", settledAt: "2025-06-01T12:00:00.000Z" });
+    seedGift(database, { id: "cursor_beta", donorEmail: "beta@example.org", donorName: "Beta Match", settledAt: "2025-06-01T12:00:00.000Z" });
     seedGift(database, { id: "percent", donorEmail: "percent@example.org", donorName: "100% Literal", settledAt: "2025-06-01T12:00:00.000Z" });
     seedGift(database, { id: "underscore", donorEmail: "underscore@example.org", donorName: "A_B Literal", settledAt: "2025-06-01T12:00:00.000Z" });
     seedGift(database, { id: "slash", donorEmail: "slash@example.org", donorName: "C\\D Literal", settledAt: "2025-06-01T12:00:00.000Z" });
@@ -153,6 +157,22 @@ describe("Stripe annual statement repository", () => {
       query: "NEEDLE"
     });
     expect(targets.map((target) => target.donorKey)).toEqual(["contains-needle@example.org"]);
+
+    const renamed = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: null,
+      limit: 50,
+      query: "search"
+    });
+    expect(renamed).toEqual([expect.objectContaining({ donorKey: "ana@example.org", count: 2, grossCents: 3_000, netCents: 3_000 })]);
+
+    const accented = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: null,
+      limit: 50,
+      query: "ángELA"
+    });
+    expect(accented.map((target) => target.donorKey)).toEqual(["angela@example.org"]);
 
     for (const [query, donorKey] of [["%", "percent@example.org"], ["_", "underscore@example.org"], ["\\", "slash@example.org"]]) {
       const literal = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
@@ -171,6 +191,43 @@ describe("Stripe annual statement repository", () => {
       query: "search"
     });
     expect(after).toEqual([]);
+
+    const cursor = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: "alpha@example.org",
+      limit: 50,
+      query: "match"
+    });
+    expect(cursor.map((target) => target.donorKey)).toEqual(["beta@example.org"]);
+  });
+
+  it("keeps the 50-row sentinel and keyset cursor after Unicode search filtering", async () => {
+    for (let index = 0; index < 51; index += 1) {
+      const sequence = String(index).padStart(2, "0");
+      seedGift(database, {
+        id: `accent_page_${sequence}`,
+        donorEmail: `accent${sequence}@example.org`,
+        donorName: `Ángela ${sequence}`,
+        settledAt: "2025-06-01T12:00:00.000Z"
+      });
+    }
+
+    const first = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: null,
+      limit: 50,
+      query: "ÁNGELA"
+    });
+    expect(first).toHaveLength(51);
+    expect(first[49].donorKey).toBe("accent49@example.org");
+
+    const next = await listStripeAnnualStatementDonorTargets(db, RANGE_2025_NEW_YORK, {
+      livemode: false,
+      afterDonorKey: first[49].donorKey,
+      limit: 50,
+      query: "ángela"
+    });
+    expect(next.map((target) => target.donorKey)).toEqual(["accent50@example.org"]);
   });
 
   it("converges concurrent identical reservations and creates corrected revision lineage", async () => {

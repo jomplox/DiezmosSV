@@ -37,5 +37,6 @@ describe("authenticated account state boundary", () => {
     expect(appSource).toContain("stripeStatementSearchInputGenerationRef.current += 1");
     expect(appSource).toContain("invalidateStripeStatementPreview(certificateResetYear, \"\")");
     expect(appSource).toContain("resetStripeStatementBulkTraversal(certificateResetYear)");
+    expect(appSource).toContain("annualReportOperationClaimsRef.current.clear()");
   });
 });

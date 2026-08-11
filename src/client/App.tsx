@@ -416,6 +416,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const stripeStatementBulkTraversalRef = useRef<StripeStatementBulkTraversal>({ generation: 0, year: stripeStatementYear, cursor: null, started: false, hasMore: false });
   const stripeStatementOperationClaimsRef = useRef(new Map<string, symbol>());
   const stripeStatementSearchInputGenerationRef = useRef(0);
+  const annualReportOperationClaimsRef = useRef(new Map<string, symbol>());
   const automaticRefreshFlightRef = useRef<AutomaticRefreshFlight | null>(null);
   // CRM contacts export customization: period preset (with optional custom range), a
   // gift-type filter, and the selected CSV columns (all on by default).
@@ -472,6 +473,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     [view, preCdeFailures, debouncedQuery]
   );
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
+  const annualReportBusy = busy.startsWith("certificates-") || busy.startsWith("stripe-statements-");
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
@@ -501,6 +503,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementBulkTraversalRef.current = { ...stripeBulkTraversal, generation: stripeBulkTraversal.generation + 1, cursor: null, started: false, hasMore: false };
     stripeStatementOperationClaimsRef.current.clear();
     stripeStatementSearchInputGenerationRef.current += 1;
+    annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
     runActionOwnerRef.current = null;
   }, []);
@@ -981,33 +984,40 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         accountApi<BackupsGrid>("/api/admin/backups"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment")
       ]);
-      if (
+      const certificatePreviewFailure = (
         certificateRequest
         && certificateResult?.status === "rejected"
         && isCurrentCertificatePreviewRequest(certificateRequest)
         && (!control || control.isOwner())
-      ) {
-        throw certificateResult.reason;
-      } else if (
+      );
+      const stripeStatementPreviewFailure = (
         stripeStatementRequest
         && stripeStatementResult?.status === "rejected"
         && isCurrentStripeStatementPreviewRequest(stripeStatementRequest)
         && (!control || control.isOwner())
-      ) {
-        throw stripeStatementResult.reason;
-      } else {
-        commitRefreshState(control, () => {
-          setExportPreview(f960Preview);
-          if (certificateRequest && certificateResult?.status === "fulfilled") {
-            commitCertificatePreview(certificateRequest, certificateResult.value, false);
-          }
-          if (stripeStatementRequest && stripeStatementResult?.status === "fulfilled") {
-            commitStripeStatementPreview(stripeStatementRequest, stripeStatementResult.value, false);
-          }
-          setDonationIntents(donationIntentResult.intents);
-          setBackups(backupsResult.months);
-          setEmissionEnvironment(environmentResult.emissionEnvironment);
-        });
+      );
+      const previewFailure = certificatePreviewFailure
+        ? certificateResult.reason
+        : stripeStatementPreviewFailure
+          ? stripeStatementResult.reason
+          : null;
+      commitRefreshState(control, () => {
+        setExportPreview(f960Preview);
+        if (certificateRequest && certificateResult?.status === "fulfilled") {
+          commitCertificatePreview(certificateRequest, certificateResult.value, false);
+        }
+        if (stripeStatementRequest && stripeStatementResult?.status === "fulfilled") {
+          commitStripeStatementPreview(stripeStatementRequest, stripeStatementResult.value, false);
+        }
+        setDonationIntents(donationIntentResult.intents);
+        setBackups(backupsResult.months);
+        setEmissionEnvironment(environmentResult.emissionEnvironment);
+      });
+      if (previewFailure) {
+        if (certificatePreviewFailure && certificateResult?.status === "rejected") {
+          throw certificateResult.reason;
+        }
+        throw previewFailure;
       }
     }
   }
@@ -1076,6 +1086,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     certificateSearchInputGenerationRef.current += 1;
     stripeStatementOperationClaimsRef.current.clear();
     stripeStatementSearchInputGenerationRef.current += 1;
+    annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
     setSettledCertificateSearchRevision(certificateSearchInputGenerationRef.current);
     setSettledStripeStatementSearchRevision(stripeStatementSearchInputGenerationRef.current);
@@ -1681,7 +1692,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (certificateOperationClaimsRef.current.has(key)) {
       return null;
     }
-    const token = Symbol(key);
+    const token = claimAnnualReportOperation(`certificates:${key}`);
+    if (!token) return null;
     certificateOperationClaimsRef.current.set(key, token);
     return token;
   }
@@ -1693,12 +1705,27 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function releaseCertificateOperation(key: string, token: symbol): void {
     if (ownsCertificateOperation(key, token)) {
       certificateOperationClaimsRef.current.delete(key);
+      releaseAnnualReportOperation(`certificates:${key}`, token);
+    }
+  }
+
+  function claimAnnualReportOperation(key: string): symbol | null {
+    if (annualReportOperationClaimsRef.current.size > 0) return null;
+    const token = Symbol(key);
+    annualReportOperationClaimsRef.current.set(key, token);
+    return token;
+  }
+
+  function releaseAnnualReportOperation(key: string, token: symbol): void {
+    if (annualReportOperationClaimsRef.current.get(key) === token) {
+      annualReportOperationClaimsRef.current.delete(key);
     }
   }
 
   function claimStripeStatementOperation(key: string): symbol | null {
     if (stripeStatementOperationClaimsRef.current.has(key)) return null;
-    const token = Symbol(key);
+    const token = claimAnnualReportOperation(`stripe-statements:${key}`);
+    if (!token) return null;
     stripeStatementOperationClaimsRef.current.set(key, token);
     return token;
   }
@@ -1708,7 +1735,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   }
 
   function releaseStripeStatementOperation(key: string, token: symbol): void {
-    if (ownsStripeStatementOperation(key, token)) stripeStatementOperationClaimsRef.current.delete(key);
+    if (ownsStripeStatementOperation(key, token)) {
+      stripeStatementOperationClaimsRef.current.delete(key);
+      releaseAnnualReportOperation(`stripe-statements:${key}`, token);
+    }
   }
 
   function beginStripeStatementPreviewReplacement(year: string, search: string): StripeStatementPreviewRequest {
@@ -2749,7 +2779,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               yearOptions={certificateYearOptions()}
               preview={certificatePreview}
               search={certificateSearch}
-              busy={busy === "certificates-send"}
+              busy={annualReportBusy}
               rowBusy={busy}
               bulkTraversalStarted={bulkTraversalStarted}
               bulkHasMore={bulkHasMore}
@@ -2765,7 +2795,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               yearOptions={certificateYearOptions()}
               preview={stripeStatementPreview}
               search={stripeStatementSearch}
-              busy={busy === "stripe-statements-send"}
+              busy={annualReportBusy}
               rowBusy={busy}
               bulkTraversalStarted={stripeStatementBulkTraversalStarted}
               bulkHasMore={stripeStatementBulkHasMore}
