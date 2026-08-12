@@ -44,6 +44,10 @@ export interface StripeRetentionFence {
   maxGeneration: string;
 }
 
+export interface StripeRetentionCursor {
+  generation: string;
+}
+
 export interface RetentionCursor {
   createdAt: string;
   id: string;
@@ -531,7 +535,7 @@ export async function listRowsCreatedBetween(
 export async function listAllRowsPaged(
   db: D1Database,
   table: RetentionSnapshotTable,
-  cursor: RetentionCursor | null,
+  cursor: RetentionCursor | StripeRetentionCursor | null,
   limit: number,
   stripeFence?: StripeRetentionFence
 ): Promise<Array<Record<string, unknown>>> {
@@ -544,6 +548,11 @@ export async function listAllRowsPaged(
   const rowAlias = isStripeTable && stripeFence ? "snapshot" : null;
   if (rowAlias && stripeFence) {
     const stripeTable = table as StripeRetentionSnapshotTable;
+    conditions.push(`retention_generation.table_name = '${stripeTable}'`);
+    if (cursor && "generation" in cursor) {
+      conditions.push(`retention_generation.generation > ?`);
+      bindings.push(cursor.generation);
+    }
     conditions.push(`retention_generation.generation <= ?`);
     bindings.push(stripeFence.maxGeneration);
     if (stripeTable === "stripe_gifts") {
@@ -585,30 +594,16 @@ export async function listAllRowsPaged(
         stripeFence.maxGeneration
       );
     } else if (stripeTable === "stripe_annual_statement_deliveries") {
+      // The 0034 immutable-lineage trigger prevents retargeting, and the FK prevents
+      // deleting/renaming a referenced parent. Requiring the direct parent therefore
+      // proves the stable transitive chain without a recursive CTE per exported row.
       conditions.push(
-        `(${rowAlias}.supersedes_delivery_id IS NULL OR (
-          EXISTS (
-            SELECT 1 FROM stripe_annual_statement_deliveries AS direct_parent
-             WHERE direct_parent.id = ${rowAlias}.supersedes_delivery_id
-          )
-          AND NOT EXISTS (
-            WITH RECURSIVE annual_ancestry(id, supersedes_delivery_id) AS (
-              SELECT ancestor.id, ancestor.supersedes_delivery_id
-                FROM stripe_annual_statement_deliveries AS ancestor
-               WHERE ancestor.id = ${rowAlias}.supersedes_delivery_id
-              UNION
-              SELECT ancestor.id, ancestor.supersedes_delivery_id
-                FROM stripe_annual_statement_deliveries AS ancestor
-                JOIN annual_ancestry ON ancestor.id = annual_ancestry.supersedes_delivery_id
-            )
-            SELECT 1
-              FROM annual_ancestry
-              LEFT JOIN stripe_retention_generations AS ancestor_generation
-                ON ancestor_generation.table_name = 'stripe_annual_statement_deliveries'
-               AND ancestor_generation.row_id = annual_ancestry.id
-               AND ancestor_generation.generation <= ?
-             WHERE ancestor_generation.generation IS NULL
-          )
+        `(${rowAlias}.supersedes_delivery_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_retention_generations AS parent_generation
+           WHERE parent_generation.table_name = 'stripe_annual_statement_deliveries'
+             AND parent_generation.row_id = ${rowAlias}.supersedes_delivery_id
+             AND parent_generation.generation <= ?
         ))`
       );
       bindings.push(stripeFence.maxGeneration);
@@ -616,22 +611,28 @@ export async function listAllRowsPaged(
   }
   const columnReference = rowAlias ? `${rowAlias}.${column}` : column;
   const idReference = rowAlias ? `${rowAlias}.id` : "id";
-  if (cursor) {
+  if (cursor && "createdAt" in cursor) {
     conditions.push(`(${columnReference}, ${idReference}) > (?, ?)`);
     bindings.push(cursor.createdAt, cursor.id);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const from = rowAlias
-    ? `${table} AS ${rowAlias}
-       JOIN stripe_retention_generations AS retention_generation
-         ON retention_generation.table_name = '${table}'
-        AND retention_generation.row_id = ${rowAlias}.id`
+    ? `stripe_retention_generations AS retention_generation
+         INDEXED BY idx_stripe_retention_generations_table_generation
+       JOIN ${table} AS ${rowAlias}
+         ON ${rowAlias}.id = retention_generation.row_id`
     : table;
-  const selection = rowAlias ? `${rowAlias}.*` : "*";
+  const selection = rowAlias
+    ? `${rowAlias}.*,
+       CAST(retention_generation.generation AS TEXT) AS __retention_generation`
+    : "*";
+  const orderBy = rowAlias
+    ? "retention_generation.generation ASC"
+    : `${columnReference} ASC, ${idReference} ASC`;
   const rows = await db
     .prepare(
       `SELECT ${selection} FROM ${from} ${where}
-       ORDER BY ${columnReference} ASC, ${idReference} ASC LIMIT ?`
+       ORDER BY ${orderBy} LIMIT ?`
     )
     .bind(...bindings, limit)
     .all<Record<string, unknown>>();

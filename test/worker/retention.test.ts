@@ -3,6 +3,10 @@ import { resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  Repository,
+  STRIPE_RETENTION_SNAPSHOT_TABLES
+} from "../../src/worker/storage/repository";
+import {
   RETENTION_FOREIGN_KEY_PROTOCOL,
   previousElSalvadorMonth,
   runRetentionExport
@@ -10,7 +14,7 @@ import {
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
-import { sqliteD1 } from "./support/sqliteD1";
+import { SqliteD1, sqliteD1 } from "./support/sqliteD1";
 
 const nativeCrypto = crypto;
 
@@ -371,11 +375,11 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
     if (sql.includes("FROM fiscal_corrections")) return this.fiscalCorrections;
-    if (sql.includes("FROM stripe_checkout_sessions AS snapshot")) return this.stripeCheckoutSessions;
-    if (sql.includes("FROM stripe_webhook_events AS snapshot")) return this.stripeWebhookEvents;
-    if (sql.includes("FROM stripe_gifts AS snapshot")) return this.stripeGifts;
-    if (sql.includes("FROM stripe_acknowledgment_deliveries AS snapshot")) return this.stripeAcknowledgmentDeliveries;
-    if (sql.includes("FROM stripe_annual_statement_deliveries AS snapshot")) return this.stripeAnnualStatementDeliveries;
+    if (sql.includes("JOIN stripe_checkout_sessions AS snapshot")) return this.stripeCheckoutSessions;
+    if (sql.includes("JOIN stripe_webhook_events AS snapshot")) return this.stripeWebhookEvents;
+    if (sql.includes("JOIN stripe_gifts AS snapshot")) return this.stripeGifts;
+    if (sql.includes("JOIN stripe_acknowledgment_deliveries AS snapshot")) return this.stripeAcknowledgmentDeliveries;
+    if (sql.includes("JOIN stripe_annual_statement_deliveries AS snapshot")) return this.stripeAnnualStatementDeliveries;
     if (sql.includes("FROM stripe_checkout_sessions")) return this.stripeCheckoutSessions;
     if (sql.includes("FROM stripe_webhook_events")) return this.stripeWebhookEvents;
     if (sql.includes("FROM stripe_gifts")) return this.stripeGifts;
@@ -553,6 +557,19 @@ class RetentionStatement {
       this.db.appliedLimits.push(limit);
       return { results: rows.slice(0, limit) as T[] };
     }
+    if (this.sql.includes("ORDER BY retention_generation.generation ASC")) {
+      const table = this.db.tableFor(this.sql) ?? [];
+      const cursorIndex = this.sql.includes("retention_generation.generation > ?") ? 0 : -1;
+      const afterGeneration = cursorIndex >= 0 ? Number(this.args[cursorIndex]) : 0;
+      const limit = Number(this.args.at(-1) ?? 500);
+      this.db.appliedLimits.push(limit);
+      return {
+        results: table
+          .map((row, index) => ({ ...row, __retention_generation: String(index + 1) }))
+          .filter((row) => Number(row.__retention_generation) > afterGeneration)
+          .slice(0, limit) as T[]
+      };
+    }
     const column = this.sql.includes("received_at") ? "received_at" : "created_at";
     let rows = [...table];
     if (this.sql.includes(`${column} >= ?`) && this.sql.includes(`${column} < ?`)) {
@@ -659,9 +676,46 @@ function d1WithAfterFinalCheckoutPage(
             !injected
             && (
               sql.includes("SELECT * FROM stripe_checkout_sessions")
-              || sql.includes("SELECT snapshot.* FROM stripe_checkout_sessions AS snapshot")
+              || sql.includes("JOIN stripe_checkout_sessions AS snapshot")
             )
           ) {
+            injected = true;
+            afterPage();
+          }
+          return result;
+        }
+      };
+      return wrapped as unknown as D1PreparedStatement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return database.batch(statements);
+    }
+  } as D1Database;
+}
+
+function d1WithAfterFirstPageMatching(
+  database: D1Database,
+  sqlMatches: (sql: string) => boolean,
+  afterPage: () => void
+): D1Database {
+  let injected = false;
+  return {
+    prepare(sql: string) {
+      const statement = database.prepare(sql);
+      const wrapped = {
+        bind(...values: unknown[]) {
+          statement.bind(...values);
+          return wrapped;
+        },
+        first<T>() {
+          return statement.first<T>();
+        },
+        run() {
+          return statement.run();
+        },
+        async all<T>() {
+          const result = await statement.all<T>();
+          if (!injected && sqlMatches(sql)) {
             injected = true;
             afterPage();
           }
@@ -919,7 +973,7 @@ describe("runRetentionExport", () => {
       const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
       expect(result.status).toBe("completed");
       expect(raceInserted).toBe(true);
-      expect(archivedRows(archive, "2026-06", "stripe_checkout_sessions").map((row) => row.id)).toEqual([
+      expect(archivedRows(archive, "2026-06", "stripe_checkout_sessions").map((row) => row.id).sort()).toEqual([
         "checkout_deleted",
         "checkout_retargeted",
         "checkout_stable"
@@ -952,6 +1006,129 @@ describe("runRetentionExport", () => {
     } finally {
       source.close();
       destination.close();
+    }
+  });
+
+  it("keeps annual lineage restorable when created_at sorts a child onto an earlier page than its parent", async () => {
+    const source = migratedDatabase();
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    const insert = source.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, created_at, updated_at
+       ) VALUES (?, 2025, 0, ?, ?, ?, ?, '{}', ?, ?, 'PENDING', ?, ?)`
+    );
+    insert.run(
+      "annual_parent_late_cursor",
+      "lineage@example.org",
+      "Lineage Donor",
+      "lineage@example.org",
+      "1".repeat(64),
+      1,
+      null,
+      "2026-06-30T00:00:00.000Z",
+      "2026-06-30T00:00:00.000Z"
+    );
+    insert.run(
+      "annual_child_early_cursor",
+      "lineage@example.org",
+      "Lineage Donor",
+      "lineage@example.org",
+      "2".repeat(64),
+      2,
+      "annual_parent_late_cursor",
+      "2025-01-01T00:00:00.000Z",
+      "2025-01-01T00:00:00.000Z"
+    );
+    for (let index = 0; index < 499; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      insert.run(
+        `annual_filler_${suffix}`,
+        `filler-${suffix}@example.org`,
+        `Filler ${suffix}`,
+        `filler-${suffix}@example.org`,
+        index.toString(16).padStart(64, "0"),
+        1,
+        null,
+        "2025-06-01T00:00:00.000Z",
+        "2025-06-01T00:00:00.000Z"
+      );
+    }
+
+    let raced = false;
+    const racedDb = d1WithAfterFirstPageMatching(
+      sqliteD1(source),
+      (sql) => sql.includes("stripe_annual_statement_deliveries AS snapshot"),
+      () => {
+        raced = true;
+        source.prepare(
+          `UPDATE stripe_annual_statement_deliveries
+              SET created_at = '2026-12-31T00:00:00.000Z',
+                  updated_at = '2026-12-31T00:00:00.000Z'
+            WHERE id = 'annual_parent_late_cursor'`
+        ).run();
+      }
+    );
+    const runtime = {
+      DB: racedDb,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("completed");
+      expect(raced).toBe(true);
+      const annualIds = archivedRows(
+        archive,
+        "2026-06",
+        "stripe_annual_statement_deliveries"
+      ).map((row) => row.id);
+      expect(annualIds).toHaveLength(501);
+      expect(annualIds).toContain("annual_parent_late_cursor");
+      expect(annualIds).toContain("annual_child_early_cursor");
+
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
+      restoreArchivedRows(
+        destination,
+        archive,
+        "2026-06",
+        "stripe_annual_statement_deliveries"
+      );
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+    } finally {
+      source.close();
+      destination.close();
+    }
+  });
+
+  it("drives every Stripe retention page from the bounded generation index", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const repository = new Repository(d1.database);
+    try {
+      const fence = await repository.captureStripeRetentionFence();
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        for (const cursor of [null, { generation: "1" }]) {
+          await repository.listAllRowsPaged(table, cursor, 500, fence);
+          const statement = d1.statements.at(-1);
+          if (!statement) throw new Error(`missing retention statement for ${table}`);
+          const plan = database.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+            .all(...statement.args) as Array<{ detail: string }>;
+          const detail = plan.map((row) => row.detail).join("\n");
+          expect(detail).toContain("idx_stripe_retention_generations_table_generation");
+          expect(detail).not.toContain("USE TEMP B-TREE");
+          expect(detail).not.toMatch(/(?:^|\n)SCAN /);
+        }
+      }
+    } finally {
+      database.close();
     }
   });
 

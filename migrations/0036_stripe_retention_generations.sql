@@ -1,7 +1,7 @@
 -- Monotonic membership fence for referentially consistent Stripe retention
--- exports. A generation changes only when a row is inserted or when a field
--- that controls paging or a foreign-key identity changes. Mutable lifecycle,
--- refund, and delivery state keeps its generation and remains snapshot-visible.
+-- exports. The complete permanent trigger set is installed before backfill, so
+-- an insert, update, or delete interleaved between migration statements is
+-- tracked without relying on file-wide transactional isolation.
 CREATE TABLE stripe_retention_generations (
   generation INTEGER PRIMARY KEY AUTOINCREMENT,
   table_name TEXT NOT NULL CHECK (table_name IN (
@@ -15,23 +15,13 @@ CREATE TABLE stripe_retention_generations (
   UNIQUE (table_name, row_id)
 );
 
-INSERT INTO stripe_retention_generations (table_name, row_id)
-SELECT 'stripe_checkout_sessions', id FROM stripe_checkout_sessions ORDER BY rowid;
-INSERT INTO stripe_retention_generations (table_name, row_id)
-SELECT 'stripe_webhook_events', id FROM stripe_webhook_events ORDER BY rowid;
-INSERT INTO stripe_retention_generations (table_name, row_id)
-SELECT 'stripe_gifts', id FROM stripe_gifts ORDER BY rowid;
-INSERT INTO stripe_retention_generations (table_name, row_id)
-SELECT 'stripe_acknowledgment_deliveries', id
-  FROM stripe_acknowledgment_deliveries ORDER BY rowid;
-INSERT INTO stripe_retention_generations (table_name, row_id)
-SELECT 'stripe_annual_statement_deliveries', id
-  FROM stripe_annual_statement_deliveries ORDER BY rowid;
+CREATE INDEX idx_stripe_retention_generations_table_generation
+  ON stripe_retention_generations(table_name, generation, row_id);
 
 CREATE TRIGGER stripe_checkout_retention_generation_insert
 AFTER INSERT ON stripe_checkout_sessions
 BEGIN
-  INSERT INTO stripe_retention_generations (table_name, row_id)
+  INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_checkout_sessions', NEW.id);
 END;
 
@@ -43,8 +33,8 @@ BEGIN
 END;
 
 CREATE TRIGGER stripe_checkout_retention_generation_update
-AFTER UPDATE OF id, created_at ON stripe_checkout_sessions
-WHEN NEW.id IS NOT OLD.id OR NEW.created_at IS NOT OLD.created_at
+AFTER UPDATE OF id ON stripe_checkout_sessions
+WHEN NEW.id IS NOT OLD.id
 BEGIN
   DELETE FROM stripe_retention_generations
    WHERE table_name = 'stripe_checkout_sessions' AND row_id = OLD.id;
@@ -55,7 +45,7 @@ END;
 CREATE TRIGGER stripe_webhook_retention_generation_insert
 AFTER INSERT ON stripe_webhook_events
 BEGIN
-  INSERT INTO stripe_retention_generations (table_name, row_id)
+  INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_webhook_events', NEW.id);
 END;
 
@@ -67,8 +57,8 @@ BEGIN
 END;
 
 CREATE TRIGGER stripe_webhook_retention_generation_update
-AFTER UPDATE OF id, received_at ON stripe_webhook_events
-WHEN NEW.id IS NOT OLD.id OR NEW.received_at IS NOT OLD.received_at
+AFTER UPDATE OF id ON stripe_webhook_events
+WHEN NEW.id IS NOT OLD.id
 BEGIN
   DELETE FROM stripe_retention_generations
    WHERE table_name = 'stripe_webhook_events' AND row_id = OLD.id;
@@ -79,7 +69,7 @@ END;
 CREATE TRIGGER stripe_gift_retention_generation_insert
 AFTER INSERT ON stripe_gifts
 BEGIN
-  INSERT INTO stripe_retention_generations (table_name, row_id)
+  INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_gifts', NEW.id);
 END;
 
@@ -91,10 +81,8 @@ BEGIN
 END;
 
 CREATE TRIGGER stripe_gift_retention_generation_update
-AFTER UPDATE OF id, checkout_id, created_at ON stripe_gifts
-WHEN NEW.id IS NOT OLD.id
-  OR NEW.checkout_id IS NOT OLD.checkout_id
-  OR NEW.created_at IS NOT OLD.created_at
+AFTER UPDATE OF id, checkout_id ON stripe_gifts
+WHEN NEW.id IS NOT OLD.id OR NEW.checkout_id IS NOT OLD.checkout_id
 BEGIN
   DELETE FROM stripe_retention_generations
    WHERE table_name = 'stripe_gifts' AND row_id = OLD.id;
@@ -105,7 +93,7 @@ END;
 CREATE TRIGGER stripe_acknowledgment_retention_generation_insert
 AFTER INSERT ON stripe_acknowledgment_deliveries
 BEGIN
-  INSERT INTO stripe_retention_generations (table_name, row_id)
+  INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_acknowledgment_deliveries', NEW.id);
 END;
 
@@ -117,10 +105,8 @@ BEGIN
 END;
 
 CREATE TRIGGER stripe_acknowledgment_retention_generation_update
-AFTER UPDATE OF id, gift_id, created_at ON stripe_acknowledgment_deliveries
-WHEN NEW.id IS NOT OLD.id
-  OR NEW.gift_id IS NOT OLD.gift_id
-  OR NEW.created_at IS NOT OLD.created_at
+AFTER UPDATE OF id, gift_id ON stripe_acknowledgment_deliveries
+WHEN NEW.id IS NOT OLD.id OR NEW.gift_id IS NOT OLD.gift_id
 BEGIN
   DELETE FROM stripe_retention_generations
    WHERE table_name = 'stripe_acknowledgment_deliveries' AND row_id = OLD.id;
@@ -131,7 +117,7 @@ END;
 CREATE TRIGGER stripe_annual_statement_retention_generation_insert
 AFTER INSERT ON stripe_annual_statement_deliveries
 BEGIN
-  INSERT INTO stripe_retention_generations (table_name, row_id)
+  INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_annual_statement_deliveries', NEW.id);
 END;
 
@@ -143,14 +129,27 @@ BEGIN
 END;
 
 CREATE TRIGGER stripe_annual_statement_retention_generation_update
-AFTER UPDATE OF id, supersedes_delivery_id, created_at
+AFTER UPDATE OF id, supersedes_delivery_id
 ON stripe_annual_statement_deliveries
-WHEN NEW.id IS NOT OLD.id
-  OR NEW.supersedes_delivery_id IS NOT OLD.supersedes_delivery_id
-  OR NEW.created_at IS NOT OLD.created_at
+WHEN NEW.id IS NOT OLD.id OR NEW.supersedes_delivery_id IS NOT OLD.supersedes_delivery_id
 BEGIN
   DELETE FROM stripe_retention_generations
    WHERE table_name = 'stripe_annual_statement_deliveries' AND row_id = OLD.id;
   INSERT INTO stripe_retention_generations (table_name, row_id)
   VALUES ('stripe_annual_statement_deliveries', NEW.id);
 END;
+
+-- Idempotent backfills cover rows written before tracking was installed. Rows
+-- captured by a trigger while a backfill is running keep their earlier generation.
+INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+SELECT 'stripe_checkout_sessions', id FROM stripe_checkout_sessions ORDER BY rowid;
+INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+SELECT 'stripe_webhook_events', id FROM stripe_webhook_events ORDER BY rowid;
+INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+SELECT 'stripe_gifts', id FROM stripe_gifts ORDER BY rowid;
+INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+SELECT 'stripe_acknowledgment_deliveries', id
+  FROM stripe_acknowledgment_deliveries ORDER BY rowid;
+INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+SELECT 'stripe_annual_statement_deliveries', id
+  FROM stripe_annual_statement_deliveries ORDER BY rowid;

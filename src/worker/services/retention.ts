@@ -7,6 +7,7 @@ import {
   type RetentionCursor,
   type RetentionSnapshotTable,
   type RetentionTable,
+  type StripeRetentionCursor,
   type StripeRetentionFence
 } from "../storage/repository";
 import type { Env } from "../types";
@@ -376,6 +377,23 @@ async function exportSnapshotTable(
   prefix: string,
   stripeFence: StripeRetentionFence
 ): Promise<TableManifestEntry> {
+  if (table.startsWith("stripe_")) {
+    return streamRetentionTable<StripeRetentionCursor>(
+      env,
+      `${prefix}/${table}.ndjson`,
+      (cursor) => repo.listAllRowsPaged(
+        table,
+        cursor,
+        RETENTION_PAGE_SIZE,
+        stripeFence
+      ),
+      (row) => ({ generation: String(row.__retention_generation) }),
+      (row) => {
+        const { __retention_generation: _generation, ...archivedRow } = row;
+        return archivedRow;
+      }
+    );
+  }
   const cursorColumn = table === "wompi_events" || table === "stripe_webhook_events"
     ? "received_at"
     : "created_at";
@@ -415,7 +433,8 @@ async function streamRetentionTable<Cursor>(
   env: Env,
   key: string,
   readPage: (cursor: Cursor | null) => Promise<Array<Record<string, unknown>>>,
-  cursorFrom: (row: Record<string, unknown>) => Cursor
+  cursorFrom: (row: Record<string, unknown>) => Cursor,
+  archiveRow: (row: Record<string, unknown>) => Record<string, unknown> = (row) => row
 ): Promise<TableManifestEntry> {
   const tempKey = `${key}.tmp.${crypto.randomUUID()}`;
   const digest = new crypto.DigestStream("SHA-256");
@@ -439,7 +458,7 @@ async function streamRetentionTable<Cursor>(
       const rows = await readPage(cursor);
       if (rows.length === 0) break;
       for (const row of rows) {
-        const bytes = utf8Bytes(`${JSON.stringify(row)}\n`);
+        const bytes = utf8Bytes(`${JSON.stringify(archiveRow(row))}\n`);
         await digestWriter.write(bytes);
         let sourceOffset = 0;
         while (sourceOffset < bytes.byteLength) {

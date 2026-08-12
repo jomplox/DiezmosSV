@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
@@ -12,13 +13,21 @@ const giftTypeMigrationPath = resolve(
   import.meta.dirname,
   "../../migrations/0033_stripe_gift_type.sql"
 );
+const retentionGenerationMigrationPath = resolve(
+  import.meta.dirname,
+  "../../migrations/0036_stripe_retention_generations.sql"
+);
 
 describe("Stripe U.S. donation persistence", () => {
   const openDatabases: DatabaseSync[] = [];
+  const temporaryDirectories: string[] = [];
 
   afterEach(() => {
     for (const database of openDatabases.splice(0)) {
       database.close();
+    }
+    for (const directory of temporaryDirectories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
     }
   });
 
@@ -99,6 +108,95 @@ describe("Stripe U.S. donation persistence", () => {
       "stripe_gifts",
       "stripe_webhook_events"
     ]));
+  });
+
+  it("tracks inserts, updates, and deletes around trigger install and backfill", () => {
+    const seed = migratedDatabaseThrough("0035");
+    const directory = mkdtempSync(join(tmpdir(), "stripe-retention-migration-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "migration.sqlite");
+    seed.exec(`VACUUM INTO '${databasePath.replaceAll("'", "''")}'`);
+    seed.close();
+    const database = track(openDatabases, new DatabaseSync(databasePath));
+    const writer = track(openDatabases, new DatabaseSync(databasePath));
+    database.exec("PRAGMA foreign_keys = ON");
+    writer.exec("PRAGMA foreign_keys = ON");
+    const migration = readFileSync(retentionGenerationMigrationPath, "utf8");
+    const triggerStart = migration.indexOf(
+      "CREATE TRIGGER stripe_checkout_retention_generation_insert"
+    );
+    const backfillStart = migration.indexOf("-- Idempotent backfills cover rows");
+    expect(triggerStart).toBeGreaterThan(0);
+    expect(backfillStart).toBeGreaterThan(triggerStart);
+    database.exec(migration.slice(0, triggerStart));
+    insertCheckout(
+      writer,
+      "checkout_before_tracking_triggers",
+      "request_before_tracking_triggers",
+      "fingerprint_before_tracking_triggers"
+    );
+    insertWebhook(writer, "webhook_before_tracking_triggers");
+    insertGift(
+      writer,
+      "gift_before_tracking_triggers",
+      "pi_before_tracking_triggers",
+      "checkout_before_tracking_triggers"
+    );
+    insertAcknowledgment(
+      writer,
+      "ack_before_tracking_triggers",
+      "gift_before_tracking_triggers"
+    );
+    insertAnnualStatement(writer, "annual_before_tracking_triggers", "before@example.org");
+    database.exec(migration.slice(triggerStart, backfillStart));
+    insertCheckout(
+      writer,
+      "checkout_after_triggers_before_backfill",
+      "request_after_triggers_before_backfill",
+      "fingerprint_after_triggers_before_backfill"
+    );
+    insertWebhook(writer, "webhook_after_triggers_before_backfill");
+    insertGift(
+      writer,
+      "gift_after_triggers_before_backfill",
+      "pi_after_triggers_before_backfill",
+      "checkout_after_triggers_before_backfill"
+    );
+    insertAcknowledgment(
+      writer,
+      "ack_after_triggers_before_backfill",
+      "gift_after_triggers_before_backfill"
+    );
+    insertAnnualStatement(
+      writer,
+      "annual_after_triggers_before_backfill",
+      "after@example.org"
+    );
+    writer.prepare(
+      "UPDATE stripe_webhook_events SET id = ? WHERE id = ?"
+    ).run("webhook_before_tracking_triggers_updated", "webhook_before_tracking_triggers");
+    insertWebhook(writer, "webhook_deleted_before_backfill");
+    writer.prepare("DELETE FROM stripe_webhook_events WHERE id = ?")
+      .run("webhook_deleted_before_backfill");
+    database.exec(migration.slice(backfillStart));
+
+    const tracked = database.prepare(
+      `SELECT table_name || ':' || row_id AS tracked
+         FROM stripe_retention_generations
+        ORDER BY tracked`
+    ).all().map((row) => row.tracked);
+    expect(tracked).toEqual([
+      "stripe_acknowledgment_deliveries:ack_after_triggers_before_backfill",
+      "stripe_acknowledgment_deliveries:ack_before_tracking_triggers",
+      "stripe_annual_statement_deliveries:annual_after_triggers_before_backfill",
+      "stripe_annual_statement_deliveries:annual_before_tracking_triggers",
+      "stripe_checkout_sessions:checkout_after_triggers_before_backfill",
+      "stripe_checkout_sessions:checkout_before_tracking_triggers",
+      "stripe_gifts:gift_after_triggers_before_backfill",
+      "stripe_gifts:gift_before_tracking_triggers",
+      "stripe_webhook_events:webhook_after_triggers_before_backfill",
+      "stripe_webhook_events:webhook_before_tracking_triggers_updated"
+    ]);
   });
 
   it("enforces idempotency, lifecycle, and amount invariants in SQLite", () => {
@@ -269,4 +367,13 @@ function insertAcknowledgment(database: DatabaseSync, id: string, giftId: string
        id, gift_id, status, attempt_count
      ) VALUES (?, ?, 'PENDING', 0)`
   ).run(id, giftId);
+}
+
+function insertAnnualStatement(database: DatabaseSync, id: string, donorEmail: string): void {
+  database.prepare(
+    `INSERT INTO stripe_annual_statement_deliveries (
+       id, year, livemode, donor_key, donor_name, donor_email,
+       snapshot_hash, snapshot_json, revision, status
+     ) VALUES (?, 2025, 0, ?, 'Migration Donor', ?, ?, '{}', 1, 'PENDING')`
+  ).run(id, donorEmail, donorEmail, id.padEnd(64, "0").slice(0, 64));
 }

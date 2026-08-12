@@ -141,6 +141,7 @@ import {
   type RetentionCursor,
   type RetentionSnapshotTable,
   type RetentionTable,
+  type StripeRetentionCursor,
   type StripeRetentionFence
 } from "./repository/retentionReads";
 import {
@@ -286,7 +287,8 @@ export type {
   RetentionSnapshotTable,
   RetentionTable,
   StripeRetentionFence,
-  StripeRetentionSnapshotTable
+  StripeRetentionSnapshotTable,
+  StripeRetentionCursor
 } from "./repository/retentionReads";
 export type {
   DonorExplorerFilters,
@@ -1644,7 +1646,7 @@ export class Repository {
 
   async listAllRowsPaged(
     table: RetentionSnapshotTable,
-    cursor: RetentionCursor | null,
+    cursor: RetentionCursor | StripeRetentionCursor | null,
     limit = RETENTION_PAGE_SIZE,
     stripeFence?: StripeRetentionFence
   ): Promise<Array<Record<string, unknown>>> {

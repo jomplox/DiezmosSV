@@ -347,6 +347,16 @@ const allowedWranglerDocumentationCases = [
 ] as const;
 
 describe("remote provisioning documentation", () => {
+  it("mirrors migration 0036 and its non-archived Stripe ledger in both READMEs", () => {
+    for (const document of [readme, readmeEs]) {
+      expect(document).toContain("0001…0036");
+      expect(document).toContain("stripe_retention_generations");
+      expect(document).toContain("Stripe");
+    }
+    expect(readme).toContain("is not an archive payload");
+    expect(readmeEs).toContain("no forma parte del payload archivado");
+  });
+
   it.each(releaseSafetyReadmes)(
     "documents the target-bound private release contract in the %s",
     (_name, document, ownerOnlyReleaseFilePattern) => {

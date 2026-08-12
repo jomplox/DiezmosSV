@@ -2067,6 +2067,19 @@ export class Statement {
         });
       return { results: rows as T[] };
     }
+    if (this.sql.includes("ORDER BY retention_generation.generation ASC")) {
+      const table = retentionTableFor(this.db, this.sql) ?? [];
+      const afterGeneration = this.sql.includes("retention_generation.generation > ?")
+        ? Number(this.args[0])
+        : 0;
+      const limit = Number(this.args.at(-1) ?? 500);
+      return {
+        results: table
+          .map((row, index) => ({ ...row, __retention_generation: String(index + 1) }))
+          .filter((row) => Number(row.__retention_generation) > afterGeneration)
+          .slice(0, limit) as T[]
+      };
+    }
     const orderByMatch = this.sql.match(/ORDER BY (created_at|received_at) ASC, id ASC LIMIT \?/);
     if (orderByMatch) {
       const column = orderByMatch[1];
@@ -4256,6 +4269,7 @@ export function retentionTableFor(db: InMemoryD1, sql: string): Array<Record<str
   if (sql.includes("FROM contingency_periods")) return db.contingencies;
   if (sql.includes("FROM contingency_batch_lines")) return db.contingencyBatchLines;
   if (sql.includes("FROM contingency_batches")) return db.contingencyBatches;
+  if (sql.includes("JOIN stripe_webhook_events AS snapshot")) return db.stripeWebhookEvents;
   return null;
 }
 

@@ -202,8 +202,8 @@ If the local foreign-key check reports rows, use `ROLLBACK` instead of
 
 Use only the latest verified Stripe snapshots as a set. Do not mix individual
 Stripe tables from different monthly manifests: their foreign-key and delivery
-state may describe different provider chronology. Restore all row columns from
-migrations 0032–0035, without raw Stripe payloads or secrets, in this order:
+state may describe different provider chronology. Restore all business-row columns
+from migrations 0032–0036, without raw Stripe payloads or secrets, in this order:
 `stripe_checkout_sessions`, `stripe_webhook_events`, `stripe_gifts`, then
 `stripe_acknowledgment_deliveries` and
 `stripe_annual_statement_deliveries`. The refund source of truth is the
@@ -211,6 +211,11 @@ migrations 0032–0035, without raw Stripe payloads or secrets, in this order:
 invent a separate refund row. Insert annual revisions in ascending `revision`
 order so every `supersedes_delivery_id` already exists. Run
 `PRAGMA foreign_key_check` before accepting the restore.
+
+`stripe_retention_generations` is internal, trigger-maintained restore metadata,
+not an archived business table. Do not manufacture or import a ledger NDJSON file:
+the migration-0036 triggers rebuild its rows automatically while the five Stripe
+business tables above are restored.
 
 Stripe snapshots are intended for an empty loss-recovery database. If restoring
 into a database with existing Stripe rows, compare rows by primary/unique key
