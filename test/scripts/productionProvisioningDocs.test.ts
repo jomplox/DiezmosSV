@@ -347,10 +347,11 @@ const allowedWranglerDocumentationCases = [
 ] as const;
 
 describe("remote provisioning documentation", () => {
-  it("mirrors migration 0036 and its non-archived Stripe ledger in both READMEs", () => {
+  it("mirrors migration 0038 and its non-archived Stripe ledgers in both READMEs", () => {
     for (const document of [readme, readmeEs]) {
-      expect(document).toContain("0001…0036");
+      expect(document).toContain("0001…0038");
       expect(document).toContain("stripe_retention_generations");
+      expect(document).toContain("stripe_invoice_settlement_retention_generations");
       expect(document).toContain("Stripe");
     }
     expect(readme).toContain("is not an archive payload");

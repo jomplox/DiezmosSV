@@ -37,10 +37,13 @@ import {
 import {
   claimDonationDatosRateLimit as claimDonationDatosRateLimitRepository,
   claimDonationIntentRateLimit as claimDonationIntentRateLimitRepository,
+  claimStripeProviderRecoveryRead as claimStripeProviderRecoveryReadRepository,
   claimLoginAttempt as claimLoginAttemptRepository,
   claimPasswordResetBudgets as claimPasswordResetBudgetsRepository,
   deleteExpiredLoginRateLimits as deleteExpiredLoginRateLimitsRepository,
-  deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository
+  deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository,
+  finalizeStripeProviderRecoveryRead as finalizeStripeProviderRecoveryReadRepository,
+  releaseUnusedDonationIntentRateLimitClaim as releaseUnusedDonationIntentRateLimitClaimRepository
 } from "./repository/rateLimits";
 import {
   INTENT_EXPIRY_SWEEP_LIMIT as DONATION_INTENT_EXPIRY_SWEEP_LIMIT,
@@ -71,6 +74,8 @@ import {
   failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
   finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
   finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
+  getStripeAcknowledgmentEvidenceSource as getStripeAcknowledgmentEvidenceSourceRepository,
+  getStripeAcknowledgmentForGiftEvidence as getStripeAcknowledgmentForGiftEvidenceRepository,
   getLatestStripeWebhookHealth as getLatestStripeWebhookHealthRepository,
   hasRecentStripeWebhookSecretVerification as hasRecentStripeWebhookSecretVerificationRepository,
   getStripeCheckoutById as getStripeCheckoutByIdRepository,
@@ -78,13 +83,20 @@ import {
   getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
   getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
   markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
+  markStripeInvoiceSettlementRecorded as markStripeInvoiceSettlementRecordedRepository,
+  listStripeAcknowledgmentReconciliation as listStripeAcknowledgmentReconciliationRepository,
   reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
+  reconcileStripeAcknowledgment as reconcileStripeAcknowledgmentRepository,
   recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
   reserveStripeCheckout as reserveStripeCheckoutRepository,
+  saveStripeAcknowledgmentSnapshot as saveStripeAcknowledgmentSnapshotRepository,
+  stageStripeInvoicePaid as stageStripeInvoicePaidRepository,
+  stageStripeInvoicePayment as stageStripeInvoicePaymentRepository,
   updateStripeCheckoutFromEvent as updateStripeCheckoutFromEventRepository,
   updateStripeCheckoutFromInvoice as updateStripeCheckoutFromInvoiceRepository,
   updateStripeSubscriptionStatus as updateStripeSubscriptionStatusRepository,
   type StripeAcknowledgmentClaim,
+  type StripeAcknowledgmentReconciliationRecord,
   type StripeCheckoutRecord,
   type StripeGiftRecord,
   type StripeWebhookHealthRecord
@@ -393,7 +405,7 @@ export class Repository {
 
   async recordStripeGiftAndAcknowledgment(
     input: Parameters<typeof recordStripeGiftAndAcknowledgmentRepository>[1]
-  ): Promise<{ inserted: boolean; record: StripeGiftRecord }> {
+  ): Promise<{ inserted: boolean; record: StripeGiftRecord; acknowledgmentId: string }> {
     return recordStripeGiftAndAcknowledgmentRepository(this.db, input);
   }
 
@@ -401,6 +413,20 @@ export class Repository {
     input: Parameters<typeof applyStripeRefundRepository>[1]
   ): Promise<StripeGiftRecord | null> {
     return applyStripeRefundRepository(this.db, input);
+  }
+
+  async stageStripeInvoicePaid(input: Parameters<typeof stageStripeInvoicePaidRepository>[1]) {
+    return stageStripeInvoicePaidRepository(this.db, input);
+  }
+
+  async stageStripeInvoicePayment(input: Parameters<typeof stageStripeInvoicePaymentRepository>[1]) {
+    return stageStripeInvoicePaymentRepository(this.db, input);
+  }
+
+  async markStripeInvoiceSettlementRecorded(
+    input: Parameters<typeof markStripeInvoiceSettlementRecordedRepository>[1]
+  ): Promise<void> {
+    return markStripeInvoiceSettlementRecordedRepository(this.db, input);
   }
 
   async getStripeGiftBySourceId(sourceId: string): Promise<StripeGiftRecord | null> {
@@ -429,6 +455,35 @@ export class Repository {
     input: Parameters<typeof finalizeStripeAcknowledgmentRepository>[1]
   ): Promise<boolean> {
     return finalizeStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async getStripeAcknowledgmentEvidenceSource(
+    id: string
+  ): ReturnType<typeof getStripeAcknowledgmentEvidenceSourceRepository> {
+    return getStripeAcknowledgmentEvidenceSourceRepository(this.db, id);
+  }
+
+  async getStripeAcknowledgmentForGiftEvidence(
+    giftId: string,
+    refundedAmountCents: number
+  ): Promise<{ id: string } | null> {
+    return getStripeAcknowledgmentForGiftEvidenceRepository(this.db, giftId, refundedAmountCents);
+  }
+
+  async saveStripeAcknowledgmentSnapshot(
+    input: Parameters<typeof saveStripeAcknowledgmentSnapshotRepository>[1]
+  ): Promise<boolean> {
+    return saveStripeAcknowledgmentSnapshotRepository(this.db, input);
+  }
+
+  async listStripeAcknowledgmentReconciliation(): Promise<StripeAcknowledgmentReconciliationRecord[]> {
+    return listStripeAcknowledgmentReconciliationRepository(this.db);
+  }
+
+  async reconcileStripeAcknowledgment(
+    input: Parameters<typeof reconcileStripeAcknowledgmentRepository>[1]
+  ): Promise<boolean> {
+    return reconcileStripeAcknowledgmentRepository(this.db, input);
   }
 
   async listStripeAnnualStatementDonorTargets(
@@ -1490,6 +1545,22 @@ export class Repository {
       expiresAt,
       limit
     );
+  }
+
+  async releaseUnusedDonationIntentRateLimitClaim(id: string): Promise<void> {
+    return releaseUnusedDonationIntentRateLimitClaimRepository(this.db, id);
+  }
+
+  async claimStripeProviderRecoveryRead(
+    input: Parameters<typeof claimStripeProviderRecoveryReadRepository>[1]
+  ) {
+    return claimStripeProviderRecoveryReadRepository(this.db, input);
+  }
+
+  async finalizeStripeProviderRecoveryRead(
+    input: Parameters<typeof finalizeStripeProviderRecoveryReadRepository>[1]
+  ): Promise<void> {
+    return finalizeStripeProviderRecoveryReadRepository(this.db, input);
   }
 
   async claimDonationDatosRateLimit(

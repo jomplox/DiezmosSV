@@ -67,12 +67,33 @@ export interface StripeAcknowledgmentEmailInput {
   brandColor?: string;
   supportEmail?: string;
   logoUrl?: string | null;
+  kind?: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+  refundedAmountLabel?: string;
+  netAmountLabel?: string;
 }
 
 export function stripeAcknowledgmentEmailHtml(input: StripeAcknowledgmentEmailInput): string {
+  const kind = input.kind ?? "ORIGINAL";
+  const title = kind === "PARTIAL_REFUND"
+    ? "Constancia corregida de donación en EE. UU."
+    : kind === "FULL_REFUND"
+      ? "Constancia revocada de donación en EE. UU."
+      : "Constancia de donación en EE. UU.";
+  const correction = kind === "PARTIAL_REFUND"
+    ? note("Esta constancia corregida reemplaza la versión anterior para esta donación.")
+    : kind === "FULL_REFUND"
+      ? note("Se registró un reembolso total. La constancia anterior queda revocada.")
+      : "";
+  const amountRows: Array<[string, string]> = kind === "ORIGINAL"
+    ? [["Monto", input.amountLabel]]
+    : [
+        ["Monto original", input.amountLabel],
+        ["Reembolso acumulado", input.refundedAmountLabel ?? ""],
+        ["Monto neto reconocido", input.netAmountLabel ?? ""]
+      ];
   return emailDocument(
     input.organizationName,
-    "Constancia de donación en EE. UU.",
+    title,
     input.brandColor ?? DEFAULT_BRAND_COLOR,
     input.supportEmail,
     input.logoUrl,
@@ -81,11 +102,12 @@ export function stripeAcknowledgmentEmailHtml(input: StripeAcknowledgmentEmailIn
         `Estimado(a) ${input.donorName}:\n\n` +
         `Gracias por su donación voluntaria. Conserve este correo como constancia de su entrega.`
       ),
+      correction,
       detailsCard([
         ["Organización legal", input.legalName],
         ["EIN", input.ein],
         ["Fecha", input.settledDateLabel],
-        ["Monto", input.amountLabel],
+        ...amountRows,
         ["Tipo", input.giftTypeLabel],
         ["Frecuencia", input.frequencyLabel]
       ]),

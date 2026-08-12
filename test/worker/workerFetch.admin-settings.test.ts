@@ -240,6 +240,67 @@ describe("Stripe owner settings", () => {
     });
   });
 
+  it("exposes sanitized acknowledgment reconciliation and keeps resolution owner-only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.stripeAcknowledgmentDeliveries.push({
+      id: "stripe_ack_review_fixture",
+      revision: 2,
+      kind: "PARTIAL_REFUND",
+      status: "REVIEW",
+      amount_cents: 5000,
+      refunded_amount_cents: 1000,
+      failure_code: "EMAIL_DISPATCH_UNKNOWN",
+      created_at: "2026-08-11T10:00:00.000Z",
+      updated_at: "2026-08-11T10:01:00.000Z",
+      donor_name: "Private Donor",
+      donor_email: "private-donor@example.org"
+    });
+
+    const list = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments",
+      { headers: { Authorization: "Bearer test-token" } }
+    ), env(db));
+    expect(list.status).toBe(200);
+    const body = await list.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
+      acknowledgments: [{
+        id: "stripe_ack_review_fixture",
+        revision: 2,
+        kind: "PARTIAL_REFUND",
+        status: "REVIEW",
+        grossAmountCents: 5000,
+        refundedAmountCents: 1000,
+        netAmountCents: 4000,
+        failureCode: "EMAIL_DISPATCH_UNKNOWN"
+      }]
+    });
+    expect(JSON.stringify(body)).not.toContain("Private Donor");
+    expect(JSON.stringify(body)).not.toContain("private-donor@example.org");
+
+    const resolved = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments/stripe_ack_review_fixture/reconcile",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ resolution: "CONFIRMED_NOT_SENT" })
+      }
+    ), env(db));
+    expect(resolved.status).toBe(200);
+    expect(db.stripeAcknowledgmentDeliveries[0]).toMatchObject({ status: "FAILED", retry_safe: 1 });
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "STRIPE_ACKNOWLEDGMENT_RECONCILED",
+      entity_id: "stripe_ack_review_fixture"
+    }));
+
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const forbidden = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments",
+      { headers: { Authorization: "Bearer test-token" } }
+    ), env(db));
+    expect(forbidden.status).toBe(403);
+  });
+
   it("rejects invalid replacements before calling Cloudflare", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
@@ -370,6 +431,53 @@ describe("Stripe owner settings", () => {
         "STRIPE_WEBHOOK_SECRET_PROMOTED",
         "STRIPE_WEBHOOK_SECRET_CANCELED"
       ]));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns remote mutation success with an audit-degraded signal when the value-free audit fails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.failNextAuditAction = "STRIPE_WEBHOOK_SECRET_PROMOTED";
+    db.stripeWebhookEvents.push({
+      id: "evt_verified_next_audit_degraded",
+      event_type: "checkout.session.completed",
+      livemode: 0,
+      status: "PROCESSED",
+      verified_secret_slot: "NEXT",
+      verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+      received_at: new Date().toISOString()
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await worker.fetch(new Request(
+        "https://example.org/api/settings/stripe/webhook-secret/promote",
+        { method: "POST", headers: { Authorization: "Bearer test-token" } }
+      ), env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_API_TOKEN: "writer-token",
+        CLOUDFLARE_SCRIPT_NAME: "worker",
+        STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+        STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private"
+      }));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        updated: ["STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_NEXT"],
+        deleted: [],
+        audit: "degraded"
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({
+        event: "stripe_webhook_secret_audit_failed"
+      }));
     } finally {
       vi.unstubAllGlobals();
     }

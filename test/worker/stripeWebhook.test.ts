@@ -319,6 +319,20 @@ describe("Stripe signed webhooks", () => {
       subscription_status: "ACTIVE"
     });
     expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())
+      .toEqual([]);
+
+    const invoicePayment = stripeEvent(
+      "evt_invoice_payment",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_initial_fixture",
+        invoiceId: "in_initial_fixture",
+        amountCents: 2500,
+        paymentIntentId: "pi_monthly_fixture"
+      })
+    );
+    expect((await sendSignedWebhook(workerEnv, invoicePayment)).status).toBe(200);
+    expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())
       .toEqual([{ source_id: "in_initial_fixture" }]);
 
     expect((await sendSignedWebhook(workerEnv, initialInvoice)).status).toBe(200);
@@ -329,6 +343,16 @@ describe("Stripe signed webhooks", () => {
       amountCents: 2500
     }));
     expect((await sendSignedWebhook(workerEnv, renewal)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_payment_renewal",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_renewal_fixture",
+        invoiceId: "in_renewal_fixture",
+        amountCents: 2500,
+        paymentIntentId: "pi_monthly_renewal_fixture"
+      })
+    ))).status).toBe(200);
     expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())
       .toEqual([
         { source_id: "in_initial_fixture" },
@@ -336,19 +360,6 @@ describe("Stripe signed webhooks", () => {
       ]);
     expect(count(database, "stripe_acknowledgment_deliveries")).toBe(2);
 
-    const invoicePayment = stripeEvent("evt_invoice_payment", "invoice_payment.paid", {
-      id: "inpay_initial_fixture",
-      object: "invoice_payment",
-      invoice: "in_initial_fixture",
-      livemode: false,
-      amount_paid: 2500,
-      currency: "usd",
-      payment: {
-        type: "payment_intent",
-        payment_intent: "pi_monthly_fixture"
-      },
-      status: "paid"
-    });
     expect((await sendSignedWebhook(workerEnv, invoicePayment)).status).toBe(200);
     expect(database.prepare(
       "SELECT stripe_payment_intent_id FROM stripe_gifts WHERE source_id = 'in_initial_fixture'"
@@ -393,8 +404,103 @@ describe("Stripe signed webhooks", () => {
       amountCents: 2500
     }));
     expect((await sendSignedWebhook(workerEnv, delayedPaidInvoice)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_payment_after_cancel",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_after_cancel_fixture",
+        invoiceId: "in_paid_before_cancel_fixture",
+        amountCents: 2500,
+        paymentIntentId: "pi_after_cancel_fixture"
+      })
+    ))).status).toBe(200);
     expect(checkoutRow(database, checkout.sessionId).subscription_status).toBe("CANCELED");
     expect(count(database, "stripe_gifts")).toBe(3);
+  });
+
+  it("requires matching paid InvoicePayment evidence and converges in either webhook order", async () => {
+    const invoiceFirstCheckout = await createCheckout(workerEnv, {
+      requestId: "8a9f2baa-c8f0-48f7-8d20-b18f5bda34d0",
+      amount: 25,
+      frequency: "monthly"
+    });
+    const invoiceFirstRow = checkoutRow(database, invoiceFirstCheckout.sessionId);
+    const invoiceFirst = stripeEvent("evt_invoice_proof_first", "invoice.paid", invoice({
+      id: "in_proof_first",
+      checkoutId: invoiceFirstRow.id,
+      subscriptionId: "sub_proof_first",
+      amountCents: 2500
+    }));
+
+    expect((await sendSignedWebhook(workerEnv, invoiceFirst)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, invoiceFirst)).status).toBe(200);
+    expect(database.prepare("SELECT source_id FROM stripe_gifts WHERE source_id = 'in_proof_first'").get())
+      .toBeUndefined();
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(0);
+
+    const outOfBand = stripeEvent("evt_invoice_payment_record", "invoice_payment.paid", {
+      id: "inpay_payment_record",
+      object: "invoice_payment",
+      invoice: "in_proof_first",
+      livemode: false,
+      amount_paid: 2500,
+      currency: "usd",
+      payment: { type: "payment_record", payment_record: "pyr_external" },
+      status: "paid"
+    });
+    expect((await sendSignedWebhook(workerEnv, outOfBand)).status).toBe(200);
+    expect(database.prepare("SELECT source_id FROM stripe_gifts WHERE source_id = 'in_proof_first'").get())
+      .toBeUndefined();
+
+    const paidProof = stripeEvent("evt_invoice_payment_proof", "invoice_payment.paid", {
+      id: "inpay_proof_first",
+      object: "invoice_payment",
+      invoice: "in_proof_first",
+      livemode: false,
+      amount_paid: 2500,
+      currency: "usd",
+      payment: { type: "payment_intent", payment_intent: "pi_proof_first" },
+      status: "paid"
+    });
+    expect((await sendSignedWebhook(workerEnv, paidProof)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, paidProof)).status).toBe(200);
+    expect(database.prepare(
+      "SELECT source_id, stripe_payment_intent_id FROM stripe_gifts WHERE source_id = 'in_proof_first'"
+    ).get()).toEqual({ source_id: "in_proof_first", stripe_payment_intent_id: "pi_proof_first" });
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(1);
+
+    const proofFirstCheckout = await createCheckout(workerEnv, {
+      requestId: "6bf04041-b6c6-472d-bd03-0217946d8fb7",
+      amount: 30,
+      frequency: "monthly"
+    });
+    const proofFirstRow = checkoutRow(database, proofFirstCheckout.sessionId);
+    const proofFirst = stripeEvent("evt_payment_proof_first", "invoice_payment.paid", {
+      id: "inpay_proof_before_invoice",
+      object: "invoice_payment",
+      invoice: "in_proof_after",
+      livemode: false,
+      amount_paid: 3000,
+      currency: "usd",
+      payment: { type: "payment_intent", payment_intent: "pi_proof_after" },
+      status: "paid"
+    });
+    expect((await sendSignedWebhook(workerEnv, proofFirst)).status).toBe(200);
+    expect(database.prepare("SELECT source_id FROM stripe_gifts WHERE source_id = 'in_proof_after'").get())
+      .toBeUndefined();
+
+    const laterInvoice = stripeEvent("evt_invoice_after_proof", "invoice.paid", invoice({
+      id: "in_proof_after",
+      checkoutId: proofFirstRow.id,
+      subscriptionId: "sub_proof_after",
+      amountCents: 3000
+    }));
+    expect((await sendSignedWebhook(workerEnv, laterInvoice)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, laterInvoice)).status).toBe(200);
+    expect(database.prepare(
+      "SELECT source_id, stripe_payment_intent_id FROM stripe_gifts WHERE source_id = 'in_proof_after'"
+    ).get()).toEqual({ source_id: "in_proof_after", stripe_payment_intent_id: "pi_proof_after" });
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(2);
   });
 
   it("handles asynchronous settlement, expiration, and refunds without duplicate gifts", async () => {
@@ -585,6 +691,16 @@ describe("Stripe signed webhooks", () => {
       subscription_event_id: "evt_invoice_failed_newer"
     });
     expect((await sendSignedWebhook(workerEnv, olderPaid)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_payment_paid_older",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_paid_older",
+        invoiceId: "in_paid_older",
+        amountCents: 3000,
+        paymentIntentId: "pi_paid_older"
+      })
+    ))).status).toBe(200);
     expect(checkoutRow(database, checkout.sessionId).subscription_status).toBe("PAST_DUE");
     expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())
       .toEqual([{ source_id: "in_paid_older" }]);
@@ -792,6 +908,27 @@ function invoice(input: {
     status_transitions: {
       paid_at: paid ? Math.floor(Date.now() / 1000) : null
     }
+  };
+}
+
+function invoicePaymentProof(input: {
+  id: string;
+  invoiceId: string;
+  amountCents: number;
+  paymentIntentId: string;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    object: "invoice_payment",
+    invoice: input.invoiceId,
+    livemode: false,
+    amount_paid: input.amountCents,
+    currency: "usd",
+    payment: {
+      type: "payment_intent",
+      payment_intent: input.paymentIntentId
+    },
+    status: "paid"
   };
 }
 

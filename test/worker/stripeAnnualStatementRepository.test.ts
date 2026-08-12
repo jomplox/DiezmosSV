@@ -457,6 +457,111 @@ describe("Stripe annual statement repository", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries").get())
       .toEqual({ count: 1 });
   });
+
+  it("allocates a new revision when a prior hash returns after an intervening SENT correction", async () => {
+    const firstA = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_a_failed",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: '{"version":2,"state":"A"}'
+    }));
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: firstA.id,
+      claimId: "claim_a_failed",
+      now: "2026-01-10T11:01:00.000Z"
+    })).not.toBeNull();
+    expect(await finalizeStripeAnnualStatementDelivery(db, {
+      id: firstA.id,
+      claimId: "claim_a_failed",
+      outcome: "FAILED",
+      failureCode: "confirmed_not_sent",
+      retrySafe: false,
+      now: "2026-01-10T11:02:00.000Z"
+    })).toBe(true);
+
+    const sentB = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_b_sent",
+      snapshotHash: "b".repeat(64),
+      snapshotJson: '{"version":2,"state":"B"}'
+    }));
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: sentB.id,
+      claimId: "claim_b_sent",
+      now: "2026-01-10T11:03:00.000Z"
+    })).not.toBeNull();
+    database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET dispatch_started_at = ? WHERE id = ?"
+    ).run("2026-01-10T11:03:01.000Z", sentB.id);
+    expect(await finalizeStripeAnnualStatementDelivery(db, {
+      id: sentB.id,
+      claimId: "claim_b_sent",
+      outcome: "SENT",
+      providerIdHash: `sha256:${"c".repeat(64)}`,
+      failureCode: null,
+      retrySafe: false,
+      now: "2026-01-10T11:03:02.000Z"
+    })).toBe(true);
+
+    const returnedA = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_a_returned",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: '{"version":2,"state":"A"}'
+    }));
+    expect(returnedA).toMatchObject({
+      id: "delivery_a_returned",
+      revision: 3,
+      supersedes_delivery_id: sentB.id,
+      status: "PENDING"
+    });
+  });
+
+  it("atomically supersedes stale pre-provider work but preserves a non-stale concurrent fence", async () => {
+    const stale = await reserveStripeAnnualStatementDelivery(db, {
+      ...reservation({ id: "delivery_stale_a", snapshotHash: "d".repeat(64) }),
+      now: "2026-01-10T11:00:00.000Z"
+    });
+    const corrected = await reserveStripeAnnualStatementDelivery(db, {
+      ...reservation({ id: "delivery_stale_b", snapshotHash: "e".repeat(64) }),
+      now: "2026-01-10T11:06:00.000Z"
+    });
+    expect(corrected).toMatchObject({ revision: 2, status: "PENDING" });
+    expect(database.prepare(
+      "SELECT status, failure_code FROM stripe_annual_statement_deliveries WHERE id = ?"
+    ).get(stale.id)).toEqual({ status: "FAILED", failure_code: "superseded_stale_pre_dispatch" });
+
+    await expect(reserveStripeAnnualStatementDelivery(db, {
+      ...reservation({ id: "delivery_non_stale", snapshotHash: "f".repeat(64) }),
+      now: "2026-01-10T11:07:00.000Z"
+    })).rejects.toThrow(/active delivery/i);
+  });
+
+  it("uses an indexed year-range access path instead of scanning all Stripe gifts", () => {
+    for (let index = 0; index < 250; index += 1) {
+      seedGift(database, {
+        id: `historic_${index}`,
+        donorEmail: `historic${index}@example.org`,
+        settledAt: "2020-06-01T12:00:00.000Z"
+      });
+    }
+    seedGift(database, {
+      id: "in_range_index_fixture",
+      donorEmail: "indexed@example.org",
+      settledAt: "2025-06-01T12:00:00.000Z"
+    });
+    database.exec("ANALYZE");
+    const plan = database.prepare(
+      `EXPLAIN QUERY PLAN
+       SELECT gift.id
+         FROM stripe_gifts AS gift
+         JOIN stripe_checkout_sessions AS checkout ON checkout.id = gift.checkout_id
+        WHERE gift.settled_at >= ? AND gift.settled_at < ?
+          AND checkout.livemode = 0
+          AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
+        ORDER BY gift.settled_at, gift.id
+        LIMIT 51`
+    ).all(RANGE_2025_NEW_YORK.startIso, RANGE_2025_NEW_YORK.endIso) as Array<{ detail: string }>;
+    expect(plan.map((row) => row.detail).join("\n"))
+      .toMatch(/SEARCH gift USING INDEX idx_stripe_gifts_annual_range/i);
+  });
 });
 
 function reservation(overrides: { id: string; snapshotHash: string; snapshotJson?: string }) {

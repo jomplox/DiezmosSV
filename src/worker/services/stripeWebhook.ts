@@ -1,7 +1,9 @@
 import type Stripe from "stripe";
 import { isValidEmail } from "../../shared/email";
 import type { Repository, StripeCheckoutRecord } from "../storage/repository";
+import type { Env } from "../types";
 import { newId } from "../utils/ids";
+import { snapshotStripeAcknowledgmentEvidence } from "./stripeAcknowledgment";
 
 export class StripeWebhookEventError extends Error {
   constructor(readonly code: string) {
@@ -13,29 +15,30 @@ export class StripeWebhookEventError extends Error {
 export async function processStripeWebhookEvent(
   repo: Repository,
   event: Stripe.Event,
-  now: string
+  now: string,
+  env?: Env
 ): Promise<void> {
   switch (event.type) {
     case "checkout.session.completed":
     case "checkout.session.async_payment_succeeded":
     case "checkout.session.async_payment_failed":
     case "checkout.session.expired":
-      await processCheckoutSessionEvent(repo, event, now);
+      await processCheckoutSessionEvent(repo, event, now, env);
       return;
     case "invoice.paid":
-      await processInvoicePaidEvent(repo, event, now);
+      await processInvoicePaidEvent(repo, event, now, env);
       return;
     case "invoice.payment_failed":
       await processInvoiceFailedEvent(repo, event, now);
       return;
     case "invoice_payment.paid":
-      await processInvoicePaymentPaidEvent(repo, event, now);
+      await processInvoicePaymentPaidEvent(repo, event, now, env);
       return;
     case "customer.subscription.deleted":
       await processSubscriptionDeletedEvent(repo, event, now);
       return;
     case "charge.refunded":
-      await processChargeRefundedEvent(repo, event, now);
+      await processChargeRefundedEvent(repo, event, now, env);
       return;
     default:
       return;
@@ -45,7 +48,8 @@ export async function processStripeWebhookEvent(
 async function processCheckoutSessionEvent(
   repo: Repository,
   event: Stripe.Event,
-  now: string
+  now: string,
+  env?: Env
 ): Promise<void> {
   const session = record(event.data.object);
   requireObjectType(session, "checkout.session");
@@ -122,7 +126,7 @@ async function processCheckoutSessionEvent(
     && paymentStatus === "PAID"
   ) {
     if (!paymentIntentId) throw new StripeWebhookEventError("payment_intent_missing");
-    await repo.recordStripeGiftAndAcknowledgment({
+    const recorded = await repo.recordStripeGiftAndAcknowledgment({
       giftId: newId("stripe_gift"),
       acknowledgmentId: newId("stripe_ack"),
       sourceType: "PAYMENT_INTENT",
@@ -139,13 +143,17 @@ async function processCheckoutSessionEvent(
       settledAt: completedAt ?? eventTime(event),
       now
     });
+    if (env) {
+      await snapshotStripeAcknowledgmentEvidence(env, repo, recorded.acknowledgmentId, now);
+    }
   }
 }
 
 async function processInvoicePaidEvent(
   repo: Repository,
   event: Stripe.Event,
-  now: string
+  now: string,
+  env?: Env
 ): Promise<void> {
   const invoice = record(event.data.object);
   requireObjectType(invoice, "invoice");
@@ -177,24 +185,19 @@ async function processInvoicePaidEvent(
     now
   });
   if (!updated) throw new StripeWebhookEventError("invoice_checkout_conflict");
-  const paymentIntentId = invoicePaymentIntentId(invoice);
-  await repo.recordStripeGiftAndAcknowledgment({
-    giftId: newId("stripe_gift"),
-    acknowledgmentId: newId("stripe_ack"),
-    sourceType: "INVOICE",
-    sourceId: invoiceId,
+  const settlement = await repo.stageStripeInvoicePaid({
+    invoiceId,
     checkoutId: updated.id,
-    stripePaymentIntentId: paymentIntentId,
-    stripeInvoiceId: invoiceId,
-    stripeSubscriptionId: context.subscriptionId,
-    frequency: "MONTHLY",
-    giftType: requiredCheckoutGiftType(updated),
+    subscriptionId: context.subscriptionId,
     amountCents: amountPaid,
     donorName: updated.donor_name,
     donorEmail: updated.donor_email,
     settledAt,
+    livemode: event.livemode,
+    eventId: providerEventId(event),
     now
   });
+  await recordReadyInvoiceSettlement(repo, settlement, updated, now, env);
 }
 
 async function processInvoiceFailedEvent(
@@ -231,35 +234,95 @@ async function processInvoiceFailedEvent(
 async function processInvoicePaymentPaidEvent(
   repo: Repository,
   event: Stripe.Event,
-  now: string
+  now: string,
+  env?: Env
 ): Promise<void> {
   const invoicePayment = record(event.data.object);
   requireObjectType(invoicePayment, "invoice_payment");
   const invoiceId = stripeId(invoicePayment.invoice, "in_");
   const payment = optionalRecord(invoicePayment.payment);
   if (payment?.type !== "payment_intent") {
-    throw new StripeWebhookEventError("invoice_payment_type_invalid");
+    return;
   }
+  if (invoicePayment.status !== "paid") return;
+  const invoicePaymentId = stripeId(invoicePayment.id, "inpay_");
   const paymentIntentId = stripeId(payment.payment_intent, "pi_");
-  const gift = await repo.getStripeGiftBySourceId(invoiceId);
-  if (!gift || gift.source_type !== "INVOICE" || !gift.checkout_id) {
-    throw new StripeWebhookEventError("invoice_gift_not_found");
+  const amountPaid = positiveInteger(invoicePayment.amount_paid, "invoice_payment_amount_invalid");
+  if (invoicePayment.currency !== "usd") {
+    throw new StripeWebhookEventError("invoice_payment_amount_mismatch");
   }
-  const checkout = await repo.getStripeCheckoutById(gift.checkout_id);
-  if (!checkout) throw new StripeWebhookEventError("monthly_checkout_not_found");
+  const settlement = await repo.stageStripeInvoicePayment({
+    invoiceId,
+    invoicePaymentId,
+    paymentIntentId,
+    amountCents: amountPaid,
+    livemode: event.livemode,
+    eventId: providerEventId(event),
+    now
+  });
+  if (!settlement.checkout_id) return;
+  const checkout = await repo.getStripeCheckoutById(settlement.checkout_id);
+  if (!checkout || checkout.frequency !== "MONTHLY") {
+    throw new StripeWebhookEventError("monthly_checkout_not_found");
+  }
   assertEventMode(checkout, event.livemode);
+  await recordReadyInvoiceSettlement(repo, settlement, checkout, now, env);
+}
+
+async function recordReadyInvoiceSettlement(
+  repo: Repository,
+  settlement: Awaited<ReturnType<Repository["stageStripeInvoicePaid"]>>,
+  checkout: StripeCheckoutRecord,
+  now: string,
+  env?: Env
+): Promise<void> {
+  if (settlement.status === "RECORDED") return;
   if (
-    invoicePayment.currency !== "usd"
-    || invoicePayment.amount_paid !== gift.amount_cents
+    !settlement.checkout_id
+    || !settlement.subscription_id
+    || settlement.amount_cents === null
+    || !settlement.settled_at
+    || settlement.invoice_livemode === null
+    || !settlement.invoice_payment_id
+    || !settlement.payment_intent_id
+    || settlement.payment_amount_cents === null
+    || settlement.payment_livemode === null
+  ) {
+    return;
+  }
+  if (
+    settlement.checkout_id !== checkout.id
+    || settlement.amount_cents !== settlement.payment_amount_cents
+    || settlement.currency !== settlement.payment_currency
+    || settlement.invoice_livemode !== settlement.payment_livemode
+    || settlement.invoice_livemode !== checkout.livemode
   ) {
     throw new StripeWebhookEventError("invoice_payment_amount_mismatch");
   }
-  if (!await repo.attachStripeInvoicePaymentIntent({
-    stripeInvoiceId: invoiceId,
-    stripePaymentIntentId: paymentIntentId,
+  const recorded = await repo.recordStripeGiftAndAcknowledgment({
+    giftId: settlement.gift_id ?? newId("stripe_gift"),
+    acknowledgmentId: newId("stripe_ack"),
+    sourceType: "INVOICE",
+    sourceId: settlement.invoice_id,
+    checkoutId: checkout.id,
+    stripePaymentIntentId: settlement.payment_intent_id,
+    stripeInvoiceId: settlement.invoice_id,
+    stripeSubscriptionId: settlement.subscription_id,
+    frequency: "MONTHLY",
+    giftType: requiredCheckoutGiftType(checkout),
+    amountCents: settlement.amount_cents,
+    donorName: settlement.donor_name,
+    donorEmail: settlement.donor_email,
+    settledAt: settlement.settled_at,
     now
-  })) {
-    throw new StripeWebhookEventError("invoice_payment_conflict");
+  });
+  await repo.markStripeInvoiceSettlementRecorded({
+    invoiceId: settlement.invoice_id,
+    giftId: recorded.record.id,
+    now
+  });
+  if (env) {
+    await snapshotStripeAcknowledgmentEvidence(env, repo, recorded.acknowledgmentId, now);
   }
 }
 
@@ -303,7 +366,8 @@ async function processSubscriptionDeletedEvent(
 async function processChargeRefundedEvent(
   repo: Repository,
   event: Stripe.Event,
-  now: string
+  now: string,
+  env?: Env
 ): Promise<void> {
   const charge = record(event.data.object);
   requireObjectType(charge, "charge");
@@ -316,6 +380,14 @@ async function processChargeRefundedEvent(
     now
   });
   if (!gift) throw new StripeWebhookEventError("refund_gift_not_found");
+  if (env && gift.refunded_amount_cents > 0) {
+    const correction = await repo.getStripeAcknowledgmentForGiftEvidence(
+      gift.id,
+      gift.refunded_amount_cents
+    );
+    if (!correction) throw new StripeWebhookEventError("refund_acknowledgment_missing");
+    await snapshotStripeAcknowledgmentEvidence(env, repo, correction.id, now);
+  }
 }
 
 function assertCheckoutIdentity(
@@ -397,17 +469,6 @@ function assertMonthlyMetadata(
   if (context.giftType !== expectedGiftType) {
     throw new StripeWebhookEventError("invoice_metadata_gift_type_mismatch");
   }
-}
-
-function invoicePaymentIntentId(invoice: Record<string, unknown>): string | null {
-  const payments = optionalRecord(invoice.payments);
-  const data = Array.isArray(payments?.data) ? payments.data : [];
-  for (const entry of data) {
-    const payment = optionalRecord(optionalRecord(entry)?.payment);
-    const id = optionalStripeId(payment?.payment_intent, "pi_");
-    if (id) return id;
-  }
-  return null;
 }
 
 function eventTime(event: Stripe.Event): string {

@@ -518,6 +518,86 @@ describe("Stripe public donation routes", () => {
     });
   });
 
+  it("bounds OPEN replay provider reads and fences concurrent recovery for one request identity", async () => {
+    let providerSession: Record<string, unknown> | null = null;
+    let retrieveCalls = 0;
+    let releaseRetrieve!: () => void;
+    let markRetrieveStarted!: () => void;
+    let holdRetrieve = false;
+    const retrieveStarted = new Promise<void>((resolve) => { markRetrieveStarted = resolve; });
+    const retrieveBarrier = new Promise<void>((resolve) => { releaseRetrieve = resolve; });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname === "/v1/checkout/sessions") {
+        providerSession = stripeCheckoutObject(new URLSearchParams(await request.text()));
+        return stripeJson(providerSession);
+      }
+      if (request.method === "GET" && url.pathname.startsWith("/v1/checkout/sessions/")) {
+        retrieveCalls += 1;
+        if (holdRetrieve) {
+          markRetrieveStarted();
+          await retrieveBarrier;
+        }
+        return stripeJson(providerSession);
+      }
+      throw new Error(`Unexpected Stripe request: ${request.method} ${url.pathname}`);
+    }));
+    const proxyEnv = stripeProxyEnv(workerEnv);
+    expect((await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" })).response.status)
+      .toBe(201);
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      expect((await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" })).response.status)
+        .toBe(200);
+    }
+    const limited = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    expect(limited.response.status).toBe(429);
+    expect(limited.body).toMatchObject({ error: "stripe_recovery_rate_limited" });
+    expect(retrieveCalls).toBe(5);
+
+    database.prepare("DELETE FROM stripe_provider_recovery_reads").run();
+    holdRetrieve = true;
+    const first = createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    await retrieveStarted;
+    const second = createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    const secondResult = await Promise.race([
+      second,
+      new Promise<never>((_resolve, reject) => setTimeout(
+        () => reject(new Error("concurrent recovery claim did not fail fast")),
+        500
+      ))
+    ]);
+    releaseRetrieve();
+    expect(secondResult.response.status).toBe(409);
+    const firstResult = await first;
+    expect(firstResult.response.status).toBe(200);
+    expect(retrieveCalls).toBe(6);
+  });
+
+  it("bounds arbitrary valid Session recovery reads by caller IP", async () => {
+    let retrieveCalls = 0;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => {
+      retrieveCalls += 1;
+      return stripeJson({ error: { type: "invalid_request_error", message: "missing fixture" } }, 404);
+    }));
+    const proxyEnv = stripeProxyEnv(workerEnv);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await worker.fetch(new Request(
+        `${origin}/api/donations/stripe/session/cs_test_unknown_${String(attempt).padStart(8, "0")}`,
+        { headers: { "CF-Connecting-IP": "203.0.113.199" } }
+      ), proxyEnv);
+      expect(response.status).toBe(404);
+    }
+    const limited = await worker.fetch(new Request(
+      `${origin}/api/donations/stripe/session/cs_test_unknown_99999999`,
+      { headers: { "CF-Connecting-IP": "203.0.113.199" } }
+    ), proxyEnv);
+    expect(limited.status).toBe(429);
+    await expect(limited.json()).resolves.toMatchObject({ error: "stripe_recovery_rate_limited" });
+    expect(retrieveCalls).toBe(20);
+  });
+
   it("returns only donor-safe Session status and gates recurring management", async () => {
     const created = await createCheckout(workerEnv, {
       requestId,
@@ -625,6 +705,21 @@ describe("Stripe public donation routes", () => {
     }, "203.0.113.10");
     expect(limited.response.status).toBe(429);
     expect(limited.body).toMatchObject({ error: "too_many_attempts" });
+  });
+
+  it("releases the duplicate admission claim when concurrent requests converge on one checkout", async () => {
+    const concurrent = withSynchronizedStripeReservationReads(database);
+    concurrent.synchronizeNextPair();
+    const concurrentEnv = { ...workerEnv, DB: concurrent.db };
+    const [first, second] = await Promise.all([
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55"),
+      createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" }, "203.0.113.55")
+    ]);
+
+    expect([first.response.status, second.response.status].sort()).toEqual([200, 201]);
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
+    ).get()).toEqual({ count: 1 });
   });
 });
 

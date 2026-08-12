@@ -4,6 +4,7 @@ import {
   bootstrapCloudflareWriterToken,
   buildCredentialSecretPatch,
   buildStripeCredentialSecretPatch,
+  buildStripeWebhookPromotionPatch,
   buildStripeWebhookStagePatch,
   credentialStatus
 } from "../../src/worker/services/credentials";
@@ -277,6 +278,10 @@ describe("credential secret patch", () => {
       }
     });
     expect(() => buildStripeWebhookStagePatch("not-a-secret")).toThrow(StripeCredentialValidationError);
+    expect(() => buildStripeWebhookPromotionPatch(env({
+      STRIPE_WEBHOOK_SECRET: "whsec_",
+      STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next"
+    }))).toThrow(StripeCredentialValidationError);
   });
 
   it("maps entered test credentials and certificate into Cloudflare secret names", () => {

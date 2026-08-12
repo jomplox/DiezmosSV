@@ -28,11 +28,14 @@ export interface RetentionExportResult {
 }
 
 interface TableManifestEntry {
+  key?: string;
   rowCount: number;
   sha256: string;
 }
 
 export interface RetentionManifest {
+  version?: 1 | 2;
+  runId?: string;
   month: string;
   generatedAt: string;
   tables: Record<string, TableManifestEntry>;
@@ -169,6 +172,7 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
       tables: [
         "contingency_batch_lines",
         "audit_logs",
+        "stripe_invoice_settlements",
         "stripe_acknowledgment_deliveries",
         "stripe_annual_statement_deliveries"
       ]
@@ -178,6 +182,7 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
     {
       name: "leaves",
       tables: [
+        "stripe_invoice_settlements",
         "stripe_acknowledgment_deliveries",
         "stripe_annual_statement_deliveries",
         "contingency_batch_lines",
@@ -221,7 +226,8 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
 
 // Single source of truth for the R2 archive key layout, shared with the backups
 // service so month listing/verification/download derive keys the same way the
-// export writes them: retention/<YYYY>/<YYYY-MM>/{manifest.json,<table>.ndjson}.
+// export writes them. Version 2 manifests stay canonical at the month root and
+// name immutable run-scoped table objects; retentionTableKey remains the v1 fallback.
 export const RETENTION_KEY_ROOT = "retention";
 
 function retentionMonthPrefix(month: string): string {
@@ -244,7 +250,8 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
   const month = options.month ?? previousElSalvadorMonth(now);
   const incidentId = `${month}:${now.toISOString()}`;
   const repo = new Repository(env.DB);
-  const prefix = retentionMonthPrefix(month);
+  const runId = crypto.randomUUID();
+  const prefix = `${retentionMonthPrefix(month)}/runs/${runId}`;
   const manifestKey = retentionManifestKey(month);
 
   try {
@@ -260,6 +267,8 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     }
 
     const manifest: RetentionManifest = {
+      version: 2,
+      runId,
       month,
       generatedAt: now.toISOString(),
       tables: {}
@@ -285,7 +294,7 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     manifest.tables[DOCUMENT_SEQUENCES_SNAPSHOT] = sequenceEntry;
     totalRows += sequenceEntry.rowCount;
 
-    // Capture immediately before the five Stripe streams, then prove no
+    // Capture immediately before the six Stripe streams, then prove no
     // material insert/update/delete occurred before publishing the manifest.
     const stripeFence = await repo.captureStripeRetentionFence();
     for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
@@ -299,7 +308,21 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     }
 
     // Manifest last: its existence is the idempotency/completion marker.
-    await env.ARCHIVE.put(manifestKey, utf8Bytes(JSON.stringify(manifest, null, 2)));
+    const published = await env.ARCHIVE.put(
+      manifestKey,
+      utf8Bytes(JSON.stringify(manifest, null, 2)),
+      { onlyIf: { etagDoesNotMatch: "*" } }
+    );
+    if (!published) {
+      await repo.createAudit({
+        action: "RETENTION_EXPORT_SKIPPED",
+        entityType: "retention_export",
+        entityId: month,
+        summary: `Otra exportación publicó primero el respaldo de ${month}; se omite este intento`,
+        metadata: { month, runId }
+      });
+      return { status: "skipped", month };
+    }
 
     await repo.createAudit({
       action: "RETENTION_EXPORT_COMPLETED",
@@ -515,7 +538,7 @@ async function streamRetentionTable<Cursor>(
     await env.ARCHIVE.put(key, tempObject.body);
     await cleanupRetentionTempObject(env, tempKey);
     const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
-    return { rowCount, sha256 };
+    return { key, rowCount, sha256 };
   } catch (error) {
     await Promise.allSettled([digestWriter.abort(error), digestResultPromise]);
     const cleanupResults = await Promise.allSettled([

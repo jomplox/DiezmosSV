@@ -223,6 +223,19 @@ export interface StripeSettingsState {
   };
 }
 
+export interface StripeAcknowledgmentReconciliationItem {
+  id: string;
+  revision: number;
+  kind: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+  status: "FAILED" | "REVIEW";
+  grossAmountCents: number;
+  refundedAmountCents: number;
+  netAmountCents: number;
+  failureCode: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface EmissionEnvironmentState {
   environment: "00" | "01";
   source: "setting" | "deployment_default";

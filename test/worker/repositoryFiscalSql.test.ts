@@ -4411,10 +4411,30 @@ describe("fiscal repository SQL on SQLite", () => {
       stripe_acknowledgment_deliveries: () => {
         database.prepare(
           `INSERT INTO stripe_acknowledgment_deliveries (
-             id, gift_id, status, created_at, updated_at
+             id, gift_id, revision, kind, evidence_refunded_amount_cents,
+             status, created_at, updated_at
            ) VALUES (
-             'restore_stripe_ack', 'restore_stripe_gift', 'PENDING',
+             'restore_stripe_ack', 'restore_stripe_gift', 1, 'ORIGINAL', 0, 'PENDING',
              '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+           )`
+        ).run();
+      },
+      stripe_invoice_settlements: () => {
+        database.prepare(
+          `INSERT INTO stripe_invoice_settlements (
+             invoice_id, checkout_id, subscription_id, amount_cents, currency,
+             donor_name, donor_email, settled_at, invoice_livemode, invoice_event_id,
+             invoice_payment_id, payment_intent_id, payment_amount_cents,
+             payment_currency, payment_livemode, payment_event_id,
+             status, gift_id, recorded_at, created_at, updated_at
+           ) VALUES (
+             'in_restore_fixture', 'restore_stripe_checkout', 'sub_restore_fixture', 100, 'usd',
+             'Restore Donor', 'restore-donor@example.org', '2026-07-01T00:00:00.000Z',
+             0, 'evt_invoice_restore_fixture', 'inpay_restore_fixture',
+             'pi_invoice_restore_fixture', 100, 'usd', 0,
+             'evt_invoice_payment_restore_fixture', 'RECORDED', 'restore_stripe_gift',
+             '2026-07-01T00:00:01.000Z', '2026-07-01T00:00:00.000Z',
+             '2026-07-01T00:00:01.000Z'
            )`
         ).run();
       },
@@ -4460,6 +4480,9 @@ describe("fiscal repository SQL on SQLite", () => {
       },
       stripe_acknowledgment_deliveries: () => {
         database.prepare("DELETE FROM stripe_acknowledgment_deliveries WHERE id = 'restore_stripe_ack'").run();
+      },
+      stripe_invoice_settlements: () => {
+        database.prepare("DELETE FROM stripe_invoice_settlements WHERE invoice_id = 'in_restore_fixture'").run();
       },
       stripe_annual_statement_deliveries: () => {
         database.prepare("DELETE FROM stripe_annual_statement_deliveries WHERE id = 'restore_stripe_annual_r2'").run();

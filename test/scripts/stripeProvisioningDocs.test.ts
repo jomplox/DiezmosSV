@@ -127,6 +127,8 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/desconocid|ambiguo|incierto/is);
     expect(runbook).toMatch(/Payment Method Configuration.*BNPL|BNPL.*Payment Method Configuration/is);
     expect(runbook).toMatch(/prueba.*live|live.*prueba/is);
+    expect(runbook).toMatch(/promover.*intercambia.*activo.*siguiente/is);
+    expect(runbook).not.toMatch(/promueve.*elimina el valor preparado/is);
   });
 
   it("documents the explicit single-rail SV-to-US safety restart in both READMEs", () => {
@@ -140,7 +142,7 @@ describe("Stripe US giving provisioning documentation", () => {
 
   it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
     const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
-    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037"]) {
+    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038"]) {
       expect(rollback).toContain(migration);
     }
     expect(rollback).toMatch(/no.*elimine|conserve/is);

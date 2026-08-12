@@ -200,7 +200,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0036)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0038)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -711,8 +711,9 @@ shows every enabled method that is eligible for the donor, device, USD amount, a
 flow, while the account configuration excludes BNPL and other financing methods. Stripe signs the
 raw webhook body; the Worker validates environment, API version, amount, currency, lane metadata,
 gift type, frequency, and identifiers before recording durable session/gift history in D1. The Spanish result page polls
-that durable state rather than trusting the browser redirect. Each paid monthly invoice becomes one
-gift, and Billing Portal provides the recurring-management path. The app sends a distinct Spanish
+that durable state rather than trusting the browser redirect. A monthly invoice becomes one gift only
+after `invoice.paid` and a paid Stripe InvoicePayment prove a PaymentIntent-backed settlement; either
+event order converges once. Billing Portal provides the recurring-management path. The app sends a distinct Spanish
 501(c)(3) immediate acknowledgment with the configured legal name, EIN, type, frequency, date, amount,
 and no-goods-or-services statement through its durable email fence. Its **Constancia anual de donaciones —
 EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
@@ -734,8 +735,10 @@ webhook events, sandbox gates, rollback, and the live handoff are documented in
 the non-secret `STRIPE_US_TIME_ZONE`. “Configurado” does not mean provider-verified: payment-method,
 Billing Portal, and account ownership remain unverified by the app. The derived `/webhooks/stripe` address
 and sanitized latest-event health are read-only; only a successfully processed, mode-matching event earns
-“Verificado por último evento procesado.” The staged secret is written, then explicitly promoted or
-cancelled; a failed or unknown remote promotion outcome must be reconciled before any retry or deletion.
+“Verificado por último evento procesado.” The staged secret is written, then explicitly promoted by an
+atomic swap (staged becomes active and the previous active remains staged for rollback) or cancelled.
+After a successful remote mutation whose status refresh fails, the panel locks further rotation until a
+successful refresh reconciles the displayed state.
 Local deterministic tests and this code do not modify a live Stripe account. Registering the live webhook,
 Payment Method Configuration, Billing Portal, and BNPL exclusion remains an owner cutover after sandbox UAT.
 
@@ -971,7 +974,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0036)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0038)</strong></summary>
 
 <br/>
 
@@ -990,10 +993,13 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `operational_alert_deliveries` | Incident- and recipient-scoped claims for alert email delivery. |
 | `stripe_checkout_sessions` | U.S.-lane Checkout intent and sanitized provider state, including independent monotonic checkout/subscription chronology. |
 | `stripe_webhook_events` | Signed Stripe event replay fence and sanitized processing outcome; raw webhook bodies are never retained. |
+| `stripe_provider_recovery_reads` | Bounded, leased admission records for public provider-backed Session recovery reads. |
+| `stripe_invoice_settlements` | Order-independent monthly invoice and paid InvoicePayment evidence; records a gift only after both sides validate. |
 | `stripe_gifts` | Settled U.S. gift source of truth, including donor-selected type and durable refund/net state. |
-| `stripe_acknowledgment_deliveries` | Durable immediate 501(c)(3) acknowledgment claims and provider-outcome evidence. |
-| `stripe_annual_statement_deliveries` | Immutable U.S. annual statement snapshots, revision lineage, claims, and dispatch outcomes. |
+| `stripe_acknowledgment_deliveries` | Immutable, revisioned immediate 501(c)(3) acknowledgment/correction evidence and provider outcomes. |
+| `stripe_annual_statement_deliveries` | Immutable U.S. annual statement snapshots, revision lineage, leased claims, and dispatch outcomes. |
 | `stripe_retention_generations` | Internal monotonic membership ledger for bounded, referentially consistent Stripe retention exports. It is restore metadata maintained by triggers, is not an archive payload, and is rebuilt automatically when Stripe rows are restored. |
+| `stripe_invoice_settlement_retention_generations` | Internal monotonic membership ledger for monthly-invoice convergence snapshots. It is not an archive payload and is rebuilt automatically on restore. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |

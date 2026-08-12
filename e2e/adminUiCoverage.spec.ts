@@ -180,6 +180,10 @@ async function installOwnerAdmin(page: Page, handleApi?: AdminUiHandler): Promis
       });
       return;
     }
+    if (url.pathname === "/api/settings/stripe/acknowledgments") {
+      await fulfillJson(route, { acknowledgments: [] });
+      return;
+    }
     if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
       await fulfillJson(route, {
         stripe: {
@@ -548,4 +552,65 @@ test("clears the staged webhook secret after POST success even when status refre
   await expect(page.getByRole("status")).toContainText(
     "Secreto siguiente preparado, pero no se pudo actualizar el estado mostrado."
   );
+});
+
+test("commits webhook promotion before refresh and locks rotation until status reconciliation", async ({ page }) => {
+  let promotionSucceeded = false;
+  const stripeGroup = {
+    label: "Stripe EE. UU.",
+    ready: true,
+    items: [{ name: "STRIPE_WEBHOOK_SECRET_NEXT", label: "Secreto siguiente", configured: true, protected: true }]
+  };
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (promotionSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: { stripe: stripeGroup },
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      if (promotionSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          stripe: {
+            credentials: stripeGroup,
+            operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+            webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe/webhook-secret/promote" && request.method() === "POST") {
+      promotionSucceeded = true;
+      await fulfillJson(route, { ok: true, updated: ["STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_NEXT"], audit: "ok" });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const promote = page.getByRole("button", { name: "Promover secreto preparado" });
+  const cancel = page.getByRole("button", { name: "Cancelar secreto preparado" });
+  await promote.click();
+
+  await expect.poll(() => promotionSucceeded).toBe(true);
+  await expect(page.getByRole("status")).toContainText(
+    "Secreto promovido, pero el estado mostrado requiere conciliación."
+  );
+  await expect(promote).toBeDisabled();
+  await expect(cancel).toBeDisabled();
+  await expect(page.getByText("Rotación guardada; actualice el estado antes de otra acción.")).toBeVisible();
 });

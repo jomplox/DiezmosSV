@@ -149,9 +149,16 @@ describe("Worker observability", () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
     logWorkerError({ APP_ENV: "production" } as Env, "stripe_webhook_processing_failed", error);
+    logWorkerError({ APP_ENV: "production" } as Env, "stripe_acknowledgment_evidence_failed", error);
 
     expect(spy).toHaveBeenCalledWith({
       event: "stripe_webhook_processing_failed",
+      app_env: "production",
+      error_name: "stripewebhookeventerror",
+      error_code: "checkout_identity_mismatch"
+    });
+    expect(spy).toHaveBeenLastCalledWith({
+      event: "stripe_acknowledgment_evidence_failed",
       app_env: "production",
       error_name: "stripewebhookeventerror",
       error_code: "checkout_identity_mismatch"

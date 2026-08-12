@@ -494,10 +494,22 @@ function insertGift(
 }
 
 function insertAcknowledgment(database: DatabaseSync, id: string, giftId: string): void {
+  const hasRevision = Boolean(database.prepare(
+    "SELECT 1 FROM pragma_table_info('stripe_acknowledgment_deliveries') WHERE name = 'revision'"
+  ).get());
+  if (!hasRevision) {
+    database.prepare(
+      `INSERT INTO stripe_acknowledgment_deliveries (
+         id, gift_id, status, attempt_count
+       ) VALUES (?, ?, 'PENDING', 0)`
+    ).run(id, giftId);
+    return;
+  }
   database.prepare(
     `INSERT INTO stripe_acknowledgment_deliveries (
-       id, gift_id, status, attempt_count
-     ) VALUES (?, ?, 'PENDING', 0)`
+       id, gift_id, revision, kind, evidence_refunded_amount_cents,
+       status, attempt_count
+     ) VALUES (?, ?, 1, 'ORIGINAL', 0, 'PENDING', 0)`
   ).run(id, giftId);
 }
 

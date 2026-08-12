@@ -442,6 +442,7 @@ export function DonarPage() {
     session: Promise<StripeCheckoutClientConfig>;
   } | null>(null);
   const stripeSessionSequenceRef = useRef(0);
+  const stripeRejectedSessionSequenceRef = useRef<number | null>(null);
   // Paso 3 widget lifecycle: "loading" from entry until Wompi renders its button
   // (spinner), "ready" once it has, "delayed" when the render budget elapses first
   // (manual hosted-checkout CTA appears; the poll keeps watching, so a late widget
@@ -822,10 +823,13 @@ export function DonarPage() {
     }
     const ownedAttempt = attempt;
     const requestId = ownedAttempt.requestId;
+    stripeSessionSequenceRef.current += 1;
+    const sequence = stripeSessionSequenceRef.current;
     const session = donarApi<StripeCheckoutClientConfig>(STRIPE_CHECKOUT_PATH, {
         method: "POST",
         body: stripeCheckoutBody({ requestId, amount: form.amount, monthly, giftType: stripeGiftType })
       }).catch((err: unknown) => {
+        stripeRejectedSessionSequenceRef.current = sequence;
         if (
           err instanceof DonarApiError
           && err.status === 409
@@ -837,10 +841,9 @@ export function DonarPage() {
         }
         throw new Error(userFacingErrorMessage(err instanceof Error ? err.message : String(err)));
       });
-    stripeSessionSequenceRef.current += 1;
     return {
       fingerprint,
-      sequence: stripeSessionSequenceRef.current,
+      sequence,
       session
     };
   }
@@ -882,6 +885,9 @@ export function DonarPage() {
     setIntent(null);
     if (!usDonation) {
       stripeAttemptRef.current = null;
+      setStripeSessionAttempt(null);
+    } else if (stripeSessionAttempt?.sequence === stripeRejectedSessionSequenceRef.current) {
+      stripeRejectedSessionSequenceRef.current = null;
       setStripeSessionAttempt(null);
     }
     setStage("form");

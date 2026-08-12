@@ -87,12 +87,17 @@ const ERROR_EVENTS = new Set([
   "retention_temp_object_cleanup_failed",
   "scheduled_handler_failed",
   "stalled_wompi_event_sweep_failed",
+  "stripe_acknowledgment_audit_failed",
+  "stripe_acknowledgment_alert_failed",
   "stripe_acknowledgment_delivery_failed",
+  "stripe_acknowledgment_evidence_failed",
+  "stripe_acknowledgment_reconciliation_audit_failed",
   "stripe_annual_statement_audit_failed",
   "stripe_acknowledgment_sweep_failed",
   "stripe_checkout_create_failed",
   "stripe_checkout_finalize_deferred",
   "stripe_portal_create_failed",
+  "stripe_webhook_secret_audit_failed",
   "stripe_webhook_processing_failed",
   "unhandled_worker_request_error",
   "wompi_issuance_failure_list_failed",
@@ -110,12 +115,14 @@ const ALERT_KINDS = new Set([
   "mh_unavailable",
   "retention_export_failed",
   "retention_verify_failed",
+  "stripe_acknowledgment_attention",
   "wompi_event_stalled"
 ]);
 const ALERT_ENTITY_TYPES = new Set([
   "credentials",
   "dte_document",
   "retention_export",
+  "stripe_acknowledgment",
   "wompi_event"
 ]);
 

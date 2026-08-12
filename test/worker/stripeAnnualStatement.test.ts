@@ -270,6 +270,7 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
     database.close();
   });
 
@@ -315,6 +316,61 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     ]);
     expect(emailSend).toHaveBeenCalledTimes(2);
     expect((emailSend.mock.calls[1][0] as { subject: string }).subject).toContain("corregida");
+  });
+
+  it("takes a fresh per-donor lease timestamp when a slow bulk send crosses the stale threshold", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-10T12:00:00.000Z"));
+    seedGift(database, gift({ id: "gift_slow_first", donor_email: "ana@example.org" }));
+    seedGift(database, gift({ id: "gift_slow_second", donor_email: "bea@example.org", donor_name: "Bea" }));
+    emailSend
+      .mockImplementationOnce(async () => {
+        vi.setSystemTime(new Date("2026-01-10T12:06:00.000Z"));
+        return { messageId: "annual-provider-first" };
+      })
+      .mockResolvedValueOnce({ messageId: "annual-provider-second" });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator"))
+      .toMatchObject({ sent: 2, failed: 0, review: 0 });
+    expect(database.prepare(
+      "SELECT donor_key, created_at, lease_expires_at FROM stripe_annual_statement_deliveries ORDER BY donor_key"
+    ).all()).toEqual([
+      {
+        donor_key: "ana@example.org",
+        created_at: "2026-01-10T12:00:00.000Z",
+        lease_expires_at: null
+      },
+      {
+        donor_key: "bea@example.org",
+        created_at: "2026-01-10T12:06:00.000Z",
+        lease_expires_at: null
+      }
+    ]);
+  });
+
+  it("prints the fresh delivery claim date instead of a stale reservation date", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-10T12:00:00.000Z"));
+    seedGift(database, gift({ id: "gift_fresh_issue_date" }));
+    const reserve = repo.reserveStripeAnnualStatementDelivery.bind(repo);
+    vi.spyOn(repo, "reserveStripeAnnualStatementDelivery").mockImplementation(async (input) => {
+      const delivery = await reserve(input);
+      vi.setSystemTime(new Date("2026-01-11T12:00:00.000Z"));
+      return delivery;
+    });
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator"))
+      .resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+    const message = emailSend.mock.calls[0][0] as {
+      attachments: Array<{ content: Uint8Array }>;
+    };
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-issue-date-"));
+    const pdfPath = join(directory, "statement.pdf");
+    writeFileSync(pdfPath, message.attachments[0].content);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+
+    expect(text).toContain("Emitida el 11 ene 2026.");
+    expect(text).not.toContain("Emitida el 10 ene 2026.");
   });
 
   it("records dispatch-start evidence before deterministic mock acceptance", async () => {
@@ -416,10 +472,20 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     })).toMatchObject({ sent: 0, skipped: 1, failed: 0, review: 0 });
     expect(emailSend).not.toHaveBeenCalled();
     expect(database.prepare(
-      "SELECT id, status, attempt_count FROM stripe_annual_statement_deliveries ORDER BY revision"
+      "SELECT id, status, attempt_count, failure_code FROM stripe_annual_statement_deliveries ORDER BY revision"
     ).all()).toEqual([
-      { id: "delivery_pending_original", status: "PENDING", attempt_count: 0 },
-      { id: "delivery_pending_changed", status: "PENDING", attempt_count: 0 }
+      {
+        id: "delivery_pending_original",
+        status: "FAILED",
+        attempt_count: 0,
+        failure_code: "superseded_stale_pre_dispatch"
+      },
+      {
+        id: "delivery_pending_changed",
+        status: "FAILED",
+        attempt_count: 0,
+        failure_code: "superseded_stale_pre_dispatch"
+      }
     ]);
   });
 

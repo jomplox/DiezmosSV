@@ -701,6 +701,43 @@ test("a terminal Stripe Session failure releases the current browser request ide
   expect(checkoutBodies[1].requestId).not.toBe(checkoutBodies[0].requestId);
 });
 
+test("editing an unchanged Stripe attempt replaces a rejected cached Session promise", async ({ page }) => {
+  const checkoutBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (checkoutBodies.length === 1) {
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo." })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: "cs_test_edited_retry_fixture",
+        clientSecret: "cs_test_edited_retry_fixture_secret_mock",
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    });
+  });
+
+  await page.goto("/donar?ruta=eeuu");
+  await page.getByRole("button", { name: "$50", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("No pudimos preparar su entrega con Stripe");
+
+  await page.getByRole("button", { name: "Editar" }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+
+  expect(checkoutBodies).toHaveLength(2);
+  expect(checkoutBodies[1]).toEqual(checkoutBodies[0]);
+});
+
 test("a stale rejected Stripe request cannot clear the newer attempt identity", async ({ page }) => {
   const checkoutBodies: Array<Record<string, unknown>> = [];
   let releaseOld!: () => void;

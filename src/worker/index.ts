@@ -113,9 +113,9 @@ import { IssuancePipeline } from "./services/pipeline";
 import { loadPdfBrandingLogo, renderDtePdf } from "./services/pdf";
 import { auditContextFrom } from "./services/requestContext";
 import { projectAuditRows } from "./services/auditProjection";
-import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, isManifestedBackupTable, listBackupMonths, verifyBackupMonth } from "./services/backups";
+import { BackupArchiveTooLargeError, BACKUP_MONTH_DOWNLOAD_MAX_BYTES, collectBackupMonthObjects, manifestedBackupTableKey, listBackupMonths, verifyBackupMonth } from "./services/backups";
 import { zipStored } from "./utils/zip";
-import { previousElSalvadorMonth, retentionManifestKey, retentionTableKey, runRetentionExport } from "./services/retention";
+import { previousElSalvadorMonth, retentionManifestKey, runRetentionExport } from "./services/retention";
 import { WompiApiService } from "./services/wompiApi";
 import {
   loadWompiNotificationSettings,
@@ -182,6 +182,10 @@ const PASSWORD_RESET_PAIR_LIMIT = 3;
 const PASSWORD_RESET_ACCOUNT_LIMIT = 3;
 const BOOTSTRAP_ATTEMPT_LIMIT = 10;
 const BOOTSTRAP_TOKEN_PATTERN = /^bt_[A-Za-z0-9_-]{43}$/;
+const STRIPE_RECOVERY_WINDOW_MS = 15 * 60 * 1000;
+const STRIPE_RECOVERY_LEASE_MS = 60 * 1000;
+const STRIPE_RECOVERY_IDENTITY_LIMIT = 5;
+const STRIPE_RECOVERY_IP_LIMIT = 20;
 
 // Public donation endpoints parse untrusted JSON before validation and rate-limit
 // admission. Cap bodies at 16 KiB (normal payloads are a few hundred bytes) so an
@@ -963,7 +967,7 @@ async function handleStripeWebhook(
   }
 
   try {
-    await processStripeWebhookEvent(repo, event, nowIso());
+    await processStripeWebhookEvent(repo, event, nowIso(), env);
     const finalized = await repo.finalizeStripeWebhookEvent({
       eventId: event.id,
       claimId,
@@ -1397,6 +1401,9 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       now: claimNow
     });
     if (reservation.kind !== "CREATED") {
+      if (reservation.record.rate_limit_claim_id !== rateLimitClaimId) {
+        await ctx.repo.releaseUnusedDonationIntentRateLimitClaim(rateLimitClaimId);
+      }
       const plan = await prepareExistingStripeCheckoutCreation(
         ctx,
         reservation.record,
@@ -1474,10 +1481,10 @@ async function prepareExistingStripeCheckoutCreation(
     return stripeCheckoutConflictResponse();
   }
   if (existing.status === "FAILED" && hasStripeCheckoutProviderTerminalEvent(existing)) {
-    return existingStripeCheckoutResponse(existing, configuration);
+    return existingStripeCheckoutResponse(ctx, existing, configuration);
   }
   if (existing.status !== "FAILED" && existing.status !== "CREATING") {
-    return existingStripeCheckoutResponse(existing, configuration);
+    return existingStripeCheckoutResponse(ctx, existing, configuration);
   }
 
   const request = await buildStripeCheckoutCreationRequest(ctx, existing.id, {
@@ -1501,7 +1508,7 @@ async function prepareExistingStripeCheckoutCreation(
   if (!reclaimed) {
     const current = await ctx.repo.getStripeCheckoutById(existing.id);
     return current
-      ? existingStripeCheckoutResponse(current, configuration)
+      ? existingStripeCheckoutResponse(ctx, current, configuration)
       : stripeCheckoutIndeterminateResponse();
   }
   return { checkout: reclaimed, params: request.params };
@@ -1566,6 +1573,7 @@ function stripeCheckoutCreationOutcome(error: unknown): "DEFINITE_FAILURE" | "AM
 }
 
 async function existingStripeCheckoutResponse(
+  ctx: ApiRouteContext,
   checkout: import("./storage/repository").StripeCheckoutRecord,
   configuration: ReturnType<typeof resolveStripeConfiguration>
 ): Promise<Response> {
@@ -1591,10 +1599,21 @@ async function existingStripeCheckoutResponse(
       { status: 409, headers: { "Cache-Control": "no-store" } }
     );
   }
+  const recoveryClaim = await claimStripeProviderRecoveryRead(
+    ctx,
+    "OPEN_REPLAY",
+    checkout.request_id
+  );
+  if (recoveryClaim instanceof Response) return recoveryClaim;
   try {
     const session = await createStripeGateway(configuration)
       .retrieveCheckoutSession(checkout.stripe_session_id);
     assertStripeEmbeddedSession(session);
+    await ctx.repo.finalizeStripeProviderRecoveryRead({
+      id: recoveryClaim,
+      outcome: "COMPLETE",
+      now: nowIso()
+    });
     return jsonResponse(
       {
         sessionId: session.id,
@@ -1605,11 +1624,46 @@ async function existingStripeCheckoutResponse(
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
+    await ctx.repo.finalizeStripeProviderRecoveryRead({
+      id: recoveryClaim,
+      outcome: "FAILED",
+      now: nowIso()
+    });
     return jsonResponse(
       { error: "stripe_checkout_unavailable", message: "No pudimos recuperar su entrega con Stripe. Inténtelo de nuevo." },
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+async function claimStripeProviderRecoveryRead(
+  ctx: ApiRouteContext,
+  kind: "OPEN_REPLAY" | "STATUS_RECOVERY",
+  identity: string
+): Promise<string | Response> {
+  const now = new Date();
+  const claim = await ctx.repo.claimStripeProviderRecoveryRead({
+    kind,
+    identityHash: await rateLimitKey(`stripe-recovery:${kind}:${identity}`),
+    ipHash: await rateLimitKey(`stripe-recovery-ip:${clientIpFrom(ctx.request)}`),
+    now: now.toISOString(),
+    cutoff: new Date(now.getTime() - STRIPE_RECOVERY_WINDOW_MS).toISOString(),
+    leaseExpiresAt: new Date(now.getTime() + STRIPE_RECOVERY_LEASE_MS).toISOString(),
+    expiresAt: new Date(now.getTime() + STRIPE_RECOVERY_WINDOW_MS).toISOString(),
+    identityLimit: STRIPE_RECOVERY_IDENTITY_LIMIT,
+    ipLimit: STRIPE_RECOVERY_IP_LIMIT
+  });
+  if (claim.kind === "CLAIMED") return claim.id;
+  if (claim.kind === "IN_PROGRESS") {
+    return jsonResponse(
+      { error: "stripe_recovery_in_progress", message: "Su entrega se está recuperando. Inténtelo de nuevo en un momento." },
+      { status: 409, headers: { "Cache-Control": "no-store" } }
+    );
+  }
+  return jsonResponse(
+    { error: "stripe_recovery_rate_limited", message: "Demasiados intentos de recuperación. Espere 15 minutos." },
+    { status: 429, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 function hasStripeCheckoutProviderTerminalEvent(
@@ -1714,9 +1768,21 @@ async function handleStripeCheckoutStatus(ctx: ApiRouteContext): Promise<Respons
       throw error;
     }
     let session: import("./services/stripeClient").StripeCheckoutSnapshot;
+    const recoveryClaim = await claimStripeProviderRecoveryRead(ctx, "STATUS_RECOVERY", sessionId);
+    if (recoveryClaim instanceof Response) return recoveryClaim;
     try {
       session = await createStripeGateway(configuration).retrieveCheckoutSession(sessionId);
+      await ctx.repo.finalizeStripeProviderRecoveryRead({
+        id: recoveryClaim,
+        outcome: "COMPLETE",
+        now: nowIso()
+      });
     } catch {
+      await ctx.repo.finalizeStripeProviderRecoveryRead({
+        id: recoveryClaim,
+        outcome: "FAILED",
+        now: nowIso()
+      });
       return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
     }
     const reservationId = session.clientReferenceId;
@@ -2385,10 +2451,10 @@ async function handleBackupDownload(ctx: ApiRouteContext): Promise<Response> {
   if (!table || !/^[a-z_]+$|^manifest$/.test(table)) {
     return jsonResponse({ error: "invalid_backup_table", message: "Indique una tabla válida o 'manifest'." }, { status: 400 });
   }
-  if (table !== "manifest" && !await isManifestedBackupTable(ctx.env, month, table)) {
-    return notFound();
-  }
-  const key = table === "manifest" ? retentionManifestKey(month) : retentionTableKey(month, table);
+  const key = table === "manifest"
+    ? retentionManifestKey(month)
+    : await manifestedBackupTableKey(ctx.env, month, table);
+  if (!key) return notFound();
   const object = await ctx.env.ARCHIVE.get(key);
   if (!object) {
     return notFound();
@@ -3065,6 +3131,8 @@ const settingsRoutes: Array<Route<ApiRouteContext>> = [
   { pattern: "/api/credentials", role: "OWNER", handler: handleCredentials },
   { pattern: "/api/credentials/writer-token", role: "OWNER", handler: handleCredentialWriterToken },
   { pattern: "/api/settings/stripe", role: "OWNER", handler: handleStripeSettings },
+  { method: "GET", pattern: "/api/settings/stripe/acknowledgments", role: "OWNER", handler: handleStripeAcknowledgmentReconciliationList },
+  { method: "POST", pattern: /^\/api\/settings\/stripe\/acknowledgments\/([^/]+)\/reconcile$/, role: "OWNER", handler: handleStripeAcknowledgmentReconcile },
   { pattern: "/api/settings/stripe/webhook-secret/stage", role: "OWNER", handler: handleStripeWebhookSecretStage },
   { pattern: "/api/settings/stripe/webhook-secret/promote", role: "OWNER", handler: handleStripeWebhookSecretPromote },
   { pattern: "/api/settings/stripe/webhook-secret/cancel", role: "OWNER", handler: handleStripeWebhookSecretCancel },
@@ -3899,6 +3967,60 @@ async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
   }
 }
 
+async function handleStripeAcknowledgmentReconciliationList(
+  ctx: ApiRouteContext
+): Promise<Response> {
+  const records = await ctx.repo.listStripeAcknowledgmentReconciliation();
+  return jsonResponse({
+    acknowledgments: records.map((record) => ({
+      id: record.id,
+      revision: record.revision,
+      kind: record.kind,
+      status: record.status,
+      grossAmountCents: record.amount_cents,
+      refundedAmountCents: record.evidence_refunded_amount_cents,
+      netAmountCents: Math.max(0, record.amount_cents - record.evidence_refunded_amount_cents),
+      failureCode: record.failure_code,
+      createdAt: record.created_at,
+      updatedAt: record.updated_at
+    }))
+  });
+}
+
+async function handleStripeAcknowledgmentReconcile(ctx: ApiRouteContext): Promise<Response> {
+  const id = ctx.params[0];
+  if (!/^stripe_ack_[A-Za-z0-9_-]{4,200}$/.test(id)) {
+    return jsonResponse({ error: "stripe_acknowledgment_not_found" }, { status: 404 });
+  }
+  const body = await readJsonObject(ctx.request, {
+    limitBytes: AUTHENTICATED_JSON_BODY_LIMIT_BYTES,
+    malformed: "throw"
+  });
+  const resolution = body.resolution;
+  if (resolution !== "CONFIRMED_SENT" && resolution !== "CONFIRMED_NOT_SENT") {
+    return jsonResponse({ error: "invalid_stripe_acknowledgment_resolution" }, { status: 400 });
+  }
+  if (!await ctx.repo.reconcileStripeAcknowledgment({ id, resolution, now: nowIso() })) {
+    return jsonResponse({ error: "stripe_acknowledgment_not_reconcilable" }, { status: 409 });
+  }
+  try {
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: ctx.actor!.id,
+      action: "STRIPE_ACKNOWLEDGMENT_RECONCILED",
+      entityType: "stripe_acknowledgment",
+      entityId: id,
+      summary: resolution === "CONFIRMED_SENT"
+        ? "Constancia inmediata confirmada como enviada"
+        : "Constancia inmediata confirmada como no enviada",
+      metadata: { resolution }
+    });
+  } catch (error) {
+    logWorkerError(ctx.env, "stripe_acknowledgment_reconciliation_audit_failed", error);
+  }
+  return jsonResponse({ ok: true, id, resolution });
+}
+
 async function handleStripeWebhookSecretStage(ctx: ApiRouteContext): Promise<Response> {
   if (ctx.request.method !== "POST") return methodNotAllowed();
   const body = await readJsonObject(ctx.request, {
@@ -3967,16 +4089,22 @@ async function applyStripeWebhookSecretAction(
   rotationAction: "stage" | "promote" | "cancel"
 ): Promise<Response> {
   const result = await patchCloudflareWorkerSecrets(ctx.env, patch);
-  await ctx.repo.createAudit({
-    actorType: "USER",
-    actorId: ctx.actor!.id,
-    action,
-    entityType: "credentials",
-    entityId: "stripe_webhook_secret",
-    summary,
-    metadata: { action: rotationAction, updated: result.updated, deleted: result.deleted }
-  });
-  return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted });
+  let audit: "ok" | "degraded" = "ok";
+  try {
+    await ctx.repo.createAudit({
+      actorType: "USER",
+      actorId: ctx.actor!.id,
+      action,
+      entityType: "credentials",
+      entityId: "stripe_webhook_secret",
+      summary,
+      metadata: { action: rotationAction, updated: result.updated, deleted: result.deleted }
+    });
+  } catch (error) {
+    audit = "degraded";
+    logWorkerError(ctx.env, "stripe_webhook_secret_audit_failed", error);
+  }
+  return jsonResponse({ ok: true, updated: result.updated, deleted: result.deleted, audit });
 }
 
 function stripeCredentialMutationError(error: unknown): Response {

@@ -21,6 +21,7 @@ import type {
   EmailTemplateSettings,
   EmailTemplateValue,
   EmissionEnvironmentState,
+  StripeAcknowledgmentReconciliationItem,
   StripeSettingsState,
   WompiNotificationSettings
 } from "./types";
@@ -67,6 +68,8 @@ import {
 export function CredentialsPanel({
   status,
   stripeSettings,
+  stripeRotationStatusStale,
+  stripeAcknowledgmentReconciliation,
   emissionEnvironment,
   emailTemplates,
   emailTemplateDraft,
@@ -92,6 +95,7 @@ export function CredentialsPanel({
   onStripeWebhookStage,
   onStripeWebhookPromote,
   onStripeWebhookCancel,
+  onStripeAcknowledgmentReconcile,
   onEmailTemplateChange,
   onEmailTemplateSubmit,
   onEmailSenderChange,
@@ -109,6 +113,8 @@ export function CredentialsPanel({
 }: {
   status: CredentialStatus | null;
   stripeSettings: StripeSettingsState | null;
+  stripeRotationStatusStale: boolean;
+  stripeAcknowledgmentReconciliation: StripeAcknowledgmentReconciliationItem[];
   emissionEnvironment: EmissionEnvironmentState | null;
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
@@ -134,6 +140,10 @@ export function CredentialsPanel({
   onStripeWebhookStage: () => Promise<void>;
   onStripeWebhookPromote: () => Promise<void>;
   onStripeWebhookCancel: () => Promise<void>;
+  onStripeAcknowledgmentReconcile: (
+    id: string,
+    resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT"
+  ) => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
   onEmailTemplateSubmit: () => Promise<void>;
   onEmailSenderChange: (value: string) => void;
@@ -541,6 +551,55 @@ export function CredentialsPanel({
                         </div>
                       ) : <strong>Sin eventos recibidos</strong>}
                     </div>
+                    <div className="credential-field-block span-2">
+                      <div className="credential-section-title">
+                        <h3>Constancias inmediatas</h3>
+                        <p>Requiere conciliación cuando no se pudo confirmar el resultado del proveedor.</p>
+                      </div>
+                      {stripeAcknowledgmentReconciliation.length === 0 ? (
+                        <small>No hay constancias pendientes de conciliación.</small>
+                      ) : stripeAcknowledgmentReconciliation.map((acknowledgment) => (
+                        <div className="legal-box" key={acknowledgment.id}>
+                          <AlertTriangle size={17} />
+                          <div>
+                            <strong>
+                              Revisión {acknowledgment.revision} · {acknowledgment.kind === "FULL_REFUND"
+                                ? "Reembolso total"
+                                : acknowledgment.kind === "PARTIAL_REFUND"
+                                  ? "Corrección por reembolso"
+                                  : "Constancia original"}
+                            </strong>
+                            <small>
+                              Estado {acknowledgment.status} · código {acknowledgment.failureCode} · neto ${(acknowledgment.netAmountCents / 100).toFixed(2)} USD
+                            </small>
+                            <div className="stripe-rotation-actions">
+                              <button
+                                className="primary"
+                                type="button"
+                                disabled={stripeBusy}
+                                onClick={() => void onStripeAcknowledgmentReconcile(
+                                  acknowledgment.id,
+                                  "CONFIRMED_SENT"
+                                )}
+                              >
+                                Confirmar que se envió
+                              </button>
+                              <button
+                                className="secondary"
+                                type="button"
+                                disabled={stripeBusy}
+                                onClick={() => void onStripeAcknowledgmentReconcile(
+                                  acknowledgment.id,
+                                  "CONFIRMED_NOT_SENT"
+                                )}
+                              >
+                                Confirmar que no se envió
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                     <small className="span-2">Los campos de reemplazo nunca se precargan y se limpian después de guardarse.</small>
                     <label>
                       <CredentialFieldLabel label="Clave restringida" configured={credentialConfigured(status, "STRIPE_RESTRICTED_KEY")} />
@@ -590,14 +649,17 @@ export function CredentialsPanel({
                       <input name="stripe-webhook-secret-next" type="password" autoComplete="new-password" value={input.stripeWebhookSecretNext} onChange={(event) => onChange({ ...input, stripeWebhookSecretNext: event.target.value })} placeholder="whsec_…" />
                     </label>
                     <div className="stripe-rotation-actions span-2">
-                      <button className="secondary" type="button" disabled={stripeBusy || !writerConfigured || !input.stripeWebhookSecretNext.trim()} onClick={() => void onStripeWebhookStage()}>Preparar secreto siguiente</button>
+                      <button className="secondary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured || !input.stripeWebhookSecretNext.trim()} onClick={() => void onStripeWebhookStage()}>Preparar secreto siguiente</button>
                       {credentialConfigured(status, "STRIPE_WEBHOOK_SECRET_NEXT") && (
                         <>
-                          <button className="primary" type="button" disabled={stripeBusy || !writerConfigured} onClick={() => void onStripeWebhookPromote()}>Promover secreto preparado</button>
-                          <button className="secondary" type="button" disabled={stripeBusy || !writerConfigured} onClick={() => void onStripeWebhookCancel()}>Cancelar secreto preparado</button>
+                          <button className="primary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured} onClick={() => void onStripeWebhookPromote()}>Promover secreto preparado</button>
+                          <button className="secondary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured} onClick={() => void onStripeWebhookCancel()}>Cancelar secreto preparado</button>
                         </>
                       )}
                     </div>
+                    {stripeRotationStatusStale && (
+                      <small className="span-2">Rotación guardada; actualice el estado antes de otra acción.</small>
+                    )}
                     <div className="legal-box span-2">
                       <ShieldCheck size={17} />
                       <div>

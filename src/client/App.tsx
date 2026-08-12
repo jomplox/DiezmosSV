@@ -30,7 +30,7 @@ import {
   Users
 } from "lucide-react";
 import { Fragment, type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from "react";
-import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
+import type { AlertEmailState, AuditRow, BackupMonth, BackupsGrid, BackupVerifyResult, CredentialStatus, DocumentListPage, DonationIntentListItem, DteDocument, EmailSenderState, EmailTemplateSettings, EmailTemplateValue, EmissionEnvironmentState, FiscalCorrectionData, FiscalCorrectionProtectedContext, FiscalReconciliationState, ReceiptEmailDeliveryState, StripeAcknowledgmentReconciliationItem, StripeAnnualStatementPreview, StripeAnnualStatementPreviewDonor, StripeAnnualStatementSendResult, StripeSettingsState, User, WompiIssuanceFailureItem, WompiNotificationSettings } from "./types";
 import {
   resolveAuthBootstrapStatus,
   shouldShowBootstrapMode,
@@ -340,6 +340,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [users, setUsers] = useState<User[]>([]);
   const [credentials, setCredentials] = useState<CredentialStatus | null>(null);
   const [stripeSettings, setStripeSettings] = useState<StripeSettingsState | null>(null);
+  const [stripeRotationStatusStale, setStripeRotationStatusStale] = useState(false);
+  const [stripeAcknowledgmentReconciliation, setStripeAcknowledgmentReconciliation] = useState<StripeAcknowledgmentReconciliationItem[]>([]);
   const [emissionEnvironment, setEmissionEnvironment] = useState<EmissionEnvironmentState | null>(null);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplateSettings | null>(null);
   const [emailTemplateDraft, setEmailTemplateDraft] = useState<Record<string, EmailTemplateValue>>({});
@@ -916,9 +918,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       commitRefreshState(control, () => setEmissionEnvironment(environmentResult.emissionEnvironment));
     }
     if (view === "credentials" && can(user, "OWNER")) {
-      const [credentialResult, stripeResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+      const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
         accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
         accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+        accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
         accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
         accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
         accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
@@ -928,6 +931,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       commitRefreshState(control, () => {
         setCredentials(credentialResult.credentials);
         setStripeSettings(stripeResult.stripe);
+        setStripeRotationStatusStale(false);
+        setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
         setEmissionEnvironment(environmentResult.emissionEnvironment);
         applyEmailTemplates(emailTemplateResult.emailTemplates);
         applyEmailSender(emailSenderResult.emailSender);
@@ -1121,6 +1126,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setUsers([]);
     setCredentials(null);
     setStripeSettings(null);
+    setStripeRotationStatusStale(false);
+    setStripeAcknowledgmentReconciliation([]);
     setEmissionEnvironment(null);
     setEmailTemplates(null);
     setEmailTemplateDraft({});
@@ -2314,6 +2321,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       control.commit(() => {
         setCredentials(credentialResult.credentials);
         setStripeSettings(stripeResult.stripe);
+        setStripeRotationStatusStale(false);
       });
     });
   }
@@ -2342,6 +2350,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           throw error;
         }
         control.commit(() => {
+          setStripeRotationStatusStale(true);
           setToast("Secreto siguiente preparado, pero no se pudo actualizar el estado mostrado.");
         });
         return;
@@ -2349,6 +2358,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       control.commit(() => {
         setCredentials(credentialResult.credentials);
         setStripeSettings(stripeResult.stripe);
+        setStripeRotationStatusStale(false);
       });
     });
   }
@@ -2356,29 +2366,72 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   async function promoteStripeWebhookSecret() {
     await runAction("stripe-webhook-promote", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/promote", { method: "POST" });
-      const [credentialResult, stripeResult] = await Promise.all([
-        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
-      ]);
-      control.commit(() => {
-        setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
+      if (!control.commit(() => {
+        setStripeRotationStatusStale(true);
         setToast("Secreto preparado promovido");
-      });
+      })) return;
+      try {
+        const [credentialResult, stripeResult] = await Promise.all([
+          accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+        ]);
+        control.commit(() => {
+          setCredentials(credentialResult.credentials);
+          setStripeSettings(stripeResult.stripe);
+          setStripeRotationStatusStale(false);
+        });
+      } catch (error) {
+        if (isApiError(error) && error.status === 401) throw error;
+        control.commit(() => {
+          setToast("Secreto promovido, pero el estado mostrado requiere conciliación.");
+        });
+      }
     });
   }
 
   async function cancelStripeWebhookSecret() {
     await runAction("stripe-webhook-cancel", async (control) => {
       await accountApi("/api/settings/stripe/webhook-secret/cancel", { method: "POST" });
-      const [credentialResult, stripeResult] = await Promise.all([
-        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
-      ]);
-      control.commit(() => {
-        setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
+      if (!control.commit(() => {
+        setStripeRotationStatusStale(true);
         setToast("Secreto preparado cancelado");
+      })) return;
+      try {
+        const [credentialResult, stripeResult] = await Promise.all([
+          accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+        ]);
+        control.commit(() => {
+          setCredentials(credentialResult.credentials);
+          setStripeSettings(stripeResult.stripe);
+          setStripeRotationStatusStale(false);
+        });
+      } catch (error) {
+        if (isApiError(error) && error.status === 401) throw error;
+        control.commit(() => {
+          setToast("Secreto cancelado, pero el estado mostrado requiere conciliación.");
+        });
+      }
+    });
+  }
+
+  async function reconcileStripeAcknowledgment(
+    id: string,
+    resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT"
+  ) {
+    await runAction("stripe-acknowledgment-reconcile", async (control) => {
+      await accountApi(`/api/settings/stripe/acknowledgments/${id}/reconcile`, {
+        method: "POST",
+        body: { resolution }
+      });
+      const result = await accountApi<{
+        acknowledgments: StripeAcknowledgmentReconciliationItem[];
+      }>("/api/settings/stripe/acknowledgments");
+      control.commit(() => {
+        setStripeAcknowledgmentReconciliation(result.acknowledgments);
+        setToast(resolution === "CONFIRMED_SENT"
+          ? "Constancia confirmada como enviada"
+          : "Constancia habilitada para reintento seguro");
       });
     });
   }
@@ -2996,6 +3049,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           <CredentialsPanel
             status={credentials}
             stripeSettings={stripeSettings}
+            stripeRotationStatusStale={stripeRotationStatusStale}
+            stripeAcknowledgmentReconciliation={stripeAcknowledgmentReconciliation}
             emissionEnvironment={emissionEnvironment}
             emailTemplates={emailTemplates}
             emailTemplateDraft={emailTemplateDraft}
@@ -3021,6 +3076,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onStripeWebhookStage={stageStripeWebhookSecret}
             onStripeWebhookPromote={promoteStripeWebhookSecret}
             onStripeWebhookCancel={cancelStripeWebhookSecret}
+            onStripeAcknowledgmentReconcile={reconcileStripeAcknowledgment}
             onEmailTemplateChange={(type, patch) => {
               setEmailTemplateDraft((current) => ({
                 ...current,
@@ -3054,9 +3110,10 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             onBootstrapWriter={bootstrapCredentialWriter}
             runAccountOperation={runAccountOperation}
             onRefresh={async () => {
-              const [credentialResult, stripeResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
+              const [credentialResult, stripeResult, acknowledgmentResult, environmentResult, emailTemplateResult, emailSenderResult, wompiNotificationResult, alertEmailResult] = await Promise.all([
                 accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
                 accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe"),
+                accountApi<{ acknowledgments: StripeAcknowledgmentReconciliationItem[] }>("/api/settings/stripe/acknowledgments"),
                 accountApi<{ emissionEnvironment: EmissionEnvironmentState }>("/api/settings/emission-environment"),
                 accountApi<{ emailTemplates: EmailTemplateSettings }>("/api/settings/email-templates"),
                 accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender"),
@@ -3065,6 +3122,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               ]);
               setCredentials(credentialResult.credentials);
               setStripeSettings(stripeResult.stripe);
+              setStripeRotationStatusStale(false);
+              setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
               applyEmailTemplates(emailTemplateResult.emailTemplates);
               applyEmailSender(emailSenderResult.emailSender);

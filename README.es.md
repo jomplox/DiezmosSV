@@ -206,7 +206,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0036)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0038)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -743,8 +743,9 @@ la configuración de la cuenta excluye BNPL y otros métodos de financiamiento. 
 crudo del webhook; el Worker valida ambiente, versión de API, monto, moneda, metadatos del carril, tipo de
 entrega, frecuencia e identificadores antes de guardar en D1 el historial durable de sesiones y entregas. La
 página de resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
-Cada factura mensual cobrada produce una sola entrega, y Billing Portal ofrece la ruta de administración
-recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, tipo,
+Una factura mensual produce una sola entrega únicamente cuando `invoice.paid` y un InvoicePayment pagado
+de Stripe demuestran una liquidación respaldada por PaymentIntent; ambos órdenes de eventos convergen una
+sola vez. Billing Portal ofrece la ruta de administración recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, tipo,
 frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La
 **Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
 netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
@@ -767,8 +768,10 @@ no-secreta `STRIPE_US_TIME_ZONE`. «Configurado» no significa verificado por el
 métodos, Billing Portal y propiedad de cuenta siguen sin verificar por la aplicación. La dirección derivada
 `/webhooks/stripe` y la salud resumida del último evento son de solo lectura; únicamente un evento
 procesado con `livemode` compatible muestra «Verificado por último evento procesado». El secreto preparado
-se escribe y luego se promueve o cancela explícitamente; un fallo o resultado remoto desconocido de promoción
-se concilia antes de repetir o borrar. Las pruebas locales deterministas y este código no modifican una cuenta
+se escribe y luego se promueve mediante un intercambio atómico (el preparado pasa a activo y el activo previo
+queda preparado para rollback), o se cancela. Después de una mutación remota exitosa cuya actualización de
+estado falle, el panel bloquea otra rotación hasta que una actualización exitosa concilie el estado mostrado.
+Las pruebas locales deterministas y este código no modifican una cuenta
 Stripe live. Registrar el webhook live, Payment Method Configuration, Billing Portal y la exclusión BNPL sigue
 siendo un cutover del propietario después de UAT sandbox.
 
@@ -1010,7 +1013,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0036)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0038)</strong></summary>
 
 <br/>
 
@@ -1029,10 +1032,13 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `operational_alert_deliveries` | Claims por incidente y por destinatario para la entrega del correo de alerta. |
 | `stripe_checkout_sessions` | Intento de Checkout del carril estadounidense y estado saneado del proveedor, con cronologías monotónicas independientes de Checkout y suscripción. |
 | `stripe_webhook_events` | Cerca contra repeticiones de eventos Stripe firmados y resultado saneado del procesamiento; nunca conserva cuerpos crudos de webhook. |
+| `stripe_provider_recovery_reads` | Registros de admisión acotados y con concesión para lecturas públicas de recuperación de Session respaldadas por el proveedor. |
+| `stripe_invoice_settlements` | Evidencia de factura mensual e InvoicePayment pagado independiente del orden; solo registra la entrega después de validar ambos lados. |
 | `stripe_gifts` | Fuente de verdad de entregas estadounidenses liquidadas, incluido el tipo elegido por el donante y el estado durable de reembolso/neto. |
-| `stripe_acknowledgment_deliveries` | Claims durables del acuse inmediato 501(c)(3) y evidencia del resultado del proveedor. |
-| `stripe_annual_statement_deliveries` | Instantáneas inmutables de constancias anuales estadounidenses, linaje de revisiones, claims y resultados de envío. |
+| `stripe_acknowledgment_deliveries` | Evidencia inmutable y revisionada de acuses/correcciones inmediatas 501(c)(3) y resultados del proveedor. |
+| `stripe_annual_statement_deliveries` | Instantáneas inmutables de constancias anuales estadounidenses, linaje de revisiones, claims con concesión y resultados de envío. |
 | `stripe_retention_generations` | Libro interno y monotónico de pertenencia para exportaciones de retención Stripe acotadas y consistentes en sus referencias. Es metadato de restauración mantenido por triggers, no forma parte del payload archivado y se reconstruye automáticamente al restaurar las filas de Stripe. |
+| `stripe_invoice_settlement_retention_generations` | Libro interno y monotónico de pertenencia para instantáneas de convergencia de facturas mensuales. No forma parte del payload archivado y se reconstruye automáticamente al restaurar. |
 | `contingency_batches` · `contingency_batch_lines` | Envíos históricos de lotes de contingencia a MH y sus resultados por CDE (solo lectura). |
 | `app_settings` | Configuración en tiempo de ejecución (ambiente de emisión, plantillas de correo, marca, correo de alertas). |
 | `users` · `sessions` · `password_reset_tokens` | Autenticación, RBAC y restablecimiento de contraseña autogestionado. |

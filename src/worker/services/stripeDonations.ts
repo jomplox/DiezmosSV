@@ -247,7 +247,7 @@ export function resolveStripeConfiguration(
     throw new StripeConfigurationError("publishable_key_environment_mismatch");
   }
   const webhookSecret = requiredValue(env.STRIPE_WEBHOOK_SECRET, "missing_webhook_secret");
-  if (!webhookSecret.startsWith("whsec_")) {
+  if (!webhookSecret.startsWith("whsec_") || webhookSecret.length <= "whsec_".length) {
     throw new StripeConfigurationError("invalid_webhook_secret");
   }
   const webhookSecretNext = optionalWebhookSecret(env.STRIPE_WEBHOOK_SECRET_NEXT);

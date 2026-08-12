@@ -131,10 +131,38 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     })).toEqual({ processed: false });
   });
 
+  it("emits a donor-safe operational alert when delivery needs operator attention", async () => {
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('alert_email', 'owner@example.org')"
+    ).run();
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockRejectedValue(new Error("Ana ana@example.org Bearer private-fixture"));
+    const alerts: Array<{ subject: string; text: string }> = [];
+    vi.spyOn(EmailService.prototype, "sendOperationalAlert")
+      .mockImplementation(async (input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        alerts.push({ subject: input.subject, text: input.text });
+        return { messageId: "alert-fixture" };
+      });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ processed: true, outcome: "FAILED" });
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      subject: "Constancia inmediata de EE. UU. requiere atención"
+    });
+    expect(alerts[0].text).toContain("EMAIL_PRE_DISPATCH_FAILED");
+    expect(alerts[0].text).not.toMatch(/Ana|ana@example\.org|Bearer|private-fixture/);
+  });
+
   it("marks a pre-dispatch failure retry-safe and reclaims it on the next sweep", async () => {
     const send = vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
       .mockRejectedValueOnce(new Error("failed before provider dispatch"))
-      .mockResolvedValueOnce({ providerResponse: {}, providerDeliveryId: "sha256:" + "a".repeat(64) });
+      .mockImplementationOnce(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        return { providerResponse: {}, providerDeliveryId: "sha256:" + "a".repeat(64) };
+      });
 
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
       now: "2026-08-10T12:01:00.000Z"
@@ -167,6 +195,152 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       status: "REVIEW",
       failure_code: "recipient_missing",
       retry_safe: 0
+    });
+  });
+
+  it("queues immutable corrected evidence and fences a stale original when a refund arrives before claim", async () => {
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 1500,
+      now: "2026-08-10T12:00:30.000Z"
+    });
+
+    expect(database.prepare(
+      `SELECT revision, kind, evidence_refunded_amount_cents, status, failure_code
+         FROM stripe_acknowledgment_deliveries ORDER BY revision`
+    ).all()).toEqual([
+      {
+        revision: 1,
+        kind: "ORIGINAL",
+        evidence_refunded_amount_cents: 0,
+        status: "FAILED",
+        failure_code: "superseded_by_refund"
+      },
+      {
+        revision: 2,
+        kind: "PARTIAL_REFUND",
+        evidence_refunded_amount_cents: 1500,
+        status: "PENDING",
+        failure_code: null
+      }
+    ]);
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ processed: true, outcome: "SENT" });
+  });
+
+  it("atomically blocks provider entry when a refund lands between claim and dispatch", async () => {
+    const originalMark = repo.markStripeAcknowledgmentDispatchStarted.bind(repo);
+    vi.spyOn(repo, "markStripeAcknowledgmentDispatchStarted").mockImplementation(async (input) => {
+      await repo.applyStripeRefund({
+        stripePaymentIntentId: "pi_fixture",
+        refundedAmountCents: 1000,
+        now: "2026-08-10T12:01:01.000Z"
+      });
+      return originalMark(input);
+    });
+    let providerEntered = false;
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockImplementation(async (_input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        providerEntered = true;
+        return { providerResponse: {}, providerDeliveryId: `sha256:${"a".repeat(64)}` };
+      });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ processed: true, outcome: "FAILED" });
+    expect(providerEntered).toBe(false);
+    expect(database.prepare(
+      "SELECT status, kind FROM stripe_acknowledgment_deliveries ORDER BY revision"
+    ).all()).toEqual([
+      { status: "FAILED", kind: "ORIGINAL" },
+      { status: "PENDING", kind: "PARTIAL_REFUND" }
+    ]);
+  });
+
+  it("preserves SENT evidence and sends idempotent partial and full refund corrections", async () => {
+    const messages: Array<{ subject: string; text: string }> = [];
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockImplementation(async (input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        messages.push({ subject: input.subject, text: input.text });
+        return { providerResponse: {}, providerDeliveryId: `sha256:${String(messages.length).repeat(64)}` };
+      });
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ outcome: "SENT" });
+
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 1000,
+      now: "2026-08-10T12:02:00.000Z"
+    });
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 1000,
+      now: "2026-08-10T12:02:01.000Z"
+    });
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:03:00.000Z"
+    })).toMatchObject({ outcome: "SENT" });
+    expect(messages[1].subject).toContain("corregida");
+    expect(messages[1].text).toContain("$10.00 USD");
+    expect(messages[1].text).toContain("$40.00 USD");
+
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 5000,
+      now: "2026-08-10T12:04:00.000Z"
+    });
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 5000,
+      now: "2026-08-10T12:04:01.000Z"
+    });
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:05:00.000Z"
+    })).toMatchObject({ outcome: "SENT" });
+    expect(messages[2].subject).toContain("revocada");
+    expect(messages[2].text).toContain("reembolso total");
+    expect(database.prepare(
+      "SELECT revision, kind, status FROM stripe_acknowledgment_deliveries ORDER BY revision"
+    ).all()).toEqual([
+      { revision: 1, kind: "ORIGINAL", status: "SENT" },
+      { revision: 2, kind: "PARTIAL_REFUND", status: "SENT" },
+      { revision: 3, kind: "FULL_REFUND", status: "SENT" }
+    ]);
+  });
+
+  it("reuses the immutable email evidence after mutable branding drifts", async () => {
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES ('branding_display_name', 'Organización Original')"
+    ).run();
+    let sentHtml = "";
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockRejectedValueOnce(new Error("pre-provider fixture"))
+      .mockImplementationOnce(async (input, beforeProviderDispatch) => {
+        await beforeProviderDispatch?.();
+        sentHtml = input.html;
+        return { providerResponse: {}, providerDeliveryId: `sha256:${"b".repeat(64)}` };
+      });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ outcome: "FAILED" });
+    database.prepare(
+      "UPDATE app_settings SET value = 'Organización Cambiada' WHERE key = 'branding_display_name'"
+    ).run();
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:06:00.000Z"
+    })).toMatchObject({ outcome: "SENT" });
+    expect(sentHtml).toContain("Organización Original");
+    expect(sentHtml).not.toContain("Organización Cambiada");
+    expect(database.prepare(
+      "SELECT snapshot_hash, snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get()).toEqual({
+      snapshot_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+      snapshot_json: expect.stringContaining("Organización Original")
     });
   });
 });

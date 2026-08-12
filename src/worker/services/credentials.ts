@@ -267,6 +267,9 @@ export function buildStripeWebhookPromotionPatch(env: Env): SecretPatch {
   if (!activeSecret || !nextSecret) {
     throw new StripeCredentialValidationError("missing_staged_webhook_secret");
   }
+  if (!activeSecret.startsWith("whsec_") || activeSecret.length <= "whsec_".length) {
+    throw new StripeCredentialValidationError("invalid_webhook_secret");
+  }
   const staged = buildStripeWebhookStagePatch(nextSecret).STRIPE_WEBHOOK_SECRET_NEXT;
   return {
     STRIPE_WEBHOOK_SECRET: secret("STRIPE_WEBHOOK_SECRET", staged!.text),

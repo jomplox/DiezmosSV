@@ -46,7 +46,7 @@ describe("Stripe U.S. annual statement persistence", () => {
     ]));
   });
 
-  it("enforces snapshot identity, revision identity, lineage, and terminal-state evidence", () => {
+  it("allows a repeated snapshot at a later revision while enforcing revision identity, lineage, and terminal evidence", () => {
     const database = migratedDatabase();
     databases.push(database);
     insertDelivery(database, { id: "delivery_1", snapshotHash: "1".repeat(64), revision: 1 });
@@ -54,8 +54,9 @@ describe("Stripe U.S. annual statement persistence", () => {
     expect(() => insertDelivery(database, {
       id: "duplicate_snapshot",
       snapshotHash: "1".repeat(64),
-      revision: 2
-    })).toThrow(/UNIQUE constraint failed/);
+      revision: 2,
+      supersedesDeliveryId: "delivery_1"
+    })).not.toThrow();
     expect(() => insertDelivery(database, {
       id: "duplicate_revision",
       snapshotHash: "2".repeat(64),

@@ -1,3 +1,5 @@
+import { newId } from "../../utils/ids";
+
 export type StripeGiftFrequency = "ONCE" | "MONTHLY";
 export type StripeGiftType = "TITHE" | "OFFERING" | "UNSPECIFIED";
 export type StripeCheckoutStatus = "CREATING" | "OPEN" | "COMPLETE" | "EXPIRED" | "FAILED";
@@ -74,6 +76,48 @@ export interface StripeAcknowledgmentClaim {
   gift_type: StripeGiftType;
   amount_cents: number;
   settled_at: string;
+  revision: number;
+  kind: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+  evidence_refunded_amount_cents: number;
+  snapshot_hash: string | null;
+  snapshot_json: string | null;
+}
+
+export interface StripeAcknowledgmentReconciliationRecord {
+  id: string;
+  revision: number;
+  kind: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+  status: "FAILED" | "REVIEW";
+  amount_cents: number;
+  evidence_refunded_amount_cents: number;
+  failure_code: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StripeInvoiceSettlementRecord {
+  invoice_id: string;
+  checkout_id: string | null;
+  subscription_id: string | null;
+  amount_cents: number | null;
+  currency: "usd" | null;
+  donor_name: string | null;
+  donor_email: string | null;
+  settled_at: string | null;
+  invoice_livemode: 0 | 1 | null;
+  invoice_event_id: string | null;
+  invoice_payment_id: string | null;
+  payment_intent_id: string | null;
+  payment_amount_cents: number | null;
+  payment_currency: "usd" | null;
+  payment_livemode: 0 | 1 | null;
+  payment_event_id: string | null;
+  status: "PENDING" | "RECORDED" | "REVIEW";
+  gift_id: string | null;
+  failure_code: string | null;
+  recorded_at: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export class StripeGiftConflictError extends Error {
@@ -694,7 +738,7 @@ export async function recordStripeGiftAndAcknowledgment(
     settledAt: string;
     now: string;
   }
-): Promise<{ inserted: boolean; record: StripeGiftRecord }> {
+): Promise<{ inserted: boolean; record: StripeGiftRecord; acknowledgmentId: string }> {
   const giftStatement = db.prepare(
     `INSERT OR IGNORE INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
@@ -721,8 +765,9 @@ export async function recordStripeGiftAndAcknowledgment(
   );
   const acknowledgmentStatement = db.prepare(
     `INSERT OR IGNORE INTO stripe_acknowledgment_deliveries (
-       id, gift_id, status, attempt_count, created_at, updated_at
-     ) SELECT ?, id, 'PENDING', 0, ?, ?
+       id, gift_id, revision, kind, evidence_refunded_amount_cents,
+       status, attempt_count, created_at, updated_at
+     ) SELECT ?, id, 1, 'ORIGINAL', 0, 'PENDING', 0, ?, ?
          FROM stripe_gifts WHERE source_id = ?`
   ).bind(input.acknowledgmentId, input.now, input.now, input.sourceId);
   const [giftResult] = await db.batch([giftStatement, acknowledgmentStatement]);
@@ -735,7 +780,146 @@ export async function recordStripeGiftAndAcknowledgment(
   if (!stripeGiftMatches(record, input)) {
     throw new StripeGiftConflictError();
   }
-  return { inserted: Number(giftResult.meta?.changes ?? 0) > 0, record };
+  const acknowledgment = await db.prepare(
+    `SELECT id FROM stripe_acknowledgment_deliveries
+      WHERE gift_id = ? AND evidence_refunded_amount_cents = 0`
+  ).bind(record.id).first<{ id: string }>();
+  if (!acknowledgment) throw new Error("Stripe acknowledgment could not be read");
+  return {
+    inserted: Number(giftResult.meta?.changes ?? 0) > 0,
+    record,
+    acknowledgmentId: acknowledgment.id
+  };
+}
+
+export async function stageStripeInvoicePaid(
+  db: D1Database,
+  input: {
+    invoiceId: string;
+    checkoutId: string;
+    subscriptionId: string;
+    amountCents: number;
+    donorName: string | null;
+    donorEmail: string | null;
+    settledAt: string;
+    livemode: boolean;
+    eventId: string;
+    now: string;
+  }
+): Promise<StripeInvoiceSettlementRecord> {
+  const row = await db.prepare(
+    `INSERT INTO stripe_invoice_settlements (
+       invoice_id, checkout_id, subscription_id, amount_cents, currency,
+       donor_name, donor_email, settled_at, invoice_livemode, invoice_event_id,
+       status, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+     ON CONFLICT(invoice_id) DO UPDATE SET
+       checkout_id = excluded.checkout_id,
+       subscription_id = excluded.subscription_id,
+       amount_cents = excluded.amount_cents,
+       currency = excluded.currency,
+       donor_name = excluded.donor_name,
+       donor_email = excluded.donor_email,
+       settled_at = excluded.settled_at,
+       invoice_livemode = excluded.invoice_livemode,
+       invoice_event_id = excluded.invoice_event_id,
+       updated_at = excluded.updated_at
+     WHERE stripe_invoice_settlements.status <> 'REVIEW'
+       AND (stripe_invoice_settlements.checkout_id IS NULL
+         OR stripe_invoice_settlements.checkout_id = excluded.checkout_id)
+       AND (stripe_invoice_settlements.subscription_id IS NULL
+         OR stripe_invoice_settlements.subscription_id = excluded.subscription_id)
+       AND (stripe_invoice_settlements.amount_cents IS NULL
+         OR stripe_invoice_settlements.amount_cents = excluded.amount_cents)
+       AND (stripe_invoice_settlements.currency IS NULL
+         OR stripe_invoice_settlements.currency = excluded.currency)
+       AND (stripe_invoice_settlements.invoice_livemode IS NULL
+         OR stripe_invoice_settlements.invoice_livemode = excluded.invoice_livemode)
+       AND (stripe_invoice_settlements.invoice_event_id IS NULL
+         OR stripe_invoice_settlements.invoice_event_id = excluded.invoice_event_id)
+     RETURNING *`
+  ).bind(
+    input.invoiceId,
+    input.checkoutId,
+    input.subscriptionId,
+    input.amountCents,
+    input.donorName,
+    input.donorEmail,
+    input.settledAt,
+    input.livemode ? 1 : 0,
+    input.eventId,
+    input.now,
+    input.now
+  ).first<StripeInvoiceSettlementRecord>();
+  if (!row) throw new Error("Stripe invoice settlement identity conflicts");
+  return row;
+}
+
+export async function stageStripeInvoicePayment(
+  db: D1Database,
+  input: {
+    invoiceId: string;
+    invoicePaymentId: string;
+    paymentIntentId: string;
+    amountCents: number;
+    livemode: boolean;
+    eventId: string;
+    now: string;
+  }
+): Promise<StripeInvoiceSettlementRecord> {
+  const row = await db.prepare(
+    `INSERT INTO stripe_invoice_settlements (
+       invoice_id, invoice_payment_id, payment_intent_id,
+       payment_amount_cents, payment_currency, payment_livemode, payment_event_id,
+       status, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, 'usd', ?, ?, 'PENDING', ?, ?)
+     ON CONFLICT(invoice_id) DO UPDATE SET
+       invoice_payment_id = excluded.invoice_payment_id,
+       payment_intent_id = excluded.payment_intent_id,
+       payment_amount_cents = excluded.payment_amount_cents,
+       payment_currency = excluded.payment_currency,
+       payment_livemode = excluded.payment_livemode,
+       payment_event_id = excluded.payment_event_id,
+       updated_at = excluded.updated_at
+     WHERE stripe_invoice_settlements.status <> 'REVIEW'
+       AND (stripe_invoice_settlements.invoice_payment_id IS NULL
+         OR stripe_invoice_settlements.invoice_payment_id = excluded.invoice_payment_id)
+       AND (stripe_invoice_settlements.payment_intent_id IS NULL
+         OR stripe_invoice_settlements.payment_intent_id = excluded.payment_intent_id)
+       AND (stripe_invoice_settlements.payment_amount_cents IS NULL
+         OR stripe_invoice_settlements.payment_amount_cents = excluded.payment_amount_cents)
+       AND (stripe_invoice_settlements.payment_currency IS NULL
+         OR stripe_invoice_settlements.payment_currency = excluded.payment_currency)
+       AND (stripe_invoice_settlements.payment_livemode IS NULL
+         OR stripe_invoice_settlements.payment_livemode = excluded.payment_livemode)
+       AND (stripe_invoice_settlements.payment_event_id IS NULL
+         OR stripe_invoice_settlements.payment_event_id = excluded.payment_event_id)
+     RETURNING *`
+  ).bind(
+    input.invoiceId,
+    input.invoicePaymentId,
+    input.paymentIntentId,
+    input.amountCents,
+    input.livemode ? 1 : 0,
+    input.eventId,
+    input.now,
+    input.now
+  ).first<StripeInvoiceSettlementRecord>();
+  if (!row) throw new Error("Stripe invoice payment identity conflicts");
+  return row;
+}
+
+export async function markStripeInvoiceSettlementRecorded(
+  db: D1Database,
+  input: { invoiceId: string; giftId: string; now: string }
+): Promise<void> {
+  await db.prepare(
+    `UPDATE stripe_invoice_settlements
+        SET status = 'RECORDED', gift_id = ?, failure_code = NULL,
+            recorded_at = ?, updated_at = ?
+      WHERE invoice_id = ? AND status IN ('PENDING', 'RECORDED')
+        AND (gift_id IS NULL OR gift_id = ?)`
+  ).bind(input.giftId, input.now, input.now, input.invoiceId, input.giftId).run();
 }
 
 function stripeGiftMatches(
@@ -783,16 +967,25 @@ export async function claimNextStripeAcknowledgment(
             dispatch_started_at = NULL, retry_safe = 0,
             next_attempt_at = NULL, updated_at = ?
       WHERE id = (
-        SELECT id FROM stripe_acknowledgment_deliveries
-         WHERE attempt_count < 5
-           AND COALESCE(next_attempt_at, created_at) <= ?
-           AND (status = 'PENDING'
-            OR (status = 'FAILED' AND retry_safe = 1)
+        SELECT stripe_acknowledgment_deliveries.id
+          FROM stripe_acknowledgment_deliveries
+          JOIN stripe_gifts AS gift ON gift.id = stripe_acknowledgment_deliveries.gift_id
+         WHERE stripe_acknowledgment_deliveries.attempt_count < 5
+           AND stripe_acknowledgment_deliveries.evidence_refunded_amount_cents = gift.refunded_amount_cents
+           AND COALESCE(stripe_acknowledgment_deliveries.next_attempt_at,
+                        stripe_acknowledgment_deliveries.created_at) <= ?
+           AND (stripe_acknowledgment_deliveries.status = 'PENDING'
+            OR (stripe_acknowledgment_deliveries.status = 'FAILED'
+              AND stripe_acknowledgment_deliveries.retry_safe = 1)
             OR (
-              status = 'PROCESSING' AND dispatch_started_at IS NULL
-              AND updated_at < ?
+              stripe_acknowledgment_deliveries.status = 'PROCESSING'
+              AND stripe_acknowledgment_deliveries.dispatch_started_at IS NULL
+              AND stripe_acknowledgment_deliveries.updated_at < ?
             ))
-         ORDER BY COALESCE(next_attempt_at, created_at), created_at, id
+         ORDER BY COALESCE(stripe_acknowledgment_deliveries.next_attempt_at,
+                           stripe_acknowledgment_deliveries.created_at),
+                  stripe_acknowledgment_deliveries.created_at,
+                  stripe_acknowledgment_deliveries.id
          LIMIT 1
       )
       RETURNING id`
@@ -803,7 +996,10 @@ export async function claimNextStripeAcknowledgment(
   return db.prepare(
     `SELECT delivery.id, delivery.gift_id, delivery.status,
             delivery.attempt_count, delivery.processing_claim_id,
-            delivery.dispatch_started_at, gift.donor_name, gift.donor_email,
+            delivery.dispatch_started_at, delivery.revision, delivery.kind,
+            delivery.evidence_refunded_amount_cents,
+            delivery.snapshot_hash, delivery.snapshot_json,
+            gift.donor_name, gift.donor_email,
             gift.frequency, gift.gift_type, gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
@@ -819,7 +1015,12 @@ export async function markStripeAcknowledgmentDispatchStarted(
     `UPDATE stripe_acknowledgment_deliveries
         SET dispatch_started_at = ?, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING'
-        AND processing_claim_id = ? AND dispatch_started_at IS NULL`
+        AND processing_claim_id = ? AND dispatch_started_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM stripe_gifts AS gift
+           WHERE gift.id = stripe_acknowledgment_deliveries.gift_id
+             AND gift.refunded_amount_cents = stripe_acknowledgment_deliveries.evidence_refunded_amount_cents
+        )`
   ).bind(input.now, input.now, input.id, input.claimId).run();
   return Number(result.meta?.changes ?? 0) > 0;
 }
@@ -878,7 +1079,9 @@ export async function applyStripeRefund(
   db: D1Database,
   input: { stripePaymentIntentId: string; refundedAmountCents: number; now: string }
 ): Promise<StripeGiftRecord | null> {
-  return db.prepare(
+  const acknowledgmentId = newId("stripe_ack");
+  await db.batch([
+    db.prepare(
     `UPDATE stripe_gifts
         SET refunded_amount_cents = MAX(refunded_amount_cents, ?),
             status = CASE
@@ -896,7 +1099,156 @@ export async function applyStripeRefund(
     input.now,
     input.stripePaymentIntentId,
     input.refundedAmountCents
-  ).first<StripeGiftRecord>();
+  ),
+    db.prepare(
+      `UPDATE stripe_acknowledgment_deliveries
+          SET status = CASE
+                WHEN status = 'PROCESSING' AND dispatch_started_at IS NOT NULL THEN 'REVIEW'
+                ELSE 'FAILED' END,
+              processing_claim_id = NULL,
+              failure_code = CASE
+                WHEN status = 'PROCESSING' AND dispatch_started_at IS NOT NULL
+                  THEN 'provider_outcome_unknown_after_refund'
+                ELSE 'superseded_by_refund' END,
+              retry_safe = 0, next_attempt_at = NULL, updated_at = ?
+        WHERE gift_id = (
+          SELECT id FROM stripe_gifts WHERE stripe_payment_intent_id = ?
+        )
+          AND evidence_refunded_amount_cents <> (
+            SELECT refunded_amount_cents FROM stripe_gifts WHERE stripe_payment_intent_id = ?
+          )
+          AND (status = 'PENDING'
+            OR (status = 'FAILED' AND retry_safe = 1)
+            OR status = 'PROCESSING')`
+    ).bind(input.now, input.stripePaymentIntentId, input.stripePaymentIntentId),
+    db.prepare(
+      `INSERT OR IGNORE INTO stripe_acknowledgment_deliveries (
+         id, gift_id, revision, kind, supersedes_delivery_id,
+         evidence_refunded_amount_cents, status, attempt_count,
+         created_at, updated_at
+       )
+       SELECT ?, gift.id,
+              COALESCE((SELECT MAX(revision) + 1
+                          FROM stripe_acknowledgment_deliveries
+                         WHERE gift_id = gift.id), 1),
+              CASE WHEN gift.refunded_amount_cents >= gift.amount_cents
+                   THEN 'FULL_REFUND' ELSE 'PARTIAL_REFUND' END,
+              (SELECT id FROM stripe_acknowledgment_deliveries
+                WHERE gift_id = gift.id AND status = 'SENT'
+                ORDER BY revision DESC LIMIT 1),
+              gift.refunded_amount_cents, 'PENDING', 0, ?, ?
+         FROM stripe_gifts AS gift
+        WHERE gift.stripe_payment_intent_id = ?
+          AND gift.refunded_amount_cents > 0`
+    ).bind(acknowledgmentId, input.now, input.now, input.stripePaymentIntentId)
+  ]);
+  return db.prepare(
+    "SELECT * FROM stripe_gifts WHERE stripe_payment_intent_id = ?"
+  ).bind(input.stripePaymentIntentId).first<StripeGiftRecord>();
+}
+
+export async function saveStripeAcknowledgmentSnapshot(
+  db: D1Database,
+  input: { id: string; snapshotHash: string; snapshotJson: string; now: string }
+): Promise<boolean> {
+  const result = await db.prepare(
+    `UPDATE stripe_acknowledgment_deliveries
+        SET snapshot_hash = ?, snapshot_json = ?, updated_at = ?
+      WHERE id = ? AND snapshot_hash IS NULL AND snapshot_json IS NULL
+        AND status IN ('PENDING', 'PROCESSING', 'FAILED')`
+  ).bind(input.snapshotHash, input.snapshotJson, input.now, input.id).run();
+  return Number(result.meta?.changes ?? 0) > 0;
+}
+
+export async function getStripeAcknowledgmentEvidenceSource(
+  db: D1Database,
+  id: string
+): Promise<(StripeAcknowledgmentClaim & { status: string; processing_claim_id: string | null }) | null> {
+  return db.prepare(
+    `SELECT delivery.id, delivery.gift_id, delivery.status,
+            delivery.attempt_count, delivery.processing_claim_id,
+            delivery.dispatch_started_at, delivery.revision, delivery.kind,
+            delivery.evidence_refunded_amount_cents,
+            delivery.snapshot_hash, delivery.snapshot_json,
+            gift.donor_name, gift.donor_email, gift.frequency, gift.gift_type,
+            gift.amount_cents, gift.settled_at
+       FROM stripe_acknowledgment_deliveries AS delivery
+       JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
+      WHERE delivery.id = ?`
+  ).bind(id).first<StripeAcknowledgmentClaim & { status: string; processing_claim_id: string | null }>();
+}
+
+export async function getStripeAcknowledgmentForGiftEvidence(
+  db: D1Database,
+  giftId: string,
+  refundedAmountCents: number
+): Promise<{ id: string } | null> {
+  return db.prepare(
+    `SELECT id FROM stripe_acknowledgment_deliveries
+      WHERE gift_id = ? AND evidence_refunded_amount_cents = ?`
+  ).bind(giftId, refundedAmountCents).first<{ id: string }>();
+}
+
+export async function listStripeAcknowledgmentReconciliation(
+  db: D1Database
+): Promise<StripeAcknowledgmentReconciliationRecord[]> {
+  const rows = await db.prepare(
+    `SELECT delivery.id, delivery.revision, delivery.kind, delivery.status,
+            gift.amount_cents, delivery.evidence_refunded_amount_cents,
+            delivery.failure_code, delivery.created_at, delivery.updated_at
+       FROM stripe_acknowledgment_deliveries AS delivery
+       JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
+      WHERE delivery.status IN ('FAILED', 'REVIEW')
+      ORDER BY delivery.updated_at DESC, delivery.id DESC
+      LIMIT 50`
+  ).all<StripeAcknowledgmentReconciliationRecord>();
+  return rows.results ?? [];
+}
+
+export async function reconcileStripeAcknowledgment(
+  db: D1Database,
+  input: {
+    id: string;
+    resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT";
+    now: string;
+  }
+): Promise<boolean> {
+  const result = await db.prepare(
+    `UPDATE stripe_acknowledgment_deliveries
+        SET status = CASE WHEN ? = 'CONFIRMED_SENT' THEN 'SENT' ELSE 'FAILED' END,
+            processing_claim_id = NULL,
+            dispatch_started_at = CASE
+              WHEN ? = 'CONFIRMED_SENT' THEN COALESCE(dispatch_started_at, ?) ELSE NULL END,
+            provider_id_hash = CASE WHEN ? = 'CONFIRMED_SENT'
+              THEN COALESCE(provider_id_hash, 'owner-confirmed') ELSE NULL END,
+            failure_code = CASE WHEN ? = 'CONFIRMED_SENT'
+              THEN NULL ELSE 'owner_confirmed_not_sent' END,
+            retry_safe = CASE WHEN ? = 'CONFIRMED_NOT_SENT' THEN 1 ELSE 0 END,
+            next_attempt_at = CASE WHEN ? = 'CONFIRMED_NOT_SENT' THEN ? ELSE NULL END,
+            sent_at = CASE WHEN ? = 'CONFIRMED_SENT' THEN COALESCE(sent_at, ?) ELSE NULL END,
+            updated_at = ?
+      WHERE id = ? AND status IN ('FAILED', 'REVIEW')
+        AND (? = 'CONFIRMED_SENT' OR EXISTS (
+          SELECT 1 FROM stripe_gifts AS gift
+           WHERE gift.id = stripe_acknowledgment_deliveries.gift_id
+             AND gift.refunded_amount_cents = stripe_acknowledgment_deliveries.evidence_refunded_amount_cents
+        ))`
+  ).bind(
+    input.resolution,
+    input.resolution,
+    input.now,
+    input.resolution,
+    input.resolution,
+    input.resolution,
+    input.resolution,
+    input.now,
+    input.resolution,
+    input.now,
+    input.now,
+    input.id,
+    input.resolution
+  ).run();
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function getStripeGiftBySourceId(

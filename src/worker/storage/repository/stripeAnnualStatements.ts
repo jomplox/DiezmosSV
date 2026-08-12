@@ -256,6 +256,7 @@ export interface StripeAnnualStatementDeliveryRecord {
   status: "PENDING" | "PROCESSING" | "SENT" | "FAILED" | "REVIEW";
   attempt_count: number;
   processing_claim_id: string | null;
+  lease_expires_at: string | null;
   dispatch_started_at: string | null;
   provider_id_hash: string | null;
   failure_code: string | null;
@@ -288,60 +289,98 @@ export async function reserveStripeAnnualStatementDelivery(
     now: string;
   }
 ): Promise<StripeAnnualStatementDeliveryRecord> {
-  await db.prepare(
-    `INSERT OR IGNORE INTO stripe_annual_statement_deliveries (
+  const staleBefore = processingStaleBefore(input.now);
+  await db.batch([
+    db.prepare(
+      `UPDATE stripe_annual_statement_deliveries
+          SET status = 'FAILED', processing_claim_id = NULL,
+              lease_expires_at = NULL, failure_code = 'superseded_stale_pre_dispatch',
+              retry_safe = 0, updated_at = ?
+        WHERE year = ? AND livemode = ? AND donor_key = ?
+          AND snapshot_hash <> ?
+          AND (
+            (status = 'PENDING' AND updated_at < ?)
+            OR (status = 'PROCESSING' AND dispatch_started_at IS NULL
+              AND lease_expires_at <= ?)
+          )`
+    ).bind(
+      input.now,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.snapshotHash,
+      staleBefore,
+      input.now
+    ),
+    db.prepare(
+      `INSERT OR IGNORE INTO stripe_annual_statement_deliveries (
        id, year, livemode, donor_key, donor_name, donor_email,
        snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
        status, attempt_count, created_at, updated_at
      )
      SELECT ?, ?, ?, ?, ?, ?, ?, ?,
-            COALESCE(MAX(revision), 0) + 1,
+            COALESCE((
+              SELECT MAX(revision) FROM stripe_annual_statement_deliveries
+               WHERE year = ? AND livemode = ? AND donor_key = ?
+            ), 0) + 1,
             (
               SELECT id FROM stripe_annual_statement_deliveries
                WHERE year = ? AND livemode = ? AND donor_key = ? AND status = 'SENT'
                ORDER BY revision DESC LIMIT 1
             ),
             'PENDING', 0, ?, ?
-       FROM stripe_annual_statement_deliveries
-      WHERE year = ? AND livemode = ? AND donor_key = ?
-     HAVING NOT EXISTS (
+      WHERE NOT EXISTS (
        SELECT 1 FROM stripe_annual_statement_deliveries AS fence
         WHERE fence.year = ? AND fence.livemode = ? AND fence.donor_key = ?
-          AND fence.snapshot_hash <> ?
           AND fence.status IN ('PENDING', 'PROCESSING', 'REVIEW')
+     ) AND NOT EXISTS (
+       SELECT 1 FROM stripe_annual_statement_deliveries AS latest
+        WHERE latest.year = ? AND latest.livemode = ? AND latest.donor_key = ?
+          AND latest.snapshot_hash = ?
+          AND latest.revision = (
+            SELECT MAX(revision) FROM stripe_annual_statement_deliveries
+             WHERE year = ? AND livemode = ? AND donor_key = ?
+          )
      )`
-  ).bind(
-    input.id,
-    input.year,
-    input.livemode ? 1 : 0,
-    input.donorKey,
-    input.donorName,
-    input.donorEmail,
-    input.snapshotHash,
-    input.snapshotJson,
-    input.year,
-    input.livemode ? 1 : 0,
-    input.donorKey,
-    input.now,
-    input.now,
-    input.year,
-    input.livemode ? 1 : 0,
-    input.donorKey,
-    input.year,
-    input.livemode ? 1 : 0,
-    input.donorKey,
-    input.snapshotHash
-  ).run();
+    ).bind(
+      input.id,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.donorName,
+      input.donorEmail,
+      input.snapshotHash,
+      input.snapshotJson,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.now,
+      input.now,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.snapshotHash,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey
+    )
+  ]);
   const row = await db.prepare(
     `SELECT * FROM stripe_annual_statement_deliveries
-      WHERE year = ? AND livemode = ? AND donor_key = ? AND snapshot_hash = ?`
+      WHERE year = ? AND livemode = ? AND donor_key = ?
+      ORDER BY revision DESC LIMIT 1`
   ).bind(
     input.year,
     input.livemode ? 1 : 0,
-    input.donorKey,
-    input.snapshotHash
+    input.donorKey
   ).first<StripeAnnualStatementDeliveryRecord>();
-  if (!row) {
+  if (!row || row.snapshot_hash !== input.snapshotHash) {
     const fence = await db.prepare(
       `SELECT status FROM stripe_annual_statement_deliveries
         WHERE year = ? AND livemode = ? AND donor_key = ?
@@ -372,25 +411,27 @@ export async function claimStripeAnnualStatementDelivery(
   db: D1Database,
   input: { id: string; claimId: string; now: string }
 ): Promise<StripeAnnualStatementDeliveryRecord | null> {
-  const staleBefore = processingStaleBefore(input.now);
   await db.prepare(
     `UPDATE stripe_annual_statement_deliveries
         SET status = 'REVIEW', processing_claim_id = NULL,
+            lease_expires_at = NULL,
             failure_code = 'provider_outcome_unknown_after_claim_timeout',
             retry_safe = 0, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING'
-        AND dispatch_started_at IS NOT NULL AND updated_at < ?`
-  ).bind(input.now, input.id, staleBefore).run();
+        AND dispatch_started_at IS NOT NULL AND lease_expires_at <= ?`
+  ).bind(input.now, input.id, input.now).run();
+  const leaseExpiresAt = processingLeaseExpiresAt(input.now);
   return db.prepare(
     `UPDATE stripe_annual_statement_deliveries
         SET status = 'PROCESSING', processing_claim_id = ?,
+            lease_expires_at = ?,
             attempt_count = attempt_count + 1, dispatch_started_at = NULL,
             provider_id_hash = NULL, failure_code = NULL, retry_safe = 0,
             updated_at = ?
       WHERE id = ? AND (
         status = 'PENDING'
         OR (status = 'FAILED' AND retry_safe = 1)
-        OR (status = 'PROCESSING' AND dispatch_started_at IS NULL AND updated_at < ?)
+        OR (status = 'PROCESSING' AND dispatch_started_at IS NULL AND lease_expires_at <= ?)
       ) AND NOT EXISTS (
         SELECT 1 FROM stripe_annual_statement_deliveries AS fence
          WHERE fence.year = stripe_annual_statement_deliveries.year
@@ -400,7 +441,7 @@ export async function claimStripeAnnualStatementDelivery(
            AND fence.status IN ('PENDING', 'PROCESSING', 'REVIEW')
       )
       RETURNING *`
-  ).bind(input.claimId, input.now, input.id, staleBefore)
+  ).bind(input.claimId, leaseExpiresAt, input.now, input.id, input.now)
     .first<StripeAnnualStatementDeliveryRecord>();
 }
 
@@ -433,9 +474,10 @@ export async function markStripeAnnualStatementDispatchStarted(
               END = ?
      )
      UPDATE stripe_annual_statement_deliveries
-        SET dispatch_started_at = ?, updated_at = ?
+        SET dispatch_started_at = ?, lease_expires_at = ?, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING'
         AND processing_claim_id = ? AND dispatch_started_at IS NULL
+        AND lease_expires_at > ?
         AND snapshot_hash = ? AND snapshot_json = ?
         AND donor_key = ?
         AND donor_key IS json_extract(snapshot_json, '$.donor.key')
@@ -483,9 +525,11 @@ export async function markStripeAnnualStatementDispatchStarted(
     input.livemode ? 1 : 0,
     input.donorKey,
     input.now,
+    processingLeaseExpiresAt(input.now),
     input.now,
     input.id,
     input.claimId,
+    input.now,
     input.snapshotHash,
     input.snapshotJson,
     input.donorKey
@@ -507,7 +551,8 @@ export async function finalizeStripeAnnualStatementDelivery(
 ): Promise<boolean> {
   const result = await db.prepare(
     `UPDATE stripe_annual_statement_deliveries
-        SET status = ?, processing_claim_id = NULL, provider_id_hash = ?,
+        SET status = ?, processing_claim_id = NULL, lease_expires_at = NULL,
+            provider_id_hash = ?,
             failure_code = ?, retry_safe = ?, sent_at = ?, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING' AND processing_claim_id = ?`
   ).bind(
@@ -527,4 +572,10 @@ function processingStaleBefore(now: string): string {
   const timestamp = Date.parse(now);
   if (!Number.isFinite(timestamp)) throw new Error("Stripe annual statement claim timestamp is invalid");
   return new Date(timestamp - 5 * 60 * 1000).toISOString();
+}
+
+function processingLeaseExpiresAt(now: string): string {
+  const timestamp = Date.parse(now);
+  if (!Number.isFinite(timestamp)) throw new Error("Stripe annual statement claim timestamp is invalid");
+  return new Date(timestamp + 5 * 60 * 1000).toISOString();
 }

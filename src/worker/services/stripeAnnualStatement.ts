@@ -458,7 +458,7 @@ export async function sendStripeAnnualStatements(
     hasMore,
     nextCursor: hasMore ? targets.at(-1)?.donorKey ?? null : null
   };
-  const now = request.now ?? new Date().toISOString();
+  const operationNow = (): string => request.now ?? new Date().toISOString();
 
   for (const target of targets) {
     result.processed += 1;
@@ -482,7 +482,7 @@ export async function sendStripeAnnualStatements(
           donorEmail: snapshot.donor.email,
           snapshotHash: snapshot.hash,
           snapshotJson: snapshot.canonicalJson,
-          now
+          now: operationNow()
         });
       } catch (error) {
         if (error instanceof StripeAnnualStatementReservationFenceError) {
@@ -502,7 +502,11 @@ export async function sendStripeAnnualStatements(
         continue;
       }
       claimId = newId("stripe_annual_statement_claim");
-      const claim = await repo.claimStripeAnnualStatementDelivery({ id: delivery.id, claimId, now });
+      const claim = await repo.claimStripeAnnualStatementDelivery({
+        id: delivery.id,
+        claimId,
+        now: operationNow()
+      });
       if (!claim) {
         result.skipped += 1;
         continue;
@@ -510,7 +514,7 @@ export async function sendStripeAnnualStatements(
       const corrected = Boolean(claim.supersedes_delivery_id);
       const pdfBytes = await renderStripeAnnualStatementPdf({
         snapshot,
-        issuedOn: claim.created_at,
+        issuedOn: claim.updated_at,
         corrected,
         logo: context.logo
       });
@@ -530,7 +534,7 @@ export async function sendStripeAnnualStatements(
           outcome: "FAILED",
           failureCode: "snapshot_changed_before_dispatch",
           retrySafe: true,
-          now
+          now: operationNow()
         });
         result.failed += 1;
         await auditStatementBestEffort(env, repo, actorId, claim.id, "FAILED", claim.revision, corrected);
@@ -561,7 +565,7 @@ export async function sendStripeAnnualStatements(
           range: finalContext.window,
           livemode,
           donorKey: claim.donor_key,
-          now
+          now: operationNow()
         });
         if (!dispatchAuthorized) {
           throw new EmailDispatchError(
@@ -583,7 +587,7 @@ export async function sendStripeAnnualStatements(
         providerIdHash: sent.providerDeliveryId,
         failureCode: null,
         retrySafe: false,
-        now
+        now: operationNow()
       })) {
         throw new Error("Stripe annual statement finalization claim was lost");
       }
@@ -599,7 +603,7 @@ export async function sendStripeAnnualStatements(
           outcome,
           failureCode: classified.code,
           retrySafe: outcome === "FAILED" && classified.retrySafe,
-          now
+          now: operationNow()
         });
         await auditStatementBestEffort(env, repo, actorId, deliveryId, outcome, null, false);
       }

@@ -188,6 +188,7 @@ describe("Stripe Checkout donation contract", () => {
       { STRIPE_PUBLISHABLE_KEY: "invalid" },
       { STRIPE_PUBLISHABLE_KEY: "pk_live_wrong_environment" },
       { STRIPE_WEBHOOK_SECRET: "invalid" },
+      { STRIPE_WEBHOOK_SECRET: "whsec_" },
       { STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "invalid" },
       { STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "invalid" },
       { STRIPE_US_LEGAL_NAME: "" },

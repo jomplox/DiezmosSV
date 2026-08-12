@@ -10,24 +10,25 @@ multi-year retention tax law requires survives independently of D1.
 ## Object layout
 
 ```
-retention/<YYYY>/<YYYY-MM>/dte_documents.ndjson
-retention/<YYYY>/<YYYY-MM>/fiscal_corrections.ndjson
-retention/<YYYY>/<YYYY-MM>/fiscal_corrections_latest.ndjson  (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/donation_intents.ndjson
-retention/<YYYY>/<YYYY-MM>/dte_events.ndjson
-retention/<YYYY>/<YYYY-MM>/email_deliveries.ndjson
-retention/<YYYY>/<YYYY-MM>/audit_logs.ndjson
-retention/<YYYY>/<YYYY-MM>/wompi_events.ndjson              (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/document_sequences.ndjson        (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/contingency_periods.ndjson       (full snapshot, not month-windowed)
-retention/<YYYY>/<YYYY-MM>/contingency_batches.ndjson       (full snapshot, not month-windowed)
-retention/<YYYY>/<YYYY-MM>/contingency_batch_lines.ndjson   (full snapshot, not month-windowed)
-retention/<YYYY>/<YYYY-MM>/stripe_checkout_sessions.ndjson  (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/stripe_webhook_events.ndjson     (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/stripe_gifts.ndjson              (full current-state snapshot, including refund state)
-retention/<YYYY>/<YYYY-MM>/stripe_acknowledgment_deliveries.ndjson  (full current-state snapshot)
-retention/<YYYY>/<YYYY-MM>/stripe_annual_statement_deliveries.ndjson (full current-state snapshot)
 retention/<YYYY>/<YYYY-MM>/manifest.json
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/dte_documents.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/fiscal_corrections.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/fiscal_corrections_latest.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/donation_intents.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/dte_events.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/email_deliveries.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/audit_logs.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/wompi_events.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/document_sequences.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/contingency_periods.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/contingency_batches.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/contingency_batch_lines.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_checkout_sessions.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_webhook_events.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_gifts.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_invoice_settlements.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_acknowledgment_deliveries.ndjson
+retention/<YYYY>/<YYYY-MM>/runs/<run-id>/stripe_annual_statement_deliveries.ndjson
 ```
 
 Each `.ndjson` file has one JSON object per line (one D1 row per line). The
@@ -40,7 +41,8 @@ number counters in `document_sequences`, and the three contingency tables are
 also written as full snapshots as of each run. Every Stripe source-of-truth
 table is likewise a full snapshot: checkout and webhook lifecycle evidence,
 gifts (including durable refund status and `refunded_amount_cents`), immediate
-acknowledgments, and annual-statement revision/delivery evidence. The historical
+acknowledgments, order-independent monthly invoice convergence evidence, and
+annual-statement revision/delivery evidence. The historical
 `fiscal_corrections.ndjson` file remains month-windowed and unchanged;
 `fiscal_corrections_latest.ndjson` is its authoritative current-state overlay.
 Both files contain the same complete correction row shape, while audit history
@@ -58,35 +60,37 @@ columns existed may omit them. Those rows remain valid legacy data: do not
 infer a failed issuance from an absent field or invent a reservation/error
 during restore.
 
-`manifest.json` is written **last** and is the completion marker: if it
-already exists for a given month, a re-run (cron retry or manual trigger)
-skips re-exporting and audits `RETENTION_EXPORT_SKIPPED` instead of
-duplicating work. It looks like:
+Every run writes to a fresh immutable `<run-id>` prefix. `manifest.json` is
+published **last** with a conditional create and is the authoritative completion
+marker. If two runs overlap, only one can publish the month manifest; the losing
+run cannot overwrite the winning files because their object keys differ. A later
+re-run skips and audits `RETENTION_EXPORT_SKIPPED`. Version 1 manifests without
+run-scoped keys remain readable for legacy restores. A version 2 manifest looks like:
 
 ```json
 {
+  "version": 2,
+    "runId": "example-run-id",
   "month": "2026-06",
   "generatedAt": "2026-07-01T09:00:03.512Z",
   "tables": {
-    "dte_documents": { "rowCount": 412, "sha256": "…64 hex chars…" },
-    "fiscal_corrections": { "rowCount": 3, "sha256": "…" },
-    "fiscal_corrections_latest": { "rowCount": 7, "sha256": "…" },
-    "dte_events": { "rowCount": 8, "sha256": "…" },
-    "email_deliveries": { "rowCount": 405, "sha256": "…" },
-    "wompi_events": { "rowCount": 420, "sha256": "…" },
-    "document_sequences": { "rowCount": 2, "sha256": "…" },
-    "audit_logs": { "rowCount": 1890, "sha256": "…" },
-    "contingency_periods": { "rowCount": 2, "sha256": "…" },
-    "contingency_batches": { "rowCount": 1, "sha256": "…" },
-    "contingency_batch_lines": { "rowCount": 3, "sha256": "…" },
-    "stripe_checkout_sessions": { "rowCount": 31, "sha256": "…" },
-    "stripe_webhook_events": { "rowCount": 84, "sha256": "…" },
-    "stripe_gifts": { "rowCount": 27, "sha256": "…" },
-    "stripe_acknowledgment_deliveries": { "rowCount": 27, "sha256": "…" },
-    "stripe_annual_statement_deliveries": { "rowCount": 8, "sha256": "…" }
+    "dte_documents": {
+      "key": "retention/2026/2026-06/runs/example-run-id/dte_documents.ndjson",
+      "rowCount": 412,
+      "sha256": "…64 hex chars…"
+    },
+    "stripe_gifts": {
+      "key": "retention/2026/2026-06/runs/example-run-id/stripe_gifts.ndjson",
+      "rowCount": 27,
+      "sha256": "…64 hex chars…"
+    }
   }
 }
 ```
+
+The real manifest contains one keyed entry for every table listed above. Never
+construct a version 2 table path from the month or from an untrusted run ID; use
+the exact `tables.<name>.key` recorded by the canonical manifest.
 
 ## 1. List what's in the archive
 
@@ -100,11 +104,11 @@ R2 API/dashboard (`wrangler r2 object` operates on a single key at a time) or
 
 ## 2. Verify manifest hashes match the archived bodies
 
-Download each `.ndjson` referenced in the manifest and confirm its SHA-256
+Download each `.ndjson` at the exact `key` referenced in the manifest and confirm its SHA-256
 matches the recorded hash before trusting it for a restore:
 
 ```bash
-node scripts/run-private-wrangler.mjs r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/dte_documents.ndjson \
+node scripts/run-private-wrangler.mjs r2 object get diezmossv-staging-archive-example/retention/2026/2026-06/runs/example-run-id/dte_documents.ndjson \
   --env staging --file dte_documents.ndjson
 shasum -a 256 dte_documents.ndjson
 # Compare against manifest.json → tables.dte_documents.sha256
@@ -154,6 +158,7 @@ table:
    4. authoritative correction overlay: apply the latest verified
       `fiscal_corrections_latest.ndjson` snapshot to `fiscal_corrections`;
    5. leaves: `contingency_batch_lines`, `audit_logs`,
+      `stripe_invoice_settlements`,
       `stripe_acknowledgment_deliveries`,
       `stripe_annual_statement_deliveries` (ascending `revision` within each
       donor/year/livemode lineage).
@@ -169,7 +174,8 @@ table:
    mapping; do not disable foreign keys or accept a partial restore.
 
    Cleanup uses a separate Wrangler file with the same first and last pragmas,
-   but reverses dependencies. Delete `stripe_acknowledgment_deliveries` and
+   but reverses dependencies. Delete `stripe_invoice_settlements`,
+   `stripe_acknowledgment_deliveries`, and
    `stripe_annual_statement_deliveries` before `stripe_gifts`; delete
    `stripe_gifts` before the roots `stripe_checkout_sessions` and
    `stripe_webhook_events`. Delete the
@@ -179,8 +185,9 @@ table:
    `document_sequences`.
 
    Before importing any Stripe snapshot, query each target table after cleanup.
-   **All five Stripe business tables must be empty**: `stripe_checkout_sessions`,
+   **All six Stripe business tables must be empty**: `stripe_checkout_sessions`,
    `stripe_webhook_events`, `stripe_gifts`,
+   `stripe_invoice_settlements`,
    `stripe_acknowledgment_deliveries`, and
    `stripe_annual_statement_deliveries`. Any non-zero count means cleanup is
    incomplete; stop rather than mixing a snapshot with existing Stripe state.
@@ -211,8 +218,9 @@ If the local foreign-key check reports rows, use `ROLLBACK` instead of
 Use only the latest verified Stripe snapshots as a set. Do not mix individual
 Stripe tables from different monthly manifests: their foreign-key and delivery
 state may describe different provider chronology. Restore all business-row columns
-from migrations 0032–0037, without raw Stripe payloads or secrets, in this order:
+from migrations 0032–0038, without raw Stripe payloads or secrets, in this order:
 `stripe_checkout_sessions`, `stripe_webhook_events`, `stripe_gifts`, then
+`stripe_invoice_settlements`,
 `stripe_acknowledgment_deliveries` and
 `stripe_annual_statement_deliveries`. The refund source of truth is the
 `status` plus `refunded_amount_cents` stored on each `stripe_gifts` row; do not
@@ -220,10 +228,11 @@ invent a separate refund row. Insert annual revisions in ascending `revision`
 order so every `supersedes_delivery_id` already exists. Run
 `PRAGMA foreign_key_check` before accepting the restore.
 
-`stripe_retention_generations` is internal, trigger-maintained restore metadata,
-not an archived business table. Do not manufacture or import a ledger NDJSON file:
-the migration-0036 triggers rebuild its rows automatically while the five Stripe
-business tables above are restored.
+`stripe_retention_generations` and
+`stripe_invoice_settlement_retention_generations` are internal,
+trigger-maintained restore metadata, not archived business tables. Do not
+manufacture or import ledger NDJSON files: the migration triggers rebuild their
+rows automatically while the six Stripe business tables above are restored.
 
 Stripe snapshots are intended for an empty loss-recovery database. If restoring
 into a database with existing Stripe rows, compare rows by primary/unique key
