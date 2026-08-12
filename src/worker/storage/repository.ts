@@ -131,6 +131,7 @@ import {
   listAcceptedWompiContactRows as listAcceptedWompiContactRowsRepository,
   listAnnualCertificateDonorDocuments as listAnnualCertificateDonorDocumentsRepository,
   listAnnualCertificateDonorTargets as listAnnualCertificateDonorTargetsRepository,
+  captureStripeRetentionFence as captureStripeRetentionFenceRepository,
   listAllRowsPaged as listAllRowsPagedRepository,
   listDocumentSequencesPaged as listDocumentSequencesPagedRepository,
   listRowsCreatedBetween as listRowsCreatedBetweenRepository,
@@ -139,7 +140,8 @@ import {
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
-  type RetentionTable
+  type RetentionTable,
+  type StripeRetentionFence
 } from "./repository/retentionReads";
 import {
   listDonors as listDonorsRepository,
@@ -274,14 +276,17 @@ export type {
 export {
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
-  RETENTION_WINDOWED_TABLES
+  RETENTION_WINDOWED_TABLES,
+  STRIPE_RETENTION_SNAPSHOT_TABLES
 } from "./repository/retentionReads";
 export type {
   AnnualCertificateDonorTarget,
   DocumentSequenceRetentionCursor,
   RetentionCursor,
   RetentionSnapshotTable,
-  RetentionTable
+  RetentionTable,
+  StripeRetentionFence,
+  StripeRetentionSnapshotTable
 } from "./repository/retentionReads";
 export type {
   DonorExplorerFilters,
@@ -1633,8 +1638,17 @@ export class Repository {
     return listRowsCreatedBetweenRepository(this.db, table, range, cursor, limit);
   }
 
-  async listAllRowsPaged(table: RetentionSnapshotTable, cursor: RetentionCursor | null, limit = RETENTION_PAGE_SIZE): Promise<Array<Record<string, unknown>>> {
-    return listAllRowsPagedRepository(this.db, table, cursor, limit);
+  async captureStripeRetentionFence(): Promise<StripeRetentionFence> {
+    return captureStripeRetentionFenceRepository(this.db);
+  }
+
+  async listAllRowsPaged(
+    table: RetentionSnapshotTable,
+    cursor: RetentionCursor | null,
+    limit = RETENTION_PAGE_SIZE,
+    stripeFence?: StripeRetentionFence
+  ): Promise<Array<Record<string, unknown>>> {
+    return listAllRowsPagedRepository(this.db, table, cursor, limit, stripeFence);
   }
 
   async listDocumentSequencesPaged(

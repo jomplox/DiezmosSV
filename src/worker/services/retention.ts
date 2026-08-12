@@ -6,7 +6,8 @@ import {
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
-  type RetentionTable
+  type RetentionTable,
+  type StripeRetentionFence
 } from "../storage/repository";
 import type { Env } from "../types";
 import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
@@ -256,6 +257,8 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       return { status: "skipped", month };
     }
 
+    const stripeFence = await repo.captureStripeRetentionFence();
+
     const manifest: RetentionManifest = {
       month,
       generatedAt: now.toISOString(),
@@ -273,7 +276,7 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     manifest.tables[FISCAL_CORRECTION_LATEST_SNAPSHOT] = fiscalCorrectionSnapshotEntry;
     totalRows += fiscalCorrectionSnapshotEntry.rowCount;
     for (const table of RETENTION_SNAPSHOT_TABLES) {
-      const entry = await exportSnapshotTable(env, repo, table, prefix);
+      const entry = await exportSnapshotTable(env, repo, table, prefix, stripeFence);
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
     }
@@ -366,14 +369,25 @@ async function exportFiscalCorrectionSnapshot(
   );
 }
 
-async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
+async function exportSnapshotTable(
+  env: Env,
+  repo: Repository,
+  table: RetentionSnapshotTable,
+  prefix: string,
+  stripeFence: StripeRetentionFence
+): Promise<TableManifestEntry> {
   const cursorColumn = table === "wompi_events" || table === "stripe_webhook_events"
     ? "received_at"
     : "created_at";
   return streamRetentionTable<RetentionCursor>(
     env,
     `${prefix}/${table}.ndjson`,
-    (cursor) => repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE),
+    (cursor) => repo.listAllRowsPaged(
+      table,
+      cursor,
+      RETENTION_PAGE_SIZE,
+      stripeFence
+    ),
     (row) => ({
       createdAt: String(row[cursorColumn]),
       id: String(row.id)

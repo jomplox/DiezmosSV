@@ -32,6 +32,18 @@ export const RETENTION_SNAPSHOT_TABLES = [
 ] as const;
 export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
 
+export const STRIPE_RETENTION_SNAPSHOT_TABLES = [
+  "stripe_checkout_sessions",
+  "stripe_webhook_events",
+  "stripe_gifts",
+  "stripe_acknowledgment_deliveries",
+  "stripe_annual_statement_deliveries"
+] as const;
+export type StripeRetentionSnapshotTable = (typeof STRIPE_RETENTION_SNAPSHOT_TABLES)[number];
+export interface StripeRetentionFence {
+  maxGeneration: string;
+}
+
 export interface RetentionCursor {
   createdAt: string;
   id: string;
@@ -40,6 +52,22 @@ export interface RetentionCursor {
 export interface DocumentSequenceRetentionCursor {
   environment: string;
   controlPrefix: string;
+}
+
+// The append-only AUTOINCREMENT ledger is shared by all five Stripe tables, so one
+// scalar defines their membership boundary. TEXT preserves the full signed 64-bit
+// value; SQLite compares the bound decimal without a JS precision loss.
+export async function captureStripeRetentionFence(
+  db: D1Database
+): Promise<StripeRetentionFence> {
+  const fence = await db.prepare(
+    `SELECT COALESCE(CAST(MAX(generation) AS TEXT), '0') AS maxGeneration
+       FROM stripe_retention_generations`
+  ).first<{ maxGeneration: string }>();
+  if (!fence || !/^(?:0|[1-9]\d*)$/.test(fence.maxGeneration)) {
+    throw new Error("retention_stripe_fence_invalid");
+  }
+  return fence;
 }
 
 export interface AnnualCertificateDonorTarget {
@@ -504,18 +532,107 @@ export async function listAllRowsPaged(
   db: D1Database,
   table: RetentionSnapshotTable,
   cursor: RetentionCursor | null,
-  limit: number
+  limit: number,
+  stripeFence?: StripeRetentionFence
 ): Promise<Array<Record<string, unknown>>> {
   const column = retentionSnapshotTimestampColumn(table);
   const conditions: string[] = [];
   const bindings: Array<string | number> = [];
+  const isStripeTable = STRIPE_RETENTION_SNAPSHOT_TABLES.includes(
+    table as StripeRetentionSnapshotTable
+  );
+  const rowAlias = isStripeTable && stripeFence ? "snapshot" : null;
+  if (rowAlias && stripeFence) {
+    const stripeTable = table as StripeRetentionSnapshotTable;
+    conditions.push(`retention_generation.generation <= ?`);
+    bindings.push(stripeFence.maxGeneration);
+    if (stripeTable === "stripe_gifts") {
+      conditions.push(
+        `(${rowAlias}.checkout_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_checkout_sessions AS checkout_parent
+            JOIN stripe_retention_generations AS checkout_generation
+              ON checkout_generation.table_name = 'stripe_checkout_sessions'
+             AND checkout_generation.row_id = checkout_parent.id
+             AND checkout_generation.generation <= ?
+           WHERE checkout_parent.id = ${rowAlias}.checkout_id
+        ))`
+      );
+      bindings.push(stripeFence.maxGeneration);
+    } else if (stripeTable === "stripe_acknowledgment_deliveries") {
+      conditions.push(
+        `EXISTS (
+          SELECT 1
+            FROM stripe_gifts AS gift_parent
+            JOIN stripe_retention_generations AS gift_generation
+              ON gift_generation.table_name = 'stripe_gifts'
+             AND gift_generation.row_id = gift_parent.id
+             AND gift_generation.generation <= ?
+           WHERE gift_parent.id = ${rowAlias}.gift_id
+             AND (gift_parent.checkout_id IS NULL OR EXISTS (
+               SELECT 1
+                 FROM stripe_checkout_sessions AS checkout_ancestor
+                 JOIN stripe_retention_generations AS checkout_generation
+                   ON checkout_generation.table_name = 'stripe_checkout_sessions'
+                  AND checkout_generation.row_id = checkout_ancestor.id
+                  AND checkout_generation.generation <= ?
+                WHERE checkout_ancestor.id = gift_parent.checkout_id
+             ))
+        )`
+      );
+      bindings.push(
+        stripeFence.maxGeneration,
+        stripeFence.maxGeneration
+      );
+    } else if (stripeTable === "stripe_annual_statement_deliveries") {
+      conditions.push(
+        `(${rowAlias}.supersedes_delivery_id IS NULL OR (
+          EXISTS (
+            SELECT 1 FROM stripe_annual_statement_deliveries AS direct_parent
+             WHERE direct_parent.id = ${rowAlias}.supersedes_delivery_id
+          )
+          AND NOT EXISTS (
+            WITH RECURSIVE annual_ancestry(id, supersedes_delivery_id) AS (
+              SELECT ancestor.id, ancestor.supersedes_delivery_id
+                FROM stripe_annual_statement_deliveries AS ancestor
+               WHERE ancestor.id = ${rowAlias}.supersedes_delivery_id
+              UNION
+              SELECT ancestor.id, ancestor.supersedes_delivery_id
+                FROM stripe_annual_statement_deliveries AS ancestor
+                JOIN annual_ancestry ON ancestor.id = annual_ancestry.supersedes_delivery_id
+            )
+            SELECT 1
+              FROM annual_ancestry
+              LEFT JOIN stripe_retention_generations AS ancestor_generation
+                ON ancestor_generation.table_name = 'stripe_annual_statement_deliveries'
+               AND ancestor_generation.row_id = annual_ancestry.id
+               AND ancestor_generation.generation <= ?
+             WHERE ancestor_generation.generation IS NULL
+          )
+        ))`
+      );
+      bindings.push(stripeFence.maxGeneration);
+    }
+  }
+  const columnReference = rowAlias ? `${rowAlias}.${column}` : column;
+  const idReference = rowAlias ? `${rowAlias}.id` : "id";
   if (cursor) {
-    conditions.push(`(${column}, id) > (?, ?)`);
+    conditions.push(`(${columnReference}, ${idReference}) > (?, ?)`);
     bindings.push(cursor.createdAt, cursor.id);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const from = rowAlias
+    ? `${table} AS ${rowAlias}
+       JOIN stripe_retention_generations AS retention_generation
+         ON retention_generation.table_name = '${table}'
+        AND retention_generation.row_id = ${rowAlias}.id`
+    : table;
+  const selection = rowAlias ? `${rowAlias}.*` : "*";
   const rows = await db
-    .prepare(`SELECT * FROM ${table} ${where} ORDER BY ${column} ASC, id ASC LIMIT ?`)
+    .prepare(
+      `SELECT ${selection} FROM ${from} ${where}
+       ORDER BY ${columnReference} ASC, ${idReference} ASC LIMIT ?`
+    )
     .bind(...bindings, limit)
     .all<Record<string, unknown>>();
   return rows.results ?? [];

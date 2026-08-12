@@ -403,6 +403,12 @@ export class Statement {
 
   async first<T>(): Promise<T | null> {
     if (
+      this.sql.includes("MAX(generation)") &&
+      this.sql.includes("FROM stripe_retention_generations")
+    ) {
+      return { maxGeneration: "0" } as T;
+    }
+    if (
       this.sql.includes("FROM stripe_webhook_events") &&
       this.sql.includes("ORDER BY received_at DESC")
     ) {

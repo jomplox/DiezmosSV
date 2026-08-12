@@ -9,6 +9,8 @@ import {
 } from "../../src/worker/services/retention";
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
+import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
+import { sqliteD1 } from "./support/sqliteD1";
 
 const nativeCrypto = crypto;
 
@@ -369,6 +371,11 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
     if (sql.includes("FROM fiscal_corrections")) return this.fiscalCorrections;
+    if (sql.includes("FROM stripe_checkout_sessions AS snapshot")) return this.stripeCheckoutSessions;
+    if (sql.includes("FROM stripe_webhook_events AS snapshot")) return this.stripeWebhookEvents;
+    if (sql.includes("FROM stripe_gifts AS snapshot")) return this.stripeGifts;
+    if (sql.includes("FROM stripe_acknowledgment_deliveries AS snapshot")) return this.stripeAcknowledgmentDeliveries;
+    if (sql.includes("FROM stripe_annual_statement_deliveries AS snapshot")) return this.stripeAnnualStatementDeliveries;
     if (sql.includes("FROM stripe_checkout_sessions")) return this.stripeCheckoutSessions;
     if (sql.includes("FROM stripe_webhook_events")) return this.stripeWebhookEvents;
     if (sql.includes("FROM stripe_gifts")) return this.stripeGifts;
@@ -403,6 +410,17 @@ class RetentionStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes("MAX(generation)") && this.sql.includes("FROM stripe_retention_generations")) {
+      return {
+        maxGeneration: String(
+          this.db.stripeCheckoutSessions.length
+          + this.db.stripeWebhookEvents.length
+          + this.db.stripeGifts.length
+          + this.db.stripeAcknowledgmentDeliveries.length
+          + this.db.stripeAnnualStatementDeliveries.length
+        )
+      } as T;
+    }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
@@ -616,6 +634,77 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+function d1WithAfterFinalCheckoutPage(
+  database: D1Database,
+  afterPage: () => void
+): D1Database {
+  let injected = false;
+  return {
+    prepare(sql: string) {
+      const statement = database.prepare(sql);
+      const wrapped = {
+        bind(...values: unknown[]) {
+          statement.bind(...values);
+          return wrapped;
+        },
+        first<T>() {
+          return statement.first<T>();
+        },
+        run() {
+          return statement.run();
+        },
+        async all<T>() {
+          const result = await statement.all<T>();
+          if (
+            !injected
+            && (
+              sql.includes("SELECT * FROM stripe_checkout_sessions")
+              || sql.includes("SELECT snapshot.* FROM stripe_checkout_sessions AS snapshot")
+            )
+          ) {
+            injected = true;
+            afterPage();
+          }
+          return result;
+        }
+      };
+      return wrapped as unknown as D1PreparedStatement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return database.batch(statements);
+    }
+  } as D1Database;
+}
+
+function archivedRows(
+  archive: FakeArchiveBucket,
+  month: string,
+  table: string
+): Array<Record<string, SQLInputValue>> {
+  const object = archive.objects.get(`retention/${month.slice(0, 4)}/${month}/${table}.ndjson`);
+  if (!object) throw new Error(`missing archived table ${table}`);
+  return new TextDecoder()
+    .decode(object.body)
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, SQLInputValue>);
+}
+
+function restoreArchivedRows(
+  database: DatabaseSync,
+  archive: FakeArchiveBucket,
+  month: string,
+  table: string
+): void {
+  for (const row of archivedRows(archive, month, table)) {
+    const columns = Object.keys(row);
+    const quotedColumns = columns.map((column) => `"${column.replaceAll('"', '""')}"`);
+    database.prepare(
+      `INSERT INTO "${table}" (${quotedColumns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
+    ).run(...Object.values(row));
+  }
+}
+
 describe("runRetentionExport", () => {
   it("exports the previous El Salvador calendar month for windowed tables into NDJSON keyed objects", async () => {
     const db = new InMemoryRetentionD1();
@@ -708,6 +797,162 @@ describe("runRetentionExport", () => {
     expect(restorePhase("stripe_acknowledgment_deliveries")).toBeGreaterThan(restorePhase("stripe_gifts"));
     expect(deletePhase("stripe_acknowledgment_deliveries")).toBeLessThan(deletePhase("stripe_gifts"));
     expect(deletePhase("stripe_gifts")).toBeLessThan(deletePhase("stripe_checkout_sessions"));
+  });
+
+  it("exports one restorable Stripe snapshot when children and mutable updates arrive after the checkout page", async () => {
+    const source = migratedDatabaseThrough("0035");
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    const createdAt = "2026-06-15T12:00:00.000Z";
+    const lateCreatedAt = "2025-01-01T00:00:00.000Z";
+    source.exec(`
+      INSERT INTO stripe_checkout_sessions (
+        id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+        livemode, status, payment_status, created_at, updated_at
+      ) VALUES
+        ('checkout_stable', 'request_stable', 'fingerprint_stable', 'ONCE', 'TITHE', 1000,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}'),
+        ('checkout_retargeted', 'request_retargeted', 'fingerprint_retargeted', 'ONCE', 'OFFERING', 1200,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}'),
+        ('checkout_deleted', 'request_deleted', 'fingerprint_deleted', 'ONCE', 'TITHE', 1300,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_webhook_events (
+        id, event_type, livemode, status, processing_claim_id, received_at, updated_at
+      ) VALUES ('evt_existing', 'checkout.session.completed', 0, 'PROCESSING', 'claim_existing',
+                '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_gifts (
+        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+        frequency, gift_type, amount_cents, donor_name, donor_email, settled_at,
+        status, created_at, updated_at
+      ) VALUES
+        ('gift_stable', 'PAYMENT_INTENT', 'pi_stable', 'checkout_stable', 'pi_stable',
+         'ONCE', 'TITHE', 1000, 'Stable Donor', 'stable@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}'),
+        ('gift_retargeted', 'PAYMENT_INTENT', 'pi_retargeted', 'checkout_retargeted', 'pi_retargeted',
+         'ONCE', 'OFFERING', 1200, 'Retargeted Donor', 'retargeted@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}'),
+        ('gift_deleted', 'PAYMENT_INTENT', 'pi_deleted', 'checkout_deleted', 'pi_deleted',
+         'ONCE', 'TITHE', 1300, 'Deleted Donor', 'deleted@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_acknowledgment_deliveries (
+        id, gift_id, status, created_at, updated_at
+      ) VALUES
+        ('ack_stable', 'gift_stable', 'PENDING', '${createdAt}', '${createdAt}'),
+        ('ack_retargeted', 'gift_retargeted', 'PENDING', '${createdAt}', '${createdAt}'),
+        ('ack_deleted', 'gift_deleted', 'PENDING', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_annual_statement_deliveries (
+        id, year, livemode, donor_key, donor_name, donor_email, snapshot_hash,
+        snapshot_json, revision, status, created_at, updated_at
+      ) VALUES (
+        'annual_r1', 2025, 0, 'annual@example.org', 'Annual Donor', 'annual@example.org',
+        '${"a".repeat(64)}', '{}', 1, 'PENDING', '${createdAt}', '${createdAt}'
+      );
+    `);
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
+      "utf8"
+    ));
+
+    let raceInserted = false;
+    const db = d1WithAfterFinalCheckoutPage(sqliteD1(source), () => {
+      raceInserted = true;
+      source.exec(`
+        UPDATE stripe_webhook_events
+           SET status = 'PROCESSED', processed_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'evt_existing';
+        UPDATE stripe_gifts
+           SET status = 'PARTIALLY_REFUNDED', refunded_amount_cents = 250, updated_at = '${createdAt}'
+         WHERE id = 'gift_stable';
+        UPDATE stripe_acknowledgment_deliveries
+           SET status = 'SENT', sent_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'ack_stable';
+        UPDATE stripe_annual_statement_deliveries
+           SET status = 'SENT', attempt_count = 1, dispatch_started_at = '${createdAt}',
+               provider_id_hash = 'provider-hash', sent_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'annual_r1';
+        DELETE FROM stripe_acknowledgment_deliveries WHERE id = 'ack_deleted';
+        DELETE FROM stripe_gifts WHERE id = 'gift_deleted';
+        DELETE FROM stripe_checkout_sessions WHERE id = 'checkout_deleted';
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+          livemode, status, payment_status, created_at, updated_at
+        ) VALUES ('checkout_reused', 'request_reused', 'fingerprint_reused', 'ONCE', 'TITHE', 1400,
+                  0, 'COMPLETE', 'PAID', '${lateCreatedAt}', '${lateCreatedAt}');
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+          livemode, status, payment_status, created_at, updated_at
+        ) VALUES ('checkout_late', 'request_late', 'fingerprint_late', 'ONCE', 'TITHE', 1500,
+                  0, 'COMPLETE', 'PAID', '${lateCreatedAt}', '${lateCreatedAt}');
+        UPDATE stripe_gifts SET checkout_id = 'checkout_late' WHERE id = 'gift_retargeted';
+        INSERT INTO stripe_gifts (
+          id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+          frequency, gift_type, amount_cents, donor_name, donor_email, settled_at,
+          status, created_at, updated_at
+        ) VALUES (
+          'gift_reused', 'PAYMENT_INTENT', 'pi_reused', 'checkout_reused', 'pi_reused',
+          'ONCE', 'TITHE', 1400, 'Reused Donor', 'reused@example.org', '${lateCreatedAt}',
+          'PAID', '${lateCreatedAt}', '${lateCreatedAt}'
+        );
+        INSERT INTO stripe_acknowledgment_deliveries (id, gift_id, status, created_at, updated_at)
+        VALUES ('ack_reused', 'gift_reused', 'PENDING', '${lateCreatedAt}', '${lateCreatedAt}');
+        INSERT INTO stripe_webhook_events (
+          id, event_type, livemode, status, processing_claim_id, received_at, updated_at
+        ) VALUES ('evt_late', 'invoice.paid', 0, 'PROCESSED', 'claim_late',
+                  '${lateCreatedAt}', '${lateCreatedAt}');
+        INSERT INTO stripe_annual_statement_deliveries (
+          id, year, livemode, donor_key, donor_name, donor_email, snapshot_hash,
+          snapshot_json, revision, supersedes_delivery_id, status, created_at, updated_at
+        ) VALUES (
+          'annual_r2', 2025, 0, 'annual@example.org', 'Annual Donor', 'annual@example.org',
+          '${"b".repeat(64)}', '{}', 2, 'annual_r1', 'PENDING', '${lateCreatedAt}', '${lateCreatedAt}'
+        );
+      `);
+    });
+    const runtime = {
+      DB: db,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("completed");
+      expect(raceInserted).toBe(true);
+      expect(archivedRows(archive, "2026-06", "stripe_checkout_sessions").map((row) => row.id)).toEqual([
+        "checkout_deleted",
+        "checkout_retargeted",
+        "checkout_stable"
+      ]);
+      expect(archivedRows(archive, "2026-06", "stripe_webhook_events")).toEqual([
+        expect.objectContaining({ id: "evt_existing", status: "PROCESSED" })
+      ]);
+      expect(archivedRows(archive, "2026-06", "stripe_gifts")).toEqual([
+        expect.objectContaining({ id: "gift_stable", status: "PARTIALLY_REFUNDED", refunded_amount_cents: 250 })
+      ]);
+      expect(archivedRows(archive, "2026-06", "stripe_acknowledgment_deliveries")).toEqual([
+        expect.objectContaining({ id: "ack_stable", status: "SENT" })
+      ]);
+      expect(archivedRows(archive, "2026-06", "stripe_annual_statement_deliveries")).toEqual([
+        expect.objectContaining({ id: "annual_r1", status: "SENT" })
+      ]);
+
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
+      for (const phase of RETENTION_FOREIGN_KEY_PROTOCOL.restorePhases) {
+        for (const table of phase.tables) {
+          if (table.startsWith("stripe_")) {
+            restoreArchivedRows(destination, archive, "2026-06", table);
+          }
+        }
+      }
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+    } finally {
+      source.close();
+      destination.close();
+    }
   });
 
   it("retains Wompi issuance lifecycle evidence with a valid manifest count and digest", async () => {
