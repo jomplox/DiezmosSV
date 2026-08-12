@@ -199,6 +199,105 @@ describe("Stripe U.S. donation persistence", () => {
     ]);
   });
 
+  it("orders an interleaved annual correction after its unbackfilled ancestry", () => {
+    const seed = migratedDatabaseThrough("0035");
+    insertAnnualStatement(seed, "annual_migration_root", "lineage@example.org");
+    insertAnnualStatement(seed, "annual_migration_parent", "lineage@example.org", {
+      revision: 2,
+      supersedesDeliveryId: "annual_migration_root"
+    });
+    const directory = mkdtempSync(join(tmpdir(), "stripe-retention-lineage-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "migration.sqlite");
+    seed.exec(`VACUUM INTO '${databasePath.replaceAll("'", "''")}'`);
+    seed.close();
+    const database = track(openDatabases, new DatabaseSync(databasePath));
+    const writer = track(openDatabases, new DatabaseSync(databasePath));
+    database.exec("PRAGMA foreign_keys = ON");
+    writer.exec("PRAGMA foreign_keys = ON");
+    const migration = readFileSync(retentionGenerationMigrationPath, "utf8");
+    const backfillStart = migration.indexOf("-- Idempotent backfills cover rows");
+    expect(backfillStart).toBeGreaterThan(0);
+
+    database.exec(migration.slice(0, backfillStart));
+    insertAnnualStatement(writer, "annual_migration_child", "lineage@example.org", {
+      revision: 3,
+      supersedesDeliveryId: "annual_migration_parent"
+    });
+
+    expect(annualGenerations(database)).toEqual([
+      "annual_migration_root",
+      "annual_migration_parent",
+      "annual_migration_child"
+    ]);
+    database.exec(migration.slice(backfillStart));
+    expect(annualGenerations(database)).toEqual([
+      "annual_migration_root",
+      "annual_migration_parent",
+      "annual_migration_child"
+    ]);
+  });
+
+  it("preserves annual lineage order across ancestor mutations and delete-reinsert", () => {
+    const database = track(openDatabases, migratedDatabase());
+    insertAnnualStatement(database, "annual_mutation_root", "mutation@example.org");
+    insertAnnualStatement(database, "annual_mutation_child", "mutation@example.org", {
+      revision: 2,
+      supersedesDeliveryId: "annual_mutation_root"
+    });
+    const originalGenerations = annualGenerationRows(database);
+    expect(originalGenerations.map((row) => row.id)).toEqual([
+      "annual_mutation_root",
+      "annual_mutation_child"
+    ]);
+
+    database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET created_at = ? WHERE id = ?"
+    ).run("2026-12-31T00:00:00.000Z", "annual_mutation_root");
+    expect(annualGenerationRows(database)).toEqual(originalGenerations);
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET id = ? WHERE id = ?"
+    ).run("annual_mutation_root_renamed", "annual_mutation_root")).toThrow(/FOREIGN KEY/);
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET supersedes_delivery_id = ? WHERE id = ?"
+    ).run("annual_mutation_child", "annual_mutation_root")).toThrow(
+      /stripe_annual_statement_snapshot_immutable/
+    );
+    expect(() => database.prepare(
+      "DELETE FROM stripe_annual_statement_deliveries WHERE id = ?"
+    ).run("annual_mutation_root")).toThrow(/FOREIGN KEY/);
+    expect(annualGenerationRows(database)).toEqual(originalGenerations);
+
+    insertAnnualStatement(database, "annual_mutation_grandchild", "mutation@example.org", {
+      revision: 3,
+      supersedesDeliveryId: "annual_mutation_child"
+    });
+    const oldLastGeneration = annualGenerationRows(database).at(-1)!.generation;
+    database.prepare(
+      "DELETE FROM stripe_annual_statement_deliveries WHERE id IN (?, ?, ?)"
+    ).run(
+      "annual_mutation_grandchild",
+      "annual_mutation_child",
+      "annual_mutation_root"
+    );
+    insertAnnualStatement(database, "annual_mutation_root", "mutation@example.org");
+    insertAnnualStatement(database, "annual_mutation_child", "mutation@example.org", {
+      revision: 2,
+      supersedesDeliveryId: "annual_mutation_root"
+    });
+    insertAnnualStatement(database, "annual_mutation_grandchild", "mutation@example.org", {
+      revision: 3,
+      supersedesDeliveryId: "annual_mutation_child"
+    });
+    const reinserted = annualGenerationRows(database);
+    expect(reinserted.map((row) => row.id)).toEqual([
+      "annual_mutation_root",
+      "annual_mutation_child",
+      "annual_mutation_grandchild"
+    ]);
+    expect(reinserted[0].generation).toBeGreaterThan(oldLastGeneration);
+  });
+
   it("enforces idempotency, lifecycle, and amount invariants in SQLite", () => {
     const database = track(openDatabases, migratedDatabase());
     insertCheckout(database, "checkout_one", "request_one", "fingerprint_one");
@@ -369,11 +468,41 @@ function insertAcknowledgment(database: DatabaseSync, id: string, giftId: string
   ).run(id, giftId);
 }
 
-function insertAnnualStatement(database: DatabaseSync, id: string, donorEmail: string): void {
+function insertAnnualStatement(
+  database: DatabaseSync,
+  id: string,
+  donorEmail: string,
+  options: { revision?: number; supersedesDeliveryId?: string } = {}
+): void {
   database.prepare(
     `INSERT INTO stripe_annual_statement_deliveries (
        id, year, livemode, donor_key, donor_name, donor_email,
-       snapshot_hash, snapshot_json, revision, status
-     ) VALUES (?, 2025, 0, ?, 'Migration Donor', ?, ?, '{}', 1, 'PENDING')`
-  ).run(id, donorEmail, donorEmail, id.padEnd(64, "0").slice(0, 64));
+       snapshot_hash, snapshot_json, revision, supersedes_delivery_id, status
+     ) VALUES (?, 2025, 0, ?, 'Migration Donor', ?, ?, '{}', ?, ?, 'PENDING')`
+  ).run(
+    id,
+    donorEmail,
+    donorEmail,
+    id.padEnd(64, "0").slice(0, 64),
+    options.revision ?? 1,
+    options.supersedesDeliveryId ?? null
+  );
+}
+
+function annualGenerations(database: DatabaseSync): string[] {
+  return annualGenerationRows(database).map((row) => row.id);
+}
+
+function annualGenerationRows(
+  database: DatabaseSync
+): Array<{ id: string; generation: number }> {
+  return database.prepare(
+    `SELECT row_id AS id, generation
+       FROM stripe_retention_generations
+      WHERE table_name = 'stripe_annual_statement_deliveries'
+      ORDER BY generation`
+  ).all().map((row) => ({
+    id: String(row.id),
+    generation: Number(row.generation)
+  }));
 }

@@ -594,9 +594,10 @@ export async function listAllRowsPaged(
         stripeFence.maxGeneration
       );
     } else if (stripeTable === "stripe_annual_statement_deliveries") {
-      // The 0034 immutable-lineage trigger prevents retargeting, and the FK prevents
-      // deleting/renaming a referenced parent. Requiring the direct parent therefore
-      // proves the stable transitive chain without a recursive CTE per exported row.
+      // Migration 0036 assigns every ancestor before its descendants. Migration 0034
+      // prevents retargeting, while the FK prevents deleting/renaming a retained
+      // parent. The indexed direct-parent check therefore proves the stable transitive
+      // chain without a recursive CTE per exported row.
       conditions.push(
         `(${rowAlias}.supersedes_delivery_id IS NULL OR EXISTS (
           SELECT 1

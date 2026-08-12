@@ -1108,6 +1108,110 @@ describe("runRetentionExport", () => {
     }
   });
 
+  it("keeps an emitted migration-gap correction restorable when its lineage is deleted between pages", async () => {
+    const source = migratedDatabaseThrough("0035");
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    const migration = readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
+      "utf8"
+    );
+    const backfillStart = migration.indexOf("-- Idempotent backfills cover rows");
+    expect(backfillStart).toBeGreaterThan(0);
+    const insert = source.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, created_at, updated_at
+       ) VALUES (?, 2025, 0, ?, ?, ?, ?, '{}', ?, ?, 'PENDING', ?, ?)`
+    );
+    insert.run(
+      "annual_gap_parent",
+      "gap-lineage@example.org",
+      "Gap Lineage Donor",
+      "gap-lineage@example.org",
+      "a".repeat(64),
+      1,
+      null,
+      "2026-06-30T00:00:00.000Z",
+      "2026-06-30T00:00:00.000Z"
+    );
+    source.exec(migration.slice(0, backfillStart));
+    insert.run(
+      "annual_gap_child",
+      "gap-lineage@example.org",
+      "Gap Lineage Donor",
+      "gap-lineage@example.org",
+      "b".repeat(64),
+      2,
+      "annual_gap_parent",
+      "2025-01-01T00:00:00.000Z",
+      "2025-01-01T00:00:00.000Z"
+    );
+    for (let index = 0; index < 499; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      insert.run(
+        `annual_gap_filler_${suffix}`,
+        `gap-filler-${suffix}@example.org`,
+        `Gap Filler ${suffix}`,
+        `gap-filler-${suffix}@example.org`,
+        index.toString(16).padStart(64, "0"),
+        1,
+        null,
+        "2025-06-01T00:00:00.000Z",
+        "2025-06-01T00:00:00.000Z"
+      );
+    }
+    source.exec(migration.slice(backfillStart));
+
+    let raced = false;
+    const racedDb = d1WithAfterFirstPageMatching(
+      sqliteD1(source),
+      (sql) => sql.includes("stripe_annual_statement_deliveries AS snapshot"),
+      () => {
+        raced = true;
+        source.exec(`
+          DELETE FROM stripe_annual_statement_deliveries WHERE id = 'annual_gap_child';
+          DELETE FROM stripe_annual_statement_deliveries WHERE id = 'annual_gap_parent';
+        `);
+      }
+    );
+    const runtime = {
+      DB: racedDb,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("completed");
+      expect(raced).toBe(true);
+      const annualIds = archivedRows(
+        archive,
+        "2026-06",
+        "stripe_annual_statement_deliveries"
+      ).map((row) => row.id);
+      expect(annualIds).toContain("annual_gap_parent");
+      expect(annualIds).toContain("annual_gap_child");
+
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
+      restoreArchivedRows(
+        destination,
+        archive,
+        "2026-06",
+        "stripe_annual_statement_deliveries"
+      );
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+    } finally {
+      source.close();
+      destination.close();
+    }
+  });
+
   it("drives every Stripe retention page from the bounded generation index", async () => {
     const database = migratedDatabase();
     const d1 = new SqliteD1(database);

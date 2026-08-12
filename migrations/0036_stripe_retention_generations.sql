@@ -117,8 +117,23 @@ END;
 CREATE TRIGGER stripe_annual_statement_retention_generation_insert
 AFTER INSERT ON stripe_annual_statement_deliveries
 BEGIN
+  -- A migration-time writer can reference a parent that exists but has not yet
+  -- been backfilled. Materialize the complete immutable ancestry root-first so
+  -- every descendant generation is strictly greater than every ancestor.
   INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
-  VALUES ('stripe_annual_statement_deliveries', NEW.id);
+  WITH RECURSIVE annual_ancestry(id, supersedes_delivery_id, depth, path) AS (
+    SELECT NEW.id, NEW.supersedes_delivery_id, 0, '|' || NEW.id || '|'
+    UNION ALL
+    SELECT parent.id, parent.supersedes_delivery_id, ancestry.depth + 1,
+           ancestry.path || parent.id || '|'
+      FROM stripe_annual_statement_deliveries AS parent
+      JOIN annual_ancestry AS ancestry
+        ON parent.id = ancestry.supersedes_delivery_id
+     WHERE instr(ancestry.path, '|' || parent.id || '|') = 0
+  )
+  SELECT 'stripe_annual_statement_deliveries', id
+    FROM annual_ancestry
+   ORDER BY depth DESC;
 END;
 
 CREATE TRIGGER stripe_annual_statement_retention_generation_delete
@@ -151,5 +166,17 @@ INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
 SELECT 'stripe_acknowledgment_deliveries', id
   FROM stripe_acknowledgment_deliveries ORDER BY rowid;
 INSERT OR IGNORE INTO stripe_retention_generations (table_name, row_id)
+WITH RECURSIVE annual_lineage(id, depth, path) AS (
+  SELECT id, 0, '|' || id || '|'
+    FROM stripe_annual_statement_deliveries
+   WHERE supersedes_delivery_id IS NULL
+  UNION ALL
+  SELECT child.id, lineage.depth + 1, lineage.path || child.id || '|'
+    FROM stripe_annual_statement_deliveries AS child
+    JOIN annual_lineage AS lineage
+      ON child.supersedes_delivery_id = lineage.id
+   WHERE instr(lineage.path, '|' || child.id || '|') = 0
+)
 SELECT 'stripe_annual_statement_deliveries', id
-  FROM stripe_annual_statement_deliveries ORDER BY rowid;
+  FROM annual_lineage
+ ORDER BY depth ASC, id ASC;
