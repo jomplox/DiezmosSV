@@ -60,6 +60,11 @@ describe("Stripe Checkout donation contract", () => {
       ui_mode: "embedded_page",
       redirect_on_completion: "always",
       submit_type: "donate",
+      branding_settings: {
+        background_color: "#ffffff",
+        button_color: "#000000",
+        border_style: "rounded"
+      },
       client_reference_id: "stripe_checkout_fixture",
       payment_method_configuration: "pmc_fixture",
       billing_address_collection: "required",

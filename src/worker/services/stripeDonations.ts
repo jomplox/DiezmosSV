@@ -164,6 +164,11 @@ export function buildStripeCheckoutSessionParams(input: {
     locale: "es-419",
     redirect_on_completion: "always",
     submit_type: "donate",
+    branding_settings: {
+      background_color: "#ffffff",
+      button_color: "#000000",
+      border_style: "rounded"
+    },
     client_reference_id: input.checkoutId,
     integration_identifier: input.integrationIdentifier,
     payment_method_configuration: input.paymentMethodConfigurationId,
