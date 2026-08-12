@@ -318,6 +318,57 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     expect((emailSend.mock.calls[1][0] as { subject: string }).subject).toContain("corregida");
   });
 
+  it("does not redispatch a SENT snapshot after a different snapshot failed before provider entry", async () => {
+    seedGift(database, gift({ id: "gift_returned_snapshot", amount_cents: 10_000 }));
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 1, skipped: 0, failed: 0, review: 0 });
+
+    database.prepare(
+      "UPDATE stripe_gifts SET refunded_amount_cents = 2500, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_returned_snapshot'"
+    ).run();
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted")
+      .mockRejectedValueOnce(new Error("simulated safe failure before provider entry"));
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:01:00.000Z"
+    })).toMatchObject({ sent: 0, skipped: 0, failed: 1, review: 0 });
+    expect(database.prepare(
+      `SELECT revision, status, dispatch_started_at, provider_id_hash
+         FROM stripe_annual_statement_deliveries ORDER BY revision`
+    ).all()).toEqual([
+      {
+        revision: 1,
+        status: "SENT",
+        dispatch_started_at: "2026-01-10T12:00:00.000Z",
+        provider_id_hash: expect.stringMatching(/^sha256:[a-f0-9]{64}$/)
+      },
+      {
+        revision: 2,
+        status: "FAILED",
+        dispatch_started_at: null,
+        provider_id_hash: null
+      }
+    ]);
+
+    database.prepare(
+      "UPDATE stripe_gifts SET refunded_amount_cents = 0, status = 'PAID' WHERE id = 'gift_returned_snapshot'"
+    ).run();
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:02:00.000Z"
+    })).toMatchObject({ sent: 0, skipped: 1, failed: 0, review: 0 });
+    expect(emailSend).toHaveBeenCalledTimes(1);
+    expect(database.prepare(
+      "SELECT revision, status FROM stripe_annual_statement_deliveries ORDER BY revision"
+    ).all()).toEqual([
+      { revision: 1, status: "SENT" },
+      { revision: 2, status: "FAILED" }
+    ]);
+  });
+
   it("takes a fresh per-donor lease timestamp when a slow bulk send crosses the stale threshold", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-10T12:00:00.000Z"));

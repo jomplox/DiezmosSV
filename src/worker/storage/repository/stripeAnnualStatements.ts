@@ -341,6 +341,14 @@ export async function reserveStripeAnnualStatementDelivery(
             SELECT MAX(revision) FROM stripe_annual_statement_deliveries
              WHERE year = ? AND livemode = ? AND donor_key = ?
           )
+     ) AND NOT EXISTS (
+       SELECT 1 FROM stripe_annual_statement_deliveries AS latest_sent
+        WHERE latest_sent.year = ? AND latest_sent.livemode = ? AND latest_sent.donor_key = ?
+          AND latest_sent.status = 'SENT' AND latest_sent.snapshot_hash = ?
+          AND latest_sent.revision = (
+            SELECT MAX(revision) FROM stripe_annual_statement_deliveries
+             WHERE year = ? AND livemode = ? AND donor_key = ? AND status = 'SENT'
+          )
      )`
     ).bind(
       input.id,
@@ -368,10 +376,17 @@ export async function reserveStripeAnnualStatementDelivery(
       input.snapshotHash,
       input.year,
       input.livemode ? 1 : 0,
+      input.donorKey,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.snapshotHash,
+      input.year,
+      input.livemode ? 1 : 0,
       input.donorKey
     )
   ]);
-  const row = await db.prepare(
+  let row = await db.prepare(
     `SELECT * FROM stripe_annual_statement_deliveries
       WHERE year = ? AND livemode = ? AND donor_key = ?
       ORDER BY revision DESC LIMIT 1`
@@ -391,7 +406,15 @@ export async function reserveStripeAnnualStatementDelivery(
     ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
       .first<Pick<StripeAnnualStatementDeliveryRecord, "status">>();
     if (fence) throw new StripeAnnualStatementReservationFenceError(fence.status);
-    throw new Error("Stripe annual statement reservation could not be read");
+    row = await db.prepare(
+      `SELECT * FROM stripe_annual_statement_deliveries
+        WHERE year = ? AND livemode = ? AND donor_key = ? AND status = 'SENT'
+        ORDER BY revision DESC LIMIT 1`
+    ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
+      .first<StripeAnnualStatementDeliveryRecord>();
+    if (!row || row.snapshot_hash !== input.snapshotHash) {
+      throw new Error("Stripe annual statement reservation could not be read");
+    }
   }
   if (
     row.year !== input.year

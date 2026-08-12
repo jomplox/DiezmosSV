@@ -514,6 +514,80 @@ describe("Stripe annual statement repository", () => {
     });
   });
 
+  it("reuses the latest SENT evidence when a later different snapshot failed before dispatch", async () => {
+    const sentA = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_a_sent",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: '{"version":2,"state":"A"}'
+    }));
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: sentA.id,
+      claimId: "claim_a_sent",
+      now: "2026-01-10T11:01:00.000Z"
+    })).not.toBeNull();
+    database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET dispatch_started_at = ? WHERE id = ?"
+    ).run("2026-01-10T11:01:01.000Z", sentA.id);
+    expect(await finalizeStripeAnnualStatementDelivery(db, {
+      id: sentA.id,
+      claimId: "claim_a_sent",
+      outcome: "SENT",
+      providerIdHash: `sha256:${"b".repeat(64)}`,
+      failureCode: null,
+      retrySafe: false,
+      now: "2026-01-10T11:01:02.000Z"
+    })).toBe(true);
+
+    const failedB = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_b_failed",
+      snapshotHash: "c".repeat(64),
+      snapshotJson: '{"version":2,"state":"B"}'
+    }));
+    await expect(reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_a_fenced",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: '{"version":2,"state":"A"}'
+    }))).rejects.toThrow(/active delivery/i);
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: failedB.id,
+      claimId: "claim_b_failed",
+      now: "2026-01-10T11:02:00.000Z"
+    })).not.toBeNull();
+    expect(await finalizeStripeAnnualStatementDelivery(db, {
+      id: failedB.id,
+      claimId: "claim_b_failed",
+      outcome: "FAILED",
+      failureCode: "confirmed_not_sent",
+      retrySafe: false,
+      now: "2026-01-10T11:02:01.000Z"
+    })).toBe(true);
+    expect(database.prepare(
+      "SELECT status, dispatch_started_at, provider_id_hash FROM stripe_annual_statement_deliveries WHERE id = ?"
+    ).get(failedB.id)).toEqual({
+      status: "FAILED",
+      dispatch_started_at: null,
+      provider_id_hash: null
+    });
+
+    const returnedA = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_a_returned_after_failure",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: '{"version":2,"state":"A"}'
+    }));
+    expect(returnedA).toMatchObject({
+      id: sentA.id,
+      revision: 1,
+      status: "SENT",
+      provider_id_hash: `sha256:${"b".repeat(64)}`
+    });
+    expect(database.prepare(
+      "SELECT id, revision, status FROM stripe_annual_statement_deliveries ORDER BY revision"
+    ).all()).toEqual([
+      { id: sentA.id, revision: 1, status: "SENT" },
+      { id: failedB.id, revision: 2, status: "FAILED" }
+    ]);
+  });
+
   it("atomically supersedes stale pre-provider work but preserves a non-stale concurrent fence", async () => {
     const stale = await reserveStripeAnnualStatementDelivery(db, {
       ...reservation({ id: "delivery_stale_a", snapshotHash: "d".repeat(64) }),
