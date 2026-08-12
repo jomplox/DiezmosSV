@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
@@ -29,7 +29,10 @@ describe("Stripe public donation routes", () => {
     };
   });
 
-  afterEach(() => database.close());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    database.close();
+  });
 
   it("creates one idempotent Embedded Checkout Session without touching the Wompi lane", async () => {
     const first = await createCheckout(workerEnv, {
@@ -145,6 +148,84 @@ describe("Stripe public donation routes", () => {
     expect(database.prepare(
       "SELECT COUNT(*) AS count FROM security_rate_limit_claims WHERE scope = 'donation_intent'"
     ).get()).toEqual({ count: 1 });
+  });
+
+  it("reconciles an ambiguous cached failure before rotating its idempotency generation", async () => {
+    const creationKeys: string[] = [];
+    let listCalls = 0;
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "GET" && url.pathname === "/v1/checkout/sessions") {
+        listCalls += 1;
+        return stripeJson({ object: "list", data: [], has_more: false, url: "/v1/checkout/sessions" });
+      }
+      if (request.method !== "POST" || url.pathname !== "/v1/checkout/sessions") {
+        throw new Error(`Unexpected Stripe request: ${request.method} ${url.pathname}`);
+      }
+      creationKeys.push(request.headers.get("idempotency-key") ?? "");
+      const params = new URLSearchParams(await request.text());
+      if (creationKeys.length <= 2) {
+        return stripeJson({ error: { type: "api_error", message: "ambiguous fixture" } }, 500, {
+          "stripe-should-retry": "false"
+        });
+      }
+      const checkoutId = params.get("client_reference_id")!;
+      const sessionId = `cs_test_${checkoutId}`;
+      return stripeJson({
+        id: sessionId,
+        object: "checkout.session",
+        client_secret: `${sessionId}_secret_fixture`,
+        url: null,
+        livemode: false,
+        status: "open",
+        payment_status: "unpaid",
+        mode: params.get("mode"),
+        amount_total: Number(params.get("line_items[0][price_data][unit_amount]")),
+        currency: "usd",
+        customer: null,
+        subscription: null,
+        payment_intent: null,
+        customer_details: null,
+        customer_email: null,
+        metadata: {
+          checkout_id: params.get("metadata[checkout_id]"),
+          lane: params.get("metadata[lane]"),
+          gift_type: params.get("metadata[gift_type]")
+        },
+        expires_at: 1_786_370_400
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const proxyEnv: Env = {
+      ...workerEnv,
+      STRIPE_MOCK_MODE: undefined,
+      STRIPE_RESTRICTED_KEY: "rk_test_fixture",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_fixture",
+      STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
+      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
+    };
+
+    const first = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    expect(first.response.status).toBe(502);
+    const retry = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    expect(retry.response.status).toBe(201);
+    expect(listCalls).toBe(1);
+    expect(creationKeys).toHaveLength(3);
+    expect(creationKeys[1]).toBe(creationKeys[0]);
+    expect(creationKeys[2]).not.toBe(creationKeys[0]);
+    expect(database.prepare(
+      `SELECT status, creation_outcome_class, idempotency_generation
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "OPEN",
+      creation_outcome_class: null,
+      idempotency_generation: 2
+    });
   });
 
   it("returns only donor-safe Session status and gates recurring management", async () => {
@@ -278,4 +359,15 @@ async function createCheckout(
 
 function jsonHeaders(): Record<string, string> {
   return { "Content-Type": "application/json", Origin: origin };
+}
+
+function stripeJson(
+  value: unknown,
+  status = 200,
+  headers: Record<string, string> = {}
+): Response {
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { "Content-Type": "application/json", "Request-Id": "req_fixture", ...headers }
+  });
 }

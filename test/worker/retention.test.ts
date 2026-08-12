@@ -368,6 +368,7 @@ class InMemoryRetentionD1 {
   readonly preparedSql: string[] = [];
   readonly appliedLimits: number[] = [];
   retentionPageError: Error | null = null;
+  materialMutationEpoch = "0";
 
   tableFor(sql: string): Array<Record<string, unknown>> | null {
     if (sql.includes("FROM dte_documents")) return this.dteDocuments;
@@ -422,7 +423,8 @@ class RetentionStatement {
           + this.db.stripeGifts.length
           + this.db.stripeAcknowledgmentDeliveries.length
           + this.db.stripeAnnualStatementDeliveries.length
-        )
+        ),
+        materialMutationEpoch: this.db.materialMutationEpoch
       } as T;
     }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
@@ -853,7 +855,91 @@ describe("runRetentionExport", () => {
     expect(deletePhase("stripe_gifts")).toBeLessThan(deletePhase("stripe_checkout_sessions"));
   });
 
-  it("exports one restorable Stripe snapshot when children and mutable updates arrive after the checkout page", async () => {
+  it("upgrades an exact 0035 database and restores its emitted Stripe archive with clean foreign keys", async () => {
+    const source = migratedDatabaseThrough("0035");
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    try {
+      source.exec(readFileSync(
+        resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
+        "utf8"
+      ));
+      source.exec(readFileSync(
+        resolve(import.meta.dirname, "../../migrations/0037_stripe_delivery_safety.sql"),
+        "utf8"
+      ));
+      const createdAt = "2026-06-15T12:00:00.000Z";
+      source.exec(`
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, stripe_session_id, frequency,
+          gift_type, amount_cents, livemode, status, payment_status,
+          creation_outcome_class, idempotency_generation, created_at, updated_at
+        ) VALUES (
+          'checkout_restore', 'request_restore', 'fingerprint_restore',
+          'cs_test_restore', 'ONCE', 'TITHE', 5000, 0, 'COMPLETE', 'PAID',
+          NULL, 2, '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_webhook_events (
+          id, event_type, livemode, status, processing_claim_id,
+          verified_secret_slot, verified_secret_generation,
+          received_at, processed_at, updated_at
+        ) VALUES (
+          'evt_restore', 'checkout.session.completed', 0, 'PROCESSED', 'claim_restore',
+          'NEXT', '${"a".repeat(64)}', '${createdAt}', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_gifts (
+          id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+          frequency, gift_type, amount_cents, donor_name, donor_email,
+          settled_at, status, created_at, updated_at
+        ) VALUES (
+          'gift_restore', 'PAYMENT_INTENT', 'pi_restore', 'checkout_restore', 'pi_restore',
+          'ONCE', 'TITHE', 5000, 'Restore Donor', 'restore@example.org',
+          '${createdAt}', 'PAID', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_acknowledgment_deliveries (
+          id, gift_id, status, attempt_count, retry_safe, next_attempt_at,
+          created_at, updated_at
+        ) VALUES (
+          'ack_restore', 'gift_restore', 'FAILED', 1, 1,
+          '2026-06-15T12:05:00.000Z', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_annual_statement_deliveries (
+          id, year, livemode, donor_key, donor_name, donor_email,
+          snapshot_hash, snapshot_json, revision, status, created_at, updated_at
+        ) VALUES (
+          'annual_restore', 2025, 0, 'restore@example.org', 'Restore Donor',
+          'restore@example.org', '${"b".repeat(64)}', '{}', 1, 'PENDING',
+          '${createdAt}', '${createdAt}'
+        );
+      `);
+
+      const result = await runRetentionExport({
+        DB: sqliteD1(source),
+        ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+        ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+        ARCHIVE: archive as unknown as R2Bucket
+      } as Env, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("completed");
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(true);
+
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        restoreArchivedRows(destination, archive, "2026-06", table);
+      }
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        expect(destination.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 1 });
+      }
+    } finally {
+      source.close();
+      destination.close();
+    }
+  });
+
+  it("refuses to publish a Stripe snapshot when material rows mutate after the export fence", async () => {
     const source = migratedDatabaseThrough("0035");
     const destination = migratedDatabase();
     const archive = new FakeArchiveBucket();
@@ -971,47 +1057,17 @@ describe("runRetentionExport", () => {
 
     try {
       const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
-      expect(result.status).toBe("completed");
+      expect(result.status).toBe("failed");
       expect(raceInserted).toBe(true);
-      expect(archivedRows(archive, "2026-06", "stripe_checkout_sessions").map((row) => row.id).sort()).toEqual([
-        "checkout_deleted",
-        "checkout_retargeted",
-        "checkout_stable"
-      ]);
-      expect(archivedRows(archive, "2026-06", "stripe_webhook_events")).toEqual([
-        expect.objectContaining({ id: "evt_existing", status: "PROCESSED" })
-      ]);
-      expect(archivedRows(archive, "2026-06", "stripe_gifts")).toEqual([
-        expect.objectContaining({ id: "gift_stable", status: "PARTIALLY_REFUNDED", refunded_amount_cents: 250 })
-      ]);
-      expect(archivedRows(archive, "2026-06", "stripe_acknowledgment_deliveries")).toEqual([
-        expect.objectContaining({ id: "ack_stable", status: "SENT" })
-      ]);
-      expect(archivedRows(archive, "2026-06", "stripe_annual_statement_deliveries")).toEqual([
-        expect.objectContaining({ id: "annual_r1", status: "SENT" })
-      ]);
-
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
-      for (const phase of RETENTION_FOREIGN_KEY_PROTOCOL.restorePhases) {
-        for (const table of phase.tables) {
-          if (table.startsWith("stripe_")) {
-            restoreArchivedRows(destination, archive, "2026-06", table);
-          }
-        }
-      }
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
     } finally {
       source.close();
       destination.close();
     }
   });
 
-  it("keeps annual lineage restorable when created_at sorts a child onto an earlier page than its parent", async () => {
+  it("aborts when annual lineage chronology mutates between pages", async () => {
     const source = migratedDatabase();
-    const destination = migratedDatabase();
     const archive = new FakeArchiveBucket();
     const insert = source.prepare(
       `INSERT INTO stripe_annual_statement_deliveries (
@@ -1080,37 +1136,16 @@ describe("runRetentionExport", () => {
 
     try {
       const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
-      expect(result.status).toBe("completed");
+      expect(result.status).toBe("failed");
       expect(raced).toBe(true);
-      const annualIds = archivedRows(
-        archive,
-        "2026-06",
-        "stripe_annual_statement_deliveries"
-      ).map((row) => row.id);
-      expect(annualIds).toHaveLength(501);
-      expect(annualIds).toContain("annual_parent_late_cursor");
-      expect(annualIds).toContain("annual_child_early_cursor");
-
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
-      restoreArchivedRows(
-        destination,
-        archive,
-        "2026-06",
-        "stripe_annual_statement_deliveries"
-      );
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
     } finally {
       source.close();
-      destination.close();
     }
   });
 
-  it("keeps an emitted migration-gap correction restorable when its lineage is deleted between pages", async () => {
+  it("aborts when migration-gap annual lineage is deleted between pages", async () => {
     const source = migratedDatabaseThrough("0035");
-    const destination = migratedDatabase();
     const archive = new FakeArchiveBucket();
     const migration = readFileSync(
       resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
@@ -1185,30 +1220,11 @@ describe("runRetentionExport", () => {
 
     try {
       const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
-      expect(result.status).toBe("completed");
+      expect(result.status).toBe("failed");
       expect(raced).toBe(true);
-      const annualIds = archivedRows(
-        archive,
-        "2026-06",
-        "stripe_annual_statement_deliveries"
-      ).map((row) => row.id);
-      expect(annualIds).toContain("annual_gap_parent");
-      expect(annualIds).toContain("annual_gap_child");
-
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
-      restoreArchivedRows(
-        destination,
-        archive,
-        "2026-06",
-        "stripe_annual_statement_deliveries"
-      );
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
-      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
-      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
     } finally {
       source.close();
-      destination.close();
     }
   });
 
@@ -2028,6 +2044,28 @@ describe("retention restore guidance", () => {
     }
     expect(guidance).toContain("latest verified Stripe snapshots");
     expect(guidance).toContain("refund");
+  });
+
+  it("documents dependency-safe cleanup and requires all five Stripe tables empty", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+    const cleanup = guidance.slice(
+      guidance.indexOf("Cleanup uses a separate Wrangler file"),
+      guidance.indexOf("5. After restoring")
+    );
+    const stripeTables = [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ];
+    for (const table of stripeTables) expect(cleanup).toContain(table);
+    expect(cleanup).toContain("All five Stripe business tables must be empty");
+    const protocolTables = RETENTION_FOREIGN_KEY_PROTOCOL.deletePhases.flatMap((phase) => phase.tables);
+    expect(protocolTables).toEqual(expect.arrayContaining(stripeTables));
   });
 
   it("applies the latest fiscal correction snapshot last and idempotently", () => {

@@ -452,6 +452,60 @@ test("clears Stripe write-only replacements after POST success even when status 
   );
 });
 
+test("keeps Stripe controls busy while an unrelated settings action finishes", async ({ page }) => {
+  let stripePostStarted = false;
+  let releaseStripePost!: () => void;
+  const stripePostBarrier = new Promise<void>((resolve) => { releaseStripePost = resolve; });
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      await fulfillJson(route, {
+        credentials: {
+          target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+          groups: {},
+          certificateExpiresAt: null,
+          stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      stripePostStarted = true;
+      await stripePostBarrier;
+      await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
+      return true;
+    }
+    if (url.pathname === "/api/settings/email-sender" && request.method() === "PUT") {
+      await fulfillJson(route, {
+        emailSender: {
+          senderName: "MISION EXAMPLEORGANIZATION",
+          senderAddress: "envios@example.org",
+          replyToAddress: "soporte@example.org"
+        }
+      });
+      return true;
+    }
+    return false;
+  });
+
+  try {
+    await openView(page, "Configuración");
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    const stripeSave = page.getByRole("button", { name: "Guardar configuración de Stripe" });
+    await stripeSave.click();
+    await expect.poll(() => stripePostStarted).toBe(true);
+
+    await page.getByRole("button", { name: /^Correo/ }).click();
+    await page.getByRole("button", { name: "Guardar remitente" }).click();
+    await expect(page.getByRole("status")).toContainText("Configuración del remitente actualizada");
+
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(page.getByRole("button", { name: /Guardar configuración de Stripe|Guardando/ })).toBeDisabled();
+  } finally {
+    releaseStripePost();
+  }
+});
+
 test("clears the staged webhook secret after POST success even when status refresh fails", async ({ page }) => {
   let stageSucceeded = false;
   await installOwnerAdmin(page, async (route, url) => {

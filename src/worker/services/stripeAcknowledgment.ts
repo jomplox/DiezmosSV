@@ -141,15 +141,28 @@ export async function deliverNextStripeAcknowledgment(
     return { processed: true, outcome: "SENT", giftId: claim.gift_id };
   } catch (error) {
     const classified = classifyEmailDispatchError(error, providerDispatchStarted);
-    const outcome = classified.outcomeClass === "UNKNOWN" ? "REVIEW" : "FAILED";
+    const retryExhausted = classified.outcomeClass !== "UNKNOWN"
+      && classified.retrySafe
+      && claim.attempt_count >= 5;
+    const outcome = classified.outcomeClass === "UNKNOWN" || retryExhausted ? "REVIEW" : "FAILED";
     await repo.finalizeStripeAcknowledgment({
       id: claim.id,
       claimId,
       outcome,
-      failureCode: classified.code,
+      failureCode: retryExhausted ? "acknowledgment_retry_exhausted" : classified.code,
       retrySafe: outcome === "FAILED" && classified.retrySafe,
+      retryAt: outcome === "FAILED" && classified.retrySafe
+        ? stripeAcknowledgmentRetryAt(now, claim.attempt_count)
+        : null,
       now
     });
     return { processed: true, outcome, giftId: claim.gift_id };
   }
+}
+
+function stripeAcknowledgmentRetryAt(now: string, attemptCount: number): string {
+  const timestamp = Date.parse(now);
+  if (!Number.isFinite(timestamp)) throw new Error("Stripe acknowledgment retry timestamp is invalid");
+  const delayMinutes = Math.min(240, 5 * (2 ** Math.max(0, attemptCount - 1)));
+  return new Date(timestamp + delayMinutes * 60 * 1000).toISOString();
 }

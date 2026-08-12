@@ -42,6 +42,7 @@ export const STRIPE_RETENTION_SNAPSHOT_TABLES = [
 export type StripeRetentionSnapshotTable = (typeof STRIPE_RETENTION_SNAPSHOT_TABLES)[number];
 export interface StripeRetentionFence {
   maxGeneration: string;
+  materialMutationEpoch: string;
 }
 
 export interface StripeRetentionCursor {
@@ -65,10 +66,17 @@ export async function captureStripeRetentionFence(
   db: D1Database
 ): Promise<StripeRetentionFence> {
   const fence = await db.prepare(
-    `SELECT COALESCE(CAST(MAX(generation) AS TEXT), '0') AS maxGeneration
+    `SELECT COALESCE(CAST(MAX(generation) AS TEXT), '0') AS maxGeneration,
+            (SELECT CAST(mutation_epoch AS TEXT)
+               FROM stripe_retention_material_state
+              WHERE singleton = 1) AS materialMutationEpoch
        FROM stripe_retention_generations`
-  ).first<{ maxGeneration: string }>();
-  if (!fence || !/^(?:0|[1-9]\d*)$/.test(fence.maxGeneration)) {
+  ).first<{ maxGeneration: string; materialMutationEpoch: string }>();
+  if (
+    !fence
+    || !/^(?:0|[1-9]\d*)$/.test(fence.maxGeneration)
+    || !/^(?:0|[1-9]\d*)$/.test(fence.materialMutationEpoch)
+  ) {
     throw new Error("retention_stripe_fence_invalid");
   }
   return fence;

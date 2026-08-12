@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, PDFPage } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildStripeAnnualStatementPreview,
@@ -180,6 +180,44 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       issuedOn: "2026-01-10T12:00:00.000Z",
       corrected: false
     })).resolves.toBeInstanceOf(Uint8Array);
+  });
+
+  it("keeps maximum-length legal and donor identity text inside printable bounds", async () => {
+    const legalName = `LEGALMAX ${"L".repeat(191)}`;
+    const donorName = `DONORMAX ${"D".repeat(191)}`;
+    const donorEmail = `EMAILMAX${"e".repeat(234)}@example.org`;
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: donorEmail,
+      donorName,
+      donorEmail,
+      document: statementDocument({ legalName }),
+      gifts: [gift({ id: "gift_max_identity", donor_name: donorName, donor_email: donorEmail })]
+    });
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    try {
+      await renderStripeAnnualStatementPdf({
+        snapshot,
+        issuedOn: "2026-01-10T12:00:00.000Z",
+        corrected: true
+      });
+      const identityCalls = drawText.mock.calls.filter(([text]) =>
+        /LEGALMAX|DONORMAX|EMAILMAX/.test(String(text))
+      );
+      expect(identityCalls.length).toBeGreaterThanOrEqual(3);
+      for (const [text, options] of identityCalls) {
+        if (!options?.font || typeof options.x !== "number") {
+          throw new Error("Identity draw call was missing its font or x coordinate");
+        }
+        const size = options.size ?? 12;
+        const font = options.font;
+        expect(options.x).toBeGreaterThanOrEqual(42);
+        expect(options.x + font.widthOfTextAtSize(String(text), size)).toBeLessThanOrEqual(570);
+      }
+    } finally {
+      drawText.mockRestore();
+    }
   });
 
   it("builds distinct U.S. Spanish email copy for original and corrected statements", () => {
@@ -596,6 +634,53 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       event: "stripe_annual_statement_audit_failed"
     }));
   });
+
+  it("keeps a durable FAILED outcome authoritative when its follow-up audit write fails", async () => {
+    seedGift(database, gift({ id: "gift_failed_audit", amount_cents: 10_000 }));
+    const originalRead = repo.listStripeAnnualStatementDonorGifts.bind(repo);
+    let reads = 0;
+    vi.spyOn(repo, "listStripeAnnualStatementDonorGifts").mockImplementation(async (...args) => {
+      const rows = await originalRead(...args);
+      reads += 1;
+      return reads === 2
+        ? rows.map((row) => ({
+            ...row,
+            status: "PARTIALLY_REFUNDED" as const,
+            refunded_amount_cents: 100,
+            net_amount_cents: row.amount_cents - 100
+          }))
+        : rows;
+    });
+    vi.spyOn(repo, "createAudit").mockRejectedValue(new Error("audit unavailable"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 0, failed: 1, review: 0 });
+    expect(database.prepare("SELECT status, failure_code FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ status: "FAILED", failure_code: "snapshot_changed_before_dispatch" });
+    expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({
+      event: "stripe_annual_statement_audit_failed"
+    }));
+  });
+
+  it("keeps a durable REVIEW outcome authoritative when its follow-up audit write fails", async () => {
+    seedGift(database, gift({ id: "gift_review_audit" }));
+    emailSend.mockRejectedValue(Object.assign(new Error("private provider response"), { code: "E_UNKNOWN" }));
+    vi.spyOn(repo, "createAudit").mockRejectedValue(new Error("audit unavailable"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 0, failed: 0, review: 1 });
+    expect(database.prepare("SELECT status, failure_code FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ status: "REVIEW", failure_code: "E_UNKNOWN" });
+    expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({
+      event: "stripe_annual_statement_audit_failed"
+    }));
+  });
 });
 
 function statementDocument(overrides: Partial<{
@@ -604,7 +689,7 @@ function statementDocument(overrides: Partial<{
   timeZone: string;
 }> = {}) {
   return {
-    rendererVersion: "stripe-annual-statement-pdf:v1" as const,
+    rendererVersion: "stripe-annual-statement-pdf:v2" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",

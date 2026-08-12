@@ -72,12 +72,14 @@ import {
   finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
   finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
   getLatestStripeWebhookHealth as getLatestStripeWebhookHealthRepository,
+  hasRecentStripeWebhookSecretVerification as hasRecentStripeWebhookSecretVerificationRepository,
   getStripeCheckoutById as getStripeCheckoutByIdRepository,
   getStripeCheckoutByRequestId as getStripeCheckoutByRequestIdRepository,
   getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
   getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
   markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
   reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
+  rotateStripeCheckoutIdempotencyGeneration as rotateStripeCheckoutIdempotencyGenerationRepository,
   recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
   reserveStripeCheckout as reserveStripeCheckoutRepository,
   updateStripeCheckoutFromEvent as updateStripeCheckoutFromEventRepository,
@@ -350,6 +352,12 @@ export class Repository {
     return reclaimStripeCheckoutCreationRepository(this.db, input);
   }
 
+  async rotateStripeCheckoutIdempotencyGeneration(
+    input: Parameters<typeof rotateStripeCheckoutIdempotencyGenerationRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return rotateStripeCheckoutIdempotencyGenerationRepository(this.db, input);
+  }
+
   async updateStripeCheckoutFromEvent(
     input: Parameters<typeof updateStripeCheckoutFromEventRepository>[1]
   ): Promise<StripeCheckoutRecord | null> {
@@ -382,6 +390,12 @@ export class Repository {
 
   async getLatestStripeWebhookHealth(): Promise<StripeWebhookHealthRecord | null> {
     return getLatestStripeWebhookHealthRepository(this.db);
+  }
+
+  async hasRecentStripeWebhookSecretVerification(
+    input: Parameters<typeof hasRecentStripeWebhookSecretVerificationRepository>[1]
+  ): Promise<boolean> {
+    return hasRecentStripeWebhookSecretVerificationRepository(this.db, input);
   }
 
   async recordStripeGiftAndAcknowledgment(

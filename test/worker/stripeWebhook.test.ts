@@ -385,6 +385,17 @@ describe("Stripe signed webhooks", () => {
       subscription_status: "PAST_DUE",
       subscription_event_created: 2_000_000_300
     });
+    const olderCanceled = stripeEvent("evt_subscription_deleted_older", "customer.subscription.deleted", {
+      id: "sub_fixture",
+      object: "subscription",
+      metadata: { checkout_id: row.id, lane: "eeuu_501c3", frequency: "monthly", gift_type: "tithe" }
+    }, false, 2_000_000_200);
+    expect((await sendSignedWebhook(workerEnv, olderCanceled)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      subscription_status: "PAST_DUE",
+      subscription_event_created: 2_000_000_300,
+      subscription_event_id: "evt_invoice_failed_newer"
+    });
     expect((await sendSignedWebhook(workerEnv, olderPaid)).status).toBe(200);
     expect(checkoutRow(database, checkout.sessionId).subscription_status).toBe("PAST_DUE");
     expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())

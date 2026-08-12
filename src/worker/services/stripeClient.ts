@@ -3,6 +3,7 @@ import {
   STRIPE_API_VERSION,
   type StripeRuntimeConfiguration
 } from "./stripeDonations";
+import { sha256Hex, utf8Bytes } from "../utils/encoding";
 
 const MOCK_EXPIRES_AT = 1_786_370_400;
 
@@ -31,6 +32,10 @@ export interface StripeGateway {
     idempotencyKey: string
   ): Promise<StripeCheckoutSnapshot>;
   retrieveCheckoutSession(sessionId: string): Promise<StripeCheckoutSnapshot>;
+  findCheckoutSessionByClientReference(input: {
+    clientReferenceId: string;
+    createdAt: string;
+  }): Promise<StripeCheckoutSnapshot | null>;
   createBillingPortalSession(input: {
     customerId: string;
     configurationId: string;
@@ -40,7 +45,24 @@ export interface StripeGateway {
     rawBody: string,
     signature: string,
     receivedAtSeconds?: number
-  ): Promise<Stripe.Event>;
+  ): Promise<StripeWebhookVerificationResult>;
+}
+
+export interface StripeWebhookVerificationResult {
+  event: Stripe.Event;
+  verification: {
+    slot: "ACTIVE" | "NEXT";
+    generation: string;
+  };
+}
+
+interface StripeWebhookSecretCandidate {
+  slot: "ACTIVE" | "NEXT";
+  secret: string;
+}
+
+export function stripeWebhookSecretGeneration(secret: string): Promise<string> {
+  return sha256Hex(utf8Bytes(secret));
 }
 
 export class StripeWebhookSignatureError extends Error {
@@ -68,16 +90,19 @@ export function createStripeGateway(configuration: StripeRuntimeConfiguration): 
     : new ApiStripeGateway(stripe, webhookSecrets(configuration));
 }
 
-function webhookSecrets(configuration: StripeRuntimeConfiguration): string[] {
+function webhookSecrets(configuration: StripeRuntimeConfiguration): StripeWebhookSecretCandidate[] {
   return configuration.webhookSecretNext
-    ? [configuration.webhookSecret, configuration.webhookSecretNext]
-    : [configuration.webhookSecret];
+    ? [
+        { slot: "ACTIVE", secret: configuration.webhookSecret },
+        { slot: "NEXT", secret: configuration.webhookSecretNext }
+      ]
+    : [{ slot: "ACTIVE", secret: configuration.webhookSecret }];
 }
 
 class ApiStripeGateway implements StripeGateway {
   constructor(
     private readonly stripe: Stripe,
-    private readonly webhookSecrets: string[]
+    private readonly webhookSecrets: StripeWebhookSecretCandidate[]
   ) {}
 
   async createCheckoutSession(
@@ -90,6 +115,33 @@ class ApiStripeGateway implements StripeGateway {
 
   async retrieveCheckoutSession(sessionId: string): Promise<StripeCheckoutSnapshot> {
     return checkoutSnapshot(await this.stripe.checkout.sessions.retrieve(sessionId));
+  }
+
+  async findCheckoutSessionByClientReference(input: {
+    clientReferenceId: string;
+    createdAt: string;
+  }): Promise<StripeCheckoutSnapshot | null> {
+    const createdGte = Math.floor(new Date(input.createdAt).getTime() / 1000);
+    if (!Number.isFinite(createdGte)) throw new Error("Stripe Checkout creation time is invalid");
+    let startingAfter: string | undefined;
+    let match: Stripe.Checkout.Session | null = null;
+    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+      const page = await this.stripe.checkout.sessions.list({
+        created: { gte: createdGte },
+        limit: 100,
+        ...(startingAfter ? { starting_after: startingAfter } : {})
+      });
+      const matches = page.data.filter((session) => session.client_reference_id === input.clientReferenceId);
+      if (matches.length > 1 || (match && matches.length > 0)) {
+        throw new Error("Stripe Checkout reconciliation found duplicate client references");
+      }
+      match = matches[0] ?? match;
+      if (!page.has_more) return match ? checkoutSnapshot(match) : null;
+      const last = page.data.at(-1);
+      if (!last) throw new Error("Stripe Checkout reconciliation pagination was invalid");
+      startingAfter = last.id;
+    }
+    throw new Error("Stripe Checkout reconciliation exceeded its bounded scan");
   }
 
   async createBillingPortalSession(input: {
@@ -110,17 +162,24 @@ class ApiStripeGateway implements StripeGateway {
     rawBody: string,
     signature: string,
     receivedAtSeconds?: number
-  ): Promise<Stripe.Event> {
-    for (const webhookSecret of this.webhookSecrets) {
+  ): Promise<StripeWebhookVerificationResult> {
+    for (const candidate of this.webhookSecrets) {
       try {
-        return await this.stripe.webhooks.constructEventAsync(
+        const event = await this.stripe.webhooks.constructEventAsync(
           rawBody,
           signature,
-          webhookSecret,
+          candidate.secret,
           Stripe.webhooks.DEFAULT_TOLERANCE,
           Stripe.createSubtleCryptoProvider(),
           receivedAtSeconds
         );
+        return {
+          event,
+          verification: {
+            slot: candidate.slot,
+            generation: await stripeWebhookSecretGeneration(candidate.secret)
+          }
+        };
       } catch {
         // The caller receives one generic rejection after all configured rotation
         // candidates fail. Never log or expose which secret matched.
@@ -195,6 +254,17 @@ class MockStripeGateway extends ApiStripeGateway {
       metadata: {},
       expiresAt: MOCK_EXPIRES_AT
     };
+  }
+
+  async findCheckoutSessionByClientReference(input: {
+    clientReferenceId: string;
+    createdAt: string;
+  }): Promise<StripeCheckoutSnapshot | null> {
+    void input.createdAt;
+    const matches = [...this.sessions.values()].filter(
+      (session) => session.id === `cs_test_${input.clientReferenceId}`
+    );
+    return matches[0] ?? null;
   }
 
   async createBillingPortalSession(input: {

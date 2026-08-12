@@ -10,14 +10,6 @@ import { isValidNitFormat } from "../shared/nit";
 
 export const DONAR_INTENT_PATH = "/api/donations/intent";
 
-// The datos-completion endpoint for a minted draft intent. The wizard mints the Wompi
-// link in the background when the SV donor enters Paso 2 (POST DONAR_INTENT_PATH with
-// only { amount, giftType }), then attaches the fiscal data here on Paso 2 submit with
-// a fast D1-only call, so Paso 3 renders without waiting on Wompi.
-export function donarDatosPath(intentId: string): string {
-  return `${DONAR_INTENT_PATH}/${intentId}/datos`;
-}
-
 // Poll the intent status every ~5s while the embedded checkout is open; stop after
 // ~3 minutes with a neutral closing message (covers slow MH, deferred
 // transmission while MH is down, and abandoned checkouts — never implies failure).
@@ -35,13 +27,6 @@ export const DONAR_SCRIPT_TIMEOUT_MS = 4_000;
 // screen; hold our notice back for four poll cycles, by which point a donor who
 // finished is already on thanks and only a genuinely stuck entrega is still waiting.
 export const DONAR_VERIFYING_NOTICE_DELAY_MS = 20_000;
-
-// A background-minted draft carries a Wompi link minted with a one-hour vigencia on the
-// worker (INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS). If the donor leaves the tab open
-// on Paso 1 and returns much later, that link may be dead. Only reuse a retained draft
-// while it is comfortably inside the vigencia; past this conservative window the wizard
-// re-mints on the next Paso 1→2 crossing. 45 min keeps a 15-min margin under the hour.
-export const DONAR_DRAFT_REUSE_WINDOW_MS = 45 * 60 * 1000;
 
 export const DONAR_AMOUNT_CHIPS = [50, 150, 250, 500] as const;
 // The US door keeps $50 accessible while offering round anchors suitable for a
@@ -510,47 +495,6 @@ export function donationIntentBody(form: DonationFormInput): Record<string, unkn
     distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
     pais: form.foreignResident ? form.pais : undefined
   };
-}
-
-// The DRAFT create body fired in the background on the SV Paso 1→2 transition: only
-// the two values known then (amount + gift type). The donor data is attached later via
-// the datos endpoint. giftType is always present on the SV path (Diezmo preselected).
-export function donationDraftBody(form: Pick<DonationFormInput, "amount" | "giftType">): Record<string, unknown> {
-  return {
-    amount: form.amount.trim(),
-    giftType: form.giftType || undefined
-  };
-}
-
-// The datos-completion body: the donor's fiscal data ONLY (no amount, no giftType — the
-// draft was minted with those and the server must not move them). Same field mapping as
-// donationIntentBody minus amount/giftType, so server validation is identical.
-export function donationDatosBody(form: DonationFormInput): Record<string, unknown> {
-  return {
-    donorDocumentType: form.donorDocumentType,
-    donorDocument: form.donorDocument.trim(),
-    donorName: form.donorDocumentType === "36" ? form.donorName.trim() : undefined,
-    departamento: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.departamento,
-    municipio: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.municipio,
-    distrito: form.foreignResident ? DONAR_FOREIGN_GEOGRAPHY_CODE : form.distrito,
-    pais: form.foreignResident ? form.pais : undefined
-  };
-}
-
-// Whether a background-minted draft is still safe to reuse. Besides matching the amount +
-// gift type the donor now has in the form, the retained Wompi link must still be
-// comfortably inside its one-hour vigencia (see DONAR_DRAFT_REUSE_WINDOW_MS). If the donor
-// edited either value (Atrás/Editar) or left the link near expiry, the draft is stale and
-// the wizard falls back to a fresh full POST (the old link expires on the sweep). `now` is
-// injectable for deterministic tests; a draft without a mintedAt is treated as just minted.
-export function draftMatchesForm(
-  draft: { amount: string; giftType: DonarGiftType | ""; mintedAt?: number },
-  form: Pick<DonationFormInput, "amount" | "giftType">,
-  now = Date.now()
-): boolean {
-  const matchesValues = draft.amount === form.amount.trim() && draft.giftType === form.giftType;
-  const mintedAt = draft.mintedAt ?? now;
-  return matchesValues && now - mintedAt < DONAR_DRAFT_REUSE_WINDOW_MS;
 }
 
 // The widget consumes urlEnlaceLargo (which already carries a query string), so

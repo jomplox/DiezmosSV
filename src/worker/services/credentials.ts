@@ -262,14 +262,15 @@ export function buildStripeWebhookStagePatch(value: string): SecretPatch {
 }
 
 export function buildStripeWebhookPromotionPatch(env: Env): SecretPatch {
+  const activeSecret = trim(env.STRIPE_WEBHOOK_SECRET);
   const nextSecret = trim(env.STRIPE_WEBHOOK_SECRET_NEXT);
-  if (!nextSecret) {
+  if (!activeSecret || !nextSecret) {
     throw new StripeCredentialValidationError("missing_staged_webhook_secret");
   }
   const staged = buildStripeWebhookStagePatch(nextSecret).STRIPE_WEBHOOK_SECRET_NEXT;
   return {
     STRIPE_WEBHOOK_SECRET: secret("STRIPE_WEBHOOK_SECRET", staged!.text),
-    STRIPE_WEBHOOK_SECRET_NEXT: null
+    STRIPE_WEBHOOK_SECRET_NEXT: secret("STRIPE_WEBHOOK_SECRET_NEXT", activeSecret)
   };
 }
 

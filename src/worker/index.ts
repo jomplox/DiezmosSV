@@ -46,7 +46,7 @@ import {
 import { DEFAULT_EMAIL_TEMPLATES, EMAIL_TEMPLATES_SETTING_KEY, EmailTemplateValidationError, emailTemplateResponse, normalizeEmailTemplateSettings, parseEmailTemplates } from "./services/emailTemplates";
 import { resolveDonationIntentBinding } from "./services/donationIntentBinding";
 import { issuanceFailureEvidence } from "./services/issuanceFailure";
-import { createStripeGateway, StripeWebhookSignatureError } from "./services/stripeClient";
+import { createStripeGateway, stripeWebhookSecretGeneration, StripeWebhookSignatureError } from "./services/stripeClient";
 import {
   StripeConfigurationError,
   StripeDonationValidationError,
@@ -922,15 +922,16 @@ async function handleStripeWebhook(
     throw error;
   }
   const rawBody = await readBodyText(request, STRIPE_WEBHOOK_BODY_LIMIT_BYTES);
-  let event;
+  let verifiedEvent;
   try {
-    event = await createStripeGateway(configuration).constructWebhookEvent(rawBody, signature);
+    verifiedEvent = await createStripeGateway(configuration).constructWebhookEvent(rawBody, signature);
   } catch (error) {
     if (error instanceof StripeWebhookSignatureError) {
       return jsonResponse({ error: "invalid_stripe_signature" }, { status: 400 });
     }
     throw error;
   }
+  const { event, verification } = verifiedEvent;
   if (
     event.livemode !== configuration.livemode
     || event.api_version !== STRIPE_API_VERSION
@@ -945,6 +946,8 @@ async function handleStripeWebhook(
     eventId: event.id,
     eventType: event.type,
     livemode: event.livemode,
+    verifiedSecretSlot: verification.slot,
+    verifiedSecretGeneration: verification.generation,
     claimId,
     now: nowIso()
   });
@@ -1411,21 +1414,20 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
     null
   ).displayName;
   const gateway = createStripeGateway(stripeConfiguration);
-  try {
-    const session = await gateway.createCheckoutSession(
-      buildStripeCheckoutSessionParams({
-        checkoutId: checkout.id,
-        requestId: input.requestId,
-        amountCents: input.amountCents,
-        frequency: input.frequency,
-        giftType: input.giftType,
-        organizationName,
-        appOrigin: resolveAppOrigin(ctx.env, ctx.url),
-        paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
-        integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
-      }),
-      `stripe-checkout:${input.requestId}`
-    );
+  const params = buildStripeCheckoutSessionParams({
+    checkoutId: checkout.id,
+    requestId: input.requestId,
+    amountCents: input.amountCents,
+    frequency: input.frequency,
+    giftType: input.giftType,
+    organizationName,
+    appOrigin: resolveAppOrigin(ctx.env, ctx.url),
+    paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
+    integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
+  });
+  const completeSession = async (
+    session: import("./services/stripeClient").StripeCheckoutSnapshot
+  ): Promise<Response> => {
     assertCreatedStripeCheckout(session, checkout);
     const completed = await ctx.repo.completeStripeCheckoutCreation({
       id: checkout.id,
@@ -1436,19 +1438,42 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
     if (!completed || !session.clientSecret) {
       throw new Error("Stripe Checkout reservation lost before finalization");
     }
-    return jsonResponse(
-      {
-        sessionId: session.id,
-        clientSecret: session.clientSecret,
-        publishableKey: stripeConfiguration.publishableKey,
-        mock: stripeConfiguration.mock
-      },
-      { status: 201, headers: { "Cache-Control": "no-store" } }
-    );
+    return jsonResponse({
+      sessionId: session.id,
+      clientSecret: session.clientSecret,
+      publishableKey: stripeConfiguration.publishableKey,
+      mock: stripeConfiguration.mock
+    }, { status: 201, headers: { "Cache-Control": "no-store" } });
+  };
+  const createWithGeneration = () => gateway.createCheckoutSession(
+    params,
+    stripeCheckoutIdempotencyKey(input.requestId, checkout.idempotency_generation)
+  );
+  try {
+    if (checkout.creation_outcome_class === "AMBIGUOUS") {
+      try {
+        return await completeSession(await createWithGeneration());
+      } catch {
+        const reconciled = await gateway.findCheckoutSessionByClientReference({
+          clientReferenceId: checkout.id,
+          createdAt: checkout.created_at
+        });
+        if (reconciled) return await completeSession(reconciled);
+        const rotated = await ctx.repo.rotateStripeCheckoutIdempotencyGeneration({
+          id: checkout.id,
+          expectedGeneration: checkout.idempotency_generation,
+          now: nowIso()
+        });
+        if (!rotated) throw new Error("Stripe Checkout idempotency rotation claim was lost");
+        checkout = rotated;
+      }
+    }
+    return await completeSession(await createWithGeneration());
   } catch (error) {
     await ctx.repo.failStripeCheckoutCreation({
       id: checkout.id,
       errorCode: "stripe_checkout_create_failed",
+      outcomeClass: stripeCheckoutCreationOutcome(error),
       now: nowIso()
     });
     logWorkerError(ctx.env, "stripe_checkout_create_failed", error);
@@ -1457,6 +1482,22 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+function stripeCheckoutIdempotencyKey(requestId: string, generation: number): string {
+  return generation === 1
+    ? `stripe-checkout:${requestId}`
+    : `stripe-checkout:${requestId}:generation:${generation}`;
+}
+
+function stripeCheckoutCreationOutcome(error: unknown): "DEFINITE_FAILURE" | "AMBIGUOUS" {
+  if (!error || typeof error !== "object") return "AMBIGUOUS";
+  const statusCode = "statusCode" in error ? Number(error.statusCode) : NaN;
+  const type = "type" in error ? String(error.type) : "";
+  return statusCode >= 400 && statusCode < 500 && statusCode !== 409 && statusCode !== 429
+    && new Set(["StripeInvalidRequestError", "StripeAuthenticationError", "StripePermissionError"]).has(type)
+    ? "DEFINITE_FAILURE"
+    : "AMBIGUOUS";
 }
 
 async function existingStripeCheckoutResponse(
@@ -3738,9 +3779,19 @@ async function handleStripeWebhookSecretStage(ctx: ApiRouteContext): Promise<Res
 async function handleStripeWebhookSecretPromote(ctx: ApiRouteContext): Promise<Response> {
   if (ctx.request.method !== "POST") return methodNotAllowed();
   try {
+    const patch = buildStripeWebhookPromotionPatch(ctx.env);
+    const stagedSecret = ctx.env.STRIPE_WEBHOOK_SECRET_NEXT!.trim();
+    const verified = await ctx.repo.hasRecentStripeWebhookSecretVerification({
+      livemode: ctx.env.APP_ENV === "production",
+      generation: await stripeWebhookSecretGeneration(stagedSecret),
+      receivedAfter: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+    });
+    if (!verified) {
+      return jsonResponse({ error: "staged_webhook_secret_not_verified" }, { status: 409 });
+    }
     return await applyStripeWebhookSecretAction(
       ctx,
-      buildStripeWebhookPromotionPatch(ctx.env),
+      patch,
       "STRIPE_WEBHOOK_SECRET_PROMOTED",
       "Secreto siguiente del webhook de Stripe promovido",
       "promote"

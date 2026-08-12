@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
+import { migratedDatabase, migratedDatabaseThrough, migrationFiles } from "./support/migratedDatabase";
+
+const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
 const migrationPath = resolve(
   import.meta.dirname,
@@ -375,6 +377,37 @@ describe("Stripe U.S. donation persistence", () => {
       `INSERT INTO stripe_gifts (id, source_type, source_id, frequency, amount_cents, settled_at, status, gift_type)
        VALUES ('new_invalid', 'PAYMENT_INTENT', 'pi_invalid', 'ONCE', 5000, '2026-08-10T12:00:00.000Z', 'PAID', 'OTHER')`
     ).run()).toThrow(/CHECK constraint failed/);
+  });
+
+  it("rejects explicit gift type downgrades while tolerating unchanged historical rows", () => {
+    const database = track(openDatabases, migratedDatabaseThrough("0032"));
+    insertLegacyCheckout(database, "legacy_checkout_guard", "legacy_request_guard", "legacy_fingerprint_guard");
+    insertLegacyGift(database, "legacy_gift_guard", "legacy_pi_guard", "legacy_checkout_guard");
+    for (const filename of migrationFiles()) {
+      const prefix = filename.slice(0, 4);
+      if (prefix > "0032" && prefix <= "0037") {
+        database.exec(readFileSync(resolve(migrationsDirectory, filename), "utf8"));
+      }
+    }
+
+    expect(database.prepare(
+      "UPDATE stripe_gifts SET gift_type = 'UNSPECIFIED' WHERE id = 'legacy_gift_guard'"
+    ).run().changes).toBe(1);
+    expect(database.prepare(
+      "UPDATE stripe_checkout_sessions SET gift_type = 'UNSPECIFIED' WHERE id = 'legacy_checkout_guard'"
+    ).run().changes).toBe(1);
+
+    insertCheckout(database, "checkout_guard", "request_guard", "fingerprint_guard");
+    insertGift(database, "gift_tithe_guard", "pi_tithe_guard", "checkout_guard", { giftType: "TITHE" });
+    insertGift(database, "gift_offering_guard", "pi_offering_guard", "checkout_guard", { giftType: "OFFERING" });
+    for (const id of ["gift_tithe_guard", "gift_offering_guard"]) {
+      expect(() => database.prepare(
+        "UPDATE stripe_gifts SET gift_type = 'UNSPECIFIED' WHERE id = ?"
+      ).run(id)).toThrow(/stripe_gift_type_downgrade/);
+    }
+    expect(() => database.prepare(
+      "UPDATE stripe_checkout_sessions SET gift_type = 'UNSPECIFIED' WHERE id = 'checkout_guard'"
+    ).run()).toThrow(/stripe_gift_type_downgrade/);
   });
 });
 

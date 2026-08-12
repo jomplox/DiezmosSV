@@ -23,7 +23,6 @@ import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./ema
 import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import {
   drawOrganizationLogo,
-  drawTextSafe,
   loadPdfBrandingLogo,
   pdfSafeText,
   type PdfBrandingLogo
@@ -37,7 +36,7 @@ export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
 const MARGIN = 42;
-export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v1" as const;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v2" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -309,7 +308,15 @@ export async function renderStripeAnnualStatementPdf(
 
   for (const currentPage of pdf.getPages()) {
     currentPage.drawLine({ start: { x: MARGIN, y: 54 }, end: { x: PAGE_WIDTH - MARGIN, y: 54 }, thickness: 0.5, color: rgb(0.8, 0.82, 0.83) });
-    drawTextSafe(currentPage, input.snapshot.document.legalName, { x: MARGIN, y: 40, size: 7.5, font: regular, color: muted });
+    drawWrappedText(currentPage, input.snapshot.document.legalName, {
+      x: MARGIN,
+      y: 40,
+      size: 7.5,
+      lineHeight: 9,
+      maxWidth: PAGE_WIDTH - MARGIN * 2,
+      font: regular,
+      color: muted
+    });
   }
   return pdf.save();
 }
@@ -526,7 +533,7 @@ export async function sendStripeAnnualStatements(
           now
         });
         result.failed += 1;
-        await auditStatement(repo, actorId, claim.id, "FAILED", claim.revision, corrected);
+        await auditStatementBestEffort(env, repo, actorId, claim.id, "FAILED", claim.revision, corrected);
         continue;
       }
       const content = stripeAnnualStatementEmailContent({
@@ -581,11 +588,7 @@ export async function sendStripeAnnualStatements(
         throw new Error("Stripe annual statement finalization claim was lost");
       }
       result.sent += 1;
-      try {
-        await auditStatement(repo, actorId, claim.id, "SENT", claim.revision, corrected);
-      } catch (error) {
-        logWorkerError(env, "stripe_annual_statement_audit_failed", error);
-      }
+      await auditStatementBestEffort(env, repo, actorId, claim.id, "SENT", claim.revision, corrected);
     } catch (error) {
       const classified = classifyEmailDispatchError(error, providerDispatchStarted);
       const outcome = classified.outcomeClass === "UNKNOWN" ? "REVIEW" : "FAILED";
@@ -598,7 +601,7 @@ export async function sendStripeAnnualStatements(
           retrySafe: outcome === "FAILED" && classified.retrySafe,
           now
         });
-        await auditStatement(repo, actorId, deliveryId, outcome, null, false);
+        await auditStatementBestEffort(env, repo, actorId, deliveryId, outcome, null, false);
       }
       if (outcome === "REVIEW") result.review += 1;
       else result.failed += 1;
@@ -722,7 +725,8 @@ function settingEvidenceValue(settings: StripeAnnualStatementSettingEvidence, ke
   }
 }
 
-async function auditStatement(
+async function auditStatementBestEffort(
+  env: Env,
   repo: Repository,
   actorId: string | null,
   deliveryId: string,
@@ -730,17 +734,21 @@ async function auditStatement(
   revision: number | null,
   corrected: boolean
 ): Promise<void> {
-  await repo.createAudit({
-    actorType: actorId ? "USER" : "SYSTEM",
-    actorId,
-    action: `STRIPE_ANNUAL_STATEMENT_${outcome}`,
-    entityType: "stripe_annual_statement",
-    entityId: deliveryId,
-    summary: outcome === "SENT"
-      ? `Constancia anual de EE. UU. ${corrected ? "corregida " : ""}enviada`
-      : `Constancia anual de EE. UU. marcada ${outcome}`,
-    metadata: { outcome, revision, corrected }
-  });
+  try {
+    await repo.createAudit({
+      actorType: actorId ? "USER" : "SYSTEM",
+      actorId,
+      action: `STRIPE_ANNUAL_STATEMENT_${outcome}`,
+      entityType: "stripe_annual_statement",
+      entityId: deliveryId,
+      summary: outcome === "SENT"
+        ? `Constancia anual de EE. UU. ${corrected ? "corregida " : ""}enviada`
+        : `Constancia anual de EE. UU. marcada ${outcome}`,
+      metadata: { outcome, revision, corrected }
+    });
+  } catch (error) {
+    logWorkerError(env, "stripe_annual_statement_audit_failed", error);
+  }
 }
 
 function previewDonor(target: StripeAnnualStatementDonorTarget): StripeAnnualStatementPreviewDonor {
@@ -772,19 +780,112 @@ async function drawStatementHeader(
     height: logoHeight,
     centered: true
   }, input.logo);
-  drawCentered(page, input.snapshot.document.legalName, 706, 11, bold);
-  drawCentered(page, `EIN: ${input.snapshot.document.ein}`, 691, 9, regular);
-  drawCentered(page, "Constancia anual de donaciones — EE. UU.", 660, 17, bold, accent);
-  drawCentered(page, `Año calendario ${input.snapshot.year}`, 640, 11, bold);
+  let y = drawWrappedCentered(page, input.snapshot.document.legalName, 706, 11, 13, bold);
+  drawCentered(page, `EIN: ${input.snapshot.document.ein}`, y - 2, 9, regular);
+  y -= 33;
+  drawCentered(page, "Constancia anual de donaciones — EE. UU.", y, 17, bold, accent);
+  y -= 20;
+  drawCentered(page, `Año calendario ${input.snapshot.year}`, y, 11, bold);
   if (input.corrected) {
-    drawCentered(page, "CONSTANCIA CORREGIDA", 619, 10, bold, rgb(0.65, 0.2, 0.12));
+    y -= 21;
+    drawCentered(page, "CONSTANCIA CORREGIDA", y, 10, bold, rgb(0.65, 0.2, 0.12));
   }
-  const identityY = input.corrected ? 588 : 602;
-  drawTextSafe(page, `Donante: ${input.snapshot.donor.name}`, { x: MARGIN, y: identityY, size: 9.5, font: regular });
+  y -= input.corrected ? 31 : 28;
+  y = drawWrappedText(page, `Donante: ${input.snapshot.donor.name}`, {
+    x: MARGIN,
+    y,
+    size: 9.5,
+    lineHeight: 12,
+    maxWidth: PAGE_WIDTH - MARGIN * 2,
+    font: regular
+  });
   if (input.snapshot.donor.email) {
-    drawTextSafe(page, `Correo: ${input.snapshot.donor.email}`, { x: MARGIN, y: identityY - 15, size: 9.5, font: regular });
+    y = drawWrappedText(page, `Correo: ${input.snapshot.donor.email}`, {
+      x: MARGIN,
+      y: y - 3,
+      size: 9.5,
+      lineHeight: 12,
+      maxWidth: PAGE_WIDTH - MARGIN * 2,
+      font: regular
+    });
   }
-  return drawTableHeader(page, bold, identityY - 44, accent);
+  return drawTableHeader(page, bold, y - 17, accent);
+}
+
+function drawWrappedText(
+  page: PDFPage,
+  text: string,
+  options: {
+    x: number;
+    y: number;
+    size: number;
+    lineHeight: number;
+    maxWidth: number;
+    font: PDFFont;
+    color?: ReturnType<typeof rgb>;
+  }
+): number {
+  const lines = wrapPdfText(text, options.font, options.size, options.maxWidth);
+  lines.forEach((line, index) => page.drawText(line, {
+    x: options.x,
+    y: options.y - index * options.lineHeight,
+    size: options.size,
+    font: options.font,
+    color: options.color
+  }));
+  return options.y - lines.length * options.lineHeight;
+}
+
+function drawWrappedCentered(
+  page: PDFPage,
+  text: string,
+  y: number,
+  size: number,
+  lineHeight: number,
+  font: PDFFont
+): number {
+  const maxWidth = PAGE_WIDTH - MARGIN * 2;
+  const lines = wrapPdfText(text, font, size, maxWidth);
+  lines.forEach((line, index) => page.drawText(line, {
+    x: MARGIN + (maxWidth - font.widthOfTextAtSize(line, size)) / 2,
+    y: y - index * lineHeight,
+    size,
+    font
+  }));
+  return y - lines.length * lineHeight;
+}
+
+function wrapPdfText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const safe = pdfSafeText(text, font).trim();
+  if (!safe) return [""];
+  const lines: string[] = [];
+  let current = "";
+  const pushToken = (token: string) => {
+    for (const character of Array.from(token)) {
+      const candidate = current + character;
+      if (current && font.widthOfTextAtSize(candidate, size) > maxWidth) {
+        lines.push(current);
+        current = character;
+      } else {
+        current = candidate;
+      }
+    }
+  };
+  for (const word of safe.split(/\s+/u)) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    if (current) {
+      lines.push(current);
+      current = "";
+    }
+    if (font.widthOfTextAtSize(word, size) <= maxWidth) current = word;
+    else pushToken(word);
+  }
+  if (current) lines.push(current);
+  return lines;
 }
 
 function drawTableHeader(page: PDFPage, bold: PDFFont, y: number, accent: ReturnType<typeof rgb>): number {

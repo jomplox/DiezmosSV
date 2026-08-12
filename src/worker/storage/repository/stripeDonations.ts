@@ -17,6 +17,8 @@ export interface StripeCheckoutRecord {
   livemode: 0 | 1;
   status: StripeCheckoutStatus;
   creation_attempt_count: number;
+  creation_outcome_class: "DEFINITE_FAILURE" | "AMBIGUOUS" | null;
+  idempotency_generation: number;
   payment_status: StripePaymentStatus;
   stripe_customer_id: string | null;
   stripe_subscription_id: string | null;
@@ -98,7 +100,7 @@ export async function reserveStripeCheckout(
   kind: "CREATED" | "EXISTING" | "CONFLICT";
   record: StripeCheckoutRecord;
 }> {
-  const inserted = await db.prepare(
+  await db.prepare(
     `INSERT OR IGNORE INTO stripe_checkout_sessions (
        id, request_id, request_fingerprint, frequency, gift_type, amount_cents, currency,
        livemode, status, payment_status, rate_limit_claim_id, created_at, updated_at
@@ -119,7 +121,7 @@ export async function reserveStripeCheckout(
   if (!record) {
     throw new Error("Stripe Checkout reservation could not be read");
   }
-  if (Number(inserted.meta?.changes ?? 0) === 1) {
+  if (record.id === input.id) {
     return { kind: "CREATED", record };
   }
   const matches = record.request_fingerprint === input.requestFingerprint
@@ -168,22 +170,28 @@ export async function completeStripeCheckoutCreation(
 ): Promise<boolean> {
   const result = await db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET stripe_session_id = ?, status = 'OPEN', expires_at = ?, error_code = NULL, updated_at = ?
+        SET stripe_session_id = ?, status = 'OPEN', expires_at = ?, error_code = NULL,
+            creation_outcome_class = NULL, updated_at = ?
       WHERE id = ? AND status = 'CREATING' AND stripe_session_id IS NULL`
   ).bind(input.stripeSessionId, input.expiresAt, input.now, input.id).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function failStripeCheckoutCreation(
   db: D1Database,
-  input: { id: string; errorCode: string; now: string }
+  input: {
+    id: string;
+    errorCode: string;
+    outcomeClass: "DEFINITE_FAILURE" | "AMBIGUOUS";
+    now: string;
+  }
 ): Promise<boolean> {
   const result = await db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET status = 'FAILED', error_code = ?, updated_at = ?
+        SET status = 'FAILED', error_code = ?, creation_outcome_class = ?, updated_at = ?
       WHERE id = ? AND status = 'CREATING' AND stripe_session_id IS NULL`
-  ).bind(input.errorCode, input.now, input.id).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  ).bind(input.errorCode, input.outcomeClass, input.now, input.id).run();
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function reclaimStripeCheckoutCreation(
@@ -193,6 +201,11 @@ export async function reclaimStripeCheckoutCreation(
   return db.prepare(
     `UPDATE stripe_checkout_sessions
         SET status = 'CREATING', creation_attempt_count = creation_attempt_count + 1,
+            idempotency_generation = idempotency_generation
+              + CASE WHEN creation_outcome_class = 'DEFINITE_FAILURE' THEN 1 ELSE 0 END,
+            creation_outcome_class = CASE
+              WHEN creation_outcome_class = 'DEFINITE_FAILURE' THEN NULL
+              ELSE creation_outcome_class END,
             error_code = NULL, updated_at = ?
       WHERE id = ? AND stripe_session_id IS NULL
         AND creation_attempt_count < 3
@@ -206,6 +219,21 @@ export async function reclaimStripeCheckoutCreation(
     input.id,
     stripeClaimStaleBefore(input.now)
   ).first<StripeCheckoutRecord>();
+}
+
+export async function rotateStripeCheckoutIdempotencyGeneration(
+  db: D1Database,
+  input: { id: string; expectedGeneration: number; now: string }
+): Promise<StripeCheckoutRecord | null> {
+  return db.prepare(
+    `UPDATE stripe_checkout_sessions
+        SET idempotency_generation = idempotency_generation + 1,
+            creation_outcome_class = NULL, updated_at = ?
+      WHERE id = ? AND status = 'CREATING' AND stripe_session_id IS NULL
+        AND creation_outcome_class = 'AMBIGUOUS'
+        AND idempotency_generation = ?
+      RETURNING *`
+  ).bind(input.now, input.id, input.expectedGeneration).first<StripeCheckoutRecord>();
 }
 
 export async function updateStripeCheckoutFromEvent(
@@ -351,7 +379,10 @@ export async function updateStripeSubscriptionStatus(
 ): Promise<StripeCheckoutRecord | null> {
   return db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET subscription_status = 'CANCELED',
+        SET subscription_status = CASE
+              WHEN ? > subscription_event_created
+                OR (? = subscription_event_created AND ? > subscription_event_rank)
+                THEN ? ELSE subscription_status END,
             subscription_event_created = CASE
               WHEN ? > subscription_event_created
                 OR (? = subscription_event_created AND ? > subscription_event_rank)
@@ -368,6 +399,10 @@ export async function updateStripeSubscriptionStatus(
       WHERE stripe_subscription_id = ? AND frequency = 'MONTHLY'
       RETURNING *`
   ).bind(
+    input.eventCreated,
+    input.eventCreated,
+    input.eventRank,
+    input.status,
     input.eventCreated,
     input.eventCreated,
     input.eventRank,
@@ -515,6 +550,8 @@ export async function claimStripeWebhookEvent(
     eventId: string;
     eventType: string;
     livemode: boolean;
+    verifiedSecretSlot: "ACTIVE" | "NEXT";
+    verifiedSecretGeneration: string;
     claimId: string;
     now: string;
   }
@@ -525,17 +562,19 @@ export async function claimStripeWebhookEvent(
   const inserted = await db.prepare(
     `INSERT OR IGNORE INTO stripe_webhook_events (
        id, event_type, livemode, status, attempt_count, processing_claim_id,
-       received_at, updated_at
-     ) VALUES (?, ?, ?, 'PROCESSING', 1, ?, ?, ?)`
+       verified_secret_slot, verified_secret_generation, received_at, updated_at
+     ) VALUES (?, ?, ?, 'PROCESSING', 1, ?, ?, ?, ?, ?)`
   ).bind(
     input.eventId,
     input.eventType,
     input.livemode ? 1 : 0,
     input.claimId,
+    input.verifiedSecretSlot,
+    input.verifiedSecretGeneration,
     input.now,
     input.now
   ).run();
-  if (Number(inserted.meta?.changes ?? 0) === 1) {
+  if (Number(inserted.meta?.changes ?? 0) > 0) {
     return { kind: "CLAIMED", attemptCount: 1 };
   }
 
@@ -554,6 +593,7 @@ export async function claimStripeWebhookEvent(
     `UPDATE stripe_webhook_events
         SET status = 'PROCESSING', attempt_count = attempt_count + 1,
             processing_claim_id = ?, failure_code = NULL, processed_at = NULL,
+            verified_secret_slot = ?, verified_secret_generation = ?,
             updated_at = ?
       WHERE id = ? AND (
         status = 'FAILED'
@@ -561,6 +601,8 @@ export async function claimStripeWebhookEvent(
       )`
   ).bind(
     input.claimId,
+    input.verifiedSecretSlot,
+    input.verifiedSecretGeneration,
     input.now,
     input.eventId,
     stripeClaimStaleBefore(input.now)
@@ -569,13 +611,31 @@ export async function claimStripeWebhookEvent(
   if (!row) {
     throw new Error("Stripe webhook event reclaim could not be read");
   }
-  if (Number(reclaimed.meta?.changes ?? 0) === 1) {
+  if (Number(reclaimed.meta?.changes ?? 0) > 0) {
     return { kind: "CLAIMED", attemptCount: row.attempt_count };
   }
   return {
     kind: row.status === "PROCESSED" ? "DUPLICATE" : "BUSY",
     attemptCount: row.attempt_count
   };
+}
+
+export async function hasRecentStripeWebhookSecretVerification(
+  db: D1Database,
+  input: { livemode: boolean; generation: string; receivedAfter: string }
+): Promise<boolean> {
+  const row = await db.prepare(
+    `SELECT id
+       FROM stripe_webhook_events
+      WHERE status = 'PROCESSED'
+        AND livemode = ?
+        AND verified_secret_slot = 'NEXT'
+        AND verified_secret_generation = ?
+        AND received_at >= ?
+      ORDER BY received_at DESC, id DESC
+      LIMIT 1`
+  ).bind(input.livemode ? 1 : 0, input.generation, input.receivedAfter).first<{ id: string }>();
+  return row !== null;
 }
 
 async function getStripeWebhookEvent(
@@ -610,7 +670,7 @@ export async function finalizeStripeWebhookEvent(
     input.eventId,
     input.claimId
   ).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function recordStripeGiftAndAcknowledgment(
@@ -673,7 +733,7 @@ export async function recordStripeGiftAndAcknowledgment(
   if (!stripeGiftMatches(record, input)) {
     throw new StripeGiftConflictError();
   }
-  return { inserted: Number(giftResult.meta?.changes ?? 0) === 1, record };
+  return { inserted: Number(giftResult.meta?.changes ?? 0) > 0, record };
 }
 
 function stripeGiftMatches(
@@ -704,24 +764,37 @@ export async function claimNextStripeAcknowledgment(
       WHERE status = 'PROCESSING' AND dispatch_started_at IS NOT NULL
         AND updated_at < ?`
   ).bind(input.now, staleBefore).run();
+  await db.prepare(
+    `UPDATE stripe_acknowledgment_deliveries
+        SET status = 'REVIEW', processing_claim_id = NULL,
+            failure_code = 'acknowledgment_retry_exhausted',
+            retry_safe = 0, next_attempt_at = NULL, updated_at = ?
+      WHERE attempt_count >= 5 AND (
+        (status = 'FAILED' AND retry_safe = 1)
+        OR (status = 'PROCESSING' AND dispatch_started_at IS NULL AND updated_at < ?)
+      )`
+  ).bind(input.now, staleBefore).run();
   const claimed = await db.prepare(
     `UPDATE stripe_acknowledgment_deliveries
         SET status = 'PROCESSING', processing_claim_id = ?,
             attempt_count = attempt_count + 1, last_attempt_at = ?,
-            dispatch_started_at = NULL, retry_safe = 0, updated_at = ?
+            dispatch_started_at = NULL, retry_safe = 0,
+            next_attempt_at = NULL, updated_at = ?
       WHERE id = (
         SELECT id FROM stripe_acknowledgment_deliveries
-         WHERE status = 'PENDING'
+         WHERE attempt_count < 5
+           AND COALESCE(next_attempt_at, created_at) <= ?
+           AND (status = 'PENDING'
             OR (status = 'FAILED' AND retry_safe = 1)
             OR (
               status = 'PROCESSING' AND dispatch_started_at IS NULL
               AND updated_at < ?
-            )
-         ORDER BY created_at, id
+            ))
+         ORDER BY COALESCE(next_attempt_at, created_at), created_at, id
          LIMIT 1
       )
       RETURNING id`
-  ).bind(input.claimId, input.now, input.now, staleBefore).first<{ id: string }>();
+  ).bind(input.claimId, input.now, input.now, input.now, staleBefore).first<{ id: string }>();
   if (!claimed) {
     return null;
   }
@@ -746,7 +819,7 @@ export async function markStripeAcknowledgmentDispatchStarted(
       WHERE id = ? AND status = 'PROCESSING'
         AND processing_claim_id = ? AND dispatch_started_at IS NULL`
   ).bind(input.now, input.now, input.id, input.claimId).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function finalizeStripeAcknowledgment(
@@ -758,25 +831,45 @@ export async function finalizeStripeAcknowledgment(
     providerIdHash?: string | null;
     failureCode?: string | null;
     retrySafe?: boolean;
+    retryAt?: string | null;
     now: string;
   }
 ): Promise<boolean> {
   const result = await db.prepare(
     `UPDATE stripe_acknowledgment_deliveries
-        SET status = ?, processing_claim_id = NULL, provider_id_hash = ?,
-            failure_code = ?, retry_safe = ?, sent_at = ?, updated_at = ?
+        SET status = CASE
+              WHEN ? = 'FAILED' AND ? = 1 AND attempt_count >= 5 THEN 'REVIEW'
+              ELSE ? END,
+            processing_claim_id = NULL, provider_id_hash = ?,
+            failure_code = CASE
+              WHEN ? = 'FAILED' AND ? = 1 AND attempt_count >= 5
+                THEN 'acknowledgment_retry_exhausted'
+              ELSE ? END,
+            retry_safe = CASE
+              WHEN ? = 'FAILED' AND ? = 1 AND attempt_count < 5 THEN 1 ELSE 0 END,
+            next_attempt_at = CASE
+              WHEN ? = 'FAILED' AND ? = 1 AND attempt_count < 5 THEN ? ELSE NULL END,
+            sent_at = ?, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING' AND processing_claim_id = ?`
   ).bind(
     input.outcome,
-    input.providerIdHash ?? null,
-    input.failureCode ?? null,
     input.retrySafe ? 1 : 0,
+    input.outcome,
+    input.providerIdHash ?? null,
+    input.outcome,
+    input.retrySafe ? 1 : 0,
+    input.failureCode ?? null,
+    input.outcome,
+    input.retrySafe ? 1 : 0,
+    input.outcome,
+    input.retrySafe ? 1 : 0,
+    input.retryAt ?? null,
     input.outcome === "SENT" ? input.now : null,
     input.now,
     input.id,
     input.claimId
   ).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function applyStripeRefund(

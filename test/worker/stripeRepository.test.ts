@@ -18,6 +18,10 @@ import { sqliteD1 } from "./support/sqliteD1";
 describe("Stripe donation repository", () => {
   let database: ReturnType<typeof migratedDatabase>;
   let db: D1Database;
+  const webhookVerification = {
+    verifiedSecretSlot: "ACTIVE" as const,
+    verifiedSecretGeneration: "a".repeat(64)
+  };
 
   beforeEach(() => {
     database = migratedDatabase();
@@ -44,6 +48,18 @@ describe("Stripe donation repository", () => {
       requestFingerprint: "monthly:5000",
       frequency: "MONTHLY"
     }))).toMatchObject({ kind: "CONFLICT", record: { id: "stripe_checkout_one" } });
+  });
+
+  it("recognizes successful Checkout writes when D1 counts retention-trigger side effects", async () => {
+    const triggerCountingDb = withInflatedChanges(db);
+    expect(await reserveStripeCheckout(triggerCountingDb, checkoutInput()))
+      .toMatchObject({ kind: "CREATED", record: { id: "stripe_checkout_one" } });
+    expect(await completeStripeCheckoutCreation(triggerCountingDb, {
+      id: "stripe_checkout_one",
+      stripeSessionId: "cs_test_trigger_count",
+      expiresAt: "2026-08-10T13:00:00.000Z",
+      now: "2026-08-10T12:00:01.000Z"
+    })).toBe(true);
   });
 
   it("finalizes Checkout creation only once under the reservation identity", async () => {
@@ -74,6 +90,7 @@ describe("Stripe donation repository", () => {
   it("atomically retries a failed Checkout reservation without allowing an unbounded loop", async () => {
     await reserveStripeCheckout(db, checkoutInput());
     expect(await failStripeCheckoutCreation(db, {
+      outcomeClass: "AMBIGUOUS",
       id: "stripe_checkout_one",
       errorCode: "temporary_one",
       now: "2026-08-10T12:00:01.000Z"
@@ -83,6 +100,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:00:02.000Z"
     })).toMatchObject({ status: "CREATING", creation_attempt_count: 2, error_code: null });
     expect(await failStripeCheckoutCreation(db, {
+      outcomeClass: "AMBIGUOUS",
       id: "stripe_checkout_one",
       errorCode: "temporary_two",
       now: "2026-08-10T12:00:03.000Z"
@@ -92,6 +110,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:00:04.000Z"
     })).toMatchObject({ status: "CREATING", creation_attempt_count: 3, error_code: null });
     expect(await failStripeCheckoutCreation(db, {
+      outcomeClass: "AMBIGUOUS",
       id: "stripe_checkout_one",
       errorCode: "temporary_three",
       now: "2026-08-10T12:00:05.000Z"
@@ -121,6 +140,7 @@ describe("Stripe donation repository", () => {
 
   it("claims failed webhook events for retry but fences processing and completed replays", async () => {
     const first = await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -129,6 +149,7 @@ describe("Stripe donation repository", () => {
     });
     expect(first).toEqual({ kind: "CLAIMED", attemptCount: 1 });
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -144,6 +165,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:00:02.000Z"
     })).toBe(true);
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -157,6 +179,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:00:04.000Z"
     })).toBe(true);
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -167,6 +190,7 @@ describe("Stripe donation repository", () => {
 
   it("reclaims a signed webhook event after its processing lease expires", async () => {
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_stale_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -174,6 +198,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:00:00.000Z"
     })).toEqual({ kind: "CLAIMED", attemptCount: 1 });
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_stale_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -181,6 +206,7 @@ describe("Stripe donation repository", () => {
       now: "2026-08-10T12:04:59.000Z"
     })).toEqual({ kind: "BUSY", attemptCount: 1 });
     expect(await claimStripeWebhookEvent(db, {
+      ...webhookVerification,
       eventId: "evt_stale_fixture",
       eventType: "checkout.session.completed",
       livemode: false,
@@ -328,6 +354,91 @@ describe("Stripe donation repository", () => {
       retry_safe: 0
     });
   });
+
+  it("does not let an older retry-safe acknowledgment starve a newer due delivery", async () => {
+    await reserveStripeCheckout(db, checkoutInput());
+    for (const [suffix, createdAt] of [["old", "2026-08-10T12:00:01.000Z"], ["new", "2026-08-10T12:00:02.000Z"]] as const) {
+      await recordStripeGiftAndAcknowledgment(db, {
+        giftId: `stripe_gift_${suffix}`,
+        acknowledgmentId: `stripe_ack_${suffix}`,
+        sourceType: "PAYMENT_INTENT",
+        sourceId: `pi_${suffix}`,
+        checkoutId: "stripe_checkout_one",
+        stripePaymentIntentId: `pi_${suffix}`,
+        stripeInvoiceId: null,
+        stripeSubscriptionId: null,
+        frequency: "ONCE",
+        giftType: "TITHE",
+        amountCents: 5000,
+        donorName: "Donante Ejemplo",
+        donorEmail: `${suffix}@example.org`,
+        settledAt: createdAt,
+        now: createdAt
+      });
+    }
+
+    expect(await claimNextStripeAcknowledgment(db, {
+      claimId: "ack_claim_old",
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ id: "stripe_ack_old" });
+    expect(await finalizeStripeAcknowledgment(db, {
+      id: "stripe_ack_old",
+      claimId: "ack_claim_old",
+      outcome: "FAILED",
+      failureCode: "EMAIL_PRE_DISPATCH_FAILED",
+      retrySafe: true,
+      retryAt: "2026-08-10T12:06:00.000Z",
+      now: "2026-08-10T12:01:00.000Z"
+    })).toBe(true);
+    expect(await claimNextStripeAcknowledgment(db, {
+      claimId: "ack_claim_new",
+      now: "2026-08-10T12:01:01.000Z"
+    })).toMatchObject({ id: "stripe_ack_new" });
+  });
+
+  it("caps retry-safe acknowledgment failures in review after five attempts", async () => {
+    await reserveStripeCheckout(db, checkoutInput());
+    await recordStripeGiftAndAcknowledgment(db, {
+      giftId: "stripe_gift_exhausted",
+      acknowledgmentId: "stripe_ack_exhausted",
+      sourceType: "PAYMENT_INTENT",
+      sourceId: "pi_exhausted",
+      checkoutId: "stripe_checkout_one",
+      stripePaymentIntentId: "pi_exhausted",
+      stripeInvoiceId: null,
+      stripeSubscriptionId: null,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      amountCents: 5000,
+      donorName: "Donante Ejemplo",
+      donorEmail: "exhausted@example.org",
+      settledAt: "2026-08-10T12:00:01.000Z",
+      now: "2026-08-10T12:00:01.000Z"
+    });
+    database.prepare(
+      "UPDATE stripe_acknowledgment_deliveries SET attempt_count = 4 WHERE id = 'stripe_ack_exhausted'"
+    ).run();
+    expect(await claimNextStripeAcknowledgment(db, {
+      claimId: "ack_claim_five",
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ attempt_count: 5 });
+    expect(await finalizeStripeAcknowledgment(db, {
+      id: "stripe_ack_exhausted",
+      claimId: "ack_claim_five",
+      outcome: "FAILED",
+      failureCode: "EMAIL_PRE_DISPATCH_FAILED",
+      retrySafe: true,
+      retryAt: "2026-08-10T12:21:00.000Z",
+      now: "2026-08-10T12:01:00.000Z"
+    })).toBe(true);
+    expect(database.prepare(
+      "SELECT status, failure_code, retry_safe FROM stripe_acknowledgment_deliveries WHERE id = 'stripe_ack_exhausted'"
+    ).get()).toEqual({
+      status: "REVIEW",
+      failure_code: "acknowledgment_retry_exhausted",
+      retry_safe: 0
+    });
+  });
 });
 
 function checkoutInput(overrides: Partial<Parameters<typeof reserveStripeCheckout>[1]> = {}) {
@@ -343,4 +454,26 @@ function checkoutInput(overrides: Partial<Parameters<typeof reserveStripeCheckou
     now: "2026-08-10T12:00:00.000Z",
     ...overrides
   };
+}
+
+function withInflatedChanges(db: D1Database): D1Database {
+  return {
+    prepare(sql: string) {
+      const statement = db.prepare(sql);
+      const mutableStatement = statement as unknown as { run: () => Promise<D1Result> };
+      const run = mutableStatement.run.bind(mutableStatement);
+      mutableStatement.run = async () => inflateChanges(await run());
+      return statement;
+    },
+    async batch(statements: D1PreparedStatement[]) {
+      return (await db.batch(statements)).map(inflateChanges);
+    }
+  } as D1Database;
+}
+
+function inflateChanges(result: D1Result): D1Result {
+  const changes = Number(result.meta?.changes ?? 0);
+  return changes > 0
+    ? { ...result, meta: { ...result.meta, changes: changes + 1 } }
+    : result;
 }

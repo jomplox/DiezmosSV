@@ -5,6 +5,7 @@ import {
   InMemoryD1
 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 
 installWorkerFetchGlobals();
 
@@ -331,6 +332,16 @@ describe("Stripe owner settings", () => {
       }), env(db, base));
       expect(stage.status).toBe(200);
 
+      db.stripeWebhookEvents.push({
+        id: "evt_verified_next",
+        event_type: "checkout.session.completed",
+        livemode: 0,
+        status: "PROCESSED",
+        verified_secret_slot: "NEXT",
+        verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+        received_at: new Date().toISOString()
+      });
+
       const promote = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
         method: "POST",
         headers: { Authorization: "Bearer test-token" }
@@ -349,7 +360,7 @@ describe("Stripe owner settings", () => {
       });
       expect(bodies[1]).toEqual({
         STRIPE_WEBHOOK_SECRET: { type: "secret_text", name: "STRIPE_WEBHOOK_SECRET", text: "whsec_next_private" },
-        STRIPE_WEBHOOK_SECRET_NEXT: null
+        STRIPE_WEBHOOK_SECRET_NEXT: { type: "secret_text", name: "STRIPE_WEBHOOK_SECRET_NEXT", text: "whsec_active_private" }
       });
       expect(bodies[2]).toEqual({ STRIPE_WEBHOOK_SECRET_NEXT: null });
       expect(JSON.stringify(await stage.json())).not.toContain("whsec_next_private");
@@ -359,6 +370,33 @@ describe("Stripe owner settings", () => {
         "STRIPE_WEBHOOK_SECRET_PROMOTED",
         "STRIPE_WEBHOOK_SECRET_CANCELED"
       ]));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects promotion until the staged secret verifies a recent correct-mode event", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(new Request(
+        "https://example.org/api/settings/stripe/webhook-secret/promote",
+        { method: "POST", headers: { Authorization: "Bearer test-token" } }
+      ), env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_API_TOKEN: "writer-token",
+        CLOUDFLARE_SCRIPT_NAME: "worker",
+        STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+        STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private"
+      }));
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "staged_webhook_secret_not_verified" });
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -387,6 +425,16 @@ describe("Stripe owner settings", () => {
       expect(missing.status).toBe(400);
       expect(fetchMock).not.toHaveBeenCalled();
 
+      db.stripeWebhookEvents.push({
+        id: "evt_verified_next_for_failure",
+        event_type: "checkout.session.completed",
+        livemode: 0,
+        status: "PROCESSED",
+        verified_secret_slot: "NEXT",
+        verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+        received_at: new Date().toISOString()
+      });
+
       const noWriter = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
         method: "POST",
         headers: { Authorization: "Bearer test-token" }
@@ -407,7 +455,7 @@ describe("Stripe owner settings", () => {
       expect(db.audits.find((audit) => audit.action === "STRIPE_WEBHOOK_SECRET_PROMOTED")).toBeUndefined();
       const requestPatch = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)).secrets;
       expect(requestPatch).toHaveProperty("STRIPE_WEBHOOK_SECRET", expect.objectContaining({ text: "whsec_next_private" }));
-      expect(requestPatch).toHaveProperty("STRIPE_WEBHOOK_SECRET_NEXT", null);
+      expect(requestPatch).toHaveProperty("STRIPE_WEBHOOK_SECRET_NEXT", expect.objectContaining({ text: "whsec_active_private" }));
     } finally {
       vi.unstubAllGlobals();
     }

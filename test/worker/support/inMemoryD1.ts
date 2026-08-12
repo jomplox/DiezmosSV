@@ -406,7 +406,20 @@ export class Statement {
       this.sql.includes("MAX(generation)") &&
       this.sql.includes("FROM stripe_retention_generations")
     ) {
-      return { maxGeneration: "0" } as T;
+      return { maxGeneration: "0", materialMutationEpoch: "0" } as T;
+    }
+    if (
+      this.sql.includes("verified_secret_slot = 'NEXT'")
+      && this.sql.includes("verified_secret_generation = ?")
+    ) {
+      const [livemode, generation, receivedAfter] = this.args;
+      return (this.db.stripeWebhookEvents.find((row) =>
+        row.status === "PROCESSED"
+        && row.livemode === livemode
+        && row.verified_secret_slot === "NEXT"
+        && row.verified_secret_generation === generation
+        && String(row.received_at) >= String(receivedAfter)
+      ) ?? null) as T | null;
     }
     if (
       this.sql.includes("FROM stripe_webhook_events") &&

@@ -270,6 +270,19 @@ describe("Correo provider destination authority (source contract)", () => {
   });
 });
 
+describe("Stripe operational status loading (source contract)", () => {
+  test("does not report the local proxy as unconfigured before Stripe settings load", () => {
+    const start = credentialsPanelSource.indexOf("<span>Proxy local</span>");
+    const proxyStatus = credentialsPanelSource.slice(
+      start,
+      credentialsPanelSource.indexOf("</div>", start)
+    );
+
+    expect(proxyStatus).toContain("stripeSettings ?");
+    expect(proxyStatus).toContain('"Sin cargar"');
+  });
+});
+
 describe("Ambiente emission-environment save guard (source contract)", () => {
   test("rejects deployment-incompatible choices and only short-circuits a matching persisted setting", () => {
     expect(credentialsPanelSource).toContain("!emissionEnvironment?.allowedEnvironments.includes(environment)");

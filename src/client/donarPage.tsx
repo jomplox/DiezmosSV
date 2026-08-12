@@ -777,9 +777,6 @@ export function DonarPage() {
     setStep(2);
   }
 
-  // Paso 2 → Paso 3. Mint the Wompi link only after the donor completes the SV
-  // residence/fiscal step. Residence is unknown on Paso 1, so a background premint there
-  // could leave a usable Wompi rail behind when Estados Unidos reroutes to Stripe.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
     const errors = donationStep2FieldErrors(form);
@@ -822,7 +819,8 @@ export function DonarPage() {
       attempt = { fingerprint, requestId: crypto.randomUUID() };
       stripeAttemptRef.current = attempt;
     }
-    const requestId = attempt.requestId;
+    const ownedAttempt = attempt;
+    const requestId = ownedAttempt.requestId;
     const session = donarApi<StripeCheckoutClientConfig>(STRIPE_CHECKOUT_PATH, {
         method: "POST",
         body: stripeCheckoutBody({ requestId, amount: form.amount, monthly, giftType: stripeGiftType })
@@ -831,6 +829,8 @@ export function DonarPage() {
           err instanceof DonarApiError
           && err.status === 409
           && err.code === "stripe_checkout_unavailable"
+          && stripeAttemptRef.current?.requestId === ownedAttempt.requestId
+          && stripeAttemptRef.current.fingerprint === ownedAttempt.fingerprint
         ) {
           stripeAttemptRef.current = null;
         }

@@ -658,6 +658,70 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8787\/(?:donar)?\?ruta=eeuu$/);
 });
 
+test("a stale rejected Stripe request cannot clear the newer attempt identity", async ({ page }) => {
+  const checkoutBodies: Array<Record<string, unknown>> = [];
+  let releaseOld!: () => void;
+  let oldResponseSent = false;
+  const oldBarrier = new Promise<void>((resolve) => { releaseOld = resolve; });
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (checkoutBodies.length === 1) {
+      await oldBarrier;
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "stripe_checkout_unavailable",
+          message: "Inicie una nueva entrega para continuar con Stripe."
+        })
+      });
+      oldResponseSent = true;
+      return;
+    }
+    if (checkoutBodies.length === 2) {
+      await route.fulfill({
+        status: 502,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo." })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: "cs_test_stale_owner_fixture",
+        clientSecret: "cs_test_stale_owner_fixture_secret_mock",
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    });
+  });
+
+  await page.goto("/donar?ruta=eeuu");
+  await page.getByRole("button", { name: "$50", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByText("Preparando su formulario seguro con Stripe…")).toBeVisible();
+
+  await page.getByRole("button", { name: "Editar" }).click();
+  await page.getByLabel("Monto").fill("100.00");
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("No pudimos preparar su entrega con Stripe");
+
+  releaseOld();
+  await expect.poll(() => oldResponseSent).toBe(true);
+  await page.waitForTimeout(50);
+  await page.getByRole("button", { name: "Intentar de nuevo" }).click();
+  await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+
+  expect(checkoutBodies).toHaveLength(3);
+  expect(checkoutBodies[0]).toMatchObject({ amount: "50.00" });
+  expect(checkoutBodies[1]).toMatchObject({ amount: "100.00" });
+  expect(checkoutBodies[2]).toMatchObject({ amount: "100.00" });
+  expect(checkoutBodies[2].requestId).toBe(checkoutBodies[1].requestId);
+  expect(checkoutBodies[1].requestId).not.toBe(checkoutBodies[0].requestId);
+});
+
 test("a canceled Stripe handoff returns to a neutral Spanish retry state", async ({ page }) => {
   await page.goto("/donar?ruta=eeuu&cancelado=1");
   await expect(page.getByText("Su entrega no se completó. Puede revisar los datos e intentarlo de nuevo cuando desee.")).toBeVisible();

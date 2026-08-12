@@ -520,7 +520,7 @@ export function CredentialsPanel({
                     <div className="stripe-status-grid span-2">
                       <div><span>APP_ENV</span><strong>{stripeSettings?.operational.appEnv ?? "Sin cargar"}</strong></div>
                       <div><span>Modo Stripe</span><strong>{stripeSettings?.operational.mode ?? "Sin cargar"}</strong></div>
-                      <div><span>Proxy local</span><strong>{stripeSettings?.operational.localProxyConfigured ? "Configurado" : "No configurado"}</strong></div>
+                      <div><span>Proxy local</span><strong>{stripeSettings ? (stripeSettings.operational.localProxyConfigured ? "Configurado" : "No configurado") : "Sin cargar"}</strong></div>
                     </div>
                     <div className="credential-field-block span-2">
                       <span className="plain-field-label">URL del webhook de Stripe</span>

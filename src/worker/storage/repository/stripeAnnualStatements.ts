@@ -490,7 +490,7 @@ export async function markStripeAnnualStatementDispatchStarted(
     input.snapshotJson,
     input.donorKey
   ).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 export async function finalizeStripeAnnualStatementDelivery(
@@ -520,7 +520,7 @@ export async function finalizeStripeAnnualStatementDelivery(
     input.id,
     input.claimId
   ).run();
-  return Number(result.meta?.changes ?? 0) === 1;
+  return Number(result.meta?.changes ?? 0) > 0;
 }
 
 function processingStaleBefore(now: string): string {

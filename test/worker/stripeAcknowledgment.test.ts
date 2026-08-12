@@ -148,7 +148,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     });
 
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
-      now: "2026-08-10T12:02:00.000Z"
+      now: "2026-08-10T12:06:00.000Z"
     })).toMatchObject({ processed: true, outcome: "SENT" });
     expect(send).toHaveBeenCalledTimes(2);
   });

@@ -318,7 +318,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
   const runActionOwnersRef = useRef(new Map<string, symbol>());
-  const runActionBusyOwnerRef = useRef<symbol | null>(null);
+  const runActionBusyNamesRef = useRef(new Map<string, string>());
   const resendRequestIds = useRef(new Map<string, string>());
   const fiscalCorrectionSubmissions = useRef(
     new Map<string, FiscalCorrectionPendingSubmission>()
@@ -364,6 +364,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [authNotice, setAuthNotice] = useState("");
   const [authBootstrapStatus, setAuthBootstrapStatus] = useState<AuthBootstrapStatus | null>(null);
   const [busy, setBusy] = useState("");
+  const [actionBusyDomains, setActionBusyDomains] = useState<ReadonlySet<string>>(() => new Set());
   const [annualReportAction, setAnnualReportAction] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
@@ -507,7 +508,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
     runActionOwnersRef.current.clear();
-    runActionBusyOwnerRef.current = null;
+    runActionBusyNamesRef.current.clear();
   }, []);
 
   useEffect(() => {
@@ -1096,7 +1097,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function resetAccountState() {
     accountStateGuardRef.current.advance();
     runActionOwnersRef.current.clear();
-    runActionBusyOwnerRef.current = null;
+    runActionBusyNamesRef.current.clear();
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
     stripeStatementOperationClaimsRef.current.clear();
@@ -1136,6 +1137,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setToast("");
     setAuditQuery("");
     setBusy("");
+    setActionBusyDomains(new Set());
     setAnnualReportAction("");
     setPendingInvalidationId(null);
     setInvalidationForm(defaultInvalidationForm);
@@ -2493,14 +2495,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     action: (control: RunActionControl) => Promise<void>,
     isCurrent: () => boolean = () => true
   ) {
-    const actionToken = Symbol(name);
     const ownershipDomain = name.startsWith("certificates-") || name.startsWith("stripe-statements-")
       ? "annual-report"
+      : name.startsWith("stripe-")
+        ? "stripe-settings"
       : name === "export-csv" || name === "export-xlsx"
         ? "f960-export"
         : name;
+    const actionToken = Symbol(name);
     runActionOwnersRef.current.set(ownershipDomain, actionToken);
-    runActionBusyOwnerRef.current = actionToken;
+    runActionBusyNamesRef.current.set(ownershipDomain, name);
+    setActionBusyDomains((current) => new Set(current).add(ownershipDomain));
     const isOwner = () => (
       accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
       && runActionOwnersRef.current.get(ownershipDomain) === actionToken
@@ -2532,16 +2537,18 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         && runActionOwnersRef.current.get(ownershipDomain) === actionToken
       ) {
         runActionOwnersRef.current.delete(ownershipDomain);
+        runActionBusyNamesRef.current.delete(ownershipDomain);
+        setActionBusyDomains((current) => {
+          const next = new Set(current);
+          next.delete(ownershipDomain);
+          return next;
+        });
         if (ownershipDomain === "annual-report") {
           setAnnualReportAction("");
         }
       }
-      if (
-        accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
-        && runActionBusyOwnerRef.current === actionToken
-      ) {
-        runActionBusyOwnerRef.current = null;
-        setBusy("");
+      if (accountStateGuardRef.current.isCurrent(renderAccountStateVersion)) {
+        setBusy(Array.from(runActionBusyNamesRef.current.values()).at(-1) ?? "");
       }
     }
   }
@@ -3000,14 +3007,14 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
             branding={branding}
             token={token}
             input={credentialInput}
-            busy={busy === "credentials"}
-            emissionBusy={busy === "emission-environment"}
-            templateBusy={busy === "email-templates"}
-            emailSenderBusy={busy === "email-sender"}
-            wompiNotificationsBusy={busy === "wompi-notifications"}
-            alertEmailBusy={busy === "alert-email"}
+            busy={actionBusyDomains.has("credentials")}
+            emissionBusy={actionBusyDomains.has("emission-environment")}
+            templateBusy={actionBusyDomains.has("email-templates")}
+            emailSenderBusy={actionBusyDomains.has("email-sender")}
+            wompiNotificationsBusy={actionBusyDomains.has("wompi-notifications")}
+            alertEmailBusy={actionBusyDomains.has("alert-email")}
             writerBusy={busy === "credential-writer"}
-            stripeBusy={busy.startsWith("stripe-")}
+            stripeBusy={actionBusyDomains.has("stripe-settings")}
             onChange={setCredentialInput}
             onSubmit={updateCredentials}
             onStripeSubmit={updateStripeCredentials}

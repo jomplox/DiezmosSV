@@ -18,6 +18,107 @@ CREATE TABLE stripe_retention_generations (
 CREATE INDEX idx_stripe_retention_generations_table_generation
   ON stripe_retention_generations(table_name, generation, row_id);
 
+-- Membership generations make paged inserts/deletes restorable. This separate
+-- epoch also fences every material lifecycle update so a multi-table export can
+-- never publish a manifest assembled from different points in time.
+CREATE TABLE stripe_retention_material_state (
+  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+  mutation_epoch INTEGER NOT NULL DEFAULT 0 CHECK (mutation_epoch >= 0)
+);
+
+INSERT INTO stripe_retention_material_state (singleton, mutation_epoch)
+VALUES (1, 0);
+
+CREATE TRIGGER stripe_checkout_retention_material_insert
+AFTER INSERT ON stripe_checkout_sessions
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_checkout_retention_material_update
+AFTER UPDATE ON stripe_checkout_sessions
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_checkout_retention_material_delete
+AFTER DELETE ON stripe_checkout_sessions
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_webhook_retention_material_insert
+AFTER INSERT ON stripe_webhook_events
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_webhook_retention_material_update
+AFTER UPDATE ON stripe_webhook_events
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_webhook_retention_material_delete
+AFTER DELETE ON stripe_webhook_events
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_gift_retention_material_insert
+AFTER INSERT ON stripe_gifts
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_gift_retention_material_update
+AFTER UPDATE ON stripe_gifts
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_gift_retention_material_delete
+AFTER DELETE ON stripe_gifts
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_acknowledgment_retention_material_insert
+AFTER INSERT ON stripe_acknowledgment_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_acknowledgment_retention_material_update
+AFTER UPDATE ON stripe_acknowledgment_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_acknowledgment_retention_material_delete
+AFTER DELETE ON stripe_acknowledgment_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_annual_statement_retention_material_insert
+AFTER INSERT ON stripe_annual_statement_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_annual_statement_retention_material_update
+AFTER UPDATE ON stripe_annual_statement_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
+CREATE TRIGGER stripe_annual_statement_retention_material_delete
+AFTER DELETE ON stripe_annual_statement_deliveries
+BEGIN
+  UPDATE stripe_retention_material_state SET mutation_epoch = mutation_epoch + 1 WHERE singleton = 1;
+END;
+
 CREATE TRIGGER stripe_checkout_retention_generation_insert
 AFTER INSERT ON stripe_checkout_sessions
 BEGIN

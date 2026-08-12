@@ -213,7 +213,9 @@ describe("annual certificate UI contract", () => {
     expect(actionSource).toContain("runActionOwnersRef.current.get(ownershipDomain) === actionToken");
     expect(actionSource).toContain("&& isCurrent()");
     expect(actionSource).toContain("runActionOwnersRef.current.delete(ownershipDomain)");
-    expect(actionSource).toContain("runActionBusyOwnerRef.current === actionToken");
+    expect(actionSource).toContain("runActionBusyNamesRef.current.delete(ownershipDomain)");
+    expect(actionSource).toContain('setBusy(Array.from(runActionBusyNamesRef.current.values()).at(-1) ?? "")');
+    expect(actionSource).not.toContain("runActionBusyOwnerRef");
 
     const f960Start = appSource.indexOf("async function downloadF960");
     const f960End = appSource.indexOf("async function downloadContacts", f960Start);

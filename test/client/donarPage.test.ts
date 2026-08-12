@@ -6,7 +6,6 @@ import {
   DONAR_AMOUNT_CHIPS,
   DONAR_BACK_LABEL,
   DONAR_CONTINUE_LABEL,
-  DONAR_DRAFT_REUSE_WINDOW_MS,
   DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
@@ -45,7 +44,6 @@ import {
   DONAR_LANDING_UNIFIER_LEAD,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
-  donarDatosPath,
   donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
@@ -55,15 +53,12 @@ import {
   DONAR_STEP_TITLE_ENTREGA,
   clearDonationFieldErrors,
   donationAmountValidationMessage,
-  donationDatosBody,
-  donationDraftBody,
   donationFormValidationMessage,
   donationIntentBody,
   donationStep1FieldErrors,
   donationStep1ValidationMessage,
   donationStep2FieldErrors,
   donationStep2ValidationMessage,
-  draftMatchesForm,
   isUsDonation,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
@@ -158,11 +153,9 @@ describe("donar form validation", () => {
     expect(donationStep2FieldErrors(base)).toEqual({});
   });
 
-  it("omits address and phone from the intent and datos bodies", () => {
+  it("omits address and phone from the intent body", () => {
     expect(donationIntentBody(base)).not.toHaveProperty("complemento");
     expect(donationIntentBody(base)).not.toHaveProperty("donorPhone");
-    expect(donationDatosBody(base)).not.toHaveProperty("complemento");
-    expect(donationDatosBody(base)).not.toHaveProperty("donorPhone");
   });
 
   it("requires the donor to choose diezmo or ofrenda first", () => {
@@ -534,80 +527,6 @@ describe("donar intent body", () => {
     // validation without a país.
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => String(option.code) === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === "06")).toBe(true);
-  });
-});
-
-describe("donar premint (background draft + datos completion)", () => {
-  const base = {
-    amount: " 10.00 ",
-    giftType: "DIEZMO" as const,
-    donorDocumentType: "13" as const,
-    donorDocument: "10000001-9",
-    donorName: "",
-    foreignResident: false,
-    pais: "",
-    departamento: "06",
-    municipio: "23",
-    distrito: "14"
-  };
-
-  it("the draft body carries only the trimmed amount + gift type (no donor data)", () => {
-    expect(donationDraftBody(base)).toEqual({ amount: "10.00", giftType: "DIEZMO" });
-    // No document/address keys: the server treats this as a draft create.
-    expect(donationDraftBody(base)).not.toHaveProperty("donorDocument");
-    expect(donationDraftBody(base)).not.toHaveProperty("departamento");
-  });
-
-  it("the draft body omits giftType when none is chosen (never sends an empty string)", () => {
-    expect(donationDraftBody({ amount: "25", giftType: "" }).giftType).toBeUndefined();
-  });
-
-  it("the datos body carries the donor fiscal data ONLY (no amount, no giftType)", () => {
-    const body = donationDatosBody(base);
-    expect(body).not.toHaveProperty("amount");
-    expect(body).not.toHaveProperty("giftType");
-    expect(body).not.toHaveProperty("datosToken");
-    // Same field mapping as the full intent body minus amount/giftType.
-    expect(body).toMatchObject({
-      donorDocumentType: "13",
-      donorDocument: "10000001-9",
-        departamento: "06",
-      municipio: "23",
-      distrito: "14",
-    });
-  });
-
-  it("the datos body mirrors the full body's NIT razón social and foreign-path rules", () => {
-    const nit = donationDatosBody({ ...base, donorDocumentType: "36", donorDocument: "0614-280390-112-1", donorName: " Empresa " });
-    expect(nit.donorName).toBe("Empresa");
-    const foreign = donationDatosBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" });
-    expect(foreign).toMatchObject({ departamento: DONAR_FOREIGN_GEOGRAPHY_CODE, pais: "US" });
-  });
-
-  it("builds the datos path from the intent id", () => {
-    expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
-  });
-
-  it("treats a draft as fresh only when the amount, the gift type, and the age are all valid", () => {
-    const now = Date.UTC(2026, 0, 1, 12, 0, 0);
-    const draft = { amount: "10.00", giftType: "DIEZMO" as const, mintedAt: now };
-    // Just inside the reuse window with amount + tipo unchanged → reuse.
-    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS - 1)).toBe(true);
-    // Edited amount → stale (abandon and full-POST).
-    expect(draftMatchesForm(draft, { ...base, amount: "20.00" }, now)).toBe(false);
-    // Switched Diezmo → Ofrenda → stale.
-    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" }, now)).toBe(false);
-    // Held past the reuse window (donor left the tab open) → stale even if values match,
-    // because the retained Wompi link is near/at expiry.
-    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS)).toBe(false);
-  });
-
-  it("keeps the reuse window safely inside the worker's one-hour Wompi link vigencia", () => {
-    // INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS are 1h on the worker; the client window
-    // must be a conservative margin under that so a retained draft is never reused near expiry.
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeGreaterThan(0);
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThan(60 * 60 * 1000);
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThanOrEqual(45 * 60 * 1000);
   });
 });
 

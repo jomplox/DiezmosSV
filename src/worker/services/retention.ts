@@ -2,6 +2,7 @@ import {
   Repository,
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
+  STRIPE_RETENTION_SNAPSHOT_TABLES,
   RETENTION_WINDOWED_TABLES,
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
@@ -258,8 +259,6 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
       return { status: "skipped", month };
     }
 
-    const stripeFence = await repo.captureStripeRetentionFence();
-
     const manifest: RetentionManifest = {
       month,
       generatedAt: now.toISOString(),
@@ -277,13 +276,27 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     manifest.tables[FISCAL_CORRECTION_LATEST_SNAPSHOT] = fiscalCorrectionSnapshotEntry;
     totalRows += fiscalCorrectionSnapshotEntry.rowCount;
     for (const table of RETENTION_SNAPSHOT_TABLES) {
-      const entry = await exportSnapshotTable(env, repo, table, prefix, stripeFence);
+      if ((STRIPE_RETENTION_SNAPSHOT_TABLES as readonly string[]).includes(table)) continue;
+      const entry = await exportSnapshotTable(env, repo, table, prefix);
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
     }
     const sequenceEntry = await exportDocumentSequences(env, repo, prefix);
     manifest.tables[DOCUMENT_SEQUENCES_SNAPSHOT] = sequenceEntry;
     totalRows += sequenceEntry.rowCount;
+
+    // Capture immediately before the five Stripe streams, then prove no
+    // material insert/update/delete occurred before publishing the manifest.
+    const stripeFence = await repo.captureStripeRetentionFence();
+    for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+      const entry = await exportSnapshotTable(env, repo, table, prefix, stripeFence);
+      manifest.tables[table] = entry;
+      totalRows += entry.rowCount;
+    }
+    const completedStripeFence = await repo.captureStripeRetentionFence();
+    if (completedStripeFence.materialMutationEpoch !== stripeFence.materialMutationEpoch) {
+      throw new Error("retention_stripe_material_epoch_changed");
+    }
 
     // Manifest last: its existence is the idempotency/completion marker.
     await env.ARCHIVE.put(manifestKey, utf8Bytes(JSON.stringify(manifest, null, 2)));
@@ -375,9 +388,10 @@ async function exportSnapshotTable(
   repo: Repository,
   table: RetentionSnapshotTable,
   prefix: string,
-  stripeFence: StripeRetentionFence
+  stripeFence?: StripeRetentionFence
 ): Promise<TableManifestEntry> {
   if (table.startsWith("stripe_")) {
+    if (!stripeFence) throw new Error("retention_stripe_fence_required");
     return streamRetentionTable<StripeRetentionCursor>(
       env,
       `${prefix}/${table}.ndjson`,

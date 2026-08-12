@@ -169,13 +169,21 @@ table:
    mapping; do not disable foreign keys or accept a partial restore.
 
    Cleanup uses a separate Wrangler file with the same first and last pragmas,
-   but reverses dependencies:
-   delete Stripe acknowledgments and annual statements before `stripe_gifts`,
-   and delete `stripe_gifts` before `stripe_checkout_sessions`. Delete the
+   but reverses dependencies. Delete `stripe_acknowledgment_deliveries` and
+   `stripe_annual_statement_deliveries` before `stripe_gifts`; delete
+   `stripe_gifts` before the roots `stripe_checkout_sessions` and
+   `stripe_webhook_events`. Delete the
    remaining leaves and dependents first (including `fiscal_corrections`), then
    delete `dte_events`, `dte_documents`, and `contingency_periods` as the
    deferred cycle, and finally delete `wompi_events` and
    `document_sequences`.
+
+   Before importing any Stripe snapshot, query each target table after cleanup.
+   **All five Stripe business tables must be empty**: `stripe_checkout_sessions`,
+   `stripe_webhook_events`, `stripe_gifts`,
+   `stripe_acknowledgment_deliveries`, and
+   `stripe_annual_statement_deliveries`. Any non-zero count means cleanup is
+   incomplete; stop rather than mixing a snapshot with existing Stripe state.
 5. After restoring, spot-check row counts against the manifest's
    `rowCount` for each table, and re-run the read paths (`GET
    /api/documents`, `GET /api/audit`) to confirm the restored data renders
@@ -203,7 +211,7 @@ If the local foreign-key check reports rows, use `ROLLBACK` instead of
 Use only the latest verified Stripe snapshots as a set. Do not mix individual
 Stripe tables from different monthly manifests: their foreign-key and delivery
 state may describe different provider chronology. Restore all business-row columns
-from migrations 0032–0036, without raw Stripe payloads or secrets, in this order:
+from migrations 0032–0037, without raw Stripe payloads or secrets, in this order:
 `stripe_checkout_sessions`, `stripe_webhook_events`, `stripe_gifts`, then
 `stripe_acknowledgment_deliveries` and
 `stripe_annual_statement_deliveries`. The refund source of truth is the

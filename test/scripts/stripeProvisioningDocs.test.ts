@@ -124,10 +124,21 @@ describe("Stripe US giving provisioning documentation", () => {
 
   it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
     const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
-    for (const migration of ["0032", "0033", "0034", "0035"]) {
+    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037"]) {
       expect(rollback).toContain(migration);
     }
     expect(rollback).toMatch(/no.*elimine|conserve/is);
+    expect(rollback).toContain("DONATION_INTAKE_DISABLED");
+    expect(rollback).toMatch(/revisión.*Stripe|Stripe.*revisión/is);
+    for (const route of [
+      "/webhooks/stripe",
+      "/api/donations/stripe/session/",
+      "/api/donations/stripe/portal"
+    ]) {
+      expect(rollback).toContain(route);
+    }
+    expect(rollback).toMatch(/constancias|acknowledgment|acuses/i);
+    expect(rollback).not.toContain("revierta el Worker al SHA anterior");
   });
 
   it("keeps mock mode local/staging-only and out of production examples", () => {
