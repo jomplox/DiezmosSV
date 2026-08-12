@@ -89,6 +89,10 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(durableRecovery).toMatch(/no.*rota.*automáticamente|nunca.*rota.*automáticamente/is);
     expect(durableRecovery).toMatch(/ruta de estado.*adjunt|adjunt.*ruta de estado/is);
     expect(durableRecovery).toMatch(/webhook firmado.*adjunt|adjunt.*webhook firmado/is);
+    expect(durableRecovery).toMatch(/huella SHA-256.*parámetros canónicos|parámetros canónicos.*huella SHA-256/is);
+    expect(durableRecovery).toMatch(/configuración.*cambia.*no.*llama a Stripe|no.*llama a Stripe.*configuración.*cambia/is);
+    expect(durableRecovery).toMatch(/tres intentos.*indeterminad|indeterminad.*tres intentos/is);
+    expect(durableRecovery).toMatch(/misma identidad.*webhook firmado|webhook firmado.*misma identidad/is);
     expect(durableRecovery).not.toContain("checkout.sessions.list");
   });
 

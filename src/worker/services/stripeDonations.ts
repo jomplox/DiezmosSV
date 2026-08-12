@@ -1,5 +1,6 @@
 import type Stripe from "stripe";
 import type { StripeGiftFrequency, StripeGiftType } from "../storage/repository/stripeDonations";
+import { sha256Hex, utf8Bytes } from "../utils/encoding";
 
 const MIN_AMOUNT_CENTS = 100;
 const MAX_AMOUNT_CENTS = 500_000;
@@ -188,6 +189,23 @@ export function buildStripeCheckoutSessionParams(input: {
   return params;
 }
 
+export async function stripeCheckoutRequestFingerprint(
+  params: Stripe.Checkout.SessionCreateParams,
+  configuration: StripeRuntimeConfiguration
+): Promise<string> {
+  const accountKeyDigest = await sha256Hex(utf8Bytes(configuration.apiKey));
+  const canonical = stableJson({
+    api_version: STRIPE_API_VERSION,
+    account_key_sha256: accountKeyDigest,
+    api_proxy_url: configuration.apiProxyUrl,
+    publishable_key: configuration.publishableKey,
+    livemode: configuration.livemode,
+    mock: configuration.mock,
+    params
+  });
+  return `v2:${await sha256Hex(utf8Bytes(canonical))}`;
+}
+
 export function resolveStripeConfiguration(
   env: StripeConfigurationEnv
 ): StripeRuntimeConfiguration {
@@ -323,6 +341,21 @@ function cleanOrganizationName(value: string): string {
     throw new StripeConfigurationError("invalid_organization_name");
   }
   return normalized;
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableJson).join(",")}]`;
+  }
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`)
+    .join(",")}}`;
 }
 
 function requiredValue(value: unknown, code: string): string {

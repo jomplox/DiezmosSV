@@ -806,7 +806,8 @@ export function DonarPage() {
 
   // Initialize Stripe's hosted embedded form. The request identifier remains
   // stable across transport retries for the same amount/frequency/gift-type fingerprint;
-  // a terminal Session conflict clears it so retry receives a fresh identity.
+  // only server-proven terminal unavailability clears it. An indeterminate
+  // Session keeps the original identity so no fresh provider request can escape.
   function stripeFingerprint(): string {
     const amountCents = Math.round(Number.parseFloat(form.amount.trim()) * 100);
     return `${monthly ? "monthly" : "once"}:${stripeGiftType.toLowerCase()}:${amountCents}`;

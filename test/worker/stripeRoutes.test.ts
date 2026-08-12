@@ -236,6 +236,172 @@ describe("Stripe public donation routes", () => {
     });
   });
 
+  it("fails closed under the original key when provider request or account config drifts after a network failure", async () => {
+    const providerRequests: Array<{
+      authorization: string;
+      body: string;
+      idempotencyKey: string;
+      url: string;
+    }> = [];
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      providerRequests.push({
+        authorization: request.headers.get("authorization") ?? "",
+        body: await request.text(),
+        idempotencyKey: request.headers.get("idempotency-key") ?? "",
+        url: request.url
+      });
+      throw new TypeError("simulated transport disconnect");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const originalEnv = stripeProxyEnv(workerEnv);
+
+    const first = await createCheckout(originalEnv, { requestId, amount: 50, frequency: "once" });
+    expect(first.response.status).toBe(502);
+    expect(providerRequests).toHaveLength(3);
+    expect(new Set(providerRequests.map((request) => request.idempotencyKey)))
+      .toEqual(new Set([`stripe-checkout:${requestId}`]));
+    expect(new Set(providerRequests.map((request) => request.body)))
+      .toEqual(new Set([providerRequests[0].body]));
+    expect(new Set(providerRequests.map((request) => request.authorization)))
+      .toEqual(new Set(["Bearer rk_test_fixture"]));
+    expect(new Set(providerRequests.map((request) => request.url)))
+      .toEqual(new Set(["http://127.0.0.1:8791/v1/checkout/sessions"]));
+    const originalProviderCallCount = providerRequests.length;
+
+    const driftCases: Array<{
+      name: string;
+      env?: Env;
+      setUp?: () => void;
+      tearDown?: () => void;
+    }> = [
+      {
+        name: "branding",
+        setUp: () => {
+          database.prepare(
+            "UPDATE app_settings SET value = 'Otra Organización' WHERE key = 'branding_display_name'"
+          ).run();
+        },
+        tearDown: () => {
+          database.prepare(
+            "UPDATE app_settings SET value = 'Organización de Prueba' WHERE key = 'branding_display_name'"
+          ).run();
+        }
+      },
+      { name: "origin", env: { ...originalEnv, APP_ORIGIN: "https://changed.example" } },
+      {
+        name: "payment method configuration",
+        env: { ...originalEnv, STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_changed_fixture" }
+      },
+      { name: "proxy", env: { ...originalEnv, STRIPE_API_PROXY_URL: "http://127.0.0.1:8792" } },
+      { name: "restricted key", env: { ...originalEnv, STRIPE_RESTRICTED_KEY: "rk_test_changed_fixture" } },
+      { name: "publishable key", env: { ...originalEnv, STRIPE_PUBLISHABLE_KEY: "pk_test_changed_fixture" } }
+    ];
+
+    for (const drift of driftCases) {
+      drift.setUp?.();
+      const retry = await createCheckout(drift.env ?? originalEnv, {
+        requestId,
+        amount: 50,
+        frequency: "once"
+      });
+      drift.tearDown?.();
+      expect(retry.response.status, drift.name).toBe(409);
+      expect(retry.body, drift.name).toMatchObject({ error: "stripe_checkout_indeterminate" });
+      expect(providerRequests, drift.name).toHaveLength(originalProviderCallCount);
+    }
+
+    expect(database.prepare(
+      `SELECT status, creation_attempt_count, creation_outcome_class, idempotency_generation,
+              request_fingerprint
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_attempt_count: 1,
+      creation_outcome_class: "AMBIGUOUS",
+      idempotency_generation: 1,
+      request_fingerprint: expect.stringMatching(/^v2:[0-9a-f]{64}$/)
+    });
+  });
+
+  it("keeps an exhausted ambiguous Checkout indeterminate on the same identity", async () => {
+    const creationKeys: string[] = [];
+    const creationBodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      creationKeys.push(request.headers.get("idempotency-key") ?? "");
+      creationBodies.push(await request.text());
+      return stripeJson({ error: { type: "api_error", message: "ambiguous fixture" } }, 500, {
+        "stripe-should-retry": "false"
+      });
+    }));
+    const proxyEnv = stripeProxyEnv(workerEnv);
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const failed = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+      expect(failed.response.status).toBe(502);
+    }
+    const fourth = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+    const fifth = await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" });
+
+    expect(fourth.response.status).toBe(409);
+    expect(fourth.body).toMatchObject({ error: "stripe_checkout_indeterminate" });
+    expect(fifth.response.status).toBe(409);
+    expect(fifth.body).toMatchObject({ error: "stripe_checkout_indeterminate" });
+    expect(creationKeys).toHaveLength(3);
+    expect(new Set(creationKeys)).toEqual(new Set([`stripe-checkout:${requestId}`]));
+    expect(new Set(creationBodies)).toEqual(new Set([creationBodies[0]]));
+    expect(database.prepare(
+      `SELECT status, creation_attempt_count, creation_outcome_class, idempotency_generation
+         FROM stripe_checkout_sessions WHERE request_id = ?`
+    ).get(requestId)).toEqual({
+      status: "FAILED",
+      creation_attempt_count: 3,
+      creation_outcome_class: "AMBIGUOUS",
+      idempotency_generation: 1
+    });
+  });
+
+  it("rereads durable state after losing a concurrent Checkout reclaim", async () => {
+    let providerCalls = 0;
+    let releaseProvider!: () => void;
+    let markProviderStarted!: () => void;
+    const providerStarted = new Promise<void>((resolve) => { markProviderStarted = resolve; });
+    const providerBarrier = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      providerCalls += 1;
+      await request.text();
+      if (providerCalls > 1) {
+        markProviderStarted();
+        await providerBarrier;
+      }
+      return stripeJson({ error: { type: "api_error", message: "ambiguous fixture" } }, 500, {
+        "stripe-should-retry": "false"
+      });
+    }));
+    const proxyEnv = stripeProxyEnv(workerEnv);
+    expect((await createCheckout(proxyEnv, { requestId, amount: 50, frequency: "once" })).response.status)
+      .toBe(502);
+
+    const concurrent = withSynchronizedStripeReservationReads(database);
+    const concurrentEnv = { ...proxyEnv, DB: concurrent.db };
+    concurrent.synchronizeNextPair();
+    const firstRetry = createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" });
+    const secondRetry = createCheckout(concurrentEnv, { requestId, amount: 50, frequency: "once" });
+    await providerStarted;
+    const loser = await Promise.race([firstRetry, secondRetry]);
+
+    expect(loser.response.status).toBe(409);
+    expect(loser.body).toMatchObject({ error: "stripe_checkout_in_progress" });
+    expect(providerCalls).toBe(2);
+
+    releaseProvider();
+    const settled = await Promise.all([firstRetry, secondRetry]);
+    expect(settled.map((result) => result.response.status).sort()).toEqual([409, 502]);
+    expect(providerCalls).toBe(2);
+  });
+
   it("advances the Checkout idempotency generation after a definite pre-execution rejection", async () => {
     const creationKeys: string[] = [];
     const creationBodies: string[] = [];
@@ -580,6 +746,46 @@ function withDeferredStripeAttachment(database: ReturnType<typeof migratedDataba
     } as D1Database,
     allowAttachments() {
       rejectAttachments = false;
+    }
+  };
+}
+
+function withSynchronizedStripeReservationReads(database: ReturnType<typeof migratedDatabase>): {
+  db: D1Database;
+  synchronizeNextPair(): void;
+} {
+  const base = sqliteD1(database);
+  let readsRemaining = 0;
+  let releaseReads: (() => void) | null = null;
+  let readBarrier = Promise.resolve();
+  return {
+    db: {
+      prepare(sql: string) {
+        const statement = base.prepare(sql);
+        if (sql === "SELECT * FROM stripe_checkout_sessions WHERE request_id = ?") {
+          const mutable = statement as unknown as {
+            first: (...args: unknown[]) => Promise<unknown>;
+          };
+          const first = mutable.first.bind(mutable);
+          mutable.first = async (...args: unknown[]) => {
+            const snapshot = await first(...args);
+            if (readsRemaining > 0) {
+              readsRemaining -= 1;
+              if (readsRemaining === 0) releaseReads?.();
+              await readBarrier;
+            }
+            return snapshot;
+          };
+        }
+        return statement;
+      },
+      batch(statements: D1PreparedStatement[]) {
+        return base.batch(statements);
+      }
+    } as D1Database,
+    synchronizeNextPair() {
+      readsRemaining = 2;
+      readBarrier = new Promise<void>((resolve) => { releaseReads = resolve; });
     }
   };
 }

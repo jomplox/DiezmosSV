@@ -108,7 +108,7 @@ describe("Stripe signed webhooks", () => {
     expect(count(database, "stripe_gifts")).toBe(0);
   });
 
-  it("attaches a reconciled Checkout Session by reservation identity", async () => {
+  it("attaches a delayed signed Session after ambiguous creation retry exhaustion", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "e1ec5708-dddb-477d-82bd-4773e8057db2",
       amount: 50,
@@ -117,9 +117,20 @@ describe("Stripe signed webhooks", () => {
     const reservation = checkoutRow(database, checkout.sessionId);
     database.prepare(
       `UPDATE stripe_checkout_sessions
-          SET stripe_session_id = NULL, status = 'CREATING', expires_at = NULL
+          SET stripe_session_id = NULL, status = 'FAILED', expires_at = NULL,
+              creation_attempt_count = 3, creation_outcome_class = 'AMBIGUOUS',
+              error_code = 'stripe_checkout_create_failed'
         WHERE id = ?`
     ).run(reservation.id);
+    expect(database.prepare(
+      `SELECT status, stripe_session_id, creation_attempt_count, creation_outcome_class
+         FROM stripe_checkout_sessions WHERE id = ?`
+    ).get(reservation.id)).toEqual({
+      status: "FAILED",
+      stripe_session_id: null,
+      creation_attempt_count: 3,
+      creation_outcome_class: "AMBIGUOUS"
+    });
     const event = stripeEvent(
       "evt_checkout_reconciled",
       "checkout.session.completed",

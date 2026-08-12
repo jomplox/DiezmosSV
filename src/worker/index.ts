@@ -54,6 +54,7 @@ import {
   buildStripeCheckoutSessionParams,
   integrationIdentifierForRequest,
   resolveStripeConfiguration,
+  stripeCheckoutRequestFingerprint,
   validateStripeCheckoutInput
 } from "./services/stripeDonations";
 import { processStripeWebhookEvent, StripeWebhookEventError } from "./services/stripeWebhook";
@@ -1352,24 +1353,13 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
     throw error;
   }
 
-  const fingerprint = `${input.frequency.toLowerCase()}:${input.giftType.toLowerCase()}:${input.amountCents}`;
   const existing = await ctx.repo.getStripeCheckoutByRequestId(input.requestId);
   let checkout: import("./storage/repository").StripeCheckoutRecord;
+  let params: ReturnType<typeof buildStripeCheckoutSessionParams>;
   if (existing) {
-    if (existing.request_fingerprint !== fingerprint) {
-      return stripeCheckoutConflictResponse();
-    }
-    if (existing.status !== "FAILED" && existing.status !== "CREATING") {
-      return existingStripeCheckoutResponse(existing, stripeConfiguration);
-    }
-    const reclaimed = await ctx.repo.reclaimStripeCheckoutCreation({
-      id: existing.id,
-      now: nowIso()
-    });
-    if (!reclaimed) {
-      return existingStripeCheckoutResponse(existing, stripeConfiguration);
-    }
-    checkout = reclaimed;
+    const plan = await prepareExistingStripeCheckoutCreation(ctx, existing, input, stripeConfiguration);
+    if (plan instanceof Response) return plan;
+    ({ checkout, params } = plan);
   } else {
     const clientIp = clientIpFrom(ctx.request);
     const claimNow = nowIso();
@@ -1388,10 +1378,17 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       );
     }
 
+    const checkoutId = newId("stripe_checkout");
+    const request = await buildStripeCheckoutCreationRequest(
+      ctx,
+      checkoutId,
+      input,
+      stripeConfiguration
+    );
     const reservation = await ctx.repo.reserveStripeCheckout({
-      id: newId("stripe_checkout"),
+      id: checkoutId,
       requestId: input.requestId,
-      requestFingerprint: fingerprint,
+      requestFingerprint: request.fingerprint,
       frequency: input.frequency,
       giftType: input.giftType,
       amountCents: input.amountCents,
@@ -1399,37 +1396,27 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       rateLimitClaimId,
       now: claimNow
     });
-    if (reservation.kind === "CONFLICT") {
-      return stripeCheckoutConflictResponse();
+    if (reservation.kind !== "CREATED") {
+      const plan = await prepareExistingStripeCheckoutCreation(
+        ctx,
+        reservation.record,
+        input,
+        stripeConfiguration
+      );
+      if (plan instanceof Response) return plan;
+      ({ checkout, params } = plan);
+    } else {
+      checkout = reservation.record;
+      params = request.params;
     }
-    if (reservation.kind === "EXISTING") {
-      return existingStripeCheckoutResponse(reservation.record, stripeConfiguration);
-    }
-    checkout = reservation.record;
   }
 
-  const organizationName = parseBrandingSettings(
-    await ctx.repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
-    null,
-    null
-  ).displayName;
   const gateway = createStripeGateway(stripeConfiguration);
-  const params = buildStripeCheckoutSessionParams({
-    checkoutId: checkout.id,
-    requestId: input.requestId,
-    amountCents: input.amountCents,
-    frequency: input.frequency,
-    giftType: input.giftType,
-    organizationName,
-    appOrigin: resolveAppOrigin(ctx.env, ctx.url),
-    paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
-    integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
-  });
   let session: import("./services/stripeClient").StripeCheckoutSnapshot;
   try {
     session = await gateway.createCheckoutSession(
       params,
-      stripeCheckoutIdempotencyKey(input.requestId, checkout.idempotency_generation)
+      stripeCheckoutIdempotencyKey(checkout.request_id, checkout.idempotency_generation)
     );
     assertCreatedStripeCheckout(session, checkout);
   } catch (error) {
@@ -1470,6 +1457,95 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
   }, { status: 201, headers: { "Cache-Control": "no-store" } });
 }
 
+type StripeCheckoutCreationInput = ReturnType<typeof validateStripeCheckoutInput>;
+type StripeCheckoutConfiguration = ReturnType<typeof resolveStripeConfiguration>;
+type StripeCheckoutCreationPlan = {
+  checkout: import("./storage/repository").StripeCheckoutRecord;
+  params: ReturnType<typeof buildStripeCheckoutSessionParams>;
+};
+
+async function prepareExistingStripeCheckoutCreation(
+  ctx: ApiRouteContext,
+  existing: import("./storage/repository").StripeCheckoutRecord,
+  input: StripeCheckoutCreationInput,
+  configuration: StripeCheckoutConfiguration
+): Promise<Response | StripeCheckoutCreationPlan> {
+  if (!stripeCheckoutMatchesInput(existing, input, configuration.livemode)) {
+    return stripeCheckoutConflictResponse();
+  }
+  if (existing.status !== "FAILED" && existing.status !== "CREATING") {
+    return existingStripeCheckoutResponse(existing, configuration);
+  }
+
+  const request = await buildStripeCheckoutCreationRequest(ctx, existing.id, {
+    requestId: existing.request_id,
+    amountCents: existing.amount_cents,
+    frequency: existing.frequency,
+    giftType: existing.gift_type === "UNSPECIFIED" ? input.giftType : existing.gift_type
+  }, configuration);
+  if (
+    existing.request_fingerprint !== request.fingerprint
+    && existing.creation_outcome_class !== "DEFINITE_FAILURE"
+  ) {
+    return stripeCheckoutIndeterminateResponse();
+  }
+
+  const reclaimed = await ctx.repo.reclaimStripeCheckoutCreation({
+    id: existing.id,
+    requestFingerprint: request.fingerprint,
+    now: nowIso()
+  });
+  if (!reclaimed) {
+    const current = await ctx.repo.getStripeCheckoutById(existing.id);
+    return current
+      ? existingStripeCheckoutResponse(current, configuration)
+      : stripeCheckoutIndeterminateResponse();
+  }
+  return { checkout: reclaimed, params: request.params };
+}
+
+async function buildStripeCheckoutCreationRequest(
+  ctx: ApiRouteContext,
+  checkoutId: string,
+  input: StripeCheckoutCreationInput,
+  configuration: StripeCheckoutConfiguration
+): Promise<{
+  fingerprint: string;
+  params: ReturnType<typeof buildStripeCheckoutSessionParams>;
+}> {
+  const organizationName = parseBrandingSettings(
+    await ctx.repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    null,
+    null
+  ).displayName;
+  const params = buildStripeCheckoutSessionParams({
+    checkoutId,
+    requestId: input.requestId,
+    amountCents: input.amountCents,
+    frequency: input.frequency,
+    giftType: input.giftType,
+    organizationName,
+    appOrigin: resolveAppOrigin(ctx.env, ctx.url),
+    paymentMethodConfigurationId: configuration.paymentMethodConfigurationId,
+    integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
+  });
+  return {
+    fingerprint: await stripeCheckoutRequestFingerprint(params, configuration),
+    params
+  };
+}
+
+function stripeCheckoutMatchesInput(
+  checkout: import("./storage/repository").StripeCheckoutRecord,
+  input: StripeCheckoutCreationInput,
+  livemode: boolean
+): boolean {
+  return checkout.frequency === input.frequency
+    && checkout.gift_type === input.giftType
+    && checkout.amount_cents === input.amountCents
+    && checkout.livemode === (livemode ? 1 : 0);
+}
+
 function stripeCheckoutIdempotencyKey(requestId: string, generation: number): string {
   return generation === 1
     ? `stripe-checkout:${requestId}`
@@ -1491,10 +1567,16 @@ async function existingStripeCheckoutResponse(
   configuration: ReturnType<typeof resolveStripeConfiguration>
 ): Promise<Response> {
   if (checkout.status === "CREATING") {
+    if (checkout.creation_attempt_count >= 3) {
+      return stripeCheckoutIndeterminateResponse();
+    }
     return jsonResponse(
       { error: "stripe_checkout_in_progress", message: "Su entrega se está preparando. Inténtelo de nuevo en un momento." },
       { status: 409, headers: { "Cache-Control": "no-store" } }
     );
+  }
+  if (checkout.status === "FAILED" && checkout.creation_outcome_class !== "DEFINITE_FAILURE") {
+    return stripeCheckoutIndeterminateResponse();
   }
   if (checkout.status !== "OPEN" || !checkout.stripe_session_id) {
     return jsonResponse(
@@ -1521,6 +1603,16 @@ async function existingStripeCheckoutResponse(
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+function stripeCheckoutIndeterminateResponse(): Response {
+  return jsonResponse(
+    {
+      error: "stripe_checkout_indeterminate",
+      message: "Su entrega sigue pendiente de confirmación. Inténtelo de nuevo en un momento."
+    },
+    { status: 409, headers: { "Cache-Control": "no-store" } }
+  );
 }
 
 function stripeCheckoutConflictResponse(): Response {

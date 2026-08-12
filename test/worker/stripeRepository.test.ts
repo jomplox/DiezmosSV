@@ -125,6 +125,7 @@ describe("Stripe donation repository", () => {
     })).toBe(true);
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
+      requestFingerprint: "once:tithe:5000",
       now: "2026-08-10T12:00:02.000Z"
     })).toMatchObject({ status: "CREATING", creation_attempt_count: 2, error_code: null });
     expect(await failStripeCheckoutCreation(db, {
@@ -135,6 +136,7 @@ describe("Stripe donation repository", () => {
     })).toBe(true);
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
+      requestFingerprint: "once:tithe:5000",
       now: "2026-08-10T12:00:04.000Z"
     })).toMatchObject({ status: "CREATING", creation_attempt_count: 3, error_code: null });
     expect(await failStripeCheckoutCreation(db, {
@@ -145,18 +147,72 @@ describe("Stripe donation repository", () => {
     })).toBe(true);
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
+      requestFingerprint: "once:tithe:5000",
       now: "2026-08-10T12:00:06.000Z"
     })).toBeNull();
+  });
+
+  it("fences ambiguous fingerprint drift but atomically freezes a corrected definite retry", async () => {
+    await reserveStripeCheckout(db, checkoutInput({ requestFingerprint: "v2:original" }));
+    await failStripeCheckoutCreation(db, {
+      outcomeClass: "AMBIGUOUS",
+      id: "stripe_checkout_one",
+      errorCode: "ambiguous_fixture",
+      now: "2026-08-10T12:00:01.000Z"
+    });
+
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:drifted",
+      now: "2026-08-10T12:00:02.000Z"
+    })).toBeNull();
+    expect(database.prepare(
+      `SELECT status, creation_attempt_count, request_fingerprint, idempotency_generation
+         FROM stripe_checkout_sessions WHERE id = 'stripe_checkout_one'`
+    ).get()).toEqual({
+      status: "FAILED",
+      creation_attempt_count: 1,
+      request_fingerprint: "v2:original",
+      idempotency_generation: 1
+    });
+
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:original",
+      now: "2026-08-10T12:00:03.000Z"
+    })).toMatchObject({
+      status: "CREATING",
+      request_fingerprint: "v2:original",
+      idempotency_generation: 1
+    });
+    await failStripeCheckoutCreation(db, {
+      outcomeClass: "DEFINITE_FAILURE",
+      id: "stripe_checkout_one",
+      errorCode: "definite_fixture",
+      now: "2026-08-10T12:00:04.000Z"
+    });
+    expect(await reclaimStripeCheckoutCreation(db, {
+      id: "stripe_checkout_one",
+      requestFingerprint: "v2:corrected",
+      now: "2026-08-10T12:00:05.000Z"
+    })).toMatchObject({
+      status: "CREATING",
+      creation_attempt_count: 3,
+      request_fingerprint: "v2:corrected",
+      idempotency_generation: 2
+    });
   });
 
   it("reclaims a Checkout creation claim only after its lease expires", async () => {
     await reserveStripeCheckout(db, checkoutInput());
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
+      requestFingerprint: "once:tithe:5000",
       now: "2026-08-10T12:04:59.000Z"
     })).toBeNull();
     expect(await reclaimStripeCheckoutCreation(db, {
       id: "stripe_checkout_one",
+      requestFingerprint: "once:tithe:5000",
       now: "2026-08-10T12:05:01.000Z"
     })).toMatchObject({
       status: "CREATING",

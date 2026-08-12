@@ -503,8 +503,8 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
         status: 409,
         contentType: "application/json",
         body: JSON.stringify({
-          error: "stripe_checkout_unavailable",
-          message: "Inicie una nueva entrega para continuar con Stripe."
+          error: "stripe_checkout_indeterminate",
+          message: "Su entrega sigue pendiente de confirmación. Inténtelo de nuevo en un momento."
         })
       });
       return;
@@ -590,10 +590,11 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByRole("radio", { name: "Mensual" })).toBeChecked();
   await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
 
-  // A transport failure remains on Paso 2; retry reuses the exact UUID.
+  // A transport failure and its indeterminate hold remain on Paso 2; every
+  // controlled retry reuses the exact UUID until Stripe resolves the same key.
   await expect(page.getByRole("alert")).toContainText("No pudimos preparar su entrega con Stripe");
   await page.getByRole("button", { name: "Intentar de nuevo" }).click();
-  await expect(page.getByRole("alert")).toContainText("Inicie una nueva entrega");
+  await expect(page.getByRole("alert")).toContainText("sigue pendiente de confirmación");
   await page.getByRole("button", { name: "Intentar de nuevo" }).click();
 
   // Editar without changing the amount, gift type, or frequency must reuse the
@@ -650,8 +651,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   expect(checkoutBodies).toHaveLength(3);
   expect(checkoutBodies[0]).toMatchObject({ amount: "100.00", frequency: "monthly", giftType: "offering" });
   expect(checkoutBodies[1]).toEqual(checkoutBodies[0]);
-  expect(checkoutBodies[2]).toMatchObject({ amount: "100.00", frequency: "monthly", giftType: "offering" });
-  expect(checkoutBodies[2].requestId).not.toBe(checkoutBodies[0].requestId);
+  expect(checkoutBodies[2]).toEqual(checkoutBodies[0]);
   expect(String(checkoutBodies[0].requestId)).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
   );

@@ -207,11 +207,14 @@ export async function failStripeCheckoutCreation(
 
 export async function reclaimStripeCheckoutCreation(
   db: D1Database,
-  input: { id: string; now: string }
+  input: { id: string; requestFingerprint: string; now: string }
 ): Promise<StripeCheckoutRecord | null> {
   return db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET status = 'CREATING', creation_attempt_count = creation_attempt_count + 1,
+        SET request_fingerprint = CASE
+              WHEN creation_outcome_class = 'DEFINITE_FAILURE' THEN ?
+              ELSE request_fingerprint END,
+            status = 'CREATING', creation_attempt_count = creation_attempt_count + 1,
             idempotency_generation = idempotency_generation
               + CASE WHEN creation_outcome_class = 'DEFINITE_FAILURE' THEN 1 ELSE 0 END,
             creation_outcome_class = CASE
@@ -220,14 +223,17 @@ export async function reclaimStripeCheckoutCreation(
             error_code = NULL, updated_at = ?
       WHERE id = ? AND stripe_session_id IS NULL
         AND creation_attempt_count < 3
+        AND (creation_outcome_class = 'DEFINITE_FAILURE' OR request_fingerprint = ?)
         AND (
           status = 'FAILED'
           OR (status = 'CREATING' AND updated_at < ?)
         )
       RETURNING *`
   ).bind(
+    input.requestFingerprint,
     input.now,
     input.id,
+    input.requestFingerprint,
     stripeClaimStaleBefore(input.now)
   ).first<StripeCheckoutRecord>();
 }
