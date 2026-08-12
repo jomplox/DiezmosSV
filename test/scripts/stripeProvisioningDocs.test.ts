@@ -80,6 +80,18 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/firma.*cuerpo crudo|cuerpo crudo.*firma/is);
   });
 
+  it("documents deterministic Checkout recovery without absence heuristics", () => {
+    const durableRecovery = runbook.slice(
+      runbook.indexOf("## Firma, idempotencia y datos durables"),
+      runbook.indexOf("## Configuración Stripe EE. UU. en el panel")
+    );
+    expect(durableRecovery).toMatch(/ambiguo.*misma.*idempotency key|misma.*idempotency key.*ambiguo/is);
+    expect(durableRecovery).toMatch(/no.*rota.*automáticamente|nunca.*rota.*automáticamente/is);
+    expect(durableRecovery).toMatch(/ruta de estado.*adjunt|adjunt.*ruta de estado/is);
+    expect(durableRecovery).toMatch(/webhook firmado.*adjunt|adjunt.*webhook firmado/is);
+    expect(durableRecovery).not.toContain("checkout.sessions.list");
+  });
+
   it("documents the complete U.S. gift, reporting, and safe owner-control contract", () => {
     for (const document of [english, spanish]) {
       for (const term of [

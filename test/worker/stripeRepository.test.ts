@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  attachStripeCheckoutSession,
   claimNextStripeAcknowledgment,
   claimStripeWebhookEvent,
-  completeStripeCheckoutCreation,
   failStripeCheckoutCreation,
   finalizeStripeAcknowledgment,
   finalizeStripeWebhookEvent,
@@ -10,7 +10,7 @@ import {
   reclaimStripeCheckoutCreation,
   recordStripeGiftAndAcknowledgment,
   reserveStripeCheckout,
-  type StripeCheckoutRecord
+  updateStripeCheckoutFromEvent
 } from "../../src/worker/storage/repository/stripeDonations";
 import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
@@ -50,40 +50,68 @@ describe("Stripe donation repository", () => {
     }))).toMatchObject({ kind: "CONFLICT", record: { id: "stripe_checkout_one" } });
   });
 
-  it("recognizes successful Checkout writes when D1 counts retention-trigger side effects", async () => {
+  it("idempotently attaches one durable Checkout Session without regressing provider state", async () => {
     const triggerCountingDb = withInflatedChanges(db);
     expect(await reserveStripeCheckout(triggerCountingDb, checkoutInput()))
       .toMatchObject({ kind: "CREATED", record: { id: "stripe_checkout_one" } });
-    expect(await completeStripeCheckoutCreation(triggerCountingDb, {
-      id: "stripe_checkout_one",
-      stripeSessionId: "cs_test_trigger_count",
-      expiresAt: "2026-08-10T13:00:00.000Z",
-      now: "2026-08-10T12:00:01.000Z"
-    })).toBe(true);
-  });
 
-  it("finalizes Checkout creation only once under the reservation identity", async () => {
-    await reserveStripeCheckout(db, checkoutInput());
-    expect(await completeStripeCheckoutCreation(db, {
+    expect(await attachStripeCheckoutSession(triggerCountingDb, {
       id: "stripe_checkout_one",
       stripeSessionId: "cs_test_fixture",
       expiresAt: "2026-08-10T13:00:00.000Z",
       now: "2026-08-10T12:00:01.000Z"
-    })).toBe(true);
-    expect(await completeStripeCheckoutCreation(db, {
+    })).toMatchObject({
+      id: "stripe_checkout_one",
+      stripe_session_id: "cs_test_fixture",
+      status: "OPEN",
+      expires_at: "2026-08-10T13:00:00.000Z"
+    });
+    expect(await attachStripeCheckoutSession(db, {
+      id: "stripe_checkout_one",
+      stripeSessionId: "cs_test_fixture",
+      expiresAt: "2026-08-10T14:00:00.000Z",
+      now: "2026-08-10T12:00:02.000Z"
+    })).toMatchObject({
+      stripe_session_id: "cs_test_fixture",
+      status: "OPEN",
+      expires_at: "2026-08-10T13:00:00.000Z",
+      updated_at: "2026-08-10T12:00:01.000Z"
+    });
+    expect(await attachStripeCheckoutSession(db, {
       id: "stripe_checkout_one",
       stripeSessionId: "cs_test_different",
       expiresAt: "2026-08-10T13:00:00.000Z",
-      now: "2026-08-10T12:00:02.000Z"
-    })).toBe(false);
+      now: "2026-08-10T12:00:03.000Z"
+    })).toBeNull();
 
-    const row = database.prepare(
-      "SELECT * FROM stripe_checkout_sessions WHERE id = 'stripe_checkout_one'"
-    ).get() as unknown as StripeCheckoutRecord;
-    expect(row).toMatchObject({
+    expect(await updateStripeCheckoutFromEvent(db, {
+      stripeSessionId: "cs_test_fixture",
+      status: "COMPLETE",
+      paymentStatus: "PAID",
+      stripeCustomerId: "cus_fixture",
+      stripeSubscriptionId: null,
+      stripePaymentIntentId: "pi_fixture",
+      donorName: "Donante Ejemplo",
+      donorEmail: "donante@example.org",
+      completedAt: "2026-08-10T12:00:04.000Z",
+      eventCreated: 1_786_363_204,
+      eventRank: 4,
+      eventId: "evt_fixture",
+      now: "2026-08-10T12:00:04.000Z"
+    })).toMatchObject({
+      status: "COMPLETE",
+      stripe_session_id: "cs_test_fixture"
+    });
+    expect(await attachStripeCheckoutSession(db, {
+      id: "stripe_checkout_one",
+      stripeSessionId: "cs_test_fixture",
+      expiresAt: "2026-08-10T15:00:00.000Z",
+      now: "2026-08-10T12:00:05.000Z"
+    })).toMatchObject({
       stripe_session_id: "cs_test_fixture",
-      status: "OPEN",
-      updated_at: "2026-08-10T12:00:01.000Z"
+      status: "COMPLETE",
+      payment_status: "PAID",
+      updated_at: "2026-08-10T12:00:04.000Z"
     });
   });
 

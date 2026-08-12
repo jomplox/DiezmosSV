@@ -1425,50 +1425,13 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
     paymentMethodConfigurationId: stripeConfiguration.paymentMethodConfigurationId,
     integrationIdentifier: await integrationIdentifierForRequest(input.requestId)
   });
-  const completeSession = async (
-    session: import("./services/stripeClient").StripeCheckoutSnapshot
-  ): Promise<Response> => {
-    assertCreatedStripeCheckout(session, checkout);
-    const completed = await ctx.repo.completeStripeCheckoutCreation({
-      id: checkout.id,
-      stripeSessionId: session.id,
-      expiresAt: new Date(session.expiresAt * 1000).toISOString(),
-      now: nowIso()
-    });
-    if (!completed || !session.clientSecret) {
-      throw new Error("Stripe Checkout reservation lost before finalization");
-    }
-    return jsonResponse({
-      sessionId: session.id,
-      clientSecret: session.clientSecret,
-      publishableKey: stripeConfiguration.publishableKey,
-      mock: stripeConfiguration.mock
-    }, { status: 201, headers: { "Cache-Control": "no-store" } });
-  };
-  const createWithGeneration = () => gateway.createCheckoutSession(
-    params,
-    stripeCheckoutIdempotencyKey(input.requestId, checkout.idempotency_generation)
-  );
+  let session: import("./services/stripeClient").StripeCheckoutSnapshot;
   try {
-    if (checkout.creation_outcome_class === "AMBIGUOUS") {
-      try {
-        return await completeSession(await createWithGeneration());
-      } catch {
-        const reconciled = await gateway.findCheckoutSessionByClientReference({
-          clientReferenceId: checkout.id,
-          createdAt: checkout.created_at
-        });
-        if (reconciled) return await completeSession(reconciled);
-        const rotated = await ctx.repo.rotateStripeCheckoutIdempotencyGeneration({
-          id: checkout.id,
-          expectedGeneration: checkout.idempotency_generation,
-          now: nowIso()
-        });
-        if (!rotated) throw new Error("Stripe Checkout idempotency rotation claim was lost");
-        checkout = rotated;
-      }
-    }
-    return await completeSession(await createWithGeneration());
+    session = await gateway.createCheckoutSession(
+      params,
+      stripeCheckoutIdempotencyKey(input.requestId, checkout.idempotency_generation)
+    );
+    assertCreatedStripeCheckout(session, checkout);
   } catch (error) {
     await ctx.repo.failStripeCheckoutCreation({
       id: checkout.id,
@@ -1482,6 +1445,29 @@ async function handleCreateStripeCheckout(ctx: ApiRouteContext): Promise<Respons
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+
+  try {
+    const attached = await ctx.repo.attachStripeCheckoutSession({
+      id: checkout.id,
+      stripeSessionId: session.id,
+      expiresAt: new Date(session.expiresAt * 1000).toISOString(),
+      now: nowIso()
+    });
+    if (!attached) {
+      return jsonResponse(
+        { error: "stripe_checkout_failed", message: "No pudimos preparar su entrega con Stripe. Inténtelo de nuevo." },
+        { status: 502, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+  } catch (error) {
+    logWorkerError(ctx.env, "stripe_checkout_finalize_deferred", error);
+  }
+  return jsonResponse({
+    sessionId: session.id,
+    clientSecret: session.clientSecret,
+    publishableKey: stripeConfiguration.publishableKey,
+    mock: stripeConfiguration.mock
+  }, { status: 201, headers: { "Cache-Control": "no-store" } });
 }
 
 function stripeCheckoutIdempotencyKey(requestId: string, generation: number): string {
@@ -1552,14 +1538,25 @@ function assertCreatedStripeCheckout(
   checkout: import("./storage/repository").StripeCheckoutRecord
 ): void {
   const expectedMode = checkout.frequency === "MONTHLY" ? "subscription" : "payment";
+  const expectedFrequency = checkout.frequency === "MONTHLY" ? "monthly" : "once";
+  const expectedGiftType = checkout.gift_type === "TITHE"
+    ? "tithe"
+    : checkout.gift_type === "OFFERING"
+      ? "offering"
+      : null;
   if (
-    session.livemode !== Boolean(checkout.livemode)
+    !expectedGiftType
+    || session.clientReferenceId !== checkout.id
+    || session.livemode !== Boolean(checkout.livemode)
     || session.mode !== expectedMode
     || session.amountTotal !== checkout.amount_cents
     || session.currency !== "usd"
     || session.metadata.checkout_id !== checkout.id
     || session.metadata.lane !== "eeuu_501c3"
-    || session.metadata.gift_type !== (checkout.gift_type === "TITHE" ? "tithe" : "offering")
+    || session.metadata.frequency !== expectedFrequency
+    || session.metadata.gift_type !== expectedGiftType
+    || !Number.isInteger(session.expiresAt)
+    || session.expiresAt <= 0
   ) {
     throw new Error("Stripe Checkout response did not match the reserved donation");
   }
@@ -1600,9 +1597,50 @@ async function handleStripeCheckoutStatus(ctx: ApiRouteContext): Promise<Respons
   if (!/^cs_(?:test|live)_[A-Za-z0-9_-]{8,200}$/.test(sessionId)) {
     return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
   }
-  const checkout = await ctx.repo.getStripeCheckoutBySessionId(sessionId);
+  let checkout = await ctx.repo.getStripeCheckoutBySessionId(sessionId);
   if (!checkout) {
-    return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    let configuration;
+    try {
+      configuration = resolveStripeConfiguration(ctx.env);
+    } catch (error) {
+      if (error instanceof StripeConfigurationError) {
+        return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+      }
+      throw error;
+    }
+    let session: import("./services/stripeClient").StripeCheckoutSnapshot;
+    try {
+      session = await createStripeGateway(configuration).retrieveCheckoutSession(sessionId);
+    } catch {
+      return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    }
+    const reservationId = session.clientReferenceId;
+    if (
+      session.id !== sessionId
+      || !reservationId
+      || !/^stripe_checkout_[A-Za-z0-9_-]{4,200}$/.test(reservationId)
+      || session.metadata.checkout_id !== reservationId
+    ) {
+      return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    }
+    const reservation = await ctx.repo.getStripeCheckoutById(reservationId);
+    if (!reservation) {
+      return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    }
+    try {
+      assertCreatedStripeCheckout(session, reservation);
+      checkout = await ctx.repo.attachStripeCheckoutSession({
+        id: reservation.id,
+        stripeSessionId: session.id,
+        expiresAt: new Date(session.expiresAt * 1000).toISOString(),
+        now: nowIso()
+      });
+    } catch {
+      return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    }
+    if (!checkout) {
+      return jsonResponse({ error: "stripe_session_not_found" }, { status: 404 });
+    }
   }
   const status = checkout.status === "COMPLETE" && checkout.payment_status === "PAID"
     ? "PAID"

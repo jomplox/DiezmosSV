@@ -64,10 +64,10 @@ import {
 } from "./repository/donationIntents";
 import {
   applyStripeRefund as applyStripeRefundRepository,
+  attachStripeCheckoutSession as attachStripeCheckoutSessionRepository,
   attachStripeInvoicePaymentIntent as attachStripeInvoicePaymentIntentRepository,
   claimNextStripeAcknowledgment as claimNextStripeAcknowledgmentRepository,
   claimStripeWebhookEvent as claimStripeWebhookEventRepository,
-  completeStripeCheckoutCreation as completeStripeCheckoutCreationRepository,
   failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
   finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
   finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
@@ -79,7 +79,6 @@ import {
   getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
   markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
   reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
-  rotateStripeCheckoutIdempotencyGeneration as rotateStripeCheckoutIdempotencyGenerationRepository,
   recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
   reserveStripeCheckout as reserveStripeCheckoutRepository,
   updateStripeCheckoutFromEvent as updateStripeCheckoutFromEventRepository,
@@ -334,10 +333,10 @@ export class Repository {
     return getStripeCheckoutByIdRepository(this.db, id);
   }
 
-  async completeStripeCheckoutCreation(
-    input: Parameters<typeof completeStripeCheckoutCreationRepository>[1]
-  ): Promise<boolean> {
-    return completeStripeCheckoutCreationRepository(this.db, input);
+  async attachStripeCheckoutSession(
+    input: Parameters<typeof attachStripeCheckoutSessionRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return attachStripeCheckoutSessionRepository(this.db, input);
   }
 
   async failStripeCheckoutCreation(
@@ -350,12 +349,6 @@ export class Repository {
     input: Parameters<typeof reclaimStripeCheckoutCreationRepository>[1]
   ): Promise<StripeCheckoutRecord | null> {
     return reclaimStripeCheckoutCreationRepository(this.db, input);
-  }
-
-  async rotateStripeCheckoutIdempotencyGeneration(
-    input: Parameters<typeof rotateStripeCheckoutIdempotencyGenerationRepository>[1]
-  ): Promise<StripeCheckoutRecord | null> {
-    return rotateStripeCheckoutIdempotencyGenerationRepository(this.db, input);
   }
 
   async updateStripeCheckoutFromEvent(

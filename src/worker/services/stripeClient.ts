@@ -9,6 +9,7 @@ const MOCK_EXPIRES_AT = 1_786_370_400;
 
 export interface StripeCheckoutSnapshot {
   id: string;
+  clientReferenceId: string | null;
   url: string | null;
   clientSecret: string | null;
   livemode: boolean;
@@ -32,10 +33,6 @@ export interface StripeGateway {
     idempotencyKey: string
   ): Promise<StripeCheckoutSnapshot>;
   retrieveCheckoutSession(sessionId: string): Promise<StripeCheckoutSnapshot>;
-  findCheckoutSessionByClientReference(input: {
-    clientReferenceId: string;
-    createdAt: string;
-  }): Promise<StripeCheckoutSnapshot | null>;
   createBillingPortalSession(input: {
     customerId: string;
     configurationId: string;
@@ -117,33 +114,6 @@ class ApiStripeGateway implements StripeGateway {
     return checkoutSnapshot(await this.stripe.checkout.sessions.retrieve(sessionId));
   }
 
-  async findCheckoutSessionByClientReference(input: {
-    clientReferenceId: string;
-    createdAt: string;
-  }): Promise<StripeCheckoutSnapshot | null> {
-    const createdGte = Math.floor(new Date(input.createdAt).getTime() / 1000);
-    if (!Number.isFinite(createdGte)) throw new Error("Stripe Checkout creation time is invalid");
-    let startingAfter: string | undefined;
-    let match: Stripe.Checkout.Session | null = null;
-    for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
-      const page = await this.stripe.checkout.sessions.list({
-        created: { gte: createdGte },
-        limit: 100,
-        ...(startingAfter ? { starting_after: startingAfter } : {})
-      });
-      const matches = page.data.filter((session) => session.client_reference_id === input.clientReferenceId);
-      if (matches.length > 1 || (match && matches.length > 0)) {
-        throw new Error("Stripe Checkout reconciliation found duplicate client references");
-      }
-      match = matches[0] ?? match;
-      if (!page.has_more) return match ? checkoutSnapshot(match) : null;
-      const last = page.data.at(-1);
-      if (!last) throw new Error("Stripe Checkout reconciliation pagination was invalid");
-      startingAfter = last.id;
-    }
-    throw new Error("Stripe Checkout reconciliation exceeded its bounded scan");
-  }
-
   async createBillingPortalSession(input: {
     customerId: string;
     configurationId: string;
@@ -208,6 +178,7 @@ class MockStripeGateway extends ApiStripeGateway {
     const firstLineItem = params.line_items?.[0];
     const snapshot: StripeCheckoutSnapshot = {
       id,
+      clientReferenceId: checkoutId,
       url: null,
       clientSecret: `${id}_secret_mock`,
       livemode: false,
@@ -238,6 +209,7 @@ class MockStripeGateway extends ApiStripeGateway {
     }
     return {
       id: sessionId,
+      clientReferenceId: sessionId.slice("cs_test_".length),
       url: null,
       clientSecret: `${sessionId}_secret_mock`,
       livemode: false,
@@ -256,17 +228,6 @@ class MockStripeGateway extends ApiStripeGateway {
     };
   }
 
-  async findCheckoutSessionByClientReference(input: {
-    clientReferenceId: string;
-    createdAt: string;
-  }): Promise<StripeCheckoutSnapshot | null> {
-    void input.createdAt;
-    const matches = [...this.sessions.values()].filter(
-      (session) => session.id === `cs_test_${input.clientReferenceId}`
-    );
-    return matches[0] ?? null;
-  }
-
   async createBillingPortalSession(input: {
     customerId: string;
     configurationId: string;
@@ -282,6 +243,7 @@ class MockStripeGateway extends ApiStripeGateway {
 function checkoutSnapshot(session: Stripe.Checkout.Session): StripeCheckoutSnapshot {
   return {
     id: session.id,
+    clientReferenceId: session.client_reference_id,
     url: session.url,
     clientSecret: session.client_secret,
     livemode: session.livemode,

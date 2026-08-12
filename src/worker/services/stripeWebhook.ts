@@ -50,8 +50,23 @@ async function processCheckoutSessionEvent(
   const session = record(event.data.object);
   requireObjectType(session, "checkout.session");
   const sessionId = stripeId(session.id, "cs_");
-  const checkout = await repo.getStripeCheckoutBySessionId(sessionId);
-  if (!checkout) throw new StripeWebhookEventError("checkout_not_found");
+  let checkout = await repo.getStripeCheckoutBySessionId(sessionId);
+  if (!checkout) {
+    const reservationId = reconciledCheckoutId(session);
+    const reservation = await repo.getStripeCheckoutById(reservationId);
+    if (!reservation) throw new StripeWebhookEventError("checkout_not_found");
+    assertEventMode(reservation, event.livemode);
+    assertCheckoutIdentity(session, reservation);
+    const expiresAt = epochIso(session.expires_at);
+    if (!expiresAt) throw new StripeWebhookEventError("checkout_identity_mismatch");
+    checkout = await repo.attachStripeCheckoutSession({
+      id: reservation.id,
+      stripeSessionId: sessionId,
+      expiresAt,
+      now
+    });
+    if (!checkout) throw new StripeWebhookEventError("checkout_identity_mismatch");
+  }
   assertEventMode(checkout, event.livemode);
   assertCheckoutIdentity(session, checkout);
 
@@ -323,6 +338,20 @@ function assertCheckoutIdentity(
   ) {
     throw new StripeWebhookEventError("checkout_identity_mismatch");
   }
+}
+
+function reconciledCheckoutId(session: Record<string, unknown>): string {
+  const clientReferenceId = typeof session.client_reference_id === "string"
+    ? session.client_reference_id
+    : "";
+  const metadataCheckoutId = optionalRecord(session.metadata)?.checkout_id;
+  if (
+    !/^stripe_checkout_[A-Za-z0-9_-]{4,200}$/.test(clientReferenceId)
+    || metadataCheckoutId !== clientReferenceId
+  ) {
+    throw new StripeWebhookEventError("checkout_identity_mismatch");
+  }
+  return clientReferenceId;
 }
 
 function assertEventMode(checkout: StripeCheckoutRecord, eventLivemode: boolean): void {

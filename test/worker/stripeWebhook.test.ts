@@ -108,6 +108,86 @@ describe("Stripe signed webhooks", () => {
     expect(count(database, "stripe_gifts")).toBe(0);
   });
 
+  it("attaches a reconciled Checkout Session by reservation identity", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "e1ec5708-dddb-477d-82bd-4773e8057db2",
+      amount: 50,
+      frequency: "once"
+    });
+    const reservation = checkoutRow(database, checkout.sessionId);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET stripe_session_id = NULL, status = 'CREATING', expires_at = NULL
+        WHERE id = ?`
+    ).run(reservation.id);
+    const event = stripeEvent(
+      "evt_checkout_reconciled",
+      "checkout.session.completed",
+      checkoutSession({
+        id: checkout.sessionId,
+        checkoutId: reservation.id,
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_reconciled_fixture"
+      })
+    );
+
+    const response = await sendSignedWebhook(workerEnv, event);
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toEqual({ received: true });
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      id: reservation.id,
+      stripe_session_id: checkout.sessionId,
+      status: "COMPLETE",
+      payment_status: "PAID",
+      stripe_payment_intent_id: "pi_reconciled_fixture"
+    });
+    expect(count(database, "stripe_gifts")).toBe(1);
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(1);
+  });
+
+  it("rejects a reconciled Session identity conflict", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "7ebfe017-ec8e-4fd0-b366-06265304183d",
+      amount: 50,
+      frequency: "once",
+      giftType: "offering"
+    });
+    const reservation = checkoutRow(database, checkout.sessionId);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET stripe_session_id = NULL, status = 'CREATING', expires_at = NULL
+        WHERE id = ?`
+    ).run(reservation.id);
+    const event = stripeEvent(
+      "evt_checkout_reconciled_conflict",
+      "checkout.session.completed",
+      checkoutSession({
+        id: checkout.sessionId,
+        checkoutId: reservation.id,
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_reconciled_conflict",
+        giftType: "tithe"
+      })
+    );
+
+    const response = await sendSignedWebhook(workerEnv, event);
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({ error: "stripe_event_processing_failed" });
+    expect(database.prepare(
+      `SELECT status, stripe_session_id FROM stripe_checkout_sessions WHERE id = ?`
+    ).get(reservation.id)).toEqual({ status: "CREATING", stripe_session_id: null });
+    expect(database.prepare(
+      `SELECT status, failure_code FROM stripe_webhook_events WHERE id = ?`
+    ).get("evt_checkout_reconciled_conflict")).toEqual({
+      status: "FAILED",
+      failure_code: "checkout_identity_mismatch"
+    });
+    expect(count(database, "stripe_gifts")).toBe(0);
+    expect(count(database, "stripe_acknowledgment_deliveries")).toBe(0);
+  });
+
   it("settles every monthly invoice once even when invoice delivery precedes Checkout completion", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "993b9407-9e16-4915-90ec-7f95855b8fab",
@@ -498,7 +578,8 @@ function checkoutSession(input: {
       frequency: input.frequency,
       gift_type: input.giftType ?? "tithe",
       lane: "eeuu_501c3"
-    }
+    },
+    expires_at: 1_786_370_400
   };
 }
 

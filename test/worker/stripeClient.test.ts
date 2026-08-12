@@ -39,6 +39,7 @@ describe("Stripe SDK boundary", () => {
     const created = await gateway.createCheckoutSession(params, `stripe-checkout:${requestId}`);
     expect(created).toMatchObject({
       id: "cs_test_stripe_checkout_fixture",
+      clientReferenceId: "stripe_checkout_fixture",
       url: null,
       clientSecret: "cs_test_stripe_checkout_fixture_secret_mock",
       livemode: false,
@@ -135,6 +136,7 @@ describe("Stripe SDK boundary", () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       id: "cs_test_proxy_fixture",
       object: "checkout.session",
+      client_reference_id: "stripe_checkout_proxy",
       client_secret: "cs_test_proxy_fixture_secret_fixture",
       url: null,
       livemode: false,
@@ -180,61 +182,11 @@ describe("Stripe SDK boundary", () => {
     });
 
     await expect(gateway.createCheckoutSession(params, `stripe-checkout:${requestId}`))
-      .resolves.toMatchObject({ id: "cs_test_proxy_fixture", amountTotal: 5000 });
-    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://127.0.0.1:8791/v1/checkout/sessions");
-  });
-
-  it("scans every reconciliation page before accepting a unique client reference", async () => {
-    const session = (id: string) => ({
-      id,
-      object: "checkout.session",
-      client_reference_id: "stripe_checkout_duplicate",
-      client_secret: `${id}_secret_fixture`,
-      url: null,
-      livemode: false,
-      status: "open",
-      payment_status: "unpaid",
-      mode: "payment",
-      amount_total: 5000,
-      currency: "usd",
-      customer: null,
-      subscription: null,
-      payment_intent: null,
-      customer_details: null,
-      customer_email: null,
-      metadata: {},
-      expires_at: 1786370400
-    });
-    const fetchMock = vi.fn<typeof fetch>(async (request) => {
-      const url = new URL(String(request));
-      const secondPage = url.searchParams.has("starting_after");
-      return new Response(JSON.stringify({
-        object: "list",
-        data: [session(secondPage ? "cs_test_duplicate_second" : "cs_test_duplicate_first")],
-        has_more: !secondPage,
-        url: "/v1/checkout/sessions"
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json", "Request-Id": "req_reconcile_fixture" }
+      .resolves.toMatchObject({
+        id: "cs_test_proxy_fixture",
+        clientReferenceId: "stripe_checkout_proxy",
+        amountTotal: 5000
       });
-    });
-    vi.stubGlobal("fetch", fetchMock);
-    const gateway = createStripeGateway(resolveStripeConfiguration({
-      APP_ENV: "local",
-      STRIPE_RESTRICTED_KEY: "rk_test_fixture",
-      STRIPE_PUBLISHABLE_KEY: "pk_test_fixture",
-      STRIPE_WEBHOOK_SECRET: "whsec_fixture",
-      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
-      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
-      STRIPE_US_LEGAL_NAME: "Example Nonprofit",
-      STRIPE_US_EIN: "12-3456789",
-      STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
-    }));
-
-    await expect(gateway.findCheckoutSessionByClientReference({
-      clientReferenceId: "stripe_checkout_duplicate",
-      createdAt: "2026-08-11T12:00:00.000Z"
-    })).rejects.toThrow(/duplicate client references/);
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toBe("http://127.0.0.1:8791/v1/checkout/sessions");
   });
 });

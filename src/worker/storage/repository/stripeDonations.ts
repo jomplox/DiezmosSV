@@ -159,7 +159,7 @@ export async function getStripeCheckoutById(
   ).bind(id).first<StripeCheckoutRecord>();
 }
 
-export async function completeStripeCheckoutCreation(
+export async function attachStripeCheckoutSession(
   db: D1Database,
   input: {
     id: string;
@@ -167,14 +167,25 @@ export async function completeStripeCheckoutCreation(
     expiresAt: string;
     now: string;
   }
-): Promise<boolean> {
-  const result = await db.prepare(
+): Promise<StripeCheckoutRecord | null> {
+  const existing = await getStripeCheckoutById(db, input.id);
+  if (!existing) return null;
+  if (existing.stripe_session_id) {
+    return existing.stripe_session_id === input.stripeSessionId ? existing : null;
+  }
+  await db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET stripe_session_id = ?, status = 'OPEN', expires_at = ?, error_code = NULL,
-            creation_outcome_class = NULL, updated_at = ?
-      WHERE id = ? AND status = 'CREATING' AND stripe_session_id IS NULL`
+        SET stripe_session_id = ?,
+            status = CASE WHEN status = 'CREATING' THEN 'OPEN' ELSE status END,
+            expires_at = ?,
+            error_code = CASE WHEN status = 'CREATING' THEN NULL ELSE error_code END,
+            creation_outcome_class = CASE
+              WHEN status = 'CREATING' THEN NULL ELSE creation_outcome_class END,
+            updated_at = ?
+      WHERE id = ? AND stripe_session_id IS NULL`
   ).bind(input.stripeSessionId, input.expiresAt, input.now, input.id).run();
-  return Number(result.meta?.changes ?? 0) > 0;
+  const attached = await getStripeCheckoutById(db, input.id);
+  return attached?.stripe_session_id === input.stripeSessionId ? attached : null;
 }
 
 export async function failStripeCheckoutCreation(
@@ -219,21 +230,6 @@ export async function reclaimStripeCheckoutCreation(
     input.id,
     stripeClaimStaleBefore(input.now)
   ).first<StripeCheckoutRecord>();
-}
-
-export async function rotateStripeCheckoutIdempotencyGeneration(
-  db: D1Database,
-  input: { id: string; expectedGeneration: number; now: string }
-): Promise<StripeCheckoutRecord | null> {
-  return db.prepare(
-    `UPDATE stripe_checkout_sessions
-        SET idempotency_generation = idempotency_generation + 1,
-            creation_outcome_class = NULL, updated_at = ?
-      WHERE id = ? AND status = 'CREATING' AND stripe_session_id IS NULL
-        AND creation_outcome_class = 'AMBIGUOUS'
-        AND idempotency_generation = ?
-      RETURNING *`
-  ).bind(input.now, input.id, input.expectedGeneration).first<StripeCheckoutRecord>();
 }
 
 export async function updateStripeCheckoutFromEvent(

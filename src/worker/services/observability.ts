@@ -91,6 +91,7 @@ const ERROR_EVENTS = new Set([
   "stripe_annual_statement_audit_failed",
   "stripe_acknowledgment_sweep_failed",
   "stripe_checkout_create_failed",
+  "stripe_checkout_finalize_deferred",
   "stripe_portal_create_failed",
   "stripe_webhook_processing_failed",
   "unhandled_worker_request_error",
