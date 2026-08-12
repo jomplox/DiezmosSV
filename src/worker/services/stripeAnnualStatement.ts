@@ -10,7 +10,7 @@ import type { Env } from "../types";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
 import { loadEmailBranding } from "./branding";
-import { classifyEmailDispatchError, EmailService } from "./email";
+import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
 import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import {
@@ -518,12 +518,33 @@ export async function sendStripeAnnualStatements(
         filename: `constancia-anual-donaciones-eeuu-${year}-r${claim.revision}.pdf`,
         idempotencyKey: `stripe-annual-statement:${claim.id}`
       }, async () => {
-        providerDispatchStarted = await repo.markStripeAnnualStatementDispatchStarted({
+        const dispatchAuthorized = await repo.markStripeAnnualStatementDispatchStarted({
           id: claim.id,
           claimId: claimId!,
           now
         });
-        if (!providerDispatchStarted) throw new Error("Stripe annual statement dispatch claim was lost");
+        if (!dispatchAuthorized) throw new Error("Stripe annual statement dispatch claim was lost");
+        const authorizedContext = await loadStripeAnnualStatementContext(env, repo, year, livemode);
+        const authorizedSnapshot = await snapshotForTarget(
+          repo,
+          authorizedContext.window,
+          livemode,
+          target,
+          year,
+          authorizedContext.document
+        );
+        if (
+          authorizedSnapshot.hash !== claim.snapshot_hash
+          || authorizedSnapshot.canonicalJson !== claim.snapshot_json
+        ) {
+          throw new EmailDispatchError(
+            "Stripe annual statement snapshot changed before provider dispatch",
+            "snapshot_changed_before_dispatch",
+            "NOT_SENT",
+            true
+          );
+        }
+        providerDispatchStarted = true;
       });
       if (!sent.providerDeliveryId) {
         throw new Error("Stripe annual statement provider acceptance was unconfirmed");

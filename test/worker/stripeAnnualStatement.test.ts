@@ -303,6 +303,60 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       .toEqual({ count: 1 });
   });
 
+  it("blocks every legacy duplicate PENDING revision from provider dispatch", async () => {
+    const originalGift = gift({ id: "gift_duplicate_pending", amount_cents: 10_000 });
+    seedGift(database, originalGift);
+    const document = statementDocument({
+      legalName: "Nonprofit Test Fixture",
+      ein: "00-0000000"
+    });
+    const originalSnapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "ana@example.org",
+      donorName: "Ana",
+      donorEmail: "ana@example.org",
+      document,
+      gifts: [originalGift]
+    });
+    const changedSnapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "ana@example.org",
+      donorName: "Ana",
+      donorEmail: "ana@example.org",
+      document,
+      gifts: [{
+        ...originalGift,
+        status: "PARTIALLY_REFUNDED",
+        refunded_amount_cents: 100,
+        net_amount_cents: 9_900
+      }]
+    });
+    insertPendingStatement(database, "delivery_pending_original", 1, originalSnapshot);
+    insertPendingStatement(database, "delivery_pending_changed", 2, changedSnapshot);
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, skipped: 1, failed: 0, review: 0 });
+
+    database.prepare(
+      "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_duplicate_pending'"
+    ).run();
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:01:00.000Z"
+    })).toMatchObject({ sent: 0, skipped: 1, failed: 0, review: 0 });
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT id, status, attempt_count FROM stripe_annual_statement_deliveries ORDER BY revision"
+    ).all()).toEqual([
+      { id: "delivery_pending_original", status: "PENDING", attempt_count: 0 },
+      { id: "delivery_pending_changed", status: "PENDING", attempt_count: 0 }
+    ]);
+  });
+
   it("rechecks the immutable snapshot immediately before dispatch and fails safely when it changed", async () => {
     seedGift(database, gift({ id: "gift_race", amount_cents: 10_000 }));
     const originalRead = repo.listStripeAnnualStatementDonorGifts.bind(repo);
@@ -376,6 +430,32 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       status: "FAILED",
       failure_code: "snapshot_changed_before_dispatch",
       dispatch_started_at: null
+    });
+  });
+
+  it("aborts before provider dispatch when the snapshot changes during dispatch authorization", async () => {
+    seedGift(database, gift({ id: "gift_dispatch_authorization_race", amount_cents: 10_000 }));
+    const originalMarkDispatchStarted = repo.markStripeAnnualStatementDispatchStarted.bind(repo);
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted").mockImplementation(async (input) => {
+      const marked = await originalMarkDispatchStarted(input);
+      database.prepare(
+        "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_dispatch_authorization_race'"
+      ).run();
+      return marked;
+    });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, failed: 1, review: 0 });
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT status, failure_code, retry_safe, dispatch_started_at FROM stripe_annual_statement_deliveries"
+    ).get()).toEqual({
+      status: "FAILED",
+      failure_code: "snapshot_changed_before_dispatch",
+      retry_safe: 1,
+      dispatch_started_at: "2026-01-10T12:00:00.000Z"
     });
   });
 
@@ -466,5 +546,29 @@ function seedGift(database: ReturnType<typeof migratedDatabase>, row: StripeAnnu
     row.settled_at,
     row.status,
     row.refunded_amount_cents
+  );
+}
+
+function insertPendingStatement(
+  database: ReturnType<typeof migratedDatabase>,
+  id: string,
+  revision: number,
+  snapshot: Awaited<ReturnType<typeof buildStripeAnnualStatementSnapshot>>
+): void {
+  database.prepare(
+    `INSERT INTO stripe_annual_statement_deliveries (
+       id, year, livemode, donor_key, donor_name, donor_email,
+       snapshot_hash, snapshot_json, revision, status, created_at, updated_at
+     ) VALUES (?, 2025, 0, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)`
+  ).run(
+    id,
+    snapshot.donor.key,
+    snapshot.donor.name,
+    snapshot.donor.email,
+    snapshot.hash,
+    snapshot.canonicalJson,
+    revision,
+    "2026-01-10T11:00:00.000Z",
+    "2026-01-10T11:00:00.000Z"
   );
 }

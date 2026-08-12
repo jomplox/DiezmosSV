@@ -397,7 +397,7 @@ export async function claimStripeAnnualStatementDelivery(
            AND fence.livemode = stripe_annual_statement_deliveries.livemode
            AND fence.donor_key = stripe_annual_statement_deliveries.donor_key
            AND fence.id <> stripe_annual_statement_deliveries.id
-           AND fence.status IN ('PROCESSING', 'REVIEW')
+           AND fence.status IN ('PENDING', 'PROCESSING', 'REVIEW')
       )
       RETURNING *`
   ).bind(input.claimId, input.now, input.id, staleBefore)
