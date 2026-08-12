@@ -28,6 +28,12 @@ export interface StripeCheckoutRecord {
   error_code: string | null;
   expires_at: string | null;
   completed_at: string | null;
+  checkout_event_created: number;
+  checkout_event_rank: number;
+  checkout_event_id: string | null;
+  subscription_event_created: number;
+  subscription_event_rank: number;
+  subscription_event_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -215,40 +221,114 @@ export async function updateStripeCheckoutFromEvent(
     donorName: string | null;
     donorEmail: string | null;
     completedAt: string | null;
+    eventCreated: number;
+    eventRank: number;
+    eventId: string;
+    subscriptionEventRank?: number;
     now: string;
   }
 ): Promise<StripeCheckoutRecord | null> {
   return db.prepare(
-    `UPDATE stripe_checkout_sessions
+    `WITH incoming (
+       event_created, event_rank, event_id, next_status, next_payment_status,
+       customer_id, subscription_id, subscription_status, subscription_event_rank,
+       payment_intent_id, donor_name, donor_email, completed_at, updated_at
+     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+     UPDATE stripe_checkout_sessions
         SET status = CASE
-              WHEN payment_status = 'PAID' OR ? = 'PAID' THEN 'COMPLETE'
-              ELSE ?
+              WHEN payment_status = 'PAID' OR (SELECT next_payment_status FROM incoming) = 'PAID'
+                THEN 'COMPLETE'
+              WHEN (SELECT event_created FROM incoming) > checkout_event_created
+                OR ((SELECT event_created FROM incoming) = checkout_event_created
+                  AND (SELECT event_rank FROM incoming) > checkout_event_rank)
+                THEN (SELECT next_status FROM incoming)
+              ELSE status
             END,
             payment_status = CASE
-              WHEN payment_status = 'PAID' OR ? = 'PAID' THEN 'PAID'
-              ELSE ?
+              WHEN payment_status = 'PAID' OR (SELECT next_payment_status FROM incoming) = 'PAID'
+                THEN 'PAID'
+              WHEN (SELECT event_created FROM incoming) > checkout_event_created
+                OR ((SELECT event_created FROM incoming) = checkout_event_created
+                  AND (SELECT event_rank FROM incoming) > checkout_event_rank)
+                THEN (SELECT next_payment_status FROM incoming)
+              ELSE payment_status
             END,
-            stripe_customer_id = COALESCE(?, stripe_customer_id),
-            stripe_subscription_id = COALESCE(?, stripe_subscription_id),
+            stripe_customer_id = COALESCE((SELECT customer_id FROM incoming), stripe_customer_id),
+            stripe_subscription_id = COALESCE((SELECT subscription_id FROM incoming), stripe_subscription_id),
             subscription_status = CASE
               WHEN subscription_status = 'CANCELED' THEN 'CANCELED'
-              ELSE COALESCE(?, subscription_status)
+              WHEN (SELECT subscription_status FROM incoming) IS NOT NULL
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT subscription_event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT subscription_status FROM incoming)
+              ELSE subscription_status
             END,
-            stripe_payment_intent_id = COALESCE(?, stripe_payment_intent_id),
-            donor_name = COALESCE(?, donor_name),
-            donor_email = COALESCE(?, donor_email),
-            completed_at = COALESCE(?, completed_at),
-            updated_at = ?
+            stripe_payment_intent_id = COALESCE((SELECT payment_intent_id FROM incoming), stripe_payment_intent_id),
+            donor_name = COALESCE((SELECT donor_name FROM incoming), donor_name),
+            donor_email = COALESCE((SELECT donor_email FROM incoming), donor_email),
+            completed_at = COALESCE((SELECT completed_at FROM incoming), completed_at),
+            checkout_event_created = CASE
+              WHEN (SELECT event_created FROM incoming) > checkout_event_created
+                OR ((SELECT event_created FROM incoming) = checkout_event_created
+                  AND (SELECT event_rank FROM incoming) > checkout_event_rank)
+                THEN (SELECT event_created FROM incoming)
+              ELSE checkout_event_created
+            END,
+            checkout_event_rank = CASE
+              WHEN (SELECT event_created FROM incoming) > checkout_event_created
+                OR ((SELECT event_created FROM incoming) = checkout_event_created
+                  AND (SELECT event_rank FROM incoming) > checkout_event_rank)
+                THEN (SELECT event_rank FROM incoming)
+              ELSE checkout_event_rank
+            END,
+            checkout_event_id = CASE
+              WHEN (SELECT event_created FROM incoming) > checkout_event_created
+                OR ((SELECT event_created FROM incoming) = checkout_event_created
+                  AND (SELECT event_rank FROM incoming) > checkout_event_rank)
+                THEN (SELECT event_id FROM incoming)
+              ELSE checkout_event_id
+            END,
+            subscription_event_created = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND (SELECT subscription_status FROM incoming) IS NOT NULL
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT subscription_event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT event_created FROM incoming)
+              ELSE subscription_event_created
+            END,
+            subscription_event_rank = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND (SELECT subscription_status FROM incoming) IS NOT NULL
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT subscription_event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT subscription_event_rank FROM incoming)
+              ELSE subscription_event_rank
+            END,
+            subscription_event_id = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND (SELECT subscription_status FROM incoming) IS NOT NULL
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT subscription_event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT event_id FROM incoming)
+              ELSE subscription_event_id
+            END,
+            updated_at = (SELECT updated_at FROM incoming)
       WHERE stripe_session_id = ?
       RETURNING *`
   ).bind(
-    input.paymentStatus,
+    input.eventCreated,
+    input.eventRank,
+    input.eventId,
     input.status,
-    input.paymentStatus,
     input.paymentStatus,
     input.stripeCustomerId,
     input.stripeSubscriptionId,
     input.subscriptionStatus ?? null,
+    input.subscriptionEventRank ?? null,
     input.stripePaymentIntentId,
     input.donorName,
     input.donorEmail,
@@ -263,16 +343,43 @@ export async function updateStripeSubscriptionStatus(
   input: {
     stripeSubscriptionId: string;
     status: NonNullable<StripeCheckoutRecord["subscription_status"]>;
+    eventCreated: number;
+    eventRank: number;
+    eventId: string;
     now: string;
   }
 ): Promise<StripeCheckoutRecord | null> {
   return db.prepare(
     `UPDATE stripe_checkout_sessions
-        SET subscription_status = ?, updated_at = ?
+        SET subscription_status = 'CANCELED',
+            subscription_event_created = CASE
+              WHEN ? > subscription_event_created
+                OR (? = subscription_event_created AND ? > subscription_event_rank)
+                THEN ? ELSE subscription_event_created END,
+            subscription_event_rank = CASE
+              WHEN ? > subscription_event_created
+                OR (? = subscription_event_created AND ? > subscription_event_rank)
+                THEN ? ELSE subscription_event_rank END,
+            subscription_event_id = CASE
+              WHEN ? > subscription_event_created
+                OR (? = subscription_event_created AND ? > subscription_event_rank)
+                THEN ? ELSE subscription_event_id END,
+            updated_at = ?
       WHERE stripe_subscription_id = ? AND frequency = 'MONTHLY'
       RETURNING *`
   ).bind(
-    input.status,
+    input.eventCreated,
+    input.eventCreated,
+    input.eventRank,
+    input.eventCreated,
+    input.eventCreated,
+    input.eventCreated,
+    input.eventRank,
+    input.eventRank,
+    input.eventCreated,
+    input.eventCreated,
+    input.eventRank,
+    input.eventId,
     input.now,
     input.stripeSubscriptionId
   ).first<StripeCheckoutRecord>();
@@ -289,36 +396,77 @@ export async function updateStripeCheckoutFromInvoice(
     donorEmail: string | null;
     settled: boolean;
     completedAt: string | null;
+    eventCreated: number;
+    eventRank: number;
+    eventId: string;
     now: string;
   }
 ): Promise<StripeCheckoutRecord | null> {
   return db.prepare(
-    `UPDATE stripe_checkout_sessions
-        SET status = CASE WHEN ? = 1 THEN 'COMPLETE' ELSE status END,
-            payment_status = CASE WHEN ? = 1 THEN 'PAID' ELSE payment_status END,
-            stripe_customer_id = COALESCE(?, stripe_customer_id),
-            stripe_subscription_id = COALESCE(stripe_subscription_id, ?),
+    `WITH incoming (
+       settled, customer_id, subscription_id, subscription_status,
+       donor_name, donor_email, completed_at, event_created, event_rank,
+       event_id, updated_at
+     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+     UPDATE stripe_checkout_sessions
+        SET status = CASE WHEN (SELECT settled FROM incoming) = 1 THEN 'COMPLETE' ELSE status END,
+            payment_status = CASE WHEN (SELECT settled FROM incoming) = 1 THEN 'PAID' ELSE payment_status END,
+            stripe_customer_id = COALESCE((SELECT customer_id FROM incoming), stripe_customer_id),
+            stripe_subscription_id = COALESCE(stripe_subscription_id, (SELECT subscription_id FROM incoming)),
             subscription_status = CASE
               WHEN subscription_status = 'CANCELED' THEN 'CANCELED'
-              ELSE ?
+              WHEN (SELECT event_created FROM incoming) > subscription_event_created
+                OR ((SELECT event_created FROM incoming) = subscription_event_created
+                  AND (SELECT event_rank FROM incoming) > subscription_event_rank)
+                THEN (SELECT subscription_status FROM incoming)
+              ELSE subscription_status
             END,
-            donor_name = COALESCE(?, donor_name),
-            donor_email = COALESCE(?, donor_email),
-            completed_at = CASE WHEN ? = 1 THEN COALESCE(?, completed_at) ELSE completed_at END,
-            updated_at = ?
+            donor_name = COALESCE((SELECT donor_name FROM incoming), donor_name),
+            donor_email = COALESCE((SELECT donor_email FROM incoming), donor_email),
+            completed_at = CASE
+              WHEN (SELECT settled FROM incoming) = 1
+                THEN COALESCE((SELECT completed_at FROM incoming), completed_at)
+              ELSE completed_at
+            END,
+            subscription_event_created = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT event_created FROM incoming)
+              ELSE subscription_event_created
+            END,
+            subscription_event_rank = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT event_rank FROM incoming)
+              ELSE subscription_event_rank
+            END,
+            subscription_event_id = CASE
+              WHEN subscription_status IS NOT 'CANCELED'
+                AND ((SELECT event_created FROM incoming) > subscription_event_created
+                  OR ((SELECT event_created FROM incoming) = subscription_event_created
+                    AND (SELECT event_rank FROM incoming) > subscription_event_rank))
+                THEN (SELECT event_id FROM incoming)
+              ELSE subscription_event_id
+            END,
+            updated_at = (SELECT updated_at FROM incoming)
       WHERE id = ? AND frequency = 'MONTHLY'
         AND (stripe_subscription_id IS NULL OR stripe_subscription_id = ?)
       RETURNING *`
   ).bind(
-    input.settled ? 1 : 0,
     input.settled ? 1 : 0,
     input.stripeCustomerId,
     input.stripeSubscriptionId,
     input.subscriptionStatus,
     input.donorName,
     input.donorEmail,
-    input.settled ? 1 : 0,
     input.completedAt,
+    input.eventCreated,
+    input.eventRank,
+    input.eventId,
     input.now,
     input.id,
     input.stripeSubscriptionId

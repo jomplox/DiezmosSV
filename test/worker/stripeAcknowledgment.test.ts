@@ -41,6 +41,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       frequency: "ONCE",
       giftType: "TITHE",
       settledAt: "2026-08-10T12:00:00.000Z",
+      timeZone: "America/New_York",
       legalName: "Friends & Example",
       ein: "12-3456789",
       branding: {
@@ -64,6 +65,23 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(content.html).toContain("Diezmo");
     expect(content.text).not.toMatch(/\b(?:MH|CDE)\b|Ministerio de Hacienda|validez fiscal/i);
     expect(content.html).not.toContain("Ana <Ejemplo>");
+  });
+
+  it("formats the settled date in the configured U.S. timezone at the New Year boundary", () => {
+    const content = stripeAcknowledgmentContent({
+      donorName: "Ana",
+      amountCents: 5000,
+      frequency: "ONCE",
+      giftType: "OFFERING",
+      settledAt: "2026-01-01T00:30:00.000Z",
+      timeZone: "America/New_York",
+      legalName: "Friends of Example Church, Inc.",
+      ein: "12-3456789",
+      branding: { organizationName: "Example Church" }
+    });
+
+    expect(content.text).toContain("Fecha: 31 de diciembre de 2025");
+    expect(content.text).not.toContain("Fecha: 1 de enero de 2026");
   });
 
   it("claims, dispatches, and finalizes one acknowledgment idempotently", async () => {

@@ -99,6 +99,7 @@ import {
   sendStripeAnnualStatements,
   StripeAnnualStatementConfigurationError,
   StripeAnnualStatementSingleDonorError,
+  stripeUsTimeZone,
   type StripeAnnualStatementSendRequest
 } from "./services/stripeAnnualStatement";
 import { AnalyticsCapacityError, computeAnalytics, elSalvadorRangeWindow, type AnalyticsRange } from "./services/analytics";
@@ -2470,7 +2471,15 @@ function stripeAnnualStatementLivemode(ctx: ApiRouteContext): boolean | Response
 
 async function handleStripeAnnualStatementPreview(ctx: ApiRouteContext): Promise<Response> {
   const yearParam = ctx.url.searchParams.get("year");
-  const yearError = certificateYearError(yearParam, new Date());
+  let yearError: string | null;
+  try {
+    yearError = certificateYearError(yearParam, new Date(), stripeUsTimeZone(ctx.env));
+  } catch (error) {
+    if (error instanceof StripeAnnualStatementConfigurationError) {
+      return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });
+    }
+    throw error;
+  }
   if (yearError) {
     return jsonResponse({ error: "invalid_stripe_annual_statement_year", message: yearError }, { status: 400 });
   }
@@ -2496,7 +2505,15 @@ async function handleStripeAnnualStatementPreview(ctx: ApiRouteContext): Promise
 
 async function handleStripeAnnualStatementSend(ctx: ApiRouteContext): Promise<Response> {
   const yearParam = ctx.url.searchParams.get("year");
-  const yearError = certificateYearError(yearParam, new Date());
+  let yearError: string | null;
+  try {
+    yearError = certificateYearError(yearParam, new Date(), stripeUsTimeZone(ctx.env));
+  } catch (error) {
+    if (error instanceof StripeAnnualStatementConfigurationError) {
+      return jsonResponse({ error: "stripe_annual_statement_unavailable", message: error.message }, { status: 503 });
+    }
+    throw error;
+  }
   if (yearError) {
     return jsonResponse({ error: "invalid_stripe_annual_statement_year", message: yearError }, { status: 400 });
   }

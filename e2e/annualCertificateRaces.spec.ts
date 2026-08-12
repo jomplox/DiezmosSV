@@ -45,6 +45,26 @@ function sendResult(year: number, options: { hasMore?: boolean; nextCursor?: str
   };
 }
 
+function stripePreview(year: number, label: string) {
+  return {
+    year,
+    livemode: false,
+    timeZone: "America/New_York",
+    donors: [{
+      donorKey: "us-donor@example.org",
+      donorName: label,
+      donorEmail: "us-donor@example.org",
+      hasEmail: true,
+      count: 1,
+      grossTotalLabel: "$10.00",
+      refundedTotalLabel: "$0.00",
+      netTotalLabel: "$10.00"
+    }],
+    hasMore: false,
+    nextCursor: null
+  };
+}
+
 function bundleDocument(label: "Old" | "New") {
   const isNew = label === "New";
   return {
@@ -213,6 +233,12 @@ function certificateButton(page: Page, name: string) {
 
 function certificateSearch(page: Page) {
   return certificatePanel(page).getByPlaceholder("Buscar donante o correo", { exact: true });
+}
+
+function stripePanel(page: Page) {
+  return page
+    .getByRole("heading", { name: "EE. UU. — Stripe" })
+    .locator("xpath=ancestor::section[1]");
 }
 
 async function nativeDoubleClick(page: Page, accessibleName: string): Promise<void> {
@@ -764,6 +790,70 @@ test("does not let a stale certificate finalizer re-enable a newer unresolved F9
   }
 
   await expect(page.getByRole("button", { name: "Descargar CSV" })).toBeEnabled();
+});
+
+test("keeps a populated U.S. annual-send completion when SV controls refresh and F960 runs", async ({ page }) => {
+  const usSend = deferred();
+  let usSendSeen = false;
+  let csvSeen = false;
+
+  await installAdminApp(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/statements/stripe/annual" && request.method() === "GET") {
+      await fulfillJson(route, stripePreview(Number(url.searchParams.get("year")), "US ownership donor"));
+      return true;
+    }
+    if (url.pathname === "/api/statements/stripe/annual/send" && request.method() === "POST") {
+      usSendSeen = true;
+      await usSend.promise;
+      await fulfillJson(route, {
+        year: 2026,
+        livemode: false,
+        mode: "bulk",
+        processed: 1,
+        sent: 1,
+        skipped: 0,
+        failed: 0,
+        review: 0,
+        hasMore: false,
+        nextCursor: null
+      });
+      return true;
+    }
+    if (url.pathname === "/api/exports/f960.csv") {
+      csvSeen = true;
+      await route.fulfill({
+        status: 200,
+        contentType: "text/csv",
+        headers: { "Content-Disposition": "attachment; filename=f960.csv" },
+        body: "fila\n"
+      });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual" && request.method() === "GET") {
+      await fulfillJson(route, preview(Number(url.searchParams.get("year")), ["SV control donor"]));
+      return true;
+    }
+    return false;
+  });
+
+  await expect(page.getByText("US ownership donor")).toBeVisible();
+  await stripePanel(page).getByRole("button", { name: "Enviar primera tanda" }).click();
+  await expect.poll(() => usSendSeen).toBe(true);
+
+  try {
+    await certificateYearSelect(page).selectOption("2025");
+    await expect(page.getByText("SV control donor")).toBeVisible();
+    await page.getByRole("button", { name: "Descargar CSV" }).click();
+    await expect.poll(() => csvSeen).toBe(true);
+    await expect(page.getByRole("status")).toContainText("CSV F960 descargado");
+
+    usSend.release();
+    await expect(page.getByRole("status")).toContainText("Constancias de EE. UU. 2026: 1 enviadas");
+    await expect(stripePanel(page).getByRole("button", { name: "Iniciar nuevo recorrido" })).toBeVisible();
+  } finally {
+    usSend.release();
+  }
 });
 
 test("claims a bulk generation and cursor synchronously so two native clicks dispatch one POST", async ({ page }) => {

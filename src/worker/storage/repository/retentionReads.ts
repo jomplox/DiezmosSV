@@ -23,7 +23,12 @@ export const RETENTION_SNAPSHOT_TABLES = [
   "wompi_events",
   "contingency_periods",
   "contingency_batches",
-  "contingency_batch_lines"
+  "contingency_batch_lines",
+  "stripe_checkout_sessions",
+  "stripe_webhook_events",
+  "stripe_gifts",
+  "stripe_acknowledgment_deliveries",
+  "stripe_annual_statement_deliveries"
 ] as const;
 export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
 
@@ -58,7 +63,9 @@ interface AnnualCertificateDonorTargetRow {
 function retentionSnapshotTimestampColumn(
   table: RetentionSnapshotTable
 ): "created_at" | "received_at" {
-  return table === "wompi_events" ? "received_at" : "created_at";
+  return table === "wompi_events" || table === "stripe_webhook_events"
+    ? "received_at"
+    : "created_at";
 }
 
 // Raw D1 column shape for the contacts export join (snake_case, intent_* columns

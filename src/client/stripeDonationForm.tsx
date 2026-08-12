@@ -1,5 +1,5 @@
 import { EmbeddedCheckout, EmbeddedCheckoutProvider } from "@stripe/react-stripe-js";
-import { loadStripe } from "@stripe/stripe-js";
+import { loadStripe } from "@stripe/stripe-js/pure";
 import { useEffect, useMemo, useState } from "react";
 
 export interface StripeCheckoutClientConfig {
@@ -85,7 +85,7 @@ function MockStripeDonationForm() {
     <>
       <p className="donar-stripe-mock-banner" role="status">
         <strong>Simulación local del formulario alojado por Stripe</strong>
-        <span>La sesión conectada reemplaza esta vista; ningún dato se envía desde la simulación.</span>
+        <span>El formulario simulado no envía datos a Stripe.</span>
       </p>
 
       <div className="donar-hosted-surface donar-stripe-embedded donar-stripe-embedded-mock">

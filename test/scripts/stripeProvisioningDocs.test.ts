@@ -113,6 +113,23 @@ describe("Stripe US giving provisioning documentation", () => {
     expect(runbook).toMatch(/prueba.*live|live.*prueba/is);
   });
 
+  it("documents the explicit single-rail SV-to-US safety restart in both READMEs", () => {
+    expect(english).toMatch(/does not mint a Wompi link on Step 1/i);
+    expect(english).toMatch(/returns to an explicit U\.S\. Step 1/i);
+    expect(english).toMatch(/no Stripe Session exists until.*confirm/is);
+    expect(spanish).toMatch(/no crea un enlace Wompi en el Paso 1/i);
+    expect(spanish).toMatch(/regresa\s+al\s+Paso 1 explícito de EE\. UU\./i);
+    expect(spanish).toMatch(/no existe ninguna Checkout Session de Stripe hasta.*confirme/is);
+  });
+
+  it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
+    const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
+    for (const migration of ["0032", "0033", "0034", "0035"]) {
+      expect(rollback).toContain(migration);
+    }
+    expect(rollback).toMatch(/no.*elimine|conserve/is);
+  });
+
   it("keeps mock mode local/staging-only and out of production examples", () => {
     expect(devVars).toContain('STRIPE_MOCK_MODE="1"');
     expect(publicWrangler).toMatch(/\[vars\][\s\S]*STRIPE_MOCK_MODE\s*=\s*"1"/);

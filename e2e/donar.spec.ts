@@ -102,7 +102,7 @@ test("uses neutral donor attribution when public branding has no configured name
 
   await page.getByRole("button", { name: "EE. UU." }).click();
   await page.getByLabel("Monto").fill("100.00");
-  await page.getByRole("button", { name: "Continuar", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
   await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
   await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
@@ -730,34 +730,78 @@ test("the Stripe result narrates a canceled monthly gift without implying future
   await expect(page.getByRole("button", { name: "Administrar mi entrega mensual" })).toHaveCount(0);
 });
 
-test("extranjero + USA on the SV form forwards to Stripe, and Atrás returns to the SV datos", async ({ page }) => {
-  // Regression: a donor on the SV door who checks "Resido en el extranjero" and picks
-  // Estados Unidos is forwarded to the Stripe path (intended), but used to be
-  // TRAPPED there — Atrás only walked the US steps and re-picking the SV door kept the
-  // lingering foreignResident+US form state, re-forwarding forever.
+test("SV to US safety routing requires an explicit single-rail Stripe confirmation", async ({ page }) => {
+  const wompiDraftBodies: Record<string, unknown>[] = [];
+  const stripeCheckoutBodies: Record<string, unknown>[] = [];
+  page.on("request", (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() !== "POST") return;
+    if (pathname === "/api/donations/intent") {
+      wompiDraftBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+    if (pathname === "/api/donations/stripe/checkout") {
+      stripeCheckoutBodies.push(request.postDataJSON() as Record<string, unknown>);
+    }
+  });
+
   await page.goto("/donar?ruta=sv");
   await page.getByLabel("Monto").fill("25.00");
+  await page.getByRole("radio", { name: "Ofrenda" }).check();
   await page.getByRole("button", { name: "Continuar", exact: true }).click();
   await page.getByLabel("Número de documento").fill("10000001-9");
 
-  // Forward: extranjero + Estados Unidos → the US (Stripe) path takes over
-  // (the step label under the title reads "Su entrega").
+  // Residence is still unknown at the end of SV Step 1, so no Wompi link may be
+  // minted yet. This keeps the later US safety reroute from leaving two usable rails.
+  expect(wompiDraftBodies).toHaveLength(0);
+
   await page.getByLabel("Resido en el extranjero").check();
   await page.getByLabel("País").selectOption({ label: "Estados Unidos" });
-  await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
-  await expect(page.getByText("Paso 2 de 2")).toBeVisible();
 
-  // THE ESCAPE: Atrás returns to the SV datos screen — datos intact, extranjero still
-  // checked, país cleared back to "Seleccione" so the donor can re-choose or uncheck.
-  await page.getByRole("button", { name: /Atrás/ }).click();
-  await expect(page.getByText("Paso 2 de 3")).toBeVisible();
-  await expect(page.getByLabel("Número de documento")).toHaveValue("10000001-9");
-  await expect(page.getByLabel("Resido en el extranjero")).toBeChecked();
-  await expect(page.getByLabel("País")).toHaveValue("");
+  // The safety route restarts at the explicit US Step 1. The amount and selected
+  // gift type remain truthful, but no Stripe Session exists before confirmation.
+  await expect(page.getByText("Paso 1 de 2")).toBeVisible();
+  await expect(page.getByLabel("Monto")).toHaveValue("25.00");
+  await expect(page.getByRole("radio", { name: "Ofrenda" })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Única" })).toBeChecked();
+  expect(stripeCheckoutBodies).toHaveLength(0);
+  expect(wompiDraftBodies).toHaveLength(0);
 
-  // Unchecking restores the domestic SV fields.
-  await page.getByLabel("Resido en el extranjero").uncheck();
-  await expect(page.getByLabel("Departamento")).toBeVisible();
+  await page.getByRole("button", { name: "Continuar con su ofrenda", exact: true }).click();
+  await expect.poll(() => stripeCheckoutBodies.length).toBe(1);
+  expect(stripeCheckoutBodies[0]).toMatchObject({
+    amount: "25.00",
+    frequency: "once",
+    giftType: "offering"
+  });
+  expect(wompiDraftBodies).toHaveLength(0);
+});
+
+test("chooser, SV, and mock US surfaces never load Stripe.js", async ({ page, context }) => {
+  const stripeJsRequests: string[] = [];
+  await context.route("https://js.stripe.com/**", async (route) => {
+    stripeJsRequests.push(route.request().url());
+    await route.abort();
+  });
+
+  await page.goto("/donar");
+  await expect(page.getByRole("button", { name: /El Salvador y el mundo/ })).toBeVisible();
+  expect(stripeJsRequests).toHaveLength(0);
+
+  await page.getByRole("button", { name: /El Salvador y el mundo/ }).click();
+  await expect(page.getByText("Paso 1 de 3")).toBeVisible();
+  expect(stripeJsRequests).toHaveLength(0);
+
+  await page.getByRole("button", { name: /Cambiar opción/ }).click();
+  await page.getByRole("button", { name: /EE\. UU\./ }).click();
+  await page.getByLabel("Monto").fill("50.00");
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+  await expect(page.getByText("El formulario simulado no envía datos a Stripe.")).toBeVisible();
+  expect(stripeJsRequests).toHaveLength(0);
+
+  await page.goto("/admin");
+  await expect(page.getByLabel("Contraseña")).toBeVisible();
+  expect(stripeJsRequests).toHaveLength(0);
 });
 
 test("thank-you page does not trust unverified redirect parameters", async ({ page }) => {

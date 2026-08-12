@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildStripeAnnualStatementPreview,
@@ -9,6 +10,7 @@ import {
   renderStripeAnnualStatementPdf,
   sendStripeAnnualStatements,
   stripeAnnualStatementEmailContent,
+  stripeUsCurrentYear,
   stripeUsYearWindow
 } from "../../src/worker/services/stripeAnnualStatement";
 import { Repository } from "../../src/worker/storage/repository";
@@ -31,6 +33,14 @@ describe("Stripe U.S. annual statement calendar", () => {
       endIso: "2026-01-01T05:00:00.000Z"
     });
   });
+
+  it("derives the current statement year in the validated U.S. timezone", () => {
+    const boundary = new Date("2026-01-01T00:30:00.000Z");
+
+    expect(stripeUsCurrentYear({ STRIPE_MOCK_MODE: "1" }, boundary)).toBe(2025);
+    expect(stripeUsCurrentYear({ STRIPE_US_TIME_ZONE: "America/Los_Angeles" }, boundary)).toBe(2025);
+    expect(() => stripeUsCurrentYear({ STRIPE_US_TIME_ZONE: "Not/AZone" }, boundary)).toThrow(/STRIPE_US_TIME_ZONE/);
+  });
 });
 
 describe("Stripe U.S. annual statement snapshot and rendering", () => {
@@ -45,6 +55,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorKey: "ana@example.org",
       donorName: " Ana ",
       donorEmail: " ANA@Example.ORG ",
+      document: statementDocument(),
       gifts
     });
 
@@ -62,9 +73,29 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorKey: "ana@example.org",
       donorName: "Ana",
       donorEmail: "ana@example.org",
+      document: statementDocument(),
       gifts: gifts.map((row) => row.id === "gift_a" ? { ...row, refunded_amount_cents: 100, status: "PARTIALLY_REFUNDED", net_amount_cents: 9_900 } : row)
     });
     expect(changed.hash).not.toBe(snapshot.hash);
+
+    const changedConfiguration = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "ana@example.org",
+      donorName: "Ana",
+      donorEmail: "ana@example.org",
+      document: statementDocument({ legalName: "Friends of Example Church — Updated" }),
+      gifts
+    });
+    expect(changedConfiguration.hash).not.toBe(snapshot.hash);
+    expect(JSON.parse(changedConfiguration.canonicalJson)).toMatchObject({
+      document: {
+        rendererVersion: expect.any(String),
+        legalName: "Friends of Example Church — Updated",
+        ein: "12-3456789",
+        timeZone: "America/New_York"
+      }
+    });
   });
 
   it("renders the U.S. legal identity, itemized types/refunds, substantiation, and neutral disclaimer", async () => {
@@ -74,6 +105,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorKey: "ana@example.org",
       donorName: "Ana",
       donorEmail: "ana@example.org",
+      document: statementDocument(),
       gifts: [
         gift({ id: "gift_tithe", settled_at: "2025-01-02T12:00:00.000Z", gift_type: "TITHE", amount_cents: 10_000 }),
         gift({ id: "gift_refund", settled_at: "2025-07-01T12:00:00.000Z", gift_type: "OFFERING", amount_cents: 5_000, refunded_amount_cents: 5_000, status: "REFUNDED" })
@@ -81,9 +113,6 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     });
     const bytes = await renderStripeAnnualStatementPdf({
       snapshot,
-      legalName: "Friends of Example Church, Inc.",
-      ein: "12-3456789",
-      timeZone: "America/New_York",
       issuedOn: "2026-01-10T12:00:00.000Z",
       corrected: true
     });
@@ -104,6 +133,25 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     expect(text).toContain("no constituye asesoría fiscal");
     expect(text).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b|deducible garantizada/i);
     expect(readFileSync(pdfPath).subarray(0, 4).toString()).toBe("%PDF");
+  });
+
+  it("renders unsupported Unicode deterministically without changing source identity", async () => {
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "unicode@example.org",
+      donorName: "李 😊 García",
+      donorEmail: "unicode@example.org",
+      document: statementDocument({ legalName: "Iglesia 李 😊" }),
+      gifts: [gift({ id: "gift_unicode", donor_name: "李 😊 García", donor_email: "unicode@example.org" })]
+    });
+
+    expect(snapshot.donor.name).toBe("李 😊 García");
+    await expect(renderStripeAnnualStatementPdf({
+      snapshot,
+      issuedOn: "2026-01-10T12:00:00.000Z",
+      corrected: false
+    })).resolves.toBeInstanceOf(Uint8Array);
   });
 
   it("builds distinct U.S. Spanish email copy for original and corrected statements", () => {
@@ -231,8 +279,28 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
 
     emailSend.mockResolvedValue({ messageId: "must-not-send" });
     expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", { donor: "ana@example.org", now: "2026-01-10T12:01:00.000Z" }))
-      .toMatchObject({ sent: 0, skipped: 1 });
+      .toMatchObject({ sent: 0, skipped: 0, review: 1 });
     expect(emailSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences every changed snapshot while a donor-year provider outcome is in REVIEW", async () => {
+    seedGift(database, gift({ id: "gift_review_changed", amount_cents: 10_000 }));
+    emailSend.mockRejectedValueOnce(Object.assign(new Error("private provider response"), { code: "E_UNKNOWN" }));
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, review: 1 });
+
+    database.prepare("UPDATE stripe_gifts SET refunded_amount_cents = 2500, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_review_changed'").run();
+    emailSend.mockResolvedValue({ messageId: "must-not-send-changed-review" });
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:01:00.000Z"
+    })).toMatchObject({ sent: 0, review: 1, failed: 0 });
+    expect(emailSend).toHaveBeenCalledTimes(1);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ count: 1 });
   });
 
   it("rechecks the immutable snapshot immediately before dispatch and fails safely when it changed", async () => {
@@ -286,7 +354,64 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       "SELECT status, failure_code FROM stripe_annual_statement_deliveries"
     ).get()).toEqual({ status: "FAILED", failure_code: "snapshot_changed_before_dispatch" });
   });
+
+  it("rechecks the snapshot after PDF rendering and immediately before provider dispatch", async () => {
+    seedGift(database, gift({ id: "gift_render_race", amount_cents: 10_000 }));
+    const originalSave = PDFDocument.prototype.save;
+    vi.spyOn(PDFDocument.prototype, "save").mockImplementation(async function (this: PDFDocument, ...args) {
+      database.prepare(
+        "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_render_race'"
+      ).run();
+      return originalSave.apply(this, args);
+    });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, failed: 1, review: 0 });
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT status, failure_code, dispatch_started_at FROM stripe_annual_statement_deliveries"
+    ).get()).toEqual({
+      status: "FAILED",
+      failure_code: "snapshot_changed_before_dispatch",
+      dispatch_started_at: null
+    });
+  });
+
+  it("keeps a durable SENT outcome authoritative when its follow-up audit write fails", async () => {
+    seedGift(database, gift({ id: "gift_sent_audit" }));
+    const createAudit = vi.spyOn(repo, "createAudit")
+      .mockRejectedValueOnce(new Error("audit unavailable"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 1, failed: 0, review: 0 });
+    expect(database.prepare("SELECT status, sent_at FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ status: "SENT", sent_at: "2026-01-10T12:00:00.000Z" });
+    expect(createAudit).toHaveBeenCalledTimes(1);
+    expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({
+      event: "stripe_annual_statement_audit_failed"
+    }));
+  });
 });
+
+function statementDocument(overrides: Partial<{
+  legalName: string;
+  ein: string;
+  timeZone: string;
+}> = {}) {
+  return {
+    rendererVersion: "stripe-annual-statement-pdf:v1" as const,
+    legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
+    ein: overrides.ein ?? "12-3456789",
+    timeZone: overrides.timeZone ?? "America/New_York",
+    accentColor: "#0f766e",
+    logo: null
+  };
+}
 
 function gift(overrides: Partial<StripeAnnualStatementGift> & { id: string }): StripeAnnualStatementGift {
   const amountCents = overrides.amount_cents ?? 1_000;

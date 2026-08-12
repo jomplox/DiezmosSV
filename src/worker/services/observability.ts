@@ -88,6 +88,7 @@ const ERROR_EVENTS = new Set([
   "scheduled_handler_failed",
   "stalled_wompi_event_sweep_failed",
   "stripe_acknowledgment_delivery_failed",
+  "stripe_annual_statement_audit_failed",
   "stripe_acknowledgment_sweep_failed",
   "stripe_checkout_create_failed",
   "stripe_portal_create_failed",

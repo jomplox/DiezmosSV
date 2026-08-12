@@ -5,6 +5,7 @@ import type {
   StripeAnnualStatementDonorTarget,
   StripeAnnualStatementGift
 } from "../storage/repository";
+import { StripeAnnualStatementReservationFenceError } from "../storage/repository/stripeAnnualStatements";
 import type { Env } from "../types";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
@@ -12,7 +13,14 @@ import { loadEmailBranding } from "./branding";
 import { classifyEmailDispatchError, EmailService } from "./email";
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
 import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
-import { drawOrganizationLogo, loadPdfBrandingLogo, type PdfBrandingLogo } from "./pdf";
+import {
+  drawOrganizationLogo,
+  drawTextSafe,
+  loadPdfBrandingLogo,
+  pdfSafeText,
+  type PdfBrandingLogo
+} from "./pdf";
+import { logWorkerError } from "./observability";
 import { resolveStripeConfiguration } from "./stripeDonations";
 
 export const STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE = 50;
@@ -21,6 +29,7 @@ export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
 const MARGIN = 42;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v1" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -42,13 +51,9 @@ export interface StripeUsYearWindow {
   endIso: string;
 }
 
-export function stripeUsYearWindow(
-  env: Pick<Env, "STRIPE_MOCK_MODE" | "STRIPE_US_TIME_ZONE">,
-  year: number
-): StripeUsYearWindow {
-  if (!Number.isInteger(year) || year < 2000 || year > 9999) {
-    throw new StripeAnnualStatementConfigurationError("Indique un año válido para la constancia de EE. UU.");
-  }
+export function stripeUsTimeZone(
+  env: Pick<Env, "STRIPE_MOCK_MODE" | "STRIPE_US_TIME_ZONE">
+): string {
   const timeZone = env.STRIPE_MOCK_MODE === "1"
     ? "America/New_York"
     : env.STRIPE_US_TIME_ZONE?.trim();
@@ -57,6 +62,28 @@ export function stripeUsYearWindow(
       "STRIPE_US_TIME_ZONE debe contener una zona horaria IANA válida."
     );
   }
+  return timeZone;
+}
+
+export function stripeUsCurrentYear(
+  env: Pick<Env, "STRIPE_MOCK_MODE" | "STRIPE_US_TIME_ZONE">,
+  now: Date
+): number {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: stripeUsTimeZone(env),
+    year: "numeric"
+  }).formatToParts(now);
+  return Number(parts.find((part) => part.type === "year")?.value ?? 0);
+}
+
+export function stripeUsYearWindow(
+  env: Pick<Env, "STRIPE_MOCK_MODE" | "STRIPE_US_TIME_ZONE">,
+  year: number
+): StripeUsYearWindow {
+  if (!Number.isInteger(year) || year < 2000 || year > 9999) {
+    throw new StripeAnnualStatementConfigurationError("Indique un año válido para la constancia de EE. UU.");
+  }
+  const timeZone = stripeUsTimeZone(env);
   return {
     timeZone,
     startIso: zonedMidnightIso(year, timeZone),
@@ -75,10 +102,11 @@ export interface StripeAnnualStatementItem {
 }
 
 export interface StripeAnnualStatementSnapshot {
-  version: 1;
+  version: 2;
   year: number;
   livemode: boolean;
   donor: { key: string; name: string; email: string | null };
+  document: StripeAnnualStatementDocumentEvidence;
   items: StripeAnnualStatementItem[];
   totals: {
     count: number;
@@ -90,12 +118,22 @@ export interface StripeAnnualStatementSnapshot {
   hash: string;
 }
 
+export interface StripeAnnualStatementDocumentEvidence {
+  rendererVersion: typeof STRIPE_ANNUAL_STATEMENT_PDF_VERSION;
+  legalName: string;
+  ein: string;
+  timeZone: string;
+  accentColor: string;
+  logo: { format: PdfBrandingLogo["format"]; hash: string } | null;
+}
+
 export async function buildStripeAnnualStatementSnapshot(input: {
   year: number;
   livemode: boolean;
   donorKey: string;
   donorName: string;
   donorEmail: string | null;
+  document: StripeAnnualStatementDocumentEvidence;
   gifts: StripeAnnualStatementGift[];
 }): Promise<StripeAnnualStatementSnapshot> {
   const items = [...input.gifts]
@@ -133,13 +171,21 @@ export async function buildStripeAnnualStatementSnapshot(input: {
     throw new Error("Stripe annual statement contains a negative annual net amount");
   }
   const canonical = {
-    version: 1 as const,
+    version: 2 as const,
     year: input.year,
     livemode: input.livemode,
     donor: {
       key: input.donorKey.trim(),
       name: input.donorName.trim() || "Donante",
       email: normalizedEmail(input.donorEmail)
+    },
+    document: {
+      rendererVersion: input.document.rendererVersion,
+      legalName: input.document.legalName.trim(),
+      ein: input.document.ein.trim(),
+      timeZone: input.document.timeZone,
+      accentColor: input.document.accentColor.trim().toLowerCase(),
+      logo: input.document.logo
     },
     items,
     totals
@@ -154,12 +200,8 @@ export async function buildStripeAnnualStatementSnapshot(input: {
 
 export interface RenderStripeAnnualStatementPdfInput {
   snapshot: StripeAnnualStatementSnapshot;
-  legalName: string;
-  ein: string;
-  timeZone: string;
   issuedOn: string;
   corrected: boolean;
-  accentColor?: string;
   logo?: PdfBrandingLogo | null;
 }
 
@@ -169,7 +211,7 @@ export async function renderStripeAnnualStatementPdf(
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const accent = accentRgb(input.accentColor);
+  const accent = accentRgb(input.snapshot.document.accentColor);
   const muted = rgb(0.32, 0.36, 0.38);
   let page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   let y = await drawStatementHeader(pdf, page, input, regular, bold, accent);
@@ -186,7 +228,7 @@ export async function renderStripeAnnualStatementPdf(
       });
       y = drawTableHeader(page, bold, 716, accent);
     }
-    const date = formatUsDate(item.settledAt, input.timeZone);
+    const date = formatUsDate(item.settledAt, input.snapshot.document.timeZone);
     page.drawText(date, { x: MARGIN + 4, y, size: 8, font: regular });
     page.drawText(giftTypeLabel(item.giftType), { x: 112, y, size: 8, font: regular });
     page.drawText(frequencyLabel(item.frequency), { x: 176, y, size: 8, font: regular });
@@ -229,7 +271,7 @@ export async function renderStripeAnnualStatementPdf(
     font: regular,
     color: muted
   });
-  page.drawText(`Emitida el ${formatUsDate(input.issuedOn, input.timeZone)}.`, {
+  page.drawText(`Emitida el ${formatUsDate(input.issuedOn, input.snapshot.document.timeZone)}.`, {
     x: MARGIN,
     y: y - 16,
     size: 8.5,
@@ -239,7 +281,7 @@ export async function renderStripeAnnualStatementPdf(
 
   for (const currentPage of pdf.getPages()) {
     currentPage.drawLine({ start: { x: MARGIN, y: 54 }, end: { x: PAGE_WIDTH - MARGIN, y: 54 }, thickness: 0.5, color: rgb(0.8, 0.82, 0.83) });
-    currentPage.drawText(input.legalName, { x: MARGIN, y: 40, size: 7.5, font: regular, color: muted });
+    drawTextSafe(currentPage, input.snapshot.document.legalName, { x: MARGIN, y: 40, size: 7.5, font: regular, color: muted });
   }
   return pdf.save();
 }
@@ -352,11 +394,8 @@ export async function sendStripeAnnualStatements(
   actorId: string | null,
   request: StripeAnnualStatementSendRequest = {}
 ): Promise<StripeAnnualStatementSendResult> {
-  const window = stripeUsYearWindow(env, year);
-  const configuration = resolveStripeConfiguration(env);
-  if (configuration.livemode !== livemode) {
-    throw new StripeAnnualStatementConfigurationError("El ambiente solicitado no coincide con la configuración de Stripe.");
-  }
+  const context = await loadStripeAnnualStatementContext(env, repo, year, livemode);
+  const { window } = context;
   const single = typeof request.donor === "string";
   const candidates = await repo.listStripeAnnualStatementDonorTargets(window, {
     livemode,
@@ -385,9 +424,6 @@ export async function sendStripeAnnualStatements(
     nextCursor: hasMore ? targets.at(-1)?.donorKey ?? null : null
   };
   const now = request.now ?? new Date().toISOString();
-  const branding = await loadEmailBranding(repo, env);
-  const logo = await loadPdfBrandingLogo(env);
-  const email = new EmailService(env, undefined, branding);
 
   for (const target of targets) {
     result.processed += 1;
@@ -399,20 +435,34 @@ export async function sendStripeAnnualStatements(
     let claimId: string | null = null;
     let providerDispatchStarted = false;
     try {
-      const snapshot = await snapshotForTarget(repo, window, livemode, target, year);
-      const delivery = await repo.reserveStripeAnnualStatementDelivery({
-        id: newId("stripe_annual_statement"),
-        year,
-        livemode,
-        donorKey: snapshot.donor.key,
-        donorName: snapshot.donor.name,
-        donorEmail: snapshot.donor.email,
-        snapshotHash: snapshot.hash,
-        snapshotJson: snapshot.canonicalJson,
-        now
-      });
+      const snapshot = await snapshotForTarget(repo, window, livemode, target, year, context.document);
+      let delivery;
+      try {
+        delivery = await repo.reserveStripeAnnualStatementDelivery({
+          id: newId("stripe_annual_statement"),
+          year,
+          livemode,
+          donorKey: snapshot.donor.key,
+          donorName: snapshot.donor.name,
+          donorEmail: snapshot.donor.email,
+          snapshotHash: snapshot.hash,
+          snapshotJson: snapshot.canonicalJson,
+          now
+        });
+      } catch (error) {
+        if (error instanceof StripeAnnualStatementReservationFenceError) {
+          if (error.status === "REVIEW") result.review += 1;
+          else result.skipped += 1;
+          continue;
+        }
+        throw error;
+      }
       deliveryId = delivery.id;
-      if (delivery.status === "SENT" || delivery.status === "REVIEW" || (delivery.status === "FAILED" && delivery.retry_safe === 0)) {
+      if (delivery.status === "REVIEW") {
+        result.review += 1;
+        continue;
+      }
+      if (delivery.status === "SENT" || (delivery.status === "FAILED" && delivery.retry_safe === 0)) {
         result.skipped += 1;
         continue;
       }
@@ -422,7 +472,22 @@ export async function sendStripeAnnualStatements(
         result.skipped += 1;
         continue;
       }
-      const rechecked = await snapshotForTarget(repo, window, livemode, target, year);
+      const corrected = Boolean(claim.supersedes_delivery_id);
+      const pdfBytes = await renderStripeAnnualStatementPdf({
+        snapshot,
+        issuedOn: claim.created_at,
+        corrected,
+        logo: context.logo
+      });
+      const finalContext = await loadStripeAnnualStatementContext(env, repo, year, livemode);
+      const rechecked = await snapshotForTarget(
+        repo,
+        finalContext.window,
+        livemode,
+        target,
+        year,
+        finalContext.document
+      );
       if (rechecked.hash !== claim.snapshot_hash || rechecked.canonicalJson !== claim.snapshot_json) {
         await repo.finalizeStripeAnnualStatementDelivery({
           id: claim.id,
@@ -433,30 +498,19 @@ export async function sendStripeAnnualStatements(
           now
         });
         result.failed += 1;
-        await auditStatement(repo, actorId, claim.id, "FAILED", claim.revision, Boolean(claim.supersedes_delivery_id));
+        await auditStatement(repo, actorId, claim.id, "FAILED", claim.revision, corrected);
         continue;
       }
-      const corrected = Boolean(claim.supersedes_delivery_id);
-      const pdfBytes = await renderStripeAnnualStatementPdf({
-        snapshot: rechecked,
-        legalName: configuration.legalName,
-        ein: configuration.ein,
-        timeZone: window.timeZone,
-        issuedOn: now,
-        corrected,
-        accentColor: branding.brandColor,
-        logo
-      });
       const content = stripeAnnualStatementEmailContent({
         donorName: rechecked.donor.name,
         year,
         count: rechecked.totals.count,
         netTotalCents: rechecked.totals.netAmountCents,
         corrected,
-        branding
+        branding: finalContext.branding
       });
-      const sent = await email.sendStripeAnnualStatement({
-        toEmail: target.donorEmail,
+      const sent = await new EmailService(env, undefined, finalContext.branding).sendStripeAnnualStatement({
+        toEmail: rechecked.donor.email!,
         subject: content.subject,
         text: content.text,
         html: content.html,
@@ -486,7 +540,11 @@ export async function sendStripeAnnualStatements(
         throw new Error("Stripe annual statement finalization claim was lost");
       }
       result.sent += 1;
-      await auditStatement(repo, actorId, claim.id, "SENT", claim.revision, corrected);
+      try {
+        await auditStatement(repo, actorId, claim.id, "SENT", claim.revision, corrected);
+      } catch (error) {
+        logWorkerError(env, "stripe_annual_statement_audit_failed", error);
+      }
     } catch (error) {
       const classified = classifyEmailDispatchError(error, providerDispatchStarted);
       const outcome = classified.outcomeClass === "UNKNOWN" ? "REVIEW" : "FAILED";
@@ -513,7 +571,8 @@ async function snapshotForTarget(
   window: StripeUsYearWindow,
   livemode: boolean,
   target: StripeAnnualStatementDonorTarget,
-  year: number
+  year: number,
+  document: StripeAnnualStatementDocumentEvidence
 ): Promise<StripeAnnualStatementSnapshot> {
   const gifts = await repo.listStripeAnnualStatementDonorGifts(window, livemode, target.donorKey);
   const first = [...gifts]
@@ -527,8 +586,44 @@ async function snapshotForTarget(
     donorKey,
     donorName,
     donorEmail,
+    document,
     gifts
   });
+}
+
+async function loadStripeAnnualStatementContext(
+  env: Env,
+  repo: Repository,
+  year: number,
+  livemode: boolean
+): Promise<{
+  window: StripeUsYearWindow;
+  branding: Awaited<ReturnType<typeof loadEmailBranding>>;
+  logo: PdfBrandingLogo | null;
+  document: StripeAnnualStatementDocumentEvidence;
+}> {
+  const window = stripeUsYearWindow(env, year);
+  const configuration = resolveStripeConfiguration(env);
+  if (configuration.livemode !== livemode) {
+    throw new StripeAnnualStatementConfigurationError("El ambiente solicitado no coincide con la configuración de Stripe.");
+  }
+  const [branding, logo] = await Promise.all([
+    loadEmailBranding(repo, env),
+    loadPdfBrandingLogo(env)
+  ]);
+  return {
+    window,
+    branding,
+    logo,
+    document: {
+      rendererVersion: STRIPE_ANNUAL_STATEMENT_PDF_VERSION,
+      legalName: configuration.legalName,
+      ein: configuration.ein,
+      timeZone: window.timeZone,
+      accentColor: branding.brandColor,
+      logo: logo ? { format: logo.format, hash: await sha256Hex(logo.bytes) } : null
+    }
+  };
 }
 
 async function auditStatement(
@@ -581,17 +676,17 @@ async function drawStatementHeader(
     height: logoHeight,
     centered: true
   }, input.logo);
-  drawCentered(page, input.legalName, 706, 11, bold);
-  drawCentered(page, `EIN: ${input.ein}`, 691, 9, regular);
+  drawCentered(page, input.snapshot.document.legalName, 706, 11, bold);
+  drawCentered(page, `EIN: ${input.snapshot.document.ein}`, 691, 9, regular);
   drawCentered(page, "Constancia anual de donaciones — EE. UU.", 660, 17, bold, accent);
   drawCentered(page, `Año calendario ${input.snapshot.year}`, 640, 11, bold);
   if (input.corrected) {
     drawCentered(page, "CONSTANCIA CORREGIDA", 619, 10, bold, rgb(0.65, 0.2, 0.12));
   }
   const identityY = input.corrected ? 588 : 602;
-  page.drawText(`Donante: ${input.snapshot.donor.name}`, { x: MARGIN, y: identityY, size: 9.5, font: regular });
+  drawTextSafe(page, `Donante: ${input.snapshot.donor.name}`, { x: MARGIN, y: identityY, size: 9.5, font: regular });
   if (input.snapshot.donor.email) {
-    page.drawText(`Correo: ${input.snapshot.donor.email}`, { x: MARGIN, y: identityY - 15, size: 9.5, font: regular });
+    drawTextSafe(page, `Correo: ${input.snapshot.donor.email}`, { x: MARGIN, y: identityY - 15, size: 9.5, font: regular });
   }
   return drawTableHeader(page, bold, identityY - 44, accent);
 }
@@ -615,7 +710,8 @@ function drawCentered(
   font: PDFFont,
   color = rgb(0, 0, 0)
 ): void {
-  page.drawText(text, { x: (PAGE_WIDTH - font.widthOfTextAtSize(text, size)) / 2, y, size, font, color });
+  const safeText = pdfSafeText(text, font);
+  page.drawText(safeText, { x: (PAGE_WIDTH - font.widthOfTextAtSize(safeText, size)) / 2, y, size, font, color });
 }
 
 function drawRight(
@@ -627,7 +723,8 @@ function drawRight(
   font: PDFFont,
   color = rgb(0, 0, 0)
 ): void {
-  page.drawText(text, { x: right - font.widthOfTextAtSize(text, size), y, size, font, color });
+  const safeText = pdfSafeText(text, font);
+  page.drawText(safeText, { x: right - font.widthOfTextAtSize(safeText, size), y, size, font, color });
 }
 
 function accentRgb(value: string | undefined): ReturnType<typeof rgb> {

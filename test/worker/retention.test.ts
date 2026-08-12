@@ -345,6 +345,11 @@ class InMemoryRetentionD1 {
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly fiscalCorrections: Array<Record<string, unknown>> = [];
+  readonly stripeCheckoutSessions: Array<Record<string, unknown>> = [];
+  readonly stripeWebhookEvents: Array<Record<string, unknown>> = [];
+  readonly stripeGifts: Array<Record<string, unknown>> = [];
+  readonly stripeAcknowledgmentDeliveries: Array<Record<string, unknown>> = [];
+  readonly stripeAnnualStatementDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly auditLogs: Array<Record<string, unknown>> = [];
   readonly contingencyPeriods: Array<Record<string, unknown>> = [];
@@ -364,6 +369,11 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
     if (sql.includes("FROM fiscal_corrections")) return this.fiscalCorrections;
+    if (sql.includes("FROM stripe_checkout_sessions")) return this.stripeCheckoutSessions;
+    if (sql.includes("FROM stripe_webhook_events")) return this.stripeWebhookEvents;
+    if (sql.includes("FROM stripe_gifts")) return this.stripeGifts;
+    if (sql.includes("FROM stripe_acknowledgment_deliveries")) return this.stripeAcknowledgmentDeliveries;
+    if (sql.includes("FROM stripe_annual_statement_deliveries")) return this.stripeAnnualStatementDeliveries;
     if (sql.includes("FROM wompi_events")) return this.wompiEvents;
     if (sql.includes("FROM audit_logs")) return this.auditLogs;
     if (sql.includes("FROM contingency_periods")) return this.contingencyPeriods;
@@ -662,6 +672,42 @@ describe("runRetentionExport", () => {
 
     // manifest must be the last object written
     expect(archive.putCalls.at(-1)?.key).toBe(manifestKey);
+  });
+
+  it("snapshots every Stripe source table and publishes dependency-safe restore and cleanup phases", async () => {
+    const db = new InMemoryRetentionD1();
+    const oldCreatedAt = "2025-01-10T12:00:00.000Z";
+    db.stripeCheckoutSessions.push(row({ id: "checkout_1", created_at: oldCreatedAt, status: "COMPLETE" }));
+    db.stripeWebhookEvents.push(row({ id: "evt_1", created_at: undefined, received_at: oldCreatedAt, status: "PROCESSED" }));
+    db.stripeGifts.push(row({ id: "gift_1", created_at: oldCreatedAt, checkout_id: "checkout_1", refunded_amount_cents: 250 }));
+    db.stripeAcknowledgmentDeliveries.push(row({ id: "ack_1", created_at: oldCreatedAt, gift_id: "gift_1", status: "SENT" }));
+    db.stripeAnnualStatementDeliveries.push(row({ id: "annual_1", created_at: oldCreatedAt, status: "SENT", snapshot_hash: "a".repeat(64) }));
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    const stripeTables = [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ];
+    const manifest = JSON.parse(new TextDecoder().decode(
+      archive.objects.get("retention/2026/2026-06/manifest.json")!.body
+    )) as { tables: Record<string, { rowCount: number; sha256: string }> };
+    for (const table of stripeTables) {
+      const body = archive.objects.get(`retention/2026/2026-06/${table}.ndjson`)!.body;
+      expect(manifest.tables[table]).toEqual({ rowCount: 1, sha256: await sha256Hex(body) });
+      expect(JSON.parse(new TextDecoder().decode(body).trim())).toMatchObject({ id: expect.any(String) });
+    }
+
+    const restorePhase = (table: string) => RETENTION_FOREIGN_KEY_PROTOCOL.restorePhases.findIndex((phase) => phase.tables.includes(table));
+    const deletePhase = (table: string) => RETENTION_FOREIGN_KEY_PROTOCOL.deletePhases.findIndex((phase) => phase.tables.includes(table));
+    expect(restorePhase("stripe_gifts")).toBeGreaterThan(restorePhase("stripe_checkout_sessions"));
+    expect(restorePhase("stripe_acknowledgment_deliveries")).toBeGreaterThan(restorePhase("stripe_gifts"));
+    expect(deletePhase("stripe_acknowledgment_deliveries")).toBeLessThan(deletePhase("stripe_gifts"));
+    expect(deletePhase("stripe_gifts")).toBeLessThan(deletePhase("stripe_checkout_sessions"));
   });
 
   it("retains Wompi issuance lifecycle evidence with a valid manifest count and digest", async () => {
@@ -1130,11 +1176,13 @@ describe("runRetentionExport", () => {
 
     expect(result.status).toBe("completed");
     const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
-    expect(finalTablePuts).toHaveLength(12);
+    // Six windowed tables, nine full snapshots (including five Stripe source
+    // tables), plus the fiscal-correction and document-sequence overlays.
+    expect(finalTablePuts).toHaveLength(17);
     expect(finalTablePuts.every((call) => call.streamed)).toBe(true);
-    expect(archive.multipartCreateCalls).toHaveLength(12);
-    expect(archive.multipartCompleteCalls).toHaveLength(12);
-    expect(archive.multipartPartCalls).toHaveLength(12);
+    expect(archive.multipartCreateCalls).toHaveLength(17);
+    expect(archive.multipartCompleteCalls).toHaveLength(17);
+    expect(archive.multipartPartCalls).toHaveLength(17);
     expect(archive.multipartPartCalls.every((call) => call.bytes.byteLength <= 5 * 1024 * 1024)).toBe(true);
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     const bytes = archive.objects.get(key)!.body;
@@ -1443,6 +1491,17 @@ describe("retention restore guidance", () => {
       "`contingency_periods` ↔ `dte_events` ↔ `dte_documents`"
     );
     expect(guidance).not.toContain("Foreign keys matter for ordering");
+    for (const table of [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ]) {
+      expect(guidance).toContain(`${table}.ndjson`);
+    }
+    expect(guidance).toContain("latest verified Stripe snapshots");
+    expect(guidance).toContain("refund");
   });
 
   it("applies the latest fiscal correction snapshot last and idempotently", () => {

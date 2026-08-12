@@ -12,12 +12,14 @@ installWorkerFetchGlobals();
 
 const origin = "https://example.org";
 const webhookSecret = "whsec_mock";
+let nextStripeEventCreated = Math.floor(Date.now() / 1000);
 
 describe("Stripe signed webhooks", () => {
   let database: ReturnType<typeof migratedDatabase>;
   let workerEnv: Env;
 
   beforeEach(() => {
+    nextStripeEventCreated = Math.floor(Date.now() / 1000);
     database = migratedDatabase();
     workerEnv = {
       ...env(new InMemoryD1()),
@@ -293,6 +295,109 @@ describe("Stripe signed webhooks", () => {
     expect((await sendSignedWebhook(workerEnv, expired)).status).toBe(200);
     expect(checkoutRow(database, expiringCheckout.sessionId).status).toBe("EXPIRED");
   });
+
+  it("keeps Checkout state monotonic for older and equal-timestamp deliveries", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "aeb1e80f-ef55-4681-b45b-cc60164e485a",
+      amount: 40,
+      frequency: "once"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const failed = stripeEvent("evt_checkout_failed_newer", "checkout.session.async_payment_failed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 4000,
+      frequency: "once",
+      paymentIntentId: "pi_ordered_fixture",
+      paid: false
+    }), false, 2_000_000_200);
+    const olderCompleted = stripeEvent("evt_checkout_completed_older", "checkout.session.completed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 4000,
+      frequency: "once",
+      paymentIntentId: "pi_ordered_fixture",
+      paid: false
+    }), false, 2_000_000_100);
+    const equalCompleted = stripeEvent("evt_checkout_completed_equal", "checkout.session.completed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 4000,
+      frequency: "once",
+      paymentIntentId: "pi_ordered_fixture",
+      paid: false
+    }), false, 2_000_000_200);
+
+    expect((await sendSignedWebhook(workerEnv, failed)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, olderCompleted)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, equalCompleted)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      status: "FAILED",
+      payment_status: "UNPAID",
+      checkout_event_created: 2_000_000_200,
+      checkout_event_id: "evt_checkout_failed_newer"
+    });
+
+    const publicStatus = await worker.fetch(
+      new Request(`${origin}/api/donations/stripe/session/${checkout.sessionId}`),
+      workerEnv
+    );
+    expect(publicStatus.status).toBe(200);
+    await expect(publicStatus.json()).resolves.toMatchObject({ status: "FAILED" });
+  });
+
+  it("keeps monthly state monotonic while still recording a delayed settled gift", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "64dcfbc5-7dce-4789-90cf-a27b3f7137d8",
+      amount: 30,
+      frequency: "monthly"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const newerFailure = stripeEvent("evt_invoice_failed_newer", "invoice.payment_failed", invoice({
+      id: "in_failed_newer",
+      checkoutId: row.id,
+      subscriptionId: "sub_fixture",
+      amountCents: 3000,
+      paid: false
+    }), false, 2_000_000_300);
+    const olderPaid = stripeEvent("evt_invoice_paid_older", "invoice.paid", invoice({
+      id: "in_paid_older",
+      checkoutId: row.id,
+      subscriptionId: "sub_fixture",
+      amountCents: 3000
+    }), false, 2_000_000_200);
+    const equalPaid = stripeEvent("evt_invoice_paid_equal", "invoice.paid", invoice({
+      id: "in_paid_equal",
+      checkoutId: row.id,
+      subscriptionId: "sub_fixture",
+      amountCents: 3000
+    }), false, 2_000_000_300);
+    const equalFailure = stripeEvent("evt_invoice_failed_equal", "invoice.payment_failed", invoice({
+      id: "in_failed_equal",
+      checkoutId: row.id,
+      subscriptionId: "sub_fixture",
+      amountCents: 3000,
+      paid: false
+    }), false, 2_000_000_300);
+
+    expect((await sendSignedWebhook(workerEnv, newerFailure)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      subscription_status: "PAST_DUE",
+      subscription_event_created: 2_000_000_300
+    });
+    expect((await sendSignedWebhook(workerEnv, olderPaid)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId).subscription_status).toBe("PAST_DUE");
+    expect(database.prepare("SELECT source_id FROM stripe_gifts ORDER BY source_id").all())
+      .toEqual([{ source_id: "in_paid_older" }]);
+
+    expect((await sendSignedWebhook(workerEnv, equalPaid)).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, equalFailure)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      subscription_status: "ACTIVE",
+      subscription_event_created: 2_000_000_300,
+      subscription_event_id: "evt_invoice_paid_equal"
+    });
+  });
 });
 
 async function createCheckout(
@@ -333,13 +438,14 @@ function stripeEvent(
   id: string,
   type: string,
   object: Record<string, unknown>,
-  livemode = false
+  livemode = false,
+  created = nextStripeEventCreated++
 ): string {
   return JSON.stringify({
     id,
     object: "event",
     api_version: STRIPE_API_VERSION,
-    created: Math.floor(Date.now() / 1000),
+    created,
     data: { object },
     livemode,
     pending_webhooks: 1,

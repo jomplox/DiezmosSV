@@ -265,6 +265,15 @@ export interface StripeAnnualStatementDeliveryRecord {
   updated_at: string;
 }
 
+export class StripeAnnualStatementReservationFenceError extends Error {
+  constructor(readonly status: StripeAnnualStatementDeliveryRecord["status"]) {
+    super(status === "REVIEW"
+      ? "Stripe annual statement has an unresolved review for this donor and year"
+      : "Stripe annual statement already has an active delivery for this donor and year");
+    this.name = "StripeAnnualStatementReservationFenceError";
+  }
+}
+
 export async function reserveStripeAnnualStatementDelivery(
   db: D1Database,
   input: {
@@ -294,7 +303,13 @@ export async function reserveStripeAnnualStatementDelivery(
             ),
             'PENDING', 0, ?, ?
        FROM stripe_annual_statement_deliveries
-      WHERE year = ? AND livemode = ? AND donor_key = ?`
+      WHERE year = ? AND livemode = ? AND donor_key = ?
+     HAVING NOT EXISTS (
+       SELECT 1 FROM stripe_annual_statement_deliveries AS fence
+        WHERE fence.year = ? AND fence.livemode = ? AND fence.donor_key = ?
+          AND fence.snapshot_hash <> ?
+          AND fence.status IN ('PENDING', 'PROCESSING', 'REVIEW')
+     )`
   ).bind(
     input.id,
     input.year,
@@ -311,7 +326,11 @@ export async function reserveStripeAnnualStatementDelivery(
     input.now,
     input.year,
     input.livemode ? 1 : 0,
-    input.donorKey
+    input.donorKey,
+    input.year,
+    input.livemode ? 1 : 0,
+    input.donorKey,
+    input.snapshotHash
   ).run();
   const row = await db.prepare(
     `SELECT * FROM stripe_annual_statement_deliveries
@@ -322,7 +341,19 @@ export async function reserveStripeAnnualStatementDelivery(
     input.donorKey,
     input.snapshotHash
   ).first<StripeAnnualStatementDeliveryRecord>();
-  if (!row) throw new Error("Stripe annual statement reservation could not be read");
+  if (!row) {
+    const fence = await db.prepare(
+      `SELECT status FROM stripe_annual_statement_deliveries
+        WHERE year = ? AND livemode = ? AND donor_key = ?
+          AND status IN ('PENDING', 'PROCESSING', 'REVIEW')
+        ORDER BY CASE status WHEN 'REVIEW' THEN 0 WHEN 'PROCESSING' THEN 1 ELSE 2 END,
+                 revision DESC
+        LIMIT 1`
+    ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
+      .first<Pick<StripeAnnualStatementDeliveryRecord, "status">>();
+    if (fence) throw new StripeAnnualStatementReservationFenceError(fence.status);
+    throw new Error("Stripe annual statement reservation could not be read");
+  }
   if (
     row.year !== input.year
     || row.livemode !== (input.livemode ? 1 : 0)
@@ -360,6 +391,13 @@ export async function claimStripeAnnualStatementDelivery(
         status = 'PENDING'
         OR (status = 'FAILED' AND retry_safe = 1)
         OR (status = 'PROCESSING' AND dispatch_started_at IS NULL AND updated_at < ?)
+      ) AND NOT EXISTS (
+        SELECT 1 FROM stripe_annual_statement_deliveries AS fence
+         WHERE fence.year = stripe_annual_statement_deliveries.year
+           AND fence.livemode = stripe_annual_statement_deliveries.livemode
+           AND fence.donor_key = stripe_annual_statement_deliveries.donor_key
+           AND fence.id <> stripe_annual_statement_deliveries.id
+           AND fence.status IN ('PROCESSING', 'REVIEW')
       )
       RETURNING *`
   ).bind(input.claimId, input.now, input.id, staleBefore)

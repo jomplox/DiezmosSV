@@ -77,6 +77,10 @@ import {
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const donationSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donation.ts"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
+const stripeDonationFormSource = readFileSync(resolve(import.meta.dirname, "../../src/client/stripeDonationForm.tsx"), "utf8");
+const stripeResultPageSource = readFileSync(resolve(import.meta.dirname, "../../src/client/stripeResultPage.tsx"), "utf8");
+const stripeAcknowledgmentSource = readFileSync(resolve(import.meta.dirname, "../../src/worker/services/stripeAcknowledgment.ts"), "utf8");
+const stripeAnnualStatementSource = readFileSync(resolve(import.meta.dirname, "../../src/worker/services/stripeAnnualStatement.ts"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
 
@@ -378,9 +382,52 @@ describe("donar step labels", () => {
   // MH catalog labels (CAT-017 "forma de pago", "Cuentas por pagar del receptor") and
   // Wompi API field names (EnlacePago, formaPago) are external vocabulary and exempt —
   // neither appears in this file. See AGENTS.md → Donor-facing language.
-  it("keeps transactional vocabulary out of the donor wizard copy", () => {
-    for (const forbidden of ["al pagar", "Pagar", "su pago", "Su pago", "el pago", "comprar", "compra"]) {
-      expect(donarSource).not.toContain(forbidden);
+  it("keeps transactional vocabulary out of every donor-facing Stripe and wizard surface", () => {
+    const donorFacingSources = [
+      ["donation helpers", donationSource],
+      ["donor wizard", donarSource],
+      ["Stripe embedded form", stripeDonationFormSource],
+      ["Stripe result page", stripeResultPageSource],
+      ["Stripe immediate acknowledgment", stripeAcknowledgmentSource],
+      ["Stripe annual statement", stripeAnnualStatementSource]
+    ] as const;
+    const forbiddenTerms = [
+      "pagar",
+      "pago",
+      "comprar",
+      "compra",
+      "cliente",
+      "precio",
+      "costo",
+      "checkout",
+      "carrito",
+      "orden"
+    ];
+
+    for (const [name, source] of donorFacingSources) {
+      // Technical comments may correctly discuss a provider checkout. Strip them
+      // so the guard targets executable strings/JSX that can reach a donor.
+      let executableSource = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+      if (name === "donation helpers") {
+        // The helper also owns provider-only routing identifiers. Remove only the
+        // exact technical literals so an accidental donor-visible "checkout" copy
+        // elsewhere in the same module still trips this guard.
+        for (const literal of [
+          "../shared/checkout",
+          "/api/donations/stripe/checkout",
+          "checkout.stripe.com",
+          "checkout.stripe.test",
+          '"checkout"'
+        ]) {
+          executableSource = executableSource.replaceAll(literal, "technical-provider-token");
+        }
+      }
+      for (const forbidden of forbiddenTerms) {
+        expect(
+          executableSource,
+          `${name} contains donor-facing transactional vocabulary: ${forbidden}`
+        ).not.toMatch(new RegExp(`\\b${forbidden}\\b`, "iu"));
+      }
     }
   });
 
@@ -561,65 +608,6 @@ describe("donar premint (background draft + datos completion)", () => {
     expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeGreaterThan(0);
     expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThan(60 * 60 * 1000);
     expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThanOrEqual(45 * 60 * 1000);
-  });
-});
-
-describe("donar premint source contract", () => {
-  it("mints the draft link in the background on the SV Paso 1→2 transition", () => {
-    // The background mint fires inside continueFromMonto (the else / SV branch), posting
-    // only the draft body, and must NOT block the step change.
-    expect(donarSource).toContain("mintDraftIntent(");
-    expect(donarSource).toContain("donationDraftBody(");
-    // Fire-and-forget: no await on the draft create, errors swallowed.
-    expect(donarSource).toContain("void donarApi");
-    expect(donarSource).toContain("setDraftIntent(");
-    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) may reuse the
-    // draft already held only while it is comfortably inside Wompi's validity window —
-    // the draft records its mint time so draftMatchesForm can age it out.
-    expect(donarSource).toContain("mintedAt: Date.now()");
-    expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
-  });
-
-  it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
-    // Fast path: a matching draft → datos call, receive the server-held link only
-    // after fiscal data commits, then advance immediately.
-    expect(donarSource).toContain("draftMatchesForm(draftIntent, form)");
-    expect(donarSource).toContain("donarDatosPath(draftIntent.intent.intentId)");
-    expect(donarSource).toContain("donationDatosBody(form)");
-    expect(donarSource).toContain("created = await donarApi<DonarIntent>");
-    // Fallback: no usable draft → the existing full-body POST still works.
-    expect(donarSource).toContain("donationIntentBody(form)");
-  });
-
-  it("keeps the one-time datos capability in memory and sends it only as a header", () => {
-    expect(donarSource).toContain("if (!created.datosToken)");
-    expect(donarSource).toContain('"X-Donation-Datos-Token": draftIntent.intent.datosToken ?? ""');
-    expect(donarSource).not.toMatch(/localStorage[^\n]*datosToken|sessionStorage[^\n]*datosToken/);
-    expect(donarSource).not.toMatch(/urlEnlace[^\n]*datosToken|datosToken[^\n]*urlEnlace/);
-  });
-
-  it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
-    // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
-    // Editar from Paso 3 and switching doors abandon it. A stale link simply expires
-    // on the sweep — there is no new deactivation call in the client.
-    expect(donarSource).toContain("abandonDraftIntent()");
-    expect(donarSource).toContain("draftGenerationRef.current += 1");
-    expect(donarSource).not.toContain("deactivate");
-  });
-
-  it("ignores an abandoned in-flight background draft via a generation guard", () => {
-    // A fire-and-forget mint can resolve AFTER the donor abandoned it (changed door,
-    // Editar). The mint captures a generation id; abandonDraftIntent bumps the ref, so
-    // the resolve path drops the stale response instead of repopulating draftIntent.
-    expect(donarSource).toContain("const generation = draftGenerationRef.current + 1");
-    expect(donarSource).toContain("if (draftGenerationRef.current !== generation)");
-  });
-
-  it("keeps the Paso 2 submit copy exactly as before", () => {
-    // The premint must not touch any donor-facing copy.
-    expect(donarSource).toContain("Preparando su entrega…");
-    expect(donarSource).toContain("Continuar con su diezmo");
-    expect(donarSource).toContain("Continuar con su ofrenda");
   });
 });
 

@@ -74,6 +74,8 @@ async function processCheckoutSessionEvent(
       ? "FAILED"
       : "COMPLETE";
   const completedAt = status === "COMPLETE" ? eventTime(event) : null;
+  const eventCreated = providerEventCreated(event);
+  const eventId = providerEventId(event);
   const updated = await repo.updateStripeCheckoutFromEvent({
     stripeSessionId: sessionId,
     status,
@@ -85,6 +87,16 @@ async function processCheckoutSessionEvent(
     donorName,
     donorEmail,
     completedAt,
+    eventCreated,
+    eventRank: paymentStatus === "PAID"
+      ? 4
+      : event.type === "checkout.session.async_payment_failed"
+        ? 3
+        : event.type === "checkout.session.expired"
+          ? 2
+          : 1,
+    eventId,
+    subscriptionEventRank: checkout.frequency === "MONTHLY" && paymentStatus === "PAID" ? 2 : undefined,
     now
   });
   if (!updated) throw new StripeWebhookEventError("checkout_update_failed");
@@ -144,6 +156,9 @@ async function processInvoicePaidEvent(
     donorEmail: donorEmailValue(invoice.customer_email),
     settled: true,
     completedAt: settledAt,
+    eventCreated: providerEventCreated(event),
+    eventRank: 2,
+    eventId: providerEventId(event),
     now
   });
   if (!updated) throw new StripeWebhookEventError("invoice_checkout_conflict");
@@ -190,6 +205,9 @@ async function processInvoiceFailedEvent(
     donorEmail: donorEmailValue(invoice.customer_email),
     settled: false,
     completedAt: null,
+    eventCreated: providerEventCreated(event),
+    eventRank: 1,
+    eventId: providerEventId(event),
     now
   });
   if (!updated) throw new StripeWebhookEventError("invoice_checkout_conflict");
@@ -258,6 +276,9 @@ async function processSubscriptionDeletedEvent(
   if (!await repo.updateStripeSubscriptionStatus({
     stripeSubscriptionId: subscriptionId,
     status: "CANCELED",
+    eventCreated: providerEventCreated(event),
+    eventRank: 3,
+    eventId: providerEventId(event),
     now
   })) {
     throw new StripeWebhookEventError("subscription_update_failed");
@@ -362,6 +383,17 @@ function invoicePaymentIntentId(invoice: Record<string, unknown>): string | null
 
 function eventTime(event: Stripe.Event): string {
   return epochIso(event.created) ?? new Date(0).toISOString();
+}
+
+function providerEventCreated(event: Stripe.Event): number {
+  if (!Number.isInteger(event.created) || event.created <= 0) {
+    throw new StripeWebhookEventError("event_created_invalid");
+  }
+  return event.created;
+}
+
+function providerEventId(event: Stripe.Event): string {
+  return stripeId(event.id, "evt_");
 }
 
 function epochIso(value: unknown): string | null {

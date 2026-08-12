@@ -200,7 +200,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0031)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0035)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -699,6 +699,12 @@ selection and verifies it again through signed Stripe webhooks; the result page 
 of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
 **never touches Wompi, `donation_intents`, or the CDE pipeline**.
 
+The SV wizard does not mint a Wompi link on Step 1, while the donor's residence is still unknown. If an
+SV-path donor later selects Estados Unidos, the safety route preserves the truthful amount and Diezmo/Ofrenda
+choice, resets frequency to Única, and returns to an explicit U.S. Step 1. No Stripe Session exists until the
+donor reviews and confirms that U.S. step, so the correction cannot leave both a usable Wompi rail and a Stripe
+rail active for the same gift.
+
 The Worker creates an idempotent Embedded Checkout Session using a dedicated
 `payment_method_configuration`; browser code never sends `payment_method_types`. Stripe Checkout therefore
 shows every enabled method that is eligible for the donor, device, USD amount, and one-time/monthly
@@ -711,6 +717,9 @@ gift, and Billing Portal provides the recurring-management path. The app sends a
 and no-goods-or-services statement through its durable email fence. Its **Constancia anual de donaciones —
 EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
 `STRIPE_US_TIME_ZONE`; it is never a Salvadoran CDE or a Salvadoran annual dossier.
+
+The pure Stripe.js loader is invoked only after a real, non-mock U.S. Session reaches the embedded form.
+The chooser, SV/Wompi path, local mock, result page, and admin do not request `js.stripe.com`.
 
 Both test and live setup are owner-only and runtime-only. No Stripe secret or configuration ID is
 baked into the client; only the environment-matched publishable key is returned with a created Session.
@@ -962,7 +971,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0031)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0035)</strong></summary>
 
 <br/>
 
@@ -979,6 +988,11 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `document_sequences` | Control-number counters per environment/prefix. Advanced by the issuance pipeline and, for fiscal corrections, by a database trigger that increments the counter inside the same statement transaction as the reservation and aborts unless it moves exactly one row. |
 | `email_deliveries` | Claimed email attempts, dispatch/outcome evidence, provider IDs, and PDF/JSON evidence hashes. |
 | `operational_alert_deliveries` | Incident- and recipient-scoped claims for alert email delivery. |
+| `stripe_checkout_sessions` | U.S.-lane Checkout intent and sanitized provider state, including independent monotonic checkout/subscription chronology. |
+| `stripe_webhook_events` | Signed Stripe event replay fence and sanitized processing outcome; raw webhook bodies are never retained. |
+| `stripe_gifts` | Settled U.S. gift source of truth, including donor-selected type and durable refund/net state. |
+| `stripe_acknowledgment_deliveries` | Durable immediate 501(c)(3) acknowledgment claims and provider-outcome evidence. |
+| `stripe_annual_statement_deliveries` | Immutable U.S. annual statement snapshots, revision lineage, claims, and dispatch outcomes. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |

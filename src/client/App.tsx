@@ -154,10 +154,6 @@ interface StripeStatementBulkTraversal extends StripeStatementBulkRequest {
   hasMore: boolean;
 }
 
-interface RunActionOwner {
-  token: symbol;
-}
-
 interface RunActionControl {
   isOwner: () => boolean;
   commit: (operation: () => void) => boolean;
@@ -321,7 +317,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     return stored ? (JSON.parse(stored) as User) : null;
   });
   const accountStateGuardRef = useRef(new AccountStateGuard());
-  const runActionOwnerRef = useRef<RunActionOwner | null>(null);
+  const runActionOwnersRef = useRef(new Map<string, symbol>());
+  const runActionBusyOwnerRef = useRef<symbol | null>(null);
   const resendRequestIds = useRef(new Map<string, string>());
   const fiscalCorrectionSubmissions = useRef(
     new Map<string, FiscalCorrectionPendingSubmission>()
@@ -367,6 +364,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   const [authNotice, setAuthNotice] = useState("");
   const [authBootstrapStatus, setAuthBootstrapStatus] = useState<AuthBootstrapStatus | null>(null);
   const [busy, setBusy] = useState("");
+  const [annualReportAction, setAnnualReportAction] = useState("");
   const [now, setNow] = useState(() => new Date());
   const [pendingInvalidationId, setPendingInvalidationId] = useState<string | null>(null);
   const [invalidationForm, setInvalidationForm] = useState<InvalidationFormInput>(defaultInvalidationForm);
@@ -476,7 +474,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     [view, preCdeFailures, debouncedQuery]
   );
   const visibleNavItems = navItems.filter((item) => !item.minRole || can(user, item.minRole));
-  const annualReportBusy = busy.startsWith("certificates-") || busy.startsWith("stripe-statements-");
+  const annualReportBusy = annualReportAction !== "";
 
   useEffect(() => {
     const interval = window.setInterval(() => setNow(new Date()), 60_000);
@@ -508,7 +506,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     stripeStatementSearchInputGenerationRef.current += 1;
     annualReportOperationClaimsRef.current.clear();
     automaticRefreshFlightRef.current = null;
-    runActionOwnerRef.current = null;
+    runActionOwnersRef.current.clear();
+    runActionBusyOwnerRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -945,10 +944,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       const params = exportParams(exportStartDate, exportEndDate);
       const currentCertificateInput = certificatePreviewRequestRef.current;
-      const certificateRequest = currentCertificateInput.year === certificateYear
-        && currentCertificateInput.search === debouncedCertificateSearch
-        ? beginCertificatePreviewReplacement(certificateYear, debouncedCertificateSearch)
-        : null;
+      const certificateInputMatches = currentCertificateInput.year === certificateYear
+        && currentCertificateInput.search === debouncedCertificateSearch;
+      const certificateRequest = !certificateInputMatches
+        ? null
+        : certificatePreview === null
+          ? { ...currentCertificateInput }
+          : certificateOperationClaimsRef.current.size === 0
+            ? beginCertificatePreviewReplacement(certificateYear, debouncedCertificateSearch)
+            : null;
       const certificateResultPromise = certificateRequest
         ? accountApi<AnnualCertificatePreview>(certificatePreviewPath(
             certificateRequest.year,
@@ -960,10 +964,15 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
           )
         : Promise.resolve(null);
       const currentStripeStatementInput = stripeStatementPreviewRequestRef.current;
-      const stripeStatementRequest = currentStripeStatementInput.year === stripeStatementYear
-        && currentStripeStatementInput.search === debouncedStripeStatementSearch
-        ? beginStripeStatementPreviewReplacement(stripeStatementYear, debouncedStripeStatementSearch)
-        : null;
+      const stripeStatementInputMatches = currentStripeStatementInput.year === stripeStatementYear
+        && currentStripeStatementInput.search === debouncedStripeStatementSearch;
+      const stripeStatementRequest = !stripeStatementInputMatches
+        ? null
+        : stripeStatementPreview === null
+          ? { ...currentStripeStatementInput }
+          : stripeStatementOperationClaimsRef.current.size === 0
+            ? beginStripeStatementPreviewReplacement(stripeStatementYear, debouncedStripeStatementSearch)
+            : null;
       const stripeStatementResultPromise = stripeStatementRequest
         ? accountApi<StripeAnnualStatementPreview>(stripeStatementPreviewPath(
             stripeStatementRequest.year,
@@ -1086,7 +1095,8 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
 
   function resetAccountState() {
     accountStateGuardRef.current.advance();
-    runActionOwnerRef.current = null;
+    runActionOwnersRef.current.clear();
+    runActionBusyOwnerRef.current = null;
     certificateOperationClaimsRef.current.clear();
     certificateSearchInputGenerationRef.current += 1;
     stripeStatementOperationClaimsRef.current.clear();
@@ -1109,6 +1119,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setAuditLoadingMore(false);
     setUsers([]);
     setCredentials(null);
+    setStripeSettings(null);
     setEmissionEnvironment(null);
     setEmailTemplates(null);
     setEmailTemplateDraft({});
@@ -1125,6 +1136,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     setToast("");
     setAuditQuery("");
     setBusy("");
+    setAnnualReportAction("");
     setPendingInvalidationId(null);
     setInvalidationForm(defaultInvalidationForm);
     setEmailEditingId(null);
@@ -2275,15 +2287,31 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         timeZone: credentialInput.stripeTimeZone
       };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
-      const [credentialResult, stripeResult] = await Promise.all([
-        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
-      ]);
-      control.commit(() => {
+      if (!control.commit(() => {
         setCredentialInput((current) => ({ ...current, ...emptyStripeCredentialInput() }));
+        setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
+      })) {
+        return;
+      }
+      let credentialResult: { credentials: CredentialStatus };
+      let stripeResult: { stripe: StripeSettingsState };
+      try {
+        [credentialResult, stripeResult] = await Promise.all([
+          accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+        ]);
+      } catch (error) {
+        if (isApiError(error) && error.status === 401) {
+          throw error;
+        }
+        control.commit(() => {
+          setToast("Configuración de Stripe guardada, pero no se pudo actualizar el estado mostrado.");
+        });
+        return;
+      }
+      control.commit(() => {
         setCredentials(credentialResult.credentials);
         setStripeSettings(stripeResult.stripe);
-        setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
       });
     });
   }
@@ -2294,15 +2322,31 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         method: "POST",
         body: { webhookSecretNext: credentialInput.stripeWebhookSecretNext }
       });
-      const [credentialResult, stripeResult] = await Promise.all([
-        accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
-        accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
-      ]);
-      control.commit(() => {
+      if (!control.commit(() => {
         setCredentialInput((current) => ({ ...current, stripeWebhookSecretNext: "" }));
+        setToast("Secreto siguiente preparado");
+      })) {
+        return;
+      }
+      let credentialResult: { credentials: CredentialStatus };
+      let stripeResult: { stripe: StripeSettingsState };
+      try {
+        [credentialResult, stripeResult] = await Promise.all([
+          accountApi<{ credentials: CredentialStatus }>("/api/credentials"),
+          accountApi<{ stripe: StripeSettingsState }>("/api/settings/stripe")
+        ]);
+      } catch (error) {
+        if (isApiError(error) && error.status === 401) {
+          throw error;
+        }
+        control.commit(() => {
+          setToast("Secreto siguiente preparado, pero no se pudo actualizar el estado mostrado.");
+        });
+        return;
+      }
+      control.commit(() => {
         setCredentials(credentialResult.credentials);
         setStripeSettings(stripeResult.stripe);
-        setToast("Secreto siguiente preparado");
       });
     });
   }
@@ -2450,10 +2494,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     isCurrent: () => boolean = () => true
   ) {
     const actionToken = Symbol(name);
-    runActionOwnerRef.current = { token: actionToken };
+    const ownershipDomain = name.startsWith("certificates-") || name.startsWith("stripe-statements-")
+      ? "annual-report"
+      : name === "export-csv" || name === "export-xlsx"
+        ? "f960-export"
+        : name;
+    runActionOwnersRef.current.set(ownershipDomain, actionToken);
+    runActionBusyOwnerRef.current = actionToken;
     const isOwner = () => (
       accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
-      && runActionOwnerRef.current?.token === actionToken
+      && runActionOwnersRef.current.get(ownershipDomain) === actionToken
       && isCurrent()
     );
     const control: RunActionControl = {
@@ -2467,6 +2517,9 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
     };
     setBusy(name);
+    if (ownershipDomain === "annual-report") {
+      setAnnualReportAction(name);
+    }
     try {
       await runAccountOperation(() => action(control));
     } catch (error) {
@@ -2476,9 +2529,18 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     } finally {
       if (
         accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
-        && runActionOwnerRef.current?.token === actionToken
+        && runActionOwnersRef.current.get(ownershipDomain) === actionToken
       ) {
-        runActionOwnerRef.current = null;
+        runActionOwnersRef.current.delete(ownershipDomain);
+        if (ownershipDomain === "annual-report") {
+          setAnnualReportAction("");
+        }
+      }
+      if (
+        accountStateGuardRef.current.isCurrent(renderAccountStateVersion)
+        && runActionBusyOwnerRef.current === actionToken
+      ) {
+        runActionBusyOwnerRef.current = null;
         setBusy("");
       }
     }
@@ -2859,7 +2921,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               preview={certificatePreview}
               search={certificateSearch}
               busy={annualReportBusy}
-              rowBusy={busy}
+              rowBusy={annualReportAction}
               bulkTraversalStarted={bulkTraversalStarted}
               bulkHasMore={bulkHasMore}
               onYearChange={changeCertificateYear}
@@ -2875,7 +2937,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
               preview={stripeStatementPreview}
               search={stripeStatementSearch}
               busy={annualReportBusy}
-              rowBusy={busy}
+              rowBusy={annualReportAction}
               bulkTraversalStarted={stripeStatementBulkTraversalStarted}
               bulkHasMore={stripeStatementBulkHasMore}
               onYearChange={changeStripeStatementYear}

@@ -140,7 +140,12 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
   restorePhases: [
     {
       name: "roots",
-      tables: ["wompi_events", "document_sequences"]
+      tables: [
+        "wompi_events",
+        "document_sequences",
+        "stripe_checkout_sessions",
+        "stripe_webhook_events"
+      ]
     },
     {
       name: "deferred-cycle",
@@ -152,24 +157,38 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
         "fiscal_corrections",
         "email_deliveries",
         "contingency_batches",
-        "donation_intents"
+        "donation_intents",
+        "stripe_gifts"
       ]
     },
     {
       name: "leaves",
-      tables: ["contingency_batch_lines", "audit_logs"]
+      tables: [
+        "contingency_batch_lines",
+        "audit_logs",
+        "stripe_acknowledgment_deliveries",
+        "stripe_annual_statement_deliveries"
+      ]
     }
   ],
   deletePhases: [
     {
-      name: "leaves-and-dependents",
+      name: "leaves",
+      tables: [
+        "stripe_acknowledgment_deliveries",
+        "stripe_annual_statement_deliveries",
+        "contingency_batch_lines",
+        "audit_logs"
+      ]
+    },
+    {
+      name: "dependents",
       tables: [
         "fiscal_corrections",
         "email_deliveries",
-        "contingency_batch_lines",
         "contingency_batches",
         "donation_intents",
-        "audit_logs"
+        "stripe_gifts"
       ]
     },
     {
@@ -178,7 +197,12 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
     },
     {
       name: "roots",
-      tables: ["wompi_events", "document_sequences"]
+      tables: [
+        "wompi_events",
+        "document_sequences",
+        "stripe_checkout_sessions",
+        "stripe_webhook_events"
+      ]
     }
   ],
   authoritativeOverlays: [
@@ -343,7 +367,9 @@ async function exportFiscalCorrectionSnapshot(
 }
 
 async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
-  const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
+  const cursorColumn = table === "wompi_events" || table === "stripe_webhook_events"
+    ? "received_at"
+    : "created_at";
   return streamRetentionTable<RetentionCursor>(
     env,
     `${prefix}/${table}.ndjson`,

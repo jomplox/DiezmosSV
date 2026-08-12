@@ -9,6 +9,7 @@ import {
   type BrandingEmailOptions
 } from "./emailHtml";
 import { resolveStripeConfiguration } from "./stripeDonations";
+import { stripeUsTimeZone } from "./stripeAnnualStatement";
 
 export interface StripeAcknowledgmentContentInput {
   donorName: string | null;
@@ -16,6 +17,7 @@ export interface StripeAcknowledgmentContentInput {
   frequency: StripeGiftFrequency;
   giftType: StripeGiftType;
   settledAt: string;
+  timeZone: string;
   legalName: string;
   ein: string;
   branding: BrandingEmailOptions;
@@ -28,7 +30,7 @@ export function stripeAcknowledgmentContent(
   const amountLabel = `${formatCents(input.amountCents)} USD`;
   const settledDateLabel = new Intl.DateTimeFormat("es-US", {
     dateStyle: "long",
-    timeZone: "UTC"
+    timeZone: input.timeZone
   }).format(new Date(input.settledAt));
   const frequencyLabel = input.frequency === "MONTHLY" ? "Mensual" : "Única";
   const giftTypeLabel = input.giftType === "TITHE"
@@ -101,6 +103,7 @@ export async function deliverNextStripeAcknowledgment(
       frequency: claim.frequency,
       giftType: claim.gift_type,
       settledAt: claim.settled_at,
+      timeZone: stripeUsTimeZone(env),
       legalName: configuration.legalName,
       ein: configuration.ein,
       branding

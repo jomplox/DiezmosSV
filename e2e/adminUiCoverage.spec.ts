@@ -13,6 +13,8 @@ interface AdminUiHarness {
   unhandledApiRequests: string[];
 }
 
+type AdminUiHandler = (route: Route, url: URL) => Promise<boolean>;
+
 async function fulfillJson(route: Route, value: unknown, status = 200): Promise<void> {
   await route.fulfill({
     status,
@@ -21,7 +23,7 @@ async function fulfillJson(route: Route, value: unknown, status = 200): Promise<
   });
 }
 
-async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
+async function installOwnerAdmin(page: Page, handleApi?: AdminUiHandler): Promise<AdminUiHarness> {
   const harness: AdminUiHarness = {
     createdUsers: [],
     f960Downloads: [],
@@ -37,6 +39,8 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+
+    if (await handleApi?.(route, url)) return;
 
     if (url.pathname === "/api/branding") {
       await fulfillJson(route, {
@@ -333,4 +337,161 @@ test("uses neutral placeholders and empty-draft branding previews", async ({ pag
   await expect(page.locator(".branding-preview-email-footer")).toHaveText("Correo de soporte");
   await expect(page.locator(".branding-preview-donor-mark")).toHaveText("Su organización");
   await expect(page.getByText(/ExamplePerson1|legacy-contact-1@example\.com/)).toHaveCount(0);
+});
+
+test("does not show the prior account Stripe status while the next account loads", async ({ page }) => {
+  let stripeGetCount = 0;
+  let releaseSecondStripeGet = () => {};
+  const secondStripeGet = new Promise<void>((resolve) => {
+    releaseSecondStripeGet = resolve;
+  });
+
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/auth/logout" && request.method() === "POST") {
+      await fulfillJson(route, {});
+      return true;
+    }
+    if (url.pathname === "/api/auth/bootstrap-status" && request.method() === "GET") {
+      await fulfillJson(route, { bootstrapAvailable: false });
+      return true;
+    }
+    if (url.pathname === "/api/auth/login" && request.method() === "POST") {
+      await fulfillJson(route, {
+        user: { ...OWNER, id: "next-ui-coverage-owner", email: "next-owner@example.org" },
+        token: "next-ui-coverage-token"
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      stripeGetCount += 1;
+      if (stripeGetCount === 2) await secondStripeGet;
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: false, items: [] },
+          operational: {
+            appEnv: "staging",
+            mode: stripeGetCount === 1 ? "Pruebas" : "Producción",
+            mockMode: false,
+            localProxyConfigured: false
+          },
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+        }
+      });
+      return true;
+    }
+    return false;
+  });
+
+  try {
+    await openView(page, "Configuración");
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    const stripeMode = page.locator(".stripe-status-grid > div").filter({ hasText: "Modo Stripe" }).locator("strong");
+    await expect(stripeMode).toHaveText("Pruebas");
+
+    await page.getByTitle("Cerrar sesión").click();
+    await expect(page.getByRole("button", { name: "Continuar" })).toBeVisible();
+    await page.getByLabel("Correo").fill("next-owner@example.org");
+    await page.getByLabel("Contraseña").fill("next-owner-password");
+    await page.getByRole("button", { name: "Continuar" }).click();
+    await expect(page.getByRole("heading", { name: "Documentos", exact: true })).toBeVisible();
+
+    await openView(page, "Configuración");
+    await expect.poll(() => stripeGetCount).toBe(2);
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(stripeMode).toHaveText("Sin cargar");
+
+    releaseSecondStripeGet();
+    await expect(stripeMode).toHaveText("Producción");
+  } finally {
+    releaseSecondStripeGet();
+  }
+});
+
+test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {
+  let postSucceeded = false;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (postSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: {},
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      postSucceeded = true;
+      await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
+      return true;
+    }
+    if (postSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, { error: "refresh_failed" }, 503);
+      return true;
+    }
+    return false;
+  });
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const replacement = page.getByLabel("Clave restringida");
+  await replacement.fill("rk_test_write_only_fixture");
+
+  await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
+
+  await expect.poll(() => postSucceeded).toBe(true);
+  await expect(replacement).toHaveValue("");
+  await expect(page.getByRole("status")).toContainText(
+    "Configuración de Stripe guardada, pero no se pudo actualizar el estado mostrado."
+  );
+});
+
+test("clears the staged webhook secret after POST success even when status refresh fails", async ({ page }) => {
+  let stageSucceeded = false;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (stageSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: {},
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe/webhook-secret/stage" && request.method() === "POST") {
+      stageSucceeded = true;
+      await fulfillJson(route, { ok: true });
+      return true;
+    }
+    if (stageSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, { error: "refresh_failed" }, 503);
+      return true;
+    }
+    return false;
+  });
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const nextSecret = page.locator('input[name="stripe-webhook-secret-next"]');
+  await nextSecret.fill("whsec_next_write_only_fixture");
+
+  await page.getByRole("button", { name: "Preparar secreto siguiente" }).click();
+
+  await expect.poll(() => stageSucceeded).toBe(true);
+  await expect(nextSecret).toHaveValue("");
+  await expect(page.getByRole("status")).toContainText(
+    "Secreto siguiente preparado, pero no se pudo actualizar el estado mostrado."
+  );
 });

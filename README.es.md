@@ -206,7 +206,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0031)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0035)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -729,6 +729,13 @@ de resultado lee el estado durable de D1, no el regreso del navegador. Un contri
 necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
 `donation_intents` ni la tubería del CDE**.
 
+El asistente SV no crea un enlace Wompi en el Paso 1, cuando todavía se desconoce la residencia del
+donante. Si después el donante de la ruta SV selecciona Estados Unidos, la ruta de seguridad conserva el
+monto y la elección Diezmo/Ofrenda que siguen siendo veraces, restablece la frecuencia a Única y regresa al
+Paso 1 explícito de EE. UU. No existe ninguna Checkout Session de Stripe hasta que el donante revise y
+confirme ese paso estadounidense; por eso la corrección no puede dejar activos a la vez un carril Wompi
+utilizable y uno Stripe para la misma entrega.
+
 El Worker crea una Embedded Checkout Session idempotente con un `payment_method_configuration` dedicado; el
 código del navegador nunca envía `payment_method_types`. Stripe muestra así todos los métodos
 habilitados que sean elegibles para el donante, dispositivo, monto USD y flujo único/mensual, mientras
@@ -741,6 +748,10 @@ recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con n
 frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La
 **Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
 netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
+
+El cargador puro de Stripe.js se invoca únicamente cuando una Session estadounidense real, no simulada,
+llega al formulario embebido. El selector inicial, la ruta SV/Wompi, la simulación local, la página de
+resultado y el panel administrativo no solicitan `js.stripe.com`.
 
 La configuración de test y live es exclusiva del dueño y solo de runtime. Ningún secreto o ID de
 Stripe se incrusta en el cliente; solo se devuelve la clave publicable del ambiente con una sesión creada.
@@ -999,7 +1010,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0031)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0035)</strong></summary>
 
 <br/>
 
@@ -1016,6 +1027,11 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `document_sequences` | Contadores de número de control por ambiente/prefijo. Los avanza la tubería de emisión y, para las correcciones fiscales, un trigger de base de datos que incrementa el contador dentro de la misma transacción de la sentencia que hace la reserva y aborta salvo que mueva exactamente una fila. |
 | `email_deliveries` | Intentos de correo reclamados, evidencia de envío/resultado, IDs del proveedor y hashes de evidencia del PDF/JSON. |
 | `operational_alert_deliveries` | Claims por incidente y por destinatario para la entrega del correo de alerta. |
+| `stripe_checkout_sessions` | Intento de Checkout del carril estadounidense y estado saneado del proveedor, con cronologías monotónicas independientes de Checkout y suscripción. |
+| `stripe_webhook_events` | Cerca contra repeticiones de eventos Stripe firmados y resultado saneado del procesamiento; nunca conserva cuerpos crudos de webhook. |
+| `stripe_gifts` | Fuente de verdad de entregas estadounidenses liquidadas, incluido el tipo elegido por el donante y el estado durable de reembolso/neto. |
+| `stripe_acknowledgment_deliveries` | Claims durables del acuse inmediato 501(c)(3) y evidencia del resultado del proveedor. |
+| `stripe_annual_statement_deliveries` | Instantáneas inmutables de constancias anuales estadounidenses, linaje de revisiones, claims y resultados de envío. |
 | `contingency_batches` · `contingency_batch_lines` | Envíos históricos de lotes de contingencia a MH y sus resultados por CDE (solo lectura). |
 | `app_settings` | Configuración en tiempo de ejecución (ambiente de emisión, plantillas de correo, marca, correo de alertas). |
 | `users` · `sessions` · `password_reset_tokens` | Autenticación, RBAC y restablecimiento de contraseña autogestionado. |

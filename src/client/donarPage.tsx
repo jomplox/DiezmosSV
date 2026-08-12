@@ -56,18 +56,14 @@ import {
   DONATION_STEP2_FIELD_ORDER,
   clearDonationFieldErrors,
   donarAmountDisplay,
-  donarDatosPath,
   donarLandingUnifierChurch,
   donarStepIndicator,
   donationAmountValidationMessage,
-  donationDatosBody,
-  donationDraftBody,
   donationIntentBody,
   donationStep1FieldErrors,
   donationStep2FieldErrors,
   firstDonationFieldError,
   doorFromSearch,
-  draftMatchesForm,
   stripeCheckoutBody,
   stripeIntro,
   graciasDisplayFromSearch,
@@ -256,22 +252,6 @@ interface DonarIntent {
   urlEnlaceLargo: string;
 }
 
-interface DonarDraftCapability {
-  intentId: string;
-  datosToken: string;
-}
-
-// A background-minted draft: the Wompi link the wizard created on the SV Paso 1→2
-// transition, tagged with the amount + gift type AND the mint time so Paso 2 submit can
-// tell whether the donor edited either (stale → full POST) or left the retained link near
-// expiry (aged out → full POST). See draftMatchesForm / DONAR_DRAFT_REUSE_WINDOW_MS.
-interface DonarDraftIntent {
-  intent: DonarDraftCapability;
-  amount: string;
-  giftType: DonarGiftType | "";
-  mintedAt: number;
-}
-
 // The built-in default logo, reusing the vector paths shared with the worker's PDF
 // renderer (src/worker/services/orgLogo.ts). Monochrome black on the donor landing.
 export function OrganizationLogo({ organizationName }: { organizationName: string | null }) {
@@ -432,14 +412,6 @@ export function DonarPage() {
   const [stage, setStage] = useState<DonarStage>("form");
   const [step, setStep] = useState<DonarStep>(1);
   const [intent, setIntent] = useState<DonarIntent | null>(null);
-  // The link minted in the background when the donor entered Paso 2. Held here until
-  // Paso 2 submit, which attaches the fiscal data (datos) and reuses this intent.
-  const [draftIntent, setDraftIntent] = useState<DonarDraftIntent | null>(null);
-  // Monotonic id for the current premint. Each mint captures the next generation; every
-  // abandon/reset bumps it. A fire-and-forget mint that resolves after the donor abandoned
-  // it (changed door, Editar) sees a newer generation and drops its stale response instead
-  // of repopulating draftIntent.
-  const draftGenerationRef = useRef(0);
   // The two-door chooser: /donar opens on a landing where the donor picks where
   // the gift goes (SV/mundo vs EE. UU.) before any form appears. Preseeded from
   // ?ruta=sv / ?ruta=eeuu; null keeps the donor on the chooser. Door "eeuu" opens
@@ -527,7 +499,6 @@ export function DonarPage() {
     setError("");
     setFieldErrors({});
     setIntent(null);
-    abandonDraftIntent();
     setStage("form");
     setDoor(next);
   };
@@ -802,61 +773,13 @@ export function DonarPage() {
       if (stripeSessionAttempt?.fingerprint !== fingerprint) {
         setStripeSessionAttempt(createStripeSessionAttempt());
       }
-    } else {
-      // SV door: mint the Wompi link in the BACKGROUND now that amount + gift type are
-      // known, so its ~6 s cost is spent while the donor fills Paso 2 instead of on
-      // submit. Never blocks the step change; a failure just leaves draftIntent null and
-      // Paso 2 submit falls back to the full POST. A draft that still matches AND is
-      // comfortably inside the Wompi vigencia (Atrás → Continuar without edits) is reused —
-      // each mint costs a Wompi link and one of the donor's throttle slots, so only a
-      // missing, edited, or aged-out draft triggers a fresh one.
-      if (!draftIntent || !draftMatchesForm(draftIntent, form)) {
-        mintDraftIntent(form.amount.trim(), form.giftType);
-      }
     }
     setStep(2);
   }
 
-  // Abandon the held draft: bump the generation so any in-flight mint's resolve is dropped,
-  // then clear it. Used wherever the donor walks away from the current draft (door change,
-  // Editar, and after a submit consumes it) — Atrás Paso 2→1 deliberately does NOT abandon.
-  function abandonDraftIntent() {
-    draftGenerationRef.current += 1;
-    setDraftIntent(null);
-  }
-
-  // Fire-and-forget draft create (SV door only). Stores the minted link + the values it
-  // was minted with; errors are swallowed so the wizard degrades to the full POST. Captures
-  // the mint's generation so a response that lands after the donor abandoned it is ignored.
-  function mintDraftIntent(amount: string, giftType: DonarGiftType | "") {
-    const generation = draftGenerationRef.current + 1;
-    draftGenerationRef.current = generation;
-    setDraftIntent(null);
-    void donarApi<DonarDraftCapability>(DONAR_INTENT_PATH, {
-      method: "POST",
-      body: donationDraftBody({ amount, giftType })
-    })
-      .then((created) => {
-        // Dropped if the donor abandoned this mint (changed door / Editar) while it was
-        // in flight — a newer generation means draftIntent must not be repopulated.
-        if (draftGenerationRef.current !== generation) {
-          return;
-        }
-        if (!created.datosToken) {
-          return;
-        }
-        setDraftIntent({ intent: created, amount, giftType, mintedAt: Date.now() });
-      })
-      .catch(() => {
-        // Ignored: Paso 2 submit falls back to the full-body POST.
-      });
-  }
-
-  // Paso 2 → Paso 3. If a background-minted draft still matches the amount + gift type,
-  // attach the fiscal data with the fast D1-only datos call and reuse that link — Paso 3
-  // renders instantly (the ~6 s Wompi mint already happened during Paso 2). If the draft
-  // is missing/failed or stale (amount/tipo edited via Atrás/Editar), fall back to the
-  // full-body POST, which still mints the link inline. On error the donor stays on Paso 2.
+  // Paso 2 → Paso 3. Mint the Wompi link only after the donor completes the SV
+  // residence/fiscal step. Residence is unknown on Paso 1, so a background premint there
+  // could leave a usable Wompi rail behind when Estados Unidos reroutes to Stripe.
   async function continueToPago(event: FormEvent) {
     event.preventDefault();
     const errors = donationStep2FieldErrors(form);
@@ -869,23 +792,10 @@ export function DonarPage() {
     setError("");
     setSubmitting(true);
     try {
-      let created: DonarIntent;
-      if (draftIntent && draftMatchesForm(draftIntent, form)) {
-        // Fast path: attach donor data, then receive the already-minted payment URLs.
-        // The server never releases those capabilities while the draft is incomplete.
-        created = await donarApi<DonarIntent>(donarDatosPath(draftIntent.intent.intentId), {
-          method: "POST",
-          headers: { "X-Donation-Datos-Token": draftIntent.intent.datosToken ?? "" },
-          body: donationDatosBody(form)
-        });
-      } else {
-        // No usable draft (missing/failed/stale): the full POST mints the link inline.
-        created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
-          method: "POST",
-          body: donationIntentBody(form)
-        });
-      }
-      abandonDraftIntent();
+      const created = await donarApi<DonarIntent>(DONAR_INTENT_PATH, {
+        method: "POST",
+        body: donationIntentBody(form)
+      });
       setHandoff("loading");
       setIntent(created);
       setStage("widget");
@@ -939,10 +849,7 @@ export function DonarPage() {
   }
 
   // "← Atrás": one step back. Leaving Paso 3 abandons the created intent (a new
-  // one is created on the next entry) and unmounts the widget cleanly. Leaving Paso 2
-  // for Paso 1 KEEPS the held draft: if the donor returns without editing amount/tipo,
-  // draftMatchesForm reuses it (no second mint, no throttle slot); if they edit, the
-  // next Paso 1→2 crossing mints fresh and the stale link expires on the sweep.
+  // one is created on the next entry) and unmounts the widget cleanly.
   function goBack() {
     setError("");
     // Inline errors belong to a submit attempt on the screen being left.
@@ -967,8 +874,7 @@ export function DonarPage() {
   }
 
   // The summary's "Editar": straight back to Paso 1. A U.S. Stripe attempt is kept
-  // until a changed fingerprint replaces it; the SV draft is abandoned because its
-  // amount/type may be edited before continuing.
+  // until a changed fingerprint replaces it.
   function editAmount() {
     setError("");
     setFieldErrors({});
@@ -977,7 +883,6 @@ export function DonarPage() {
       stripeAttemptRef.current = null;
       setStripeSessionAttempt(null);
     }
-    abandonDraftIntent();
     setStage("form");
     setStep(1);
   }
@@ -1293,12 +1198,27 @@ export function DonarPage() {
                   options={DONAR_FOREIGN_COUNTRIES}
                   frequentOptions={DONAR_FREQUENT_COUNTRIES}
                   onChange={(pais) => {
-                    // Switching country away from US must leave the Stripe path cleanly.
+                    // Estados Unidos is a safety correction, not implicit consent to a
+                    // processor switch. Restart at explicit U.S. Paso 1, preserve the
+                    // donor's truthful amount/type choice, and mint no Stripe Session
+                    // until that step is confirmed.
                     setMonthly(false);
-                    update({ pais });
                     if (pais === "US") {
-                      setStripeSessionAttempt(createStripeSessionAttempt());
+                      const params = new URLSearchParams(window.location.search);
+                      params.delete("cancelado");
+                      params.set(DONAR_ROUTE_PARAM, "eeuu");
+                      window.history.replaceState(null, "", `${window.location.pathname}?${params.toString()}`);
+                      setStripeGiftType(form.giftType === "OFRENDA" ? "OFFERING" : "TITHE");
+                      stripeAttemptRef.current = null;
+                      setStripeSessionAttempt(null);
+                      update({ foreignResident: false, pais: "" });
+                      setStep(1);
+                      setError("");
+                      setFieldErrors({});
+                      setDoor("eeuu");
+                      return;
                     }
+                    update({ pais });
                   }}
                   ariaLabel="País"
                   id={donarFieldDomId("pais")}

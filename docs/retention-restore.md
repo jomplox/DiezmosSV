@@ -22,6 +22,11 @@ retention/<YYYY>/<YYYY-MM>/document_sequences.ndjson        (full current-state 
 retention/<YYYY>/<YYYY-MM>/contingency_periods.ndjson       (full snapshot, not month-windowed)
 retention/<YYYY>/<YYYY-MM>/contingency_batches.ndjson       (full snapshot, not month-windowed)
 retention/<YYYY>/<YYYY-MM>/contingency_batch_lines.ndjson   (full snapshot, not month-windowed)
+retention/<YYYY>/<YYYY-MM>/stripe_checkout_sessions.ndjson  (full current-state snapshot)
+retention/<YYYY>/<YYYY-MM>/stripe_webhook_events.ndjson     (full current-state snapshot)
+retention/<YYYY>/<YYYY-MM>/stripe_gifts.ndjson              (full current-state snapshot, including refund state)
+retention/<YYYY>/<YYYY-MM>/stripe_acknowledgment_deliveries.ndjson  (full current-state snapshot)
+retention/<YYYY>/<YYYY-MM>/stripe_annual_statement_deliveries.ndjson (full current-state snapshot)
 retention/<YYYY>/<YYYY-MM>/manifest.json
 ```
 
@@ -32,7 +37,10 @@ filtered to rows whose `created_at`
 falls in the given month, evaluated in El Salvador local time (UTC-6, no
 DST). The mutable `fiscal_corrections` and `wompi_events` lifecycles, the legal
 number counters in `document_sequences`, and the three contingency tables are
-also written as full snapshots as of each run. The historical
+also written as full snapshots as of each run. Every Stripe source-of-truth
+table is likewise a full snapshot: checkout and webhook lifecycle evidence,
+gifts (including durable refund status and `refunded_amount_cents`), immediate
+acknowledgments, and annual-statement revision/delivery evidence. The historical
 `fiscal_corrections.ndjson` file remains month-windowed and unchanged;
 `fiscal_corrections_latest.ndjson` is its authoritative current-state overlay.
 Both files contain the same complete correction row shape, while audit history
@@ -70,7 +78,12 @@ duplicating work. It looks like:
     "audit_logs": { "rowCount": 1890, "sha256": "…" },
     "contingency_periods": { "rowCount": 2, "sha256": "…" },
     "contingency_batches": { "rowCount": 1, "sha256": "…" },
-    "contingency_batch_lines": { "rowCount": 3, "sha256": "…" }
+    "contingency_batch_lines": { "rowCount": 3, "sha256": "…" },
+    "stripe_checkout_sessions": { "rowCount": 31, "sha256": "…" },
+    "stripe_webhook_events": { "rowCount": 84, "sha256": "…" },
+    "stripe_gifts": { "rowCount": 27, "sha256": "…" },
+    "stripe_acknowledgment_deliveries": { "rowCount": 27, "sha256": "…" },
+    "stripe_annual_statement_deliveries": { "rowCount": 8, "sha256": "…" }
   }
 }
 ```
@@ -133,13 +146,17 @@ table:
 
    Insert in these phases:
 
-   1. roots: `wompi_events`, `document_sequences`;
+   1. roots: `wompi_events`, `document_sequences`,
+      `stripe_checkout_sessions`, `stripe_webhook_events`;
    2. deferred cycle: `contingency_periods`, `dte_documents`, `dte_events`;
    3. dependents: historical `fiscal_corrections`, `email_deliveries`,
-      `contingency_batches`, `donation_intents`;
+      `contingency_batches`, `donation_intents`, `stripe_gifts`;
    4. authoritative correction overlay: apply the latest verified
       `fiscal_corrections_latest.ndjson` snapshot to `fiscal_corrections`;
-   5. leaves: `contingency_batch_lines`, `audit_logs`.
+   5. leaves: `contingency_batch_lines`, `audit_logs`,
+      `stripe_acknowledgment_deliveries`,
+      `stripe_annual_statement_deliveries` (ascending `revision` within each
+      donor/year/livemode lineage).
 
    End the same file with:
 
@@ -153,7 +170,9 @@ table:
 
    Cleanup uses a separate Wrangler file with the same first and last pragmas,
    but reverses dependencies:
-   delete leaves and dependents first (including `fiscal_corrections`), then
+   delete Stripe acknowledgments and annual statements before `stripe_gifts`,
+   and delete `stripe_gifts` before `stripe_checkout_sessions`. Delete the
+   remaining leaves and dependents first (including `fiscal_corrections`), then
    delete `dte_events`, `dte_documents`, and `contingency_periods` as the
    deferred cycle, and finally delete `wompi_events` and
    `document_sequences`.
@@ -180,6 +199,26 @@ If the local foreign-key check reports rows, use `ROLLBACK` instead of
 `COMMIT`, repair the input, and repeat the rehearsal.
 
 ### Mutable snapshots and legal counter reconciliation
+
+Use only the latest verified Stripe snapshots as a set. Do not mix individual
+Stripe tables from different monthly manifests: their foreign-key and delivery
+state may describe different provider chronology. Restore all row columns from
+migrations 0032–0035, without raw Stripe payloads or secrets, in this order:
+`stripe_checkout_sessions`, `stripe_webhook_events`, `stripe_gifts`, then
+`stripe_acknowledgment_deliveries` and
+`stripe_annual_statement_deliveries`. The refund source of truth is the
+`status` plus `refunded_amount_cents` stored on each `stripe_gifts` row; do not
+invent a separate refund row. Insert annual revisions in ascending `revision`
+order so every `supersedes_delivery_id` already exists. Run
+`PRAGMA foreign_key_check` before accepting the restore.
+
+Stripe snapshots are intended for an empty loss-recovery database. If restoring
+into a database with existing Stripe rows, compare rows by primary/unique key
+and stop for manual review on any difference; never overwrite immutable annual
+snapshot/lineage evidence or turn REVIEW/SENT delivery evidence backward.
+Archives created before these Stripe snapshot files existed remain valid legacy
+archives, but they cannot reconstruct Stripe gifts and no missing row may be
+manufactured from an audit entry.
 
 Do not concatenate every repeated Wompi snapshot. Restore historical
 windowed records, then overlay rows by `id` from the latest

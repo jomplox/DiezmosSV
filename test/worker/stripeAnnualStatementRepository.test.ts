@@ -322,6 +322,33 @@ describe("Stripe annual statement repository", () => {
       snapshotHash: "d".repeat(64)
     }));
     expect(same).toMatchObject({ id: row.id, status: "REVIEW", retry_safe: 0 });
+
+    await expect(reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_changed_while_review",
+      snapshotHash: "f".repeat(64),
+      snapshotJson: '{"version":2}'
+    }))).rejects.toThrow(/unresolved review/i);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ count: 1 });
+  });
+
+  it("serializes concurrent changed-hash reservations for one donor-year", async () => {
+    const [first, second] = await Promise.allSettled([
+      reserveStripeAnnualStatementDelivery(db, reservation({
+        id: "delivery_concurrent_a",
+        snapshotHash: "a".repeat(64),
+        snapshotJson: '{"version":2,"amount":1000}'
+      })),
+      reserveStripeAnnualStatementDelivery(db, reservation({
+        id: "delivery_concurrent_b",
+        snapshotHash: "b".repeat(64),
+        snapshotJson: '{"version":2,"amount":900}'
+      }))
+    ]);
+
+    expect([first.status, second.status].sort()).toEqual(["fulfilled", "rejected"]);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries").get())
+      .toEqual({ count: 1 });
   });
 });
 
