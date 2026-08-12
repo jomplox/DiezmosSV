@@ -658,6 +658,49 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:8787\/(?:donar)?\?ruta=eeuu$/);
 });
 
+test("a terminal Stripe Session failure releases the current browser request identity", async ({ page }) => {
+  const checkoutBodies: Array<Record<string, unknown>> = [];
+  await page.route("**/api/donations/stripe/checkout", async (route) => {
+    checkoutBodies.push(route.request().postDataJSON() as Record<string, unknown>);
+    if (checkoutBodies.length === 1) {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({
+          error: "stripe_checkout_unavailable",
+          message: "Inicie una nueva entrega para continuar con Stripe."
+        })
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 201,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sessionId: "cs_test_terminal_retry_fixture",
+        clientSecret: "cs_test_terminal_retry_fixture_secret_mock",
+        publishableKey: "pk_test_mock",
+        mock: true
+      })
+    });
+  });
+
+  await page.goto("/donar?ruta=eeuu");
+  await page.getByRole("button", { name: "$50", exact: true }).click();
+  await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Inicie una nueva entrega");
+  await page.getByRole("button", { name: "Intentar de nuevo" }).click();
+  await expect(page.getByText("Simulación local del formulario alojado por Stripe")).toBeVisible();
+
+  expect(checkoutBodies).toHaveLength(2);
+  expect(checkoutBodies[1]).toMatchObject({
+    amount: checkoutBodies[0].amount,
+    frequency: checkoutBodies[0].frequency,
+    giftType: checkoutBodies[0].giftType
+  });
+  expect(checkoutBodies[1].requestId).not.toBe(checkoutBodies[0].requestId);
+});
+
 test("a stale rejected Stripe request cannot clear the newer attempt identity", async ({ page }) => {
   const checkoutBodies: Array<Record<string, unknown>> = [];
   let releaseOld!: () => void;

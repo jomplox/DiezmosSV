@@ -1473,6 +1473,9 @@ async function prepareExistingStripeCheckoutCreation(
   if (!stripeCheckoutMatchesInput(existing, input, configuration.livemode)) {
     return stripeCheckoutConflictResponse();
   }
+  if (existing.status === "FAILED" && hasStripeCheckoutProviderTerminalEvent(existing)) {
+    return existingStripeCheckoutResponse(existing, configuration);
+  }
   if (existing.status !== "FAILED" && existing.status !== "CREATING") {
     return existingStripeCheckoutResponse(existing, configuration);
   }
@@ -1575,7 +1578,11 @@ async function existingStripeCheckoutResponse(
       { status: 409, headers: { "Cache-Control": "no-store" } }
     );
   }
-  if (checkout.status === "FAILED" && checkout.creation_outcome_class !== "DEFINITE_FAILURE") {
+  if (
+    checkout.status === "FAILED"
+    && checkout.creation_outcome_class !== "DEFINITE_FAILURE"
+    && !hasStripeCheckoutProviderTerminalEvent(checkout)
+  ) {
     return stripeCheckoutIndeterminateResponse();
   }
   if (checkout.status !== "OPEN" || !checkout.stripe_session_id) {
@@ -1603,6 +1610,12 @@ async function existingStripeCheckoutResponse(
       { status: 502, headers: { "Cache-Control": "no-store" } }
     );
   }
+}
+
+function hasStripeCheckoutProviderTerminalEvent(
+  checkout: import("./storage/repository").StripeCheckoutRecord
+): boolean {
+  return checkout.stripe_session_id !== null && checkout.checkout_event_created > 0;
 }
 
 function stripeCheckoutIndeterminateResponse(): Response {

@@ -1,5 +1,5 @@
 import Stripe from "stripe";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker from "../../src/worker/index";
 import { STRIPE_API_VERSION } from "../../src/worker/services/stripeDonations";
 import type { Env } from "../../src/worker/types";
@@ -30,7 +30,10 @@ describe("Stripe signed webhooks", () => {
     };
   });
 
-  afterEach(() => database.close());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    database.close();
+  });
 
   it("rejects forged and wrong-environment events, then idempotently settles one one-time gift", async () => {
     const checkout = await createCheckout(workerEnv, {
@@ -155,6 +158,100 @@ describe("Stripe signed webhooks", () => {
     });
     expect(count(database, "stripe_gifts")).toBe(1);
     expect(count(database, "stripe_acknowledgment_deliveries")).toBe(1);
+  });
+
+  it("returns terminal unavailability after an attached Session receives async payment failure", async () => {
+    const providerBodies: string[] = [];
+    vi.stubGlobal("fetch", stripeCheckoutFetch(providerBodies));
+    const providerEnv = stripeProviderEnv(workerEnv);
+    const requestId = "21c7fd3f-1b0b-48f5-b65a-942c16a43333";
+    const checkout = await createCheckout(providerEnv, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const reservation = checkoutRow(database, checkout.sessionId);
+    const failed = stripeEvent(
+      "evt_attached_async_failed",
+      "checkout.session.async_payment_failed",
+      checkoutSession({
+        id: checkout.sessionId,
+        checkoutId: reservation.id,
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_attached_async_failed",
+        paid: false
+      }),
+      false,
+      2_000_000_400
+    );
+
+    expect((await sendSignedWebhook(providerEnv, failed)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      status: "FAILED",
+      stripe_session_id: checkout.sessionId,
+      creation_outcome_class: null,
+      checkout_event_created: 2_000_000_400,
+      checkout_event_id: "evt_attached_async_failed"
+    });
+
+    const retry = await requestCheckout({
+      ...providerEnv,
+      STRIPE_RESTRICTED_KEY: "rk_test_terminal_fixture_rotated",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_terminal_fixture_rotated"
+    }, { requestId, amount: 50, frequency: "once" });
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(providerBodies).toHaveLength(1);
+  });
+
+  it("returns terminal unavailability when a delayed failed Session reconciles an exhausted ambiguous row", async () => {
+    const providerBodies: string[] = [];
+    vi.stubGlobal("fetch", stripeCheckoutFetch(providerBodies));
+    const providerEnv = stripeProviderEnv(workerEnv);
+    const requestId = "f35c7b7c-7fb4-4870-bbdd-24c90fd0193c";
+    const checkout = await createCheckout(providerEnv, {
+      requestId,
+      amount: 50,
+      frequency: "once"
+    });
+    const reservation = checkoutRow(database, checkout.sessionId);
+    database.prepare(
+      `UPDATE stripe_checkout_sessions
+          SET stripe_session_id = NULL, status = 'FAILED', expires_at = NULL,
+              creation_attempt_count = 3, creation_outcome_class = 'AMBIGUOUS',
+              error_code = 'stripe_checkout_create_failed'
+        WHERE id = ?`
+    ).run(reservation.id);
+    const delayedFailure = stripeEvent(
+      "evt_exhausted_async_failed",
+      "checkout.session.async_payment_failed",
+      checkoutSession({
+        id: checkout.sessionId,
+        checkoutId: reservation.id,
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_exhausted_async_failed",
+        paid: false
+      }),
+      false,
+      2_000_000_500
+    );
+
+    expect((await sendSignedWebhook(providerEnv, delayedFailure)).status).toBe(200);
+    expect(checkoutRow(database, checkout.sessionId)).toMatchObject({
+      status: "FAILED",
+      stripe_session_id: checkout.sessionId,
+      creation_attempt_count: 3,
+      creation_outcome_class: "AMBIGUOUS",
+      checkout_event_created: 2_000_000_500,
+      checkout_event_id: "evt_exhausted_async_failed"
+    });
+
+    const retry = await requestCheckout(providerEnv, { requestId, amount: 50, frequency: "once" });
+    expect(retry.response.status).toBe(409);
+    expect(retry.body).toMatchObject({ error: "stripe_checkout_unavailable" });
+    expect(providerBodies).toHaveLength(1);
   });
 
   it("rejects a reconciled Session identity conflict", async () => {
@@ -506,6 +603,15 @@ async function createCheckout(
   workerEnv: Env,
   body: { requestId: string; amount: number; frequency: "once" | "monthly"; giftType?: "tithe" | "offering" }
 ): Promise<{ sessionId: string }> {
+  const { response, body: responseBody } = await requestCheckout(workerEnv, body);
+  expect(response.status).toBe(201);
+  return responseBody as { sessionId: string };
+}
+
+async function requestCheckout(
+  workerEnv: Env,
+  body: { requestId: string; amount: number; frequency: "once" | "monthly"; giftType?: "tithe" | "offering" }
+): Promise<{ response: Response; body: Record<string, unknown> }> {
   const response = await worker.fetch(new Request(`${origin}/api/donations/stripe/checkout`, {
     method: "POST",
     headers: {
@@ -515,15 +621,16 @@ async function createCheckout(
     },
     body: JSON.stringify({ giftType: "tithe", ...body })
   }), workerEnv);
-  expect(response.status).toBe(201);
-  return await response.json() as { sessionId: string };
+  return { response, body: await response.json() as Record<string, unknown> };
 }
 
 async function sendSignedWebhook(workerEnv: Env, body: string): Promise<Response> {
   const timestamp = Math.floor(Date.now() / 1000);
   const signature = Stripe.webhooks.generateTestHeaderString({
     payload: body,
-    secret: webhookSecret,
+    secret: workerEnv.STRIPE_MOCK_MODE === "1"
+      ? webhookSecret
+      : String(workerEnv.STRIPE_WEBHOOK_SECRET),
     timestamp
   });
   return worker.fetch(new Request(`${origin}/webhooks/stripe`, {
@@ -534,6 +641,64 @@ async function sendSignedWebhook(workerEnv: Env, body: string): Promise<Response
     },
     body
   }), workerEnv);
+}
+
+function stripeProviderEnv(workerEnv: Env): Env {
+  return {
+    ...workerEnv,
+    STRIPE_MOCK_MODE: undefined,
+    STRIPE_RESTRICTED_KEY: "rk_test_terminal_fixture",
+    STRIPE_PUBLISHABLE_KEY: "pk_test_terminal_fixture",
+    STRIPE_WEBHOOK_SECRET: "whsec_terminal_fixture",
+    STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_terminal_fixture",
+    STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_terminal_fixture",
+    STRIPE_US_LEGAL_NAME: "Example Nonprofit",
+    STRIPE_US_EIN: "12-3456789",
+    STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
+  };
+}
+
+function stripeCheckoutFetch(providerBodies: string[]): typeof fetch {
+  return vi.fn<typeof fetch>(async (input, init) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method !== "POST" || url.pathname !== "/v1/checkout/sessions") {
+      throw new Error(`Unexpected Stripe request: ${request.method} ${url.pathname}`);
+    }
+    const body = await request.text();
+    providerBodies.push(body);
+    const params = new URLSearchParams(body);
+    const checkoutId = String(params.get("client_reference_id"));
+    const sessionId = `cs_test_${checkoutId}`;
+    return new Response(JSON.stringify({
+      id: sessionId,
+      object: "checkout.session",
+      client_reference_id: checkoutId,
+      client_secret: `${sessionId}_secret_fixture`,
+      url: null,
+      created: 1_700_000_000,
+      livemode: false,
+      status: "open",
+      payment_status: "unpaid",
+      mode: params.get("mode"),
+      amount_total: Number(params.get("line_items[0][price_data][unit_amount]")),
+      currency: "usd",
+      customer: null,
+      subscription: null,
+      payment_intent: null,
+      customer_details: null,
+      customer_email: null,
+      metadata: {
+        checkout_id: params.get("metadata[checkout_id]"),
+        frequency: params.get("metadata[frequency]"),
+        lane: params.get("metadata[lane]"),
+        gift_type: params.get("metadata[gift_type]")
+      },
+      expires_at: 1_786_370_400
+    }), {
+      headers: { "Content-Type": "application/json", "Request-Id": "req_terminal_fixture" }
+    });
+  });
 }
 
 function stripeEvent(
