@@ -353,6 +353,37 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       }
     ]);
 
+    const originalDelivery = database.prepare(
+      `SELECT id, donor_key, donor_name, donor_email, snapshot_hash, snapshot_json
+         FROM stripe_annual_statement_deliveries WHERE revision = 1`
+    ).get() as {
+      id: string;
+      donor_key: string;
+      donor_name: string;
+      donor_email: string;
+      snapshot_hash: string;
+      snapshot_json: string;
+    };
+    database.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, attempt_count, failure_code, retry_safe, created_at, updated_at
+       ) VALUES (
+         'delivery_legacy_returned_snapshot', 2025, 0, ?, ?, ?, ?, ?, 3, ?,
+         'FAILED', 1, 'snapshot_changed_before_dispatch', 1, ?, ?
+       )`
+    ).run(
+      originalDelivery.donor_key,
+      originalDelivery.donor_name,
+      originalDelivery.donor_email,
+      originalDelivery.snapshot_hash,
+      originalDelivery.snapshot_json,
+      originalDelivery.id,
+      "2026-01-10T12:01:30.000Z",
+      "2026-01-10T12:01:30.000Z"
+    );
+
     database.prepare(
       "UPDATE stripe_gifts SET refunded_amount_cents = 0, status = 'PAID' WHERE id = 'gift_returned_snapshot'"
     ).run();
@@ -362,10 +393,16 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     })).toMatchObject({ sent: 0, skipped: 1, failed: 0, review: 0 });
     expect(emailSend).toHaveBeenCalledTimes(1);
     expect(database.prepare(
-      "SELECT revision, status FROM stripe_annual_statement_deliveries ORDER BY revision"
+      "SELECT revision, status, failure_code, retry_safe FROM stripe_annual_statement_deliveries ORDER BY revision"
     ).all()).toEqual([
-      { revision: 1, status: "SENT" },
-      { revision: 2, status: "FAILED" }
+      { revision: 1, status: "SENT", failure_code: null, retry_safe: 0 },
+      { revision: 2, status: "FAILED", failure_code: "EMAIL_PRE_DISPATCH_FAILED", retry_safe: 1 },
+      {
+        revision: 3,
+        status: "FAILED",
+        failure_code: "duplicate_sent_snapshot_suppressed",
+        retry_safe: 0
+      }
     ]);
   });
 

@@ -588,6 +588,42 @@ describe("Stripe annual statement repository", () => {
     ]);
   });
 
+  it.each(["FAILED", "PENDING"] as const)(
+    "reuses SENT evidence instead of a legacy same-hash %s pre-dispatch revision",
+    async (tailStatus) => {
+      const history = seedLegacyAnnualDedupHistory(database, tailStatus);
+
+      const returned = await reserveStripeAnnualStatementDelivery(db, reservation({
+        id: `delivery_a_after_legacy_${tailStatus.toLowerCase()}`,
+        snapshotHash: history.snapshotHash,
+        snapshotJson: history.snapshotJson
+      }));
+
+      expect(returned).toMatchObject({
+        id: history.sentId,
+        revision: 1,
+        status: "SENT",
+        provider_id_hash: `sha256:${"b".repeat(64)}`
+      });
+      expect(database.prepare(
+        `SELECT status, failure_code, retry_safe
+           FROM stripe_annual_statement_deliveries WHERE id = ?`
+      ).get(history.tailId)).toEqual({
+        status: "FAILED",
+        failure_code: "duplicate_sent_snapshot_suppressed",
+        retry_safe: 0
+      });
+      expect(await claimStripeAnnualStatementDelivery(db, {
+        id: history.tailId,
+        claimId: `claim_legacy_${tailStatus.toLowerCase()}`,
+        now: "2026-01-10T11:05:00.000Z"
+      })).toBeNull();
+      expect(database.prepare(
+        "SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries"
+      ).get()).toEqual({ count: 3 });
+    }
+  );
+
   it("atomically supersedes stale pre-provider work but preserves a non-stale concurrent fence", async () => {
     const stale = await reserveStripeAnnualStatementDelivery(db, {
       ...reservation({ id: "delivery_stale_a", snapshotHash: "d".repeat(64) }),
@@ -677,6 +713,52 @@ function repositorySnapshotJson(giftId: string): string {
       netAmountCents: 1_000
     }]
   });
+}
+
+function seedLegacyAnnualDedupHistory(
+  database: ReturnType<typeof migratedDatabase>,
+  tailStatus: "FAILED" | "PENDING"
+): { sentId: string; tailId: string; snapshotHash: string; snapshotJson: string } {
+  const sentId = `delivery_legacy_sent_${tailStatus.toLowerCase()}`;
+  const failedCorrectionId = `delivery_legacy_changed_${tailStatus.toLowerCase()}`;
+  const tailId = `delivery_legacy_returned_${tailStatus.toLowerCase()}`;
+  const snapshotHash = "a".repeat(64);
+  const snapshotJson = '{"version":2,"state":"A"}';
+  database.prepare(
+    `INSERT INTO stripe_annual_statement_deliveries (
+       id, year, livemode, donor_key, donor_name, donor_email,
+       snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+       status, attempt_count, dispatch_started_at, provider_id_hash,
+       failure_code, retry_safe, sent_at, created_at, updated_at
+     ) VALUES
+       (?, 2025, 0, 'ana@example.org', 'Ana', 'ana@example.org', ?, ?, 1, NULL,
+        'SENT', 1, '2026-01-10T10:00:01.000Z', ?, NULL, 0,
+        '2026-01-10T10:00:02.000Z', '2026-01-10T10:00:00.000Z', '2026-01-10T10:00:02.000Z'),
+       (?, 2025, 0, 'ana@example.org', 'Ana', 'ana@example.org', ?, ?, 2, ?,
+        'FAILED', 1, NULL, NULL, 'confirmed_not_sent', 0,
+        NULL, '2026-01-10T10:01:00.000Z', '2026-01-10T10:01:01.000Z'),
+       (?, 2025, 0, 'ana@example.org', 'Ana', 'ana@example.org', ?, ?, 3, ?,
+        ?, ?, NULL, NULL, ?, ?,
+        NULL, '2026-01-10T10:02:00.000Z', '2026-01-10T10:02:01.000Z')`
+  ).run(
+    sentId,
+    snapshotHash,
+    snapshotJson,
+    `sha256:${"b".repeat(64)}`,
+    failedCorrectionId,
+    "c".repeat(64),
+    '{"version":2,"state":"B"}',
+    sentId,
+    tailId,
+    snapshotHash,
+    snapshotJson,
+    sentId,
+    tailStatus,
+    tailStatus === "FAILED" ? 1 : 0,
+    tailStatus === "FAILED" ? "snapshot_changed_before_dispatch" : null,
+    tailStatus === "FAILED" ? 1 : 0
+  );
+  return { sentId, tailId, snapshotHash, snapshotJson };
 }
 
 function dispatchAuthorization(

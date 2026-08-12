@@ -313,6 +313,32 @@ export async function reserveStripeAnnualStatementDelivery(
       input.now
     ),
     db.prepare(
+      `UPDATE stripe_annual_statement_deliveries
+          SET status = 'FAILED', processing_claim_id = NULL,
+              lease_expires_at = NULL, failure_code = 'duplicate_sent_snapshot_suppressed',
+              retry_safe = 0, updated_at = ?
+        WHERE year = ? AND livemode = ? AND donor_key = ?
+          AND snapshot_hash = ?
+          AND (
+            (status IN ('PENDING', 'PROCESSING') AND dispatch_started_at IS NULL)
+            OR (status = 'FAILED' AND retry_safe = 1)
+          )
+          AND EXISTS (
+            SELECT 1 FROM stripe_annual_statement_deliveries AS sent
+             WHERE sent.year = stripe_annual_statement_deliveries.year
+               AND sent.livemode = stripe_annual_statement_deliveries.livemode
+               AND sent.donor_key = stripe_annual_statement_deliveries.donor_key
+               AND sent.snapshot_hash = stripe_annual_statement_deliveries.snapshot_hash
+               AND sent.status = 'SENT'
+          )`
+    ).bind(
+      input.now,
+      input.year,
+      input.livemode ? 1 : 0,
+      input.donorKey,
+      input.snapshotHash
+    ),
+    db.prepare(
       `INSERT OR IGNORE INTO stripe_annual_statement_deliveries (
        id, year, livemode, donor_key, donor_name, donor_email,
        snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
@@ -395,26 +421,28 @@ export async function reserveStripeAnnualStatementDelivery(
     input.livemode ? 1 : 0,
     input.donorKey
   ).first<StripeAnnualStatementDeliveryRecord>();
-  if (!row || row.snapshot_hash !== input.snapshotHash) {
-    const fence = await db.prepare(
-      `SELECT status FROM stripe_annual_statement_deliveries
-        WHERE year = ? AND livemode = ? AND donor_key = ?
-          AND status IN ('PENDING', 'PROCESSING', 'REVIEW')
-        ORDER BY CASE status WHEN 'REVIEW' THEN 0 WHEN 'PROCESSING' THEN 1 ELSE 2 END,
-                 revision DESC
-        LIMIT 1`
-    ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
-      .first<Pick<StripeAnnualStatementDeliveryRecord, "status">>();
+  const matchingSent = await db.prepare(
+    `SELECT * FROM stripe_annual_statement_deliveries
+      WHERE year = ? AND livemode = ? AND donor_key = ?
+        AND status = 'SENT' AND snapshot_hash = ?
+      ORDER BY revision DESC LIMIT 1`
+  ).bind(input.year, input.livemode ? 1 : 0, input.donorKey, input.snapshotHash)
+    .first<StripeAnnualStatementDeliveryRecord>();
+  const fence = await db.prepare(
+    `SELECT status FROM stripe_annual_statement_deliveries
+      WHERE year = ? AND livemode = ? AND donor_key = ?
+        AND status IN ('PENDING', 'PROCESSING', 'REVIEW')
+      ORDER BY CASE status WHEN 'REVIEW' THEN 0 WHEN 'PROCESSING' THEN 1 ELSE 2 END,
+               revision DESC
+      LIMIT 1`
+  ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
+    .first<Pick<StripeAnnualStatementDeliveryRecord, "status">>();
+  if (matchingSent) {
     if (fence) throw new StripeAnnualStatementReservationFenceError(fence.status);
-    row = await db.prepare(
-      `SELECT * FROM stripe_annual_statement_deliveries
-        WHERE year = ? AND livemode = ? AND donor_key = ? AND status = 'SENT'
-        ORDER BY revision DESC LIMIT 1`
-    ).bind(input.year, input.livemode ? 1 : 0, input.donorKey)
-      .first<StripeAnnualStatementDeliveryRecord>();
-    if (!row || row.snapshot_hash !== input.snapshotHash) {
-      throw new Error("Stripe annual statement reservation could not be read");
-    }
+    row = matchingSent;
+  } else if (!row || row.snapshot_hash !== input.snapshotHash) {
+    if (fence) throw new StripeAnnualStatementReservationFenceError(fence.status);
+    throw new Error("Stripe annual statement reservation could not be read");
   }
   if (
     row.year !== input.year
