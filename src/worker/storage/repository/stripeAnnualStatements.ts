@@ -406,14 +406,90 @@ export async function claimStripeAnnualStatementDelivery(
 
 export async function markStripeAnnualStatementDispatchStarted(
   db: D1Database,
-  input: { id: string; claimId: string; now: string }
+  input: {
+    id: string;
+    claimId: string;
+    snapshotHash: string;
+    snapshotJson: string;
+    range: { startIso: string; endIso: string };
+    livemode: boolean;
+    donorKey: string;
+    now: string;
+  }
 ): Promise<boolean> {
   const result = await db.prepare(
-    `UPDATE stripe_annual_statement_deliveries
+    `WITH current_gifts AS (
+       SELECT gift.id, gift.source_id, gift.frequency, gift.gift_type,
+              gift.amount_cents, gift.refunded_amount_cents,
+              gift.donor_name, gift.donor_email, gift.settled_at
+         FROM stripe_gifts AS gift
+         JOIN stripe_checkout_sessions AS checkout ON checkout.id = gift.checkout_id
+        WHERE gift.settled_at >= ? AND gift.settled_at < ?
+          AND checkout.livemode = ?
+          AND gift.status IN ('PAID', 'PARTIALLY_REFUNDED', 'REFUNDED')
+          AND CASE
+                WHEN NULLIF(TRIM(gift.donor_email), '') IS NULL THEN 'gift:' || gift.id
+                ELSE LOWER(TRIM(gift.donor_email))
+              END = ?
+     )
+     UPDATE stripe_annual_statement_deliveries
         SET dispatch_started_at = ?, updated_at = ?
       WHERE id = ? AND status = 'PROCESSING'
-        AND processing_claim_id = ? AND dispatch_started_at IS NULL`
-  ).bind(input.now, input.now, input.id, input.claimId).run();
+        AND processing_claim_id = ? AND dispatch_started_at IS NULL
+        AND snapshot_hash = ? AND snapshot_json = ?
+        AND donor_key = ?
+        AND donor_key IS json_extract(snapshot_json, '$.donor.key')
+        AND (SELECT COALESCE(
+               NULLIF(TRIM(gift.donor_name), ''),
+               NULLIF(LOWER(TRIM(gift.donor_email)), ''),
+               'Donante'
+             ) FROM current_gifts AS gift ORDER BY gift.settled_at, gift.id LIMIT 1)
+            IS json_extract(snapshot_json, '$.donor.name')
+        AND (SELECT NULLIF(LOWER(TRIM(gift.donor_email)), '')
+               FROM current_gifts AS gift ORDER BY gift.settled_at, gift.id LIMIT 1)
+            IS json_extract(snapshot_json, '$.donor.email')
+        AND (SELECT COUNT(*) FROM current_gifts)
+            = json_array_length(json_extract(snapshot_json, '$.items'))
+        AND NOT EXISTS (
+          SELECT 1 FROM current_gifts AS gift
+           WHERE NOT EXISTS (
+             SELECT 1 FROM json_each(snapshot_json, '$.items') AS item
+              WHERE json_extract(item.value, '$.sourceId') = gift.source_id
+                AND json_extract(item.value, '$.settledAt') = strftime('%Y-%m-%dT%H:%M:%fZ', gift.settled_at)
+                AND json_extract(item.value, '$.giftType') = gift.gift_type
+                AND json_extract(item.value, '$.frequency') = gift.frequency
+                AND json_extract(item.value, '$.grossAmountCents') = gift.amount_cents
+                AND json_extract(item.value, '$.refundedAmountCents') = gift.refunded_amount_cents
+                AND json_extract(item.value, '$.netAmountCents') = gift.amount_cents - gift.refunded_amount_cents
+           )
+        )
+        AND (SELECT value FROM app_settings WHERE key = 'branding_display_name')
+            IS json_extract(snapshot_json, '$.document.settings.brandingDisplayName')
+        AND (SELECT value FROM app_settings WHERE key = 'branding_accent_color')
+            IS json_extract(snapshot_json, '$.document.settings.brandingAccentColor')
+        AND (SELECT value FROM app_settings WHERE key = 'branding_support_email')
+            IS json_extract(snapshot_json, '$.document.settings.brandingSupportEmail')
+        AND (SELECT value FROM app_settings WHERE key = 'branding_logo')
+            IS json_extract(snapshot_json, '$.document.settings.brandingLogo')
+        AND (SELECT value FROM app_settings WHERE key = 'branding_donor_logo')
+            IS json_extract(snapshot_json, '$.document.settings.brandingDonorLogo')
+        AND (SELECT value FROM app_settings WHERE key = 'email_sender_name')
+            IS json_extract(snapshot_json, '$.document.settings.emailSenderName')
+        AND (SELECT value FROM app_settings WHERE key = 'email_reply_to')
+            IS json_extract(snapshot_json, '$.document.settings.emailReplyTo')`
+  ).bind(
+    input.range.startIso,
+    input.range.endIso,
+    input.livemode ? 1 : 0,
+    input.donorKey,
+    input.now,
+    input.now,
+    input.id,
+    input.claimId,
+    input.snapshotHash,
+    input.snapshotJson,
+    input.donorKey
+  ).run();
   return Number(result.meta?.changes ?? 0) === 1;
 }
 

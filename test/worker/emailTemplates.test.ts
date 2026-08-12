@@ -402,6 +402,35 @@ describe("email subject boundary", () => {
     expect(beforeProviderDispatch).toHaveBeenCalledTimes(1);
     expect(send).not.toHaveBeenCalled();
   });
+
+  it("awaits provider-boundary authorization completely before entering Cloudflare Email", async () => {
+    const order: string[] = [];
+    const send = vi.fn(async () => {
+      order.push("provider-entry");
+      return { messageId: "provider-boundary" };
+    });
+    const service = new EmailService({
+      MOCK_EXTERNAL_SERVICES: "false",
+      EMAIL_FROM: "receipts@example.org",
+      EMAIL: { send }
+    } as unknown as Env);
+
+    await service.sendStripeAnnualStatement({
+      toEmail: "ana@example.org",
+      subject: "Constancia anual de donaciones 2025 — EE. UU.",
+      text: "Body",
+      html: "<p>Body</p>",
+      pdfBytes: new Uint8Array([1, 2, 3]),
+      filename: "statement.pdf",
+      idempotencyKey: "stripe-annual-statement:delivery_1"
+    }, async () => {
+      order.push("authorization-start");
+      await Promise.resolve();
+      order.push("authorization-complete");
+    });
+
+    expect(order).toEqual(["authorization-start", "authorization-complete", "provider-entry"]);
+  });
 });
 
 describe("email dispatch outcome classification", () => {

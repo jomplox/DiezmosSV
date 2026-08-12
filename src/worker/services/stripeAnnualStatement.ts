@@ -9,9 +9,17 @@ import { StripeAnnualStatementReservationFenceError } from "../storage/repositor
 import type { Env } from "../types";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 import { newId } from "../utils/ids";
-import { loadEmailBranding } from "./branding";
+import {
+  BRANDING_ACCENT_COLOR_SETTING_KEY,
+  BRANDING_DISPLAY_NAME_SETTING_KEY,
+  BRANDING_DONOR_LOGO_SETTING_KEY,
+  BRANDING_LOGO_SETTING_KEY,
+  BRANDING_SUPPORT_EMAIL_SETTING_KEY,
+  loadEmailBranding
+} from "./branding";
 import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
+import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./emailSender";
 import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import {
   drawOrganizationLogo,
@@ -125,6 +133,24 @@ export interface StripeAnnualStatementDocumentEvidence {
   timeZone: string;
   accentColor: string;
   logo: { format: PdfBrandingLogo["format"]; hash: string } | null;
+  email: {
+    organizationName: string;
+    supportEmail: string;
+    logoUrl: string | null;
+    senderName: string;
+    replyToAddress: string | null;
+  };
+  settings: StripeAnnualStatementSettingEvidence;
+}
+
+export interface StripeAnnualStatementSettingEvidence {
+  brandingDisplayName: string | null;
+  brandingAccentColor: string | null;
+  brandingSupportEmail: string | null;
+  brandingLogo: string | null;
+  brandingDonorLogo: string | null;
+  emailSenderName: string | null;
+  emailReplyTo: string | null;
 }
 
 export async function buildStripeAnnualStatementSnapshot(input: {
@@ -185,7 +211,9 @@ export async function buildStripeAnnualStatementSnapshot(input: {
       ein: input.document.ein.trim(),
       timeZone: input.document.timeZone,
       accentColor: input.document.accentColor.trim().toLowerCase(),
-      logo: input.document.logo
+      logo: input.document.logo,
+      email: input.document.email,
+      settings: input.document.settings
     },
     items,
     totals
@@ -521,24 +549,16 @@ export async function sendStripeAnnualStatements(
         const dispatchAuthorized = await repo.markStripeAnnualStatementDispatchStarted({
           id: claim.id,
           claimId: claimId!,
+          snapshotHash: claim.snapshot_hash,
+          snapshotJson: claim.snapshot_json,
+          range: finalContext.window,
+          livemode,
+          donorKey: claim.donor_key,
           now
         });
-        if (!dispatchAuthorized) throw new Error("Stripe annual statement dispatch claim was lost");
-        const authorizedContext = await loadStripeAnnualStatementContext(env, repo, year, livemode);
-        const authorizedSnapshot = await snapshotForTarget(
-          repo,
-          authorizedContext.window,
-          livemode,
-          target,
-          year,
-          authorizedContext.document
-        );
-        if (
-          authorizedSnapshot.hash !== claim.snapshot_hash
-          || authorizedSnapshot.canonicalJson !== claim.snapshot_json
-        ) {
+        if (!dispatchAuthorized) {
           throw new EmailDispatchError(
-            "Stripe annual statement snapshot changed before provider dispatch",
+            "Stripe annual statement dispatch authorization failed",
             "snapshot_changed_before_dispatch",
             "NOT_SENT",
             true
@@ -628,10 +648,13 @@ async function loadStripeAnnualStatementContext(
   if (configuration.livemode !== livemode) {
     throw new StripeAnnualStatementConfigurationError("El ambiente solicitado no coincide con la configuración de Stripe.");
   }
-  const [branding, logo] = await Promise.all([
-    loadEmailBranding(repo, env),
+  const [settings, logo] = await Promise.all([
+    loadStripeAnnualStatementSettingEvidence(repo),
     loadPdfBrandingLogo(env)
   ]);
+  const branding = await loadEmailBranding({
+    getSetting: async (key) => settingEvidenceValue(settings, key)
+  }, env);
   return {
     window,
     branding,
@@ -642,9 +665,61 @@ async function loadStripeAnnualStatementContext(
       ein: configuration.ein,
       timeZone: window.timeZone,
       accentColor: branding.brandColor,
-      logo: logo ? { format: logo.format, hash: await sha256Hex(logo.bytes) } : null
+      logo: logo ? { format: logo.format, hash: await sha256Hex(logo.bytes) } : null,
+      email: {
+        organizationName: branding.organizationName,
+        supportEmail: branding.supportEmail,
+        logoUrl: branding.logoUrl,
+        senderName: branding.senderName,
+        replyToAddress: branding.replyToAddress
+      },
+      settings
     }
   };
+}
+
+async function loadStripeAnnualStatementSettingEvidence(
+  repo: Pick<Repository, "getSetting">
+): Promise<StripeAnnualStatementSettingEvidence> {
+  const [
+    brandingDisplayName,
+    brandingAccentColor,
+    brandingSupportEmail,
+    brandingLogo,
+    brandingDonorLogo,
+    emailSenderName,
+    emailReplyTo
+  ] = await Promise.all([
+    repo.getSetting(BRANDING_DISPLAY_NAME_SETTING_KEY),
+    repo.getSetting(BRANDING_ACCENT_COLOR_SETTING_KEY),
+    repo.getSetting(BRANDING_SUPPORT_EMAIL_SETTING_KEY),
+    repo.getSetting(BRANDING_LOGO_SETTING_KEY),
+    repo.getSetting(BRANDING_DONOR_LOGO_SETTING_KEY),
+    repo.getSetting(EMAIL_SENDER_NAME_SETTING_KEY),
+    repo.getSetting(EMAIL_REPLY_TO_SETTING_KEY)
+  ]);
+  return {
+    brandingDisplayName,
+    brandingAccentColor,
+    brandingSupportEmail,
+    brandingLogo,
+    brandingDonorLogo,
+    emailSenderName,
+    emailReplyTo
+  };
+}
+
+function settingEvidenceValue(settings: StripeAnnualStatementSettingEvidence, key: string): string | null {
+  switch (key) {
+    case BRANDING_DISPLAY_NAME_SETTING_KEY: return settings.brandingDisplayName;
+    case BRANDING_ACCENT_COLOR_SETTING_KEY: return settings.brandingAccentColor;
+    case BRANDING_SUPPORT_EMAIL_SETTING_KEY: return settings.brandingSupportEmail;
+    case BRANDING_LOGO_SETTING_KEY: return settings.brandingLogo;
+    case BRANDING_DONOR_LOGO_SETTING_KEY: return settings.brandingDonorLogo;
+    case EMAIL_SENDER_NAME_SETTING_KEY: return settings.emailSenderName;
+    case EMAIL_REPLY_TO_SETTING_KEY: return settings.emailReplyTo;
+    default: return null;
+  }
 }
 
 async function auditStatement(

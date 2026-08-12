@@ -231,7 +231,18 @@ describe("Stripe annual statement repository", () => {
   });
 
   it("converges concurrent identical reservations and creates corrected revision lineage", async () => {
-    const base = reservation({ id: "delivery_a", snapshotHash: "a".repeat(64), snapshotJson: '{"version":1}' });
+    seedGift(database, {
+      id: "delivery_gift",
+      donorEmail: "ana@example.org",
+      donorName: "Ana",
+      amountCents: 1_000,
+      settledAt: "2025-06-01T12:00:00.000Z"
+    });
+    const base = reservation({
+      id: "delivery_a",
+      snapshotHash: "a".repeat(64),
+      snapshotJson: repositorySnapshotJson("delivery_gift")
+    });
     const [first, duplicate] = await Promise.all([
       reserveStripeAnnualStatementDelivery(db, base),
       reserveStripeAnnualStatementDelivery(db, { ...base, id: "delivery_duplicate" })
@@ -247,11 +258,10 @@ describe("Stripe annual statement repository", () => {
       now: "2026-01-10T12:00:00.000Z"
     });
     expect(claim).toMatchObject({ status: "PROCESSING", attempt_count: 1 });
-    expect(await markStripeAnnualStatementDispatchStarted(db, {
-      id: first.id,
-      claimId: "claim_a",
-      now: "2026-01-10T12:00:01.000Z"
-    })).toBe(true);
+    expect(await markStripeAnnualStatementDispatchStarted(
+      db,
+      dispatchAuthorization(first, "claim_a", "2026-01-10T12:00:01.000Z")
+    )).toBe(true);
     expect(await finalizeStripeAnnualStatementDelivery(db, {
       id: first.id,
       claimId: "claim_a",
@@ -289,20 +299,27 @@ describe("Stripe annual statement repository", () => {
   });
 
   it("fences an unknown post-dispatch outcome from every automatic retry", async () => {
+    seedGift(database, {
+      id: "review_gift",
+      donorEmail: "ana@example.org",
+      donorName: "Ana",
+      amountCents: 1_000,
+      settledAt: "2025-06-01T12:00:00.000Z"
+    });
     const row = await reserveStripeAnnualStatementDelivery(db, reservation({
       id: "delivery_review",
-      snapshotHash: "d".repeat(64)
+      snapshotHash: "d".repeat(64),
+      snapshotJson: repositorySnapshotJson("review_gift")
     }));
     expect(await claimStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_review",
       now: "2026-01-10T12:00:00.000Z"
     })).not.toBeNull();
-    expect(await markStripeAnnualStatementDispatchStarted(db, {
-      id: row.id,
-      claimId: "claim_review",
-      now: "2026-01-10T12:00:01.000Z"
-    })).toBe(true);
+    expect(await markStripeAnnualStatementDispatchStarted(
+      db,
+      dispatchAuthorization(row, "claim_review", "2026-01-10T12:00:01.000Z")
+    )).toBe(true);
     expect(await finalizeStripeAnnualStatementDelivery(db, {
       id: row.id,
       claimId: "claim_review",
@@ -319,7 +336,8 @@ describe("Stripe annual statement repository", () => {
     })).toBeNull();
     const same = await reserveStripeAnnualStatementDelivery(db, reservation({
       id: "delivery_same_again",
-      snapshotHash: "d".repeat(64)
+      snapshotHash: "d".repeat(64),
+      snapshotJson: repositorySnapshotJson("review_gift")
     }));
     expect(same).toMatchObject({ id: row.id, status: "REVIEW", retry_safe: 0 });
 
@@ -330,6 +348,95 @@ describe("Stripe annual statement repository", () => {
     }))).rejects.toThrow(/unresolved review/i);
     expect(database.prepare("SELECT COUNT(*) AS count FROM stripe_annual_statement_deliveries").get())
       .toEqual({ count: 1 });
+  });
+
+  it("atomically refuses dispatch authorization after the reserved gift snapshot changes", async () => {
+    seedGift(database, {
+      id: "authorization_gift",
+      donorEmail: "ana@example.org",
+      donorName: "Ana",
+      amountCents: 1_000,
+      settledAt: "2025-06-01T12:00:00.000Z"
+    });
+    const snapshotJson = JSON.stringify({
+      version: 2,
+      donor: { key: "ana@example.org", name: "Ana", email: "ana@example.org" },
+      document: {
+        settings: {
+          brandingDisplayName: null,
+          brandingAccentColor: null,
+          brandingSupportEmail: null,
+          brandingLogo: null,
+          brandingDonorLogo: null,
+          emailSenderName: null,
+          emailReplyTo: null
+        }
+      },
+      items: [{
+        sourceId: "pi_authorization_gift",
+        settledAt: "2025-06-01T12:00:00.000Z",
+        giftType: "TITHE",
+        frequency: "ONCE",
+        grossAmountCents: 1_000,
+        refundedAmountCents: 0,
+        netAmountCents: 1_000
+      }]
+    });
+    const row = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_authorization",
+      snapshotHash: "9".repeat(64),
+      snapshotJson
+    }));
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: row.id,
+      claimId: "claim_authorization",
+      now: "2026-01-10T12:00:00.000Z"
+    })).not.toBeNull();
+    database.prepare(
+      "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'authorization_gift'"
+    ).run();
+
+    const authorization = {
+      id: row.id,
+      claimId: "claim_authorization",
+      snapshotHash: "9".repeat(64),
+      snapshotJson,
+      range: RANGE_2025_NEW_YORK,
+      livemode: false,
+      donorKey: "ana@example.org",
+      now: "2026-01-10T12:00:01.000Z"
+    };
+    expect(await markStripeAnnualStatementDispatchStarted(db, authorization)).toBe(false);
+    expect(database.prepare(
+      "SELECT status, processing_claim_id, dispatch_started_at FROM stripe_annual_statement_deliveries WHERE id = ?"
+    ).get(row.id)).toEqual({
+      status: "PROCESSING",
+      processing_claim_id: "claim_authorization",
+      dispatch_started_at: null
+    });
+  });
+
+  it("reclaims stale pre-provider work without converting it to REVIEW", async () => {
+    const row = await reserveStripeAnnualStatementDelivery(db, reservation({
+      id: "delivery_stale_pre_provider",
+      snapshotHash: "8".repeat(64)
+    }));
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: row.id,
+      claimId: "claim_interrupted_before_provider",
+      now: "2026-01-10T12:00:00.000Z"
+    })).not.toBeNull();
+
+    expect(await claimStripeAnnualStatementDelivery(db, {
+      id: row.id,
+      claimId: "claim_recovered",
+      now: "2026-01-10T12:06:00.000Z"
+    })).toMatchObject({
+      status: "PROCESSING",
+      processing_claim_id: "claim_recovered",
+      dispatch_started_at: null,
+      attempt_count: 2
+    });
   });
 
   it("serializes concurrent changed-hash reservations for one donor-year", async () => {
@@ -363,6 +470,50 @@ function reservation(overrides: { id: string; snapshotHash: string; snapshotJson
     snapshotHash: overrides.snapshotHash,
     snapshotJson: overrides.snapshotJson ?? '{"version":1}',
     now: "2026-01-10T11:00:00.000Z"
+  };
+}
+
+function repositorySnapshotJson(giftId: string): string {
+  return JSON.stringify({
+    version: 2,
+    donor: { key: "ana@example.org", name: "Ana", email: "ana@example.org" },
+    document: {
+      settings: {
+        brandingDisplayName: null,
+        brandingAccentColor: null,
+        brandingSupportEmail: null,
+        brandingLogo: null,
+        brandingDonorLogo: null,
+        emailSenderName: null,
+        emailReplyTo: null
+      }
+    },
+    items: [{
+      sourceId: `pi_${giftId}`,
+      settledAt: "2025-06-01T12:00:00.000Z",
+      giftType: "TITHE",
+      frequency: "ONCE",
+      grossAmountCents: 1_000,
+      refundedAmountCents: 0,
+      netAmountCents: 1_000
+    }]
+  });
+}
+
+function dispatchAuthorization(
+  row: Awaited<ReturnType<typeof reserveStripeAnnualStatementDelivery>>,
+  claimId: string,
+  now: string
+) {
+  return {
+    id: row.id,
+    claimId,
+    snapshotHash: row.snapshot_hash,
+    snapshotJson: row.snapshot_json,
+    range: RANGE_2025_NEW_YORK,
+    livemode: false,
+    donorKey: row.donor_key,
+    now
   };
 }
 

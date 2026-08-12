@@ -78,6 +78,34 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     });
     expect(changed.hash).not.toBe(snapshot.hash);
 
+    const changedEmailEvidence = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "ana@example.org",
+      donorName: "Ana",
+      donorEmail: "ana@example.org",
+      document: {
+        ...statementDocument(),
+        email: {
+          ...statementDocument().email,
+          organizationName: "Updated Email Organization",
+          supportEmail: "updated-support@example.org",
+          logoUrl: "https://example.org/api/branding/logo?v=updated",
+          senderName: "Updated Sender",
+          replyToAddress: "updated-replies@example.org"
+        }
+      },
+      gifts
+    });
+    expect(changedEmailEvidence.hash).not.toBe(snapshot.hash);
+    expect(JSON.parse(changedEmailEvidence.canonicalJson).document.email).toEqual({
+      organizationName: "Updated Email Organization",
+      supportEmail: "updated-support@example.org",
+      logoUrl: "https://example.org/api/branding/logo?v=updated",
+      senderName: "Updated Sender",
+      replyToAddress: "updated-replies@example.org"
+    });
+
     const changedConfiguration = await buildStripeAnnualStatementSnapshot({
       year: 2025,
       livemode: false,
@@ -433,15 +461,14 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     });
   });
 
-  it("aborts before provider dispatch when the snapshot changes during dispatch authorization", async () => {
-    seedGift(database, gift({ id: "gift_dispatch_authorization_race", amount_cents: 10_000 }));
-    const originalMarkDispatchStarted = repo.markStripeAnnualStatementDispatchStarted.bind(repo);
+  it("atomically fences a refund committed after the last snapshot read before provider entry", async () => {
+    seedGift(database, gift({ id: "gift_post_read_race", amount_cents: 10_000 }));
+    const originalMark = repo.markStripeAnnualStatementDispatchStarted.bind(repo);
     vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted").mockImplementation(async (input) => {
-      const marked = await originalMarkDispatchStarted(input);
       database.prepare(
-        "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_dispatch_authorization_race'"
+        "UPDATE stripe_gifts SET refunded_amount_cents = 100, status = 'PARTIALLY_REFUNDED' WHERE id = 'gift_post_read_race'"
       ).run();
-      return marked;
+      return originalMark(input);
     });
 
     expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
@@ -455,8 +482,101 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       status: "FAILED",
       failure_code: "snapshot_changed_before_dispatch",
       retry_safe: 1,
-      dispatch_started_at: "2026-01-10T12:00:00.000Z"
+      dispatch_started_at: null
     });
+  });
+
+  it("keeps a failed pre-provider authorization callback retry-safe", async () => {
+    seedGift(database, gift({ id: "gift_pre_provider_callback_failure" }));
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted")
+      .mockRejectedValueOnce(new Error("simulated worker interruption before authorization committed"));
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, failed: 1, review: 0 });
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT status, retry_safe, dispatch_started_at FROM stripe_annual_statement_deliveries"
+    ).get()).toEqual({ status: "FAILED", retry_safe: 1, dispatch_started_at: null });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:01:00.000Z"
+    })).toMatchObject({ sent: 1, failed: 0, review: 0 });
+    expect(emailSend).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["organization name", "branding_display_name", "Original Church", "Updated Church"],
+    ["accent color", "branding_accent_color", "#0f766e", "#123456"],
+    ["support email", "branding_support_email", "old-support@example.org", "new-support@example.org"],
+    [
+      "email logo metadata",
+      "branding_logo",
+      JSON.stringify({ contentType: "image/png", size: 10, version: "logo-old" }),
+      JSON.stringify({ contentType: "image/png", size: 10, version: "logo-new" })
+    ],
+    [
+      "PDF donor-logo metadata",
+      "branding_donor_logo",
+      JSON.stringify({ contentType: "image/png", size: 10, version: "donor-logo-old" }),
+      JSON.stringify({ contentType: "image/png", size: 10, version: "donor-logo-new" })
+    ],
+    ["sender name", "email_sender_name", "Original Sender", "Updated Sender"],
+    ["reply-to address", "email_reply_to", "old-replies@example.org", "new-replies@example.org"]
+  ])("fences a %s mutation completed during final dispatch authorization", async (_label, key, initial, changed) => {
+    seedGift(database, gift({ id: `gift_branding_race_${key}` }));
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?)"
+    ).run(key, initial);
+    const originalMark = repo.markStripeAnnualStatementDispatchStarted.bind(repo);
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted").mockImplementation(async (input) => {
+      database.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(changed, key);
+      return originalMark(input);
+    });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 0, failed: 1, review: 0 });
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(database.prepare(
+      "SELECT status, failure_code, retry_safe, dispatch_started_at FROM stripe_annual_statement_deliveries"
+    ).get()).toEqual({
+      status: "FAILED",
+      failure_code: "snapshot_changed_before_dispatch",
+      retry_safe: 1,
+      dispatch_started_at: null
+    });
+  });
+
+  it("completes final asynchronous validation before marking ambiguous provider entry", async () => {
+    seedGift(database, gift({ id: "gift_provider_boundary_order" }));
+    const order: string[] = [];
+    const originalRead = repo.listStripeAnnualStatementDonorGifts.bind(repo);
+    let reads = 0;
+    vi.spyOn(repo, "listStripeAnnualStatementDonorGifts").mockImplementation(async (...args) => {
+      const rows = await originalRead(...args);
+      reads += 1;
+      if (reads === 2) order.push("final-validation");
+      return rows;
+    });
+    const originalMark = repo.markStripeAnnualStatementDispatchStarted.bind(repo);
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted").mockImplementation(async (input) => {
+      order.push("dispatch-marker");
+      return originalMark(input);
+    });
+    emailSend.mockImplementation(async () => {
+      order.push("provider-entry");
+      return { messageId: "provider-boundary-order" };
+    });
+
+    expect(await sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).toMatchObject({ sent: 1, failed: 0, review: 0 });
+    expect(order).toEqual(["final-validation", "dispatch-marker", "provider-entry"]);
   });
 
   it("keeps a durable SENT outcome authoritative when its follow-up audit write fails", async () => {
@@ -489,7 +609,23 @@ function statementDocument(overrides: Partial<{
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",
     accentColor: "#0f766e",
-    logo: null
+    logo: null,
+    email: {
+      organizationName: "ExamplePerson1",
+      supportEmail: "legacy-contact-1@example.com",
+      logoUrl: null,
+      senderName: "ExamplePerson1",
+      replyToAddress: null
+    },
+    settings: {
+      brandingDisplayName: null,
+      brandingAccentColor: null,
+      brandingSupportEmail: null,
+      brandingLogo: null,
+      brandingDonorLogo: null,
+      emailSenderName: null,
+      emailReplyTo: null
+    }
   };
 }
 
