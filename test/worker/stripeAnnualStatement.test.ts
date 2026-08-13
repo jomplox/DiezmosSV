@@ -27,6 +27,7 @@ import { sqliteD1 } from "./support/sqliteD1";
 const temporaryDirectories: string[] = [];
 
 afterEach(() => {
+  vi.restoreAllMocks();
   temporaryDirectories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }));
 });
 
@@ -107,6 +108,12 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       corrected: false
     });
     const pdf = await PDFDocument.load(bytes);
+    const metadataDirectory = mkdtempSync(join(tmpdir(), "stripe-annual-version-"));
+    temporaryDirectories.push(metadataDirectory);
+    const metadataPath = join(metadataDirectory, "statement.pdf");
+    writeFileSync(metadataPath, bytes);
+    expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
+      .toContain("Producer:        stripe-annual-statement-pdf:v5");
     expect(pdf.getPages().map((page) => page.getMediaBox()))
       .toEqual([{ x: 0, y: 0, width: 612, height: 792 }]);
 
@@ -392,6 +399,90 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       "Page 2 of 2",
       expect.objectContaining({ y: 24.5, size: 7.5 })
     ]);
+  });
+
+  it.each([
+    { count: 4, pages: 1 },
+    { count: 5, pages: 1 },
+    { count: 6, pages: 2 },
+    { count: 17, pages: 2 }
+  ])("keeps $count complete contribution rows and totals above footer clearance", async ({ count, pages }) => {
+    const drawRectangle = vi.spyOn(PDFPage.prototype, "drawRectangle");
+    const gifts = Array.from({ length: count }, (_, index) => gift({
+      id: `gift_clearance_${index + 1}`,
+      source_id: `pi_clearance_${String(index + 1).padStart(2, "0")}`,
+      settled_at: `2025-${String((index % 12) + 1).padStart(2, "0")}-01T12:00:00.000Z`
+    }));
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "clearance@example.org",
+      donorName: "Footer Clearance",
+      donorEmail: "clearance@example.org",
+      document: statementDocument(),
+      gifts
+    });
+    const bytes = await renderStripeAnnualStatementPdf({
+      snapshot,
+      issuedOn: "2026-01-10T12:00:00.000Z",
+      corrected: false
+    });
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(pages);
+    const totals = drawRectangle.mock.calls
+      .map(([options]) => options)
+      .filter((options) => options?.height === 36.223);
+    expect(totals).toHaveLength(1);
+    expect(totals[0]?.y).toBeGreaterThanOrEqual(45.5);
+
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-clearance-"));
+    temporaryDirectories.push(directory);
+    const pdfPath = join(directory, "statement.pdf");
+    writeFileSync(pdfPath, bytes);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    for (const row of gifts) expect(text).toContain(row.source_id);
+  });
+
+  it("preserves maximum renderer-safe contact fields and all four address lines", async () => {
+    const legalName = `LEGAL ${"L".repeat(74)}`;
+    const supportEmail = `${"e".repeat(87)}@example.org`;
+    const phone = `+1${"2".repeat(38)}`;
+    const website = `https://example.org/${"w".repeat(80)}`;
+    const address = [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"A".repeat(70)}`);
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "max-contact@example.org",
+      donorName: "Maximum Contact Donor",
+      donorEmail: "max-contact@example.org",
+      document: statementDocument({
+        legalName,
+        organizationContact: { phone, website, mailingAddress: address },
+        email: {
+          organizationName: "Maximum Contact Ministry",
+          supportEmail,
+          logoUrl: null,
+          senderName: "Maximum Contact Ministry",
+          replyToAddress: supportEmail
+        }
+      }),
+      gifts: [gift({ id: "gift_max_contact", source_id: "pi_max_contact" })]
+    });
+    const bytes = await renderStripeAnnualStatementPdf({ snapshot, issuedOn: "2026-01-10T12:00:00.000Z", corrected: false });
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-max-contact-"));
+    temporaryDirectories.push(directory);
+    const pdfPath = join(directory, "statement.pdf");
+    writeFileSync(pdfPath, bytes);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" }).replace(/\s+/gu, " ");
+    for (const marker of ["LEGAL", "example.org", "+122222", "ADDRESS-1", "ADDRESS-2", "ADDRESS-3", "ADDRESS-4"]) {
+      expect(text).toContain(marker);
+    }
+    for (const [drawn, options] of drawText.mock.calls) {
+      if (!options?.font || typeof options.x !== "number" || !String(drawn).match(/LEGAL|example\.org|ADDRESS-|^\+1/)) continue;
+      expect(options.x).toBeGreaterThanOrEqual(45.354);
+      expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(566.646);
+      expect(options.y).toBeGreaterThanOrEqual(45.5);
+    }
   });
 
   it("renders unsupported Unicode deterministically without changing source identity", async () => {
@@ -1259,7 +1350,7 @@ function statementDocument(overrides: Partial<{
   };
 }> = {}): StripeAnnualStatementDocumentEvidence {
   return {
-    rendererVersion: "stripe-annual-statement-pdf:v4" as const,
+    rendererVersion: "stripe-annual-statement-pdf:v5" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",

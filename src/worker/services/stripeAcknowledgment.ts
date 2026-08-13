@@ -18,7 +18,8 @@ import { logWorkerError } from "./observability";
 import { pdfSafeText } from "./pdf";
 import { STRIPE_RECEIPT_ELIM_LOGO_BYTES } from "./stripePdfAssets";
 
-export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v3" as const;
+export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v4" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3 = "stripe-acknowledgment-pdf:v3" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2 = "stripe-acknowledgment-pdf:v2" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1 = "stripe-acknowledgment-pdf:v1" as const;
 
@@ -154,18 +155,25 @@ export async function renderStripeAcknowledgmentPdf(
     : input.kind === "PARTIAL_REFUND"
       ? `This corrected receipt replaces the prior acknowledgment for your ${originalAmount} cash contribution received on ${receivedDate}. A cumulative refund of ${refundedAmount} leaves a net charitable contribution of ${netAmount}. No goods or services were provided in exchange for your contribution.`
       : `This receipt revokes the prior acknowledgment for your ${originalAmount} cash contribution received on ${receivedDate}. A full refund of ${refundedAmount} leaves a net charitable contribution of ${netAmount}.`;
-  drawPdfWrapped(page, contributionParagraph, {
+  const contributionBottom = drawPdfWrapped(page, contributionParagraph, {
     x: contentX,
     y: 604,
-    size: 11.25,
-    lineHeight: 17.46,
+    size: 10.5,
+    lineHeight: 14,
     maxWidth: contentWidth,
     font: regular
   });
 
-  drawPdfText(page, input.signerName, { x: contentX, y: 535.5, size: 11.25, font: bold });
-  drawPdfText(page, `${input.signerTitle.replace(/[.]$/u, "")}.`, { x: contentX, y: 518.5, size: 11.25, font: regular });
-  drawPdfText(page, input.organizationName, { x: contentX, y: 501.5, size: 11.25, font: regular });
+  let signatureY = Math.min(535.5, contributionBottom - 4);
+  signatureY = drawPdfWrapped(page, input.signerName, {
+    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: bold
+  });
+  signatureY = drawPdfWrapped(page, `${input.signerTitle.replace(/[.]$/u, "")}.`, {
+    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: regular
+  });
+  drawPdfWrapped(page, input.organizationName, {
+    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: regular
+  });
 
   drawPdfText(page, "Receipt of Charitable Donation:", {
     x: contentX,
@@ -226,16 +234,31 @@ export async function renderStripeAcknowledgmentPdf(
     }
   );
 
-  drawPdfCentered(
-    page,
-    [input.supportEmail, input.organizationPhone].filter(Boolean).join(" · "),
-    192.3,
-    9.5,
-    bold,
-    contentX,
-    499
-  );
-  drawPdfCentered(page, input.organizationMailingAddress.join(" "), 177.3, 9.5, bold, contentX, 499);
+  const contactGap = 12;
+  const contactLeft = 45;
+  const contactColumnWidth = (522 - contactGap) / 2;
+  let leftContactY = 232;
+  for (const line of [input.supportEmail, input.organizationPhone, input.organizationWebsite]) {
+    leftContactY = drawPdfWrapped(page, line, {
+      x: contactLeft,
+      y: leftContactY,
+      size: 7.2,
+      lineHeight: 8,
+      maxWidth: contactColumnWidth,
+      font: bold
+    });
+  }
+  let addressY = 232;
+  for (const line of input.organizationMailingAddress) {
+    addressY = drawPdfWrapped(page, line, {
+      x: contactLeft + contactColumnWidth + contactGap,
+      y: addressY,
+      size: 7.2,
+      lineHeight: 8,
+      maxWidth: contactColumnWidth,
+      font: bold
+    });
+  }
 
   page.drawRectangle({ x: 0, y: 0, width: 612, height: 169, color: rgb(0.93, 0.93, 0.93) });
   const scripture = [
@@ -312,14 +335,30 @@ function wrapStripePdfText(text: string, font: PDFFont, size: number, maxWidth: 
   if (!safe) return [""];
   const lines: string[] = [];
   let current = "";
+  const pushLongToken = (token: string) => {
+    for (const character of Array.from(token)) {
+      const candidate = current + character;
+      if (current && font.widthOfTextAtSize(candidate, size) > maxWidth) {
+        lines.push(current);
+        current = character;
+      } else {
+        current = candidate;
+      }
+    }
+  };
   for (const word of safe.split(/\s+/u)) {
     const candidate = current ? `${current} ${word}` : word;
     if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
       current = candidate;
       continue;
     }
-    if (current) lines.push(current);
-    current = word;
+    if (font.widthOfTextAtSize(word, size) <= maxWidth) {
+      if (current) lines.push(current);
+      current = word;
+    } else {
+      if (current) current += " ";
+      pushLongToken(word);
+    }
   }
   if (current) lines.push(current);
   return lines;
@@ -355,6 +394,7 @@ type StripeAcknowledgmentPdfEvidence = Omit<
 > & {
   rendererVersion:
     | typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+    | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1;
   organizationPhone?: string;
@@ -596,6 +636,7 @@ export async function deliverNextStripeAcknowledgment(
 function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAcknowledgmentPdfEvidence {
   if (!isRecord(value)) return false;
   return (value.rendererVersion === STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1)
     && (value.donorName === null || typeof value.donorName === "string")

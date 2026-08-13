@@ -295,6 +295,28 @@ describe("credential secret patch", () => {
     });
   });
 
+  it("applies the renderer-safe Stripe contact maxima at the admin boundary", () => {
+    const staging = env({ APP_ENV: "staging" });
+    const maximum = {
+      legalName: `LEGAL ${"L".repeat(74)}`,
+      organizationWebsite: `https://example.org/${"w".repeat(80)}`,
+      organizationMailingAddress: [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"A".repeat(70)}`).join("\n"),
+      signerName: `SIGNER ${"S".repeat(53)}`,
+      signerTitle: `TITLE ${"T".repeat(54)}`
+    };
+    expect(buildStripeCredentialSecretPatch(maximum, staging)).toMatchObject({
+      STRIPE_US_LEGAL_NAME: expect.objectContaining({ text: maximum.legalName }),
+      STRIPE_US_MAILING_ADDRESS: expect.objectContaining({ text: maximum.organizationMailingAddress })
+    });
+    for (const input of [
+      { legalName: "L".repeat(81) },
+      { organizationWebsite: `https://example.org/${"w".repeat(81)}` },
+      { organizationMailingAddress: `A${"a".repeat(80)}\nSecond line` },
+      { signerName: "S".repeat(61) },
+      { signerTitle: "T".repeat(61) }
+    ]) expect(() => buildStripeCredentialSecretPatch(input, staging)).toThrow(StripeCredentialValidationError);
+  });
+
   it("stages only a syntactically valid next webhook secret", () => {
     expect(buildStripeWebhookStagePatch(" whsec_next ")).toEqual({
       STRIPE_WEBHOOK_SECRET_NEXT: {

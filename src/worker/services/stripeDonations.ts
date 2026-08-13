@@ -1,4 +1,11 @@
 import type Stripe from "stripe";
+import {
+  STRIPE_US_LEGAL_NAME_MAX_LENGTH,
+  STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
+  STRIPE_US_SIGNER_NAME_MAX_LENGTH,
+  STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_WEBSITE_MAX_LENGTH
+} from "../../shared/stripeUsConfiguration";
 import type { StripeGiftFrequency, StripeGiftType } from "../storage/repository/stripeDonations";
 import { sha256Hex, utf8Bytes } from "../utils/encoding";
 
@@ -281,7 +288,7 @@ export function resolveStripeConfiguration(
     throw new StripeConfigurationError("invalid_billing_portal_configuration");
   }
   const legalName = requiredValue(env.STRIPE_US_LEGAL_NAME, "missing_legal_name");
-  if (legalName.length > 200) {
+  if (legalName.length > STRIPE_US_LEGAL_NAME_MAX_LENGTH) {
     throw new StripeConfigurationError("invalid_legal_name");
   }
   const ein = requiredValue(env.STRIPE_US_EIN, "missing_ein");
@@ -295,11 +302,11 @@ export function resolveStripeConfiguration(
   const organizationWebsite = validatedOrganizationWebsite(env.STRIPE_US_WEBSITE);
   const organizationMailingAddress = validatedMailingAddress(env.STRIPE_US_MAILING_ADDRESS);
   const signerName = requiredValue(env.STRIPE_US_SIGNER_NAME, "missing_us_signer_name");
-  if (signerName.length > 120 || hasControlCharacters(signerName)) {
+  if (signerName.length > STRIPE_US_SIGNER_NAME_MAX_LENGTH || hasControlCharacters(signerName)) {
     throw new StripeConfigurationError("invalid_us_signer_name");
   }
   const signerTitle = requiredValue(env.STRIPE_US_SIGNER_TITLE, "missing_us_signer_title");
-  if (signerTitle.length > 120 || hasControlCharacters(signerTitle)) {
+  if (signerTitle.length > STRIPE_US_SIGNER_TITLE_MAX_LENGTH || hasControlCharacters(signerTitle)) {
     throw new StripeConfigurationError("invalid_us_signer_title");
   }
   return {
@@ -324,7 +331,7 @@ export function resolveStripeConfiguration(
 
 function validatedOrganizationWebsite(value: string | undefined): string {
   const configured = requiredValue(value, "missing_us_website");
-  if (configured.length > 200 || hasControlCharacters(configured)) {
+  if (configured.length > STRIPE_US_WEBSITE_MAX_LENGTH || hasControlCharacters(configured)) {
     throw new StripeConfigurationError("invalid_us_website");
   }
   try {
@@ -344,7 +351,7 @@ function validatedMailingAddress(value: string | undefined): string[] {
     throw new StripeConfigurationError("invalid_us_mailing_address");
   }
   const lines = configured.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
-  if (lines.length < 2 || lines.length > 4 || lines.some((line) => line.length > 200)) {
+  if (lines.length < 2 || lines.length > 4 || lines.some((line) => line.length > STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH)) {
     throw new StripeConfigurationError("invalid_us_mailing_address");
   }
   return lines;

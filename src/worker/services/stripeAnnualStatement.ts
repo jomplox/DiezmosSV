@@ -34,7 +34,7 @@ export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
-export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v4" as const;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v5" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -286,7 +286,7 @@ export async function renderStripeAnnualStatementPdf(
       drawAnnualCover(page, input, logo, regular, bold, italic);
       drawAnnualContributionTable(page, items, {
         topY: 215.613,
-        rowHeight: 24.75,
+        rowHeight: annualTableRowHeight(215.613, items.length, finalPage),
         regular,
         bold,
         timeZone: input.snapshot.document.timeZone,
@@ -790,21 +790,34 @@ function drawAnnualCover(
 
   drawPdfLabel(page, "FROM", left, 674, bold);
   drawPdfLabel(page, "PREPARED FOR", preparedX, 674, bold);
-  drawWrappedText(page, input.snapshot.document.legalName, {
+  const fromWidth = preparedX - left - 12;
+  let fromY = drawWrappedText(page, input.snapshot.document.legalName, {
     x: left,
     y: 656,
-    size: 12,
-    lineHeight: 13.5,
-    maxWidth: 220,
+    size: 10,
+    lineHeight: 11,
+    maxWidth: fromWidth,
     font: bold
   });
-  drawPdfTextLine(page, "A 501(c)(3) Public Charity", left, 638, 9.8, regular);
-  drawPdfTextLine(page, `EIN ${input.snapshot.document.ein}`, left, 625, 9.8, regular);
-  drawPdfTextLine(page, `${input.snapshot.document.email.supportEmail}  ·  ${input.snapshot.document.organizationContact.phone}`, left, 612, 9.3, regular, gray);
-  drawPdfTextLine(page, input.snapshot.document.organizationContact.website, left, 599, 9.3, regular, gray);
-  input.snapshot.document.organizationContact.mailingAddress.slice(0, 3).forEach((line, index) => {
-    drawPdfTextLine(page, line, left, 586 - index * 13, 9.3, regular, gray);
-  });
+  fromY -= 1;
+  for (const line of [
+    "A 501(c)(3) Public Charity",
+    `EIN ${input.snapshot.document.ein}`,
+    input.snapshot.document.email.supportEmail,
+    input.snapshot.document.organizationContact.phone,
+    input.snapshot.document.organizationContact.website,
+    ...input.snapshot.document.organizationContact.mailingAddress
+  ]) {
+    fromY = drawWrappedText(page, line, {
+      x: left,
+      y: fromY,
+      size: 7,
+      lineHeight: 7.5,
+      maxWidth: fromWidth,
+      font: regular,
+      color: gray
+    });
+  }
 
   drawWrappedText(page, input.snapshot.donor.name, {
     x: preparedX,
@@ -1001,6 +1014,15 @@ function drawAnnualContributionTable(
     drawRight(page, `${formatCents(options.total.netAmountCents)} USD`, amountRight, rowTop - 22.38, 9, options.bold);
     page.drawLine({ start: { x: left, y: rowTop - totalHeight }, end: { x: right, y: rowTop - totalHeight }, thickness: 0.7, color: rule });
   }
+}
+
+function annualTableRowHeight(topY: number, itemCount: number, includesTotal: boolean): number {
+  const preferred = 24.75;
+  if (!includesTotal || itemCount === 0) return preferred;
+  const headerHeight = 22.578;
+  const totalHeight = 36.223;
+  const footerClearance = 45.6;
+  return Math.min(preferred, (topY - headerHeight - totalHeight - footerClearance) / itemCount);
 }
 
 function drawAnnualFooter(

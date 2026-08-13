@@ -160,10 +160,18 @@ function collectTrackedImplementationDetails() {
       violations.add(normalize(path));
       continue;
     }
+    if (containsUserHomeAbsolutePath(contents)) {
+      violations.add(normalize(path));
+      continue;
+    }
     if (path === "wrangler.toml" && containsLiveWranglerIdentifier(contents)) {
       violations.add(normalize(path));
     }
   }
+}
+
+function containsUserHomeAbsolutePath(contents) {
+  return /(^|[\s('"`=])\/(?:Users|home)\/[^/\s'"`<>]+\//m.test(contents);
 }
 
 function containsImplementationEndpoint(contents) {

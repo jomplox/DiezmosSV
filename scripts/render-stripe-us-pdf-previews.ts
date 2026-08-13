@@ -28,7 +28,12 @@ export async function renderStripeUsPdfPreviews(
       supportEmail: "preview-receipt@example.org",
       organizationPhone: "+1 555 010 0413",
       organizationWebsite: "https://preview-receipt.example.org",
-      organizationMailingAddress: ["413 Preview Receipt Way", "Orlando, FL 32813, USA"],
+      organizationMailingAddress: [
+        "413 Preview Receipt Way",
+        "Preview Receipt Address 2",
+        "Preview Receipt Address 3",
+        "Preview Receipt Address 4"
+      ],
       signerName: "Preview Receipt Signer",
       signerTitle: "Preview Treasurer",
       kind: "ORIGINAL"
@@ -47,7 +52,7 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
     donorName: "Preview Annual Donor 517",
     donorEmail: "preview-annual-donor@example.org",
     document: {
-      rendererVersion: "stripe-annual-statement-pdf:v4",
+      rendererVersion: "stripe-annual-statement-pdf:v5",
       legalName: "Preview Annual Legal Foundation",
       ein: "51-7000517",
       timeZone: "America/New_York",
@@ -59,7 +64,12 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
       organizationContact: {
         phone: "+1 555 010 0517",
         website: "https://preview-annual.example.org",
-        mailingAddress: ["517 Preview Annual Avenue", "Austin, TX 78751, USA"]
+        mailingAddress: [
+          "517 Preview Annual Avenue",
+          "Preview Annual Address 2",
+          "Preview Annual Address 3",
+          "Preview Annual Address 4"
+        ]
       },
       email: {
         organizationName: "Preview Annual Ministry",
@@ -78,12 +88,12 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
         emailReplyTo: null
       }
     },
-    gifts: [{
-      id: "preview_annual_gift_517",
+    gifts: Array.from({ length: 5 }, (_, index) => ({
+      id: `preview_annual_gift_517_${index + 1}`,
       source_type: "PAYMENT_INTENT",
-      source_id: "pi_preview_annual_517",
-      checkout_id: "checkout_preview_annual_517",
-      stripe_payment_intent_id: "pi_preview_annual_517",
+      source_id: `pi_preview_annual_517_${index + 1}`,
+      checkout_id: `checkout_preview_annual_517_${index + 1}`,
+      stripe_payment_intent_id: `pi_preview_annual_517_${index + 1}`,
       stripe_invoice_id: null,
       stripe_subscription_id: null,
       frequency: "MONTHLY",
@@ -101,13 +111,13 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
         postalCode: "78751",
         country: "US"
       }),
-      settled_at: "2025-05-17T16:00:00.000Z",
+      settled_at: `2025-0${index + 1}-17T16:00:00.000Z`,
       status: "PAID",
       refunded_amount_cents: 0,
       net_amount_cents: 51_700,
       created_at: "2025-05-17T16:00:00.000Z",
       updated_at: "2025-05-17T16:00:00.000Z"
-    }]
+    }))
   });
   return renderStripeAnnualStatementPdf({
     snapshot,

@@ -35,11 +35,16 @@ describe("Stripe U.S. PDF preview command", () => {
     expect(receiptText).toContain("pi_preview_receipt_413");
     expect(receiptText).toContain("Preview Receipt Legal Foundation");
     expect(receiptText).toContain("preview-receipt@example.org");
+    expect(receiptText).toContain("Preview Receipt Address 4");
 
     const annualText = execFileSync("pdftotext", ["-layout", previews.annualPath, "-"], { encoding: "utf8" });
     expect(annualText).toContain("Preview Annual Donor 517");
     expect(annualText).toContain("pi_preview_annual_517");
     expect(annualText).toContain("Preview Annual Legal Foundation");
     expect(annualText).toContain("preview-annual@example.org");
+    expect(annualText).toContain("Preview Annual Address 4");
+    for (let index = 1; index <= 5; index += 1) {
+      expect(annualText).toContain(`pi_preview_annual_517_${index}`);
+    }
   });
 });

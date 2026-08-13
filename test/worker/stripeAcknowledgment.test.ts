@@ -134,6 +134,12 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     });
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPageCount()).toBe(1);
+    const metadataDirectory = mkdtempSync(join(tmpdir(), "stripe-ack-version-"));
+    directories.push(metadataDirectory);
+    const metadataPath = join(metadataDirectory, "receipt.pdf");
+    writeFileSync(metadataPath, bytes);
+    expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
+      .toContain("Producer:        stripe-acknowledgment-pdf:v4");
     expect(pdf.getPage(0).getMediaBox()).toEqual({ x: 0, y: 0, width: 612, height: 792 });
 
     expect(drawImage).toHaveBeenCalledTimes(1);
@@ -173,16 +179,66 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(drawRectangle.mock.calls).toContainEqual([
       expect.objectContaining({ x: 0, y: 0, width: 612, height: 169 })
     ]);
-    expect(drawText.mock.calls).toContainEqual([
-      "fmce@example.org · +1 (786) 505-8446",
-      expect.objectContaining({ y: 192.3, size: 9.5 })
-    ]);
-    expect(drawText.mock.calls).toContainEqual([
-      "2885 Sanford Ave SW, PMB 41357 Grandville, MI 49418, USA",
-      expect.objectContaining({ y: 177.3, size: 9.5 })
+    for (const contact of [
+      "fmce@example.org",
+      "+1 (786) 505-8446",
+      "https://www.elim.click",
+      "2885 Sanford Ave SW, PMB 41357",
+      "Grandville, MI 49418, USA"
+    ]) expect(drawText.mock.calls).toContainEqual([
+      contact,
+      expect.objectContaining({ size: 7.2 })
     ]);
     const salutation = drawText.mock.calls.find(([text]) => text === "Dear Edith Anaya,");
     expect(logoOptions.y).toBeGreaterThan((salutation?.[1]?.y ?? Number.POSITIVE_INFINITY) + 24);
+  });
+
+  it("preserves maximum renderer-safe names, contacts, and all four address lines", async () => {
+    const legalName = `LEGAL ${"L".repeat(74)}`;
+    const signerName = `SIGNER ${"S".repeat(53)}`;
+    const signerTitle = `TITLE ${"T".repeat(54)}`;
+    const supportEmail = `${"e".repeat(88)}@example.org`;
+    const phone = `+1${"2".repeat(38)}`;
+    const website = `https://example.org/${"w".repeat(80)}`;
+    const address = [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"A".repeat(70)}`);
+    expect([legalName.length, signerName.length, signerTitle.length, supportEmail.length, phone.length, website.length])
+      .toEqual([80, 60, 60, 100, 40, 100]);
+    expect(address.map((line) => line.length)).toEqual([80, 80, 80, 80]);
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const bytes = await renderStripeAcknowledgmentPdf({
+      donorName: "Maximum Contact Donor",
+      amountCents: 10_000,
+      refundedAmountCents: 0,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      sourceId: "pi_max_contact",
+      settledAt: "2025-01-01T12:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName,
+      ein: "12-3456789",
+      organizationName: "Maximum Contact Ministry",
+      supportEmail,
+      organizationPhone: phone,
+      organizationWebsite: website,
+      organizationMailingAddress: address,
+      signerName,
+      signerTitle,
+      kind: "ORIGINAL"
+    });
+    const directory = mkdtempSync(join(tmpdir(), "stripe-ack-max-contact-"));
+    directories.push(directory);
+    const pdfPath = join(directory, "receipt.pdf");
+    writeFileSync(pdfPath, bytes);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    for (const marker of ["LEGAL", "SIGNER", "TITLE", "example.org", "ADDRESS-1", "ADDRESS-2", "ADDRESS-3", "ADDRESS-4"]) {
+      expect(text).toContain(marker);
+    }
+    for (const [drawn, options] of drawText.mock.calls) {
+      if (!options?.font || typeof options.x !== "number" || !String(drawn).match(/LEGAL|SIGNER|TITLE|example\.org|ADDRESS-|^\+1/)) continue;
+      expect(options.x).toBeGreaterThanOrEqual(45);
+      expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(567);
+      expect(options.y, String(drawn)).toBeGreaterThanOrEqual(176);
+    }
   });
 
   it("attaches the immutable one-page receipt before crossing the email provider boundary", async () => {
@@ -280,7 +336,8 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       "Ack Organization Sentinel",
       "ack-support-sentinel@example.org",
       "+1 555 010 8282",
-      "82 Acknowledgment Way New York, NY 10082, USA",
+      "82 Acknowledgment Way",
+      "New York, NY 10082, USA",
       "Ack Signer Sentinel",
       "Acknowledgment Treasurer"
     ]) {

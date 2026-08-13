@@ -226,6 +226,37 @@ describe("Stripe Checkout donation contract", () => {
     }).livemode).toBe(true);
   });
 
+  it("accepts renderer-safe maxima and rejects the first overflowing character", () => {
+    const base = {
+      APP_ENV: "staging",
+      STRIPE_RESTRICTED_KEY: "rk_test_fixture",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_fixture",
+      STRIPE_WEBHOOK_SECRET: "whsec_fixture",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: `+1${"2".repeat(38)}`,
+      STRIPE_US_WEBSITE: `https://example.org/${"w".repeat(80)}`,
+      STRIPE_US_MAILING_ADDRESS: [1, 2, 3, 4].map((line) => `ADDRESS-${line} ${"A".repeat(70)}`).join("\n"),
+      STRIPE_US_LEGAL_NAME: `LEGAL ${"L".repeat(74)}`,
+      STRIPE_US_SIGNER_NAME: `SIGNER ${"S".repeat(53)}`,
+      STRIPE_US_SIGNER_TITLE: `TITLE ${"T".repeat(54)}`
+    };
+    expect(resolveStripeConfiguration(base)).toMatchObject({
+      legalName: base.STRIPE_US_LEGAL_NAME,
+      signerName: base.STRIPE_US_SIGNER_NAME,
+      signerTitle: base.STRIPE_US_SIGNER_TITLE,
+      organizationMailingAddress: base.STRIPE_US_MAILING_ADDRESS.split("\n")
+    });
+    for (const override of [
+      { STRIPE_US_LEGAL_NAME: "L".repeat(81) },
+      { STRIPE_US_SIGNER_NAME: "S".repeat(61) },
+      { STRIPE_US_SIGNER_TITLE: "T".repeat(61) },
+      { STRIPE_US_WEBSITE: `https://example.org/${"w".repeat(81)}` },
+      { STRIPE_US_MAILING_ADDRESS: `A${"a".repeat(80)}\nSecond line` }
+    ]) expect(() => resolveStripeConfiguration({ ...base, ...override })).toThrow(StripeConfigurationError);
+  });
+
   it("allows an HTTP loopback Stripe API bridge only in local development", () => {
     const valid = {
       APP_ENV: "local",

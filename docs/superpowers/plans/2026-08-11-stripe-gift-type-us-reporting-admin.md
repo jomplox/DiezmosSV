@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Work only in `/Users/josevega/Documents/CCRTV/DiezmosSV/.worktrees/stripe-replace-givebutter` on branch `codex/stripe-replace-givebutter`.
+- Work only in the isolated `stripe-replace-givebutter` worktree on branch `codex/stripe-replace-givebutter`.
 - Use test-driven development for every behavior change: write the narrow failing test first, run it and record the expected failure, implement the minimum change, then rerun the focused test.
 - Never edit an applied migration. Add migrations after `0032_stripe_us_donations.sql`.
 - Keep Wompi, DTE/CDE issuance, Ministerio de Hacienda records, and El Salvador annual dossiers unchanged. Stripe data must never enter the Salvadoran fiscal pipeline.

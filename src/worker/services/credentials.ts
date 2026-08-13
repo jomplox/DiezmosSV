@@ -1,4 +1,11 @@
 import { certificateExpiry } from "../domain/signer";
+import {
+  STRIPE_US_LEGAL_NAME_MAX_LENGTH,
+  STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
+  STRIPE_US_SIGNER_NAME_MAX_LENGTH,
+  STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_WEBSITE_MAX_LENGTH
+} from "../../shared/stripeUsConfiguration";
 import { getMhCertificateXml } from "../config";
 import type { Env } from "../types";
 import { deploymentEnvironmentPolicy } from "./environmentPolicy";
@@ -248,7 +255,7 @@ export function buildStripeCredentialSecretPatch(
   if (billingPortalConfigurationId && !hasPrefixedValue(billingPortalConfigurationId, "bpc_")) {
     throw new StripeCredentialValidationError("invalid_billing_portal_configuration");
   }
-  if (legalName && (legalName.length > 200 || /[\u0000-\u001f\u007f-\u009f]/u.test(legalName))) {
+  if (legalName && (legalName.length > STRIPE_US_LEGAL_NAME_MAX_LENGTH || /[\u0000-\u001f\u007f-\u009f]/u.test(legalName))) {
     throw new StripeCredentialValidationError("invalid_legal_name");
   }
   if (ein && (!/^\d{2}-\d{7}$/.test(ein) || ein === "00-0000000")) {
@@ -266,10 +273,10 @@ export function buildStripeCredentialSecretPatch(
   if (organizationMailingAddress && !isMailingAddress(organizationMailingAddress)) {
     throw new StripeCredentialValidationError("invalid_us_mailing_address");
   }
-  if (signerName && (signerName.length > 120 || hasControlCharacters(signerName))) {
+  if (signerName && (signerName.length > STRIPE_US_SIGNER_NAME_MAX_LENGTH || hasControlCharacters(signerName))) {
     throw new StripeCredentialValidationError("invalid_us_signer_name");
   }
-  if (signerTitle && (signerTitle.length > 120 || hasControlCharacters(signerTitle))) {
+  if (signerTitle && (signerTitle.length > STRIPE_US_SIGNER_TITLE_MAX_LENGTH || hasControlCharacters(signerTitle))) {
     throw new StripeCredentialValidationError("invalid_us_signer_title");
   }
 
@@ -293,7 +300,7 @@ function hasControlCharacters(value: string): boolean {
 }
 
 function isSecureWebsite(value: string): boolean {
-  if (value.length > 200 || hasControlCharacters(value)) return false;
+  if (value.length > STRIPE_US_WEBSITE_MAX_LENGTH || hasControlCharacters(value)) return false;
   try {
     const parsed = new URL(value);
     return parsed.protocol === "https:" && !parsed.username && !parsed.password;
@@ -305,7 +312,8 @@ function isSecureWebsite(value: string): boolean {
 function isMailingAddress(value: string): boolean {
   if (value.length > 600 || hasControlCharacters(value.replace(/\r?\n/gu, ""))) return false;
   const lines = value.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
-  return lines.length >= 2 && lines.length <= 4 && lines.every((line) => line.length <= 200);
+  return lines.length >= 2 && lines.length <= 4
+    && lines.every((line) => line.length <= STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH);
 }
 
 export function buildStripeWebhookStagePatch(value: string): SecretPatch {

@@ -14,6 +14,13 @@ import {
   X
 } from "lucide-react";
 import { type FormEvent, useMemo, useRef, useState } from "react";
+import {
+  STRIPE_US_LEGAL_NAME_MAX_LENGTH,
+  STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
+  STRIPE_US_SIGNER_NAME_MAX_LENGTH,
+  STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_WEBSITE_MAX_LENGTH
+} from "../shared/stripeUsConfiguration";
 import type {
   CredentialStatus,
   CredentialStatusItem,
@@ -626,7 +633,7 @@ export function CredentialsPanel({
                     <label>
                       <CredentialFieldLabel label="Nombre legal" configured={credentialConfigured(status, "STRIPE_US_LEGAL_NAME")} />
                       <CredentialActiveValue status={status} name="STRIPE_US_LEGAL_NAME" />
-                      <input type="text" autoComplete="off" value={input.stripeLegalName} onChange={(event) => onChange({ ...input, stripeLegalName: event.target.value })} />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_LEGAL_NAME_MAX_LENGTH} value={input.stripeLegalName} onChange={(event) => onChange({ ...input, stripeLegalName: event.target.value })} />
                     </label>
                     <label>
                       <CredentialFieldLabel label="EIN" configured={credentialConfigured(status, "STRIPE_US_EIN")} />
@@ -646,23 +653,23 @@ export function CredentialsPanel({
                     <label>
                       <CredentialFieldLabel label="Sitio web" configured={credentialConfigured(status, "STRIPE_US_WEBSITE")} />
                       <CredentialActiveValue status={status} name="STRIPE_US_WEBSITE" />
-                      <input type="url" autoComplete="off" value={input.stripeOrganizationWebsite} onChange={(event) => onChange({ ...input, stripeOrganizationWebsite: event.target.value })} placeholder="https://example.org" />
+                      <input type="url" autoComplete="off" maxLength={STRIPE_US_WEBSITE_MAX_LENGTH} value={input.stripeOrganizationWebsite} onChange={(event) => onChange({ ...input, stripeOrganizationWebsite: event.target.value })} placeholder="https://example.org" />
                     </label>
                     <label className="span-2">
                       <CredentialFieldLabel label="Dirección postal" configured={credentialConfigured(status, "STRIPE_US_MAILING_ADDRESS")} />
                       <CredentialActiveValue status={status} name="STRIPE_US_MAILING_ADDRESS" />
-                      <textarea value={input.stripeOrganizationMailingAddress} onChange={(event) => onChange({ ...input, stripeOrganizationMailingAddress: event.target.value })} placeholder={"Calle y número\nCiudad, estado, código postal, EE. UU."} rows={3} />
-                      <small>Use una línea por renglón tal como debe aparecer en las constancias.</small>
+                      <textarea value={input.stripeOrganizationMailingAddress} onChange={(event) => onChange({ ...input, stripeOrganizationMailingAddress: event.target.value })} placeholder={"Calle y número\nCiudad, estado, código postal, EE. UU."} rows={4} />
+                      <small>Use de 2 a 4 renglones, con hasta {STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH} caracteres por renglón.</small>
                     </label>
                     <label>
                       <CredentialFieldLabel label="Nombre del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_NAME")} />
                       <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_NAME" />
-                      <input type="text" autoComplete="off" value={input.stripeSignerName} onChange={(event) => onChange({ ...input, stripeSignerName: event.target.value })} />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_NAME_MAX_LENGTH} value={input.stripeSignerName} onChange={(event) => onChange({ ...input, stripeSignerName: event.target.value })} />
                     </label>
                     <label>
                       <CredentialFieldLabel label="Cargo del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_TITLE")} />
                       <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_TITLE" />
-                      <input type="text" autoComplete="off" value={input.stripeSignerTitle} onChange={(event) => onChange({ ...input, stripeSignerTitle: event.target.value })} placeholder="Treasurer" />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_TITLE_MAX_LENGTH} value={input.stripeSignerTitle} onChange={(event) => onChange({ ...input, stripeSignerTitle: event.target.value })} placeholder="Treasurer" />
                     </label>
                     <div className="credential-field-block span-2">
                       <CredentialFieldLabel label="Secreto activo del webhook" configured={credentialConfigured(status, "STRIPE_WEBHOOK_SECRET")} />

@@ -12,7 +12,7 @@
 
 - Both PDFs use U.S. Letter pages: exactly `612 x 792` PDF points (`8.5 x 11` inches), never A4.
 - The immediate receipt uses the approved Elim mark already carried in the repository's Stripe PDF asset source, rendered substantially larger and with preserved aspect ratio.
-- The annual statement uses the exact bytes of `/Users/josevega/Documents/FMCE/FMCE_Brand.png`; its SHA-256 is `ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c` and its intrinsic dimensions are `2393 x 672`.
+- The annual statement uses the exact bytes of owner-supplied `FMCE_Brand.png`; its SHA-256 is `ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c` and its intrinsic dimensions are `2393 x 672`.
 - The tracked `Sources/Logo.svg` is explicitly a neutral placeholder and must not replace either approved U.S. legal-document mark.
 - A runtime branding upload must not silently substitute another logo in the U.S. annual legal statement.
 - Every donor, gift, legal, contact, signer, date, identifier, and total visible in the PDFs must come from the production service's durable gift/snapshot/configuration inputs; no preview-only field path may exist.
