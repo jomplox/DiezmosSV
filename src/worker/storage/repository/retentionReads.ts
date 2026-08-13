@@ -23,9 +23,34 @@ export const RETENTION_SNAPSHOT_TABLES = [
   "wompi_events",
   "contingency_periods",
   "contingency_batches",
-  "contingency_batch_lines"
+  "contingency_batch_lines",
+  "stripe_checkout_sessions",
+  "stripe_webhook_events",
+  "stripe_gifts",
+  "stripe_invoice_settlements",
+  "stripe_acknowledgment_deliveries",
+  "stripe_annual_statement_deliveries"
 ] as const;
 export type RetentionSnapshotTable = (typeof RETENTION_SNAPSHOT_TABLES)[number];
+
+export const STRIPE_RETENTION_SNAPSHOT_TABLES = [
+  "stripe_checkout_sessions",
+  "stripe_webhook_events",
+  "stripe_gifts",
+  "stripe_invoice_settlements",
+  "stripe_acknowledgment_deliveries",
+  "stripe_annual_statement_deliveries"
+] as const;
+export type StripeRetentionSnapshotTable = (typeof STRIPE_RETENTION_SNAPSHOT_TABLES)[number];
+export interface StripeRetentionFence {
+  maxGeneration: string;
+  maxInvoiceSettlementGeneration: string;
+  materialMutationEpoch: string;
+}
+
+export interface StripeRetentionCursor {
+  generation: string;
+}
 
 export interface RetentionCursor {
   createdAt: string;
@@ -35,6 +60,34 @@ export interface RetentionCursor {
 export interface DocumentSequenceRetentionCursor {
   environment: string;
   controlPrefix: string;
+}
+
+// The original append-only AUTOINCREMENT ledger is shared by five Stripe tables;
+// invoice convergence state has its own append-only ledger because migration 0036's
+// applied CHECK constraint is immutable. The two scalars are captured in one SQLite
+// statement. TEXT preserves full signed 64-bit values without JS precision loss.
+export async function captureStripeRetentionFence(
+  db: D1Database
+): Promise<StripeRetentionFence> {
+  const fence = await db.prepare(
+    `SELECT COALESCE(CAST(MAX(generation) AS TEXT), '0') AS maxGeneration,
+            (SELECT COALESCE(CAST(MAX(generation) AS TEXT), '0')
+               FROM stripe_invoice_settlement_retention_generations
+            ) AS maxInvoiceSettlementGeneration,
+            (SELECT CAST(mutation_epoch AS TEXT)
+               FROM stripe_retention_material_state
+              WHERE singleton = 1) AS materialMutationEpoch
+       FROM stripe_retention_generations`
+  ).first<StripeRetentionFence>();
+  if (
+    !fence
+    || !/^(?:0|[1-9]\d*)$/.test(fence.maxGeneration)
+    || !/^(?:0|[1-9]\d*)$/.test(fence.maxInvoiceSettlementGeneration)
+    || !/^(?:0|[1-9]\d*)$/.test(fence.materialMutationEpoch)
+  ) {
+    throw new Error("retention_stripe_fence_invalid");
+  }
+  return fence;
 }
 
 export interface AnnualCertificateDonorTarget {
@@ -58,7 +111,9 @@ interface AnnualCertificateDonorTargetRow {
 function retentionSnapshotTimestampColumn(
   table: RetentionSnapshotTable
 ): "created_at" | "received_at" {
-  return table === "wompi_events" ? "received_at" : "created_at";
+  return table === "wompi_events" || table === "stripe_webhook_events"
+    ? "received_at"
+    : "created_at";
 }
 
 // Raw D1 column shape for the contacts export join (snake_case, intent_* columns
@@ -496,19 +551,153 @@ export async function listRowsCreatedBetween(
 export async function listAllRowsPaged(
   db: D1Database,
   table: RetentionSnapshotTable,
-  cursor: RetentionCursor | null,
-  limit: number
+  cursor: RetentionCursor | StripeRetentionCursor | null,
+  limit: number,
+  stripeFence?: StripeRetentionFence
 ): Promise<Array<Record<string, unknown>>> {
   const column = retentionSnapshotTimestampColumn(table);
   const conditions: string[] = [];
   const bindings: Array<string | number> = [];
-  if (cursor) {
-    conditions.push(`(${column}, id) > (?, ?)`);
+  const isStripeTable = STRIPE_RETENTION_SNAPSHOT_TABLES.includes(
+    table as StripeRetentionSnapshotTable
+  );
+  const rowAlias = isStripeTable && stripeFence ? "snapshot" : null;
+  if (rowAlias && stripeFence) {
+    const stripeTable = table as StripeRetentionSnapshotTable;
+    const isInvoiceSettlement = stripeTable === "stripe_invoice_settlements";
+    if (!isInvoiceSettlement) {
+      conditions.push(`retention_generation.table_name = '${stripeTable}'`);
+    }
+    if (cursor && "generation" in cursor) {
+      conditions.push(`retention_generation.generation > ?`);
+      bindings.push(cursor.generation);
+    }
+    conditions.push(`retention_generation.generation <= ?`);
+    bindings.push(
+      isInvoiceSettlement
+        ? stripeFence.maxInvoiceSettlementGeneration
+        : stripeFence.maxGeneration
+    );
+    if (stripeTable === "stripe_gifts") {
+      conditions.push(
+        `(${rowAlias}.checkout_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_checkout_sessions AS checkout_parent
+            JOIN stripe_retention_generations AS checkout_generation
+              ON checkout_generation.table_name = 'stripe_checkout_sessions'
+             AND checkout_generation.row_id = checkout_parent.id
+             AND checkout_generation.generation <= ?
+           WHERE checkout_parent.id = ${rowAlias}.checkout_id
+        ))`
+      );
+      bindings.push(stripeFence.maxGeneration);
+    } else if (stripeTable === "stripe_invoice_settlements") {
+      conditions.push(
+        `(${rowAlias}.checkout_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_checkout_sessions AS checkout_parent
+            JOIN stripe_retention_generations AS checkout_generation
+              ON checkout_generation.table_name = 'stripe_checkout_sessions'
+             AND checkout_generation.row_id = checkout_parent.id
+             AND checkout_generation.generation <= ?
+           WHERE checkout_parent.id = ${rowAlias}.checkout_id
+        ))`,
+        `(${rowAlias}.gift_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_gifts AS gift_parent
+            JOIN stripe_retention_generations AS gift_generation
+              ON gift_generation.table_name = 'stripe_gifts'
+             AND gift_generation.row_id = gift_parent.id
+             AND gift_generation.generation <= ?
+           WHERE gift_parent.id = ${rowAlias}.gift_id
+             AND (gift_parent.checkout_id IS NULL OR EXISTS (
+               SELECT 1
+                 FROM stripe_checkout_sessions AS checkout_ancestor
+                 JOIN stripe_retention_generations AS checkout_generation
+                   ON checkout_generation.table_name = 'stripe_checkout_sessions'
+                  AND checkout_generation.row_id = checkout_ancestor.id
+                  AND checkout_generation.generation <= ?
+                WHERE checkout_ancestor.id = gift_parent.checkout_id
+             ))
+        ))`
+      );
+      bindings.push(
+        stripeFence.maxGeneration,
+        stripeFence.maxGeneration,
+        stripeFence.maxGeneration
+      );
+    } else if (stripeTable === "stripe_acknowledgment_deliveries") {
+      conditions.push(
+        `EXISTS (
+          SELECT 1
+            FROM stripe_gifts AS gift_parent
+            JOIN stripe_retention_generations AS gift_generation
+              ON gift_generation.table_name = 'stripe_gifts'
+             AND gift_generation.row_id = gift_parent.id
+             AND gift_generation.generation <= ?
+           WHERE gift_parent.id = ${rowAlias}.gift_id
+             AND (gift_parent.checkout_id IS NULL OR EXISTS (
+               SELECT 1
+                 FROM stripe_checkout_sessions AS checkout_ancestor
+                 JOIN stripe_retention_generations AS checkout_generation
+                   ON checkout_generation.table_name = 'stripe_checkout_sessions'
+                  AND checkout_generation.row_id = checkout_ancestor.id
+                  AND checkout_generation.generation <= ?
+                WHERE checkout_ancestor.id = gift_parent.checkout_id
+             ))
+        )`
+      );
+      bindings.push(
+        stripeFence.maxGeneration,
+        stripeFence.maxGeneration
+      );
+    } else if (stripeTable === "stripe_annual_statement_deliveries") {
+      // Migration 0036 assigns every ancestor before its descendants. Migration 0034
+      // prevents retargeting, while the FK prevents deleting/renaming a retained
+      // parent. The indexed direct-parent check therefore proves the stable transitive
+      // chain without a recursive CTE per exported row.
+      conditions.push(
+        `(${rowAlias}.supersedes_delivery_id IS NULL OR EXISTS (
+          SELECT 1
+            FROM stripe_retention_generations AS parent_generation
+           WHERE parent_generation.table_name = 'stripe_annual_statement_deliveries'
+             AND parent_generation.row_id = ${rowAlias}.supersedes_delivery_id
+             AND parent_generation.generation <= ?
+        ))`
+      );
+      bindings.push(stripeFence.maxGeneration);
+    }
+  }
+  const columnReference = rowAlias ? `${rowAlias}.${column}` : column;
+  const idReference = rowAlias ? `${rowAlias}.id` : "id";
+  if (cursor && "createdAt" in cursor) {
+    conditions.push(`(${columnReference}, ${idReference}) > (?, ?)`);
     bindings.push(cursor.createdAt, cursor.id);
   }
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+  const from = rowAlias
+    ? table === "stripe_invoice_settlements"
+      ? `stripe_invoice_settlement_retention_generations AS retention_generation
+           INDEXED BY idx_stripe_invoice_settlement_retention_generation
+         JOIN ${table} AS ${rowAlias}
+           ON ${rowAlias}.invoice_id = retention_generation.row_id`
+      : `stripe_retention_generations AS retention_generation
+           INDEXED BY idx_stripe_retention_generations_table_generation
+         JOIN ${table} AS ${rowAlias}
+           ON ${rowAlias}.id = retention_generation.row_id`
+    : table;
+  const selection = rowAlias
+    ? `${rowAlias}.*,
+       CAST(retention_generation.generation AS TEXT) AS __retention_generation`
+    : "*";
+  const orderBy = rowAlias
+    ? "retention_generation.generation ASC"
+    : `${columnReference} ASC, ${idReference} ASC`;
   const rows = await db
-    .prepare(`SELECT * FROM ${table} ${where} ORDER BY ${column} ASC, id ASC LIMIT ?`)
+    .prepare(
+      `SELECT ${selection} FROM ${from} ${where}
+       ORDER BY ${orderBy} LIMIT ?`
+    )
     .bind(...bindings, limit)
     .all<Record<string, unknown>>();
   return rows.results ?? [];

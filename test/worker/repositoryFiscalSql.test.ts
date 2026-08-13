@@ -4276,7 +4276,7 @@ describe("fiscal repository SQL on SQLite", () => {
     database.close();
   });
 
-  it("restores and deletes the real contingency cycle with fiscal corrections in one deferred-FK transaction", () => {
+  it("restores and deletes the real contingency and Stripe dependency graphs in one deferred-FK transaction", () => {
     const database = migratedDatabase();
     const protocol = RETENTION_FOREIGN_KEY_PROTOCOL;
     const restorePhase = (table: string) =>
@@ -4299,6 +4299,18 @@ describe("fiscal repository SQL on SQLite", () => {
     );
     expect(deletePhase("fiscal_corrections")).toBeLessThan(
       deletePhase("dte_documents")
+    );
+    expect(restorePhase("stripe_gifts")).toBeGreaterThan(
+      restorePhase("stripe_checkout_sessions")
+    );
+    expect(restorePhase("stripe_acknowledgment_deliveries")).toBeGreaterThan(
+      restorePhase("stripe_gifts")
+    );
+    expect(deletePhase("stripe_acknowledgment_deliveries")).toBeLessThan(
+      deletePhase("stripe_gifts")
+    );
+    expect(deletePhase("stripe_gifts")).toBeLessThan(
+      deletePhase("stripe_checkout_sessions")
     );
 
     const restoreOperations: Record<string, () => void> = {
@@ -4352,6 +4364,101 @@ describe("fiscal repository SQL on SQLite", () => {
              'user_operator'
            )`
         ).run();
+      },
+      stripe_checkout_sessions: () => {
+        database.prepare(
+          `INSERT INTO stripe_checkout_sessions (
+             id, request_id, request_fingerprint, stripe_session_id, frequency,
+             amount_cents, livemode, status, payment_status, gift_type,
+             created_at, updated_at
+           ) VALUES (
+             'restore_stripe_checkout',
+             '48484848-4848-4484-8484-484848484848',
+             'restore-fingerprint', 'cs_test_restore_fixture', 'ONCE',
+             100, 0, 'COMPLETE', 'PAID', 'TITHE',
+             '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+           )`
+        ).run();
+      },
+      stripe_webhook_events: () => {
+        database.prepare(
+          `INSERT INTO stripe_webhook_events (
+             id, event_type, livemode, status, processing_claim_id,
+             received_at, processed_at, updated_at
+           ) VALUES (
+             'evt_restore_fixture', 'checkout.session.completed', 0,
+             'PROCESSED', 'restore-webhook-claim',
+             '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:01.000Z',
+             '2026-07-01T00:00:01.000Z'
+           )`
+        ).run();
+      },
+      stripe_gifts: () => {
+        database.prepare(
+          `INSERT INTO stripe_gifts (
+             id, source_type, source_id, checkout_id,
+             stripe_payment_intent_id, frequency, amount_cents, donor_name,
+             donor_email, settled_at, status, gift_type, created_at, updated_at
+           ) VALUES (
+             'restore_stripe_gift', 'PAYMENT_INTENT', 'pi_restore_fixture',
+             'restore_stripe_checkout', 'pi_restore_fixture', 'ONCE', 100,
+             'Restore Donor', 'restore-donor@example.org',
+             '2026-07-01T00:00:00.000Z', 'PAID', 'TITHE',
+             '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+           )`
+        ).run();
+      },
+      stripe_acknowledgment_deliveries: () => {
+        database.prepare(
+          `INSERT INTO stripe_acknowledgment_deliveries (
+             id, gift_id, revision, kind, evidence_refunded_amount_cents,
+             status, created_at, updated_at
+           ) VALUES (
+             'restore_stripe_ack', 'restore_stripe_gift', 1, 'ORIGINAL', 0, 'PENDING',
+             '2026-07-01T00:00:00.000Z', '2026-07-01T00:00:00.000Z'
+           )`
+        ).run();
+      },
+      stripe_invoice_settlements: () => {
+        database.prepare(
+          `INSERT INTO stripe_invoice_settlements (
+             invoice_id, checkout_id, subscription_id, amount_cents, currency,
+             donor_name, donor_email, settled_at, invoice_livemode, invoice_event_id,
+             invoice_payment_id, payment_intent_id, payment_amount_cents,
+             payment_currency, payment_livemode, payment_event_id,
+             status, gift_id, recorded_at, created_at, updated_at
+           ) VALUES (
+             'in_restore_fixture', 'restore_stripe_checkout', 'sub_restore_fixture', 100, 'usd',
+             'Restore Donor', 'restore-donor@example.org', '2026-07-01T00:00:00.000Z',
+             0, 'evt_invoice_restore_fixture', 'inpay_restore_fixture',
+             'pi_invoice_restore_fixture', 100, 'usd', 0,
+             'evt_invoice_payment_restore_fixture', 'RECORDED', 'restore_stripe_gift',
+             '2026-07-01T00:00:01.000Z', '2026-07-01T00:00:00.000Z',
+             '2026-07-01T00:00:01.000Z'
+           )`
+        ).run();
+      },
+      stripe_annual_statement_deliveries: () => {
+        const insert = database.prepare(
+          `INSERT INTO stripe_annual_statement_deliveries (
+             id, year, livemode, donor_key, donor_name, donor_email,
+             snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+             status, attempt_count, dispatch_started_at, provider_id_hash,
+             sent_at, created_at, updated_at
+           ) VALUES (?, 2026, 0, 'email:restore-donor@example.org',
+             'Restore Donor', 'restore-donor@example.org', ?, '{}', ?, ?, ?, ?,
+             ?, ?, ?, '2026-07-01T00:00:00.000Z',
+             '2026-07-01T00:00:00.000Z')`
+        );
+        insert.run(
+          'restore_stripe_annual_r1', 'a'.repeat(64), 1, null, 'SENT', 1,
+          '2026-07-01T00:00:01.000Z', 'provider-hash-r1',
+          '2026-07-01T00:00:02.000Z'
+        );
+        insert.run(
+          'restore_stripe_annual_r2', 'b'.repeat(64), 2,
+          'restore_stripe_annual_r1', 'PENDING', 0, null, null, null
+        );
       }
     };
 
@@ -4370,6 +4477,25 @@ describe("fiscal repository SQL on SQLite", () => {
     const deleteOperations: Record<string, () => void> = {
       fiscal_corrections: () => {
         database.prepare("DELETE FROM fiscal_corrections WHERE id = 'restore_correction'").run();
+      },
+      stripe_acknowledgment_deliveries: () => {
+        database.prepare("DELETE FROM stripe_acknowledgment_deliveries WHERE id = 'restore_stripe_ack'").run();
+      },
+      stripe_invoice_settlements: () => {
+        database.prepare("DELETE FROM stripe_invoice_settlements WHERE invoice_id = 'in_restore_fixture'").run();
+      },
+      stripe_annual_statement_deliveries: () => {
+        database.prepare("DELETE FROM stripe_annual_statement_deliveries WHERE id = 'restore_stripe_annual_r2'").run();
+        database.prepare("DELETE FROM stripe_annual_statement_deliveries WHERE id = 'restore_stripe_annual_r1'").run();
+      },
+      stripe_gifts: () => {
+        database.prepare("DELETE FROM stripe_gifts WHERE id = 'restore_stripe_gift'").run();
+      },
+      stripe_checkout_sessions: () => {
+        database.prepare("DELETE FROM stripe_checkout_sessions WHERE id = 'restore_stripe_checkout'").run();
+      },
+      stripe_webhook_events: () => {
+        database.prepare("DELETE FROM stripe_webhook_events WHERE id = 'evt_restore_fixture'").run();
       },
       contingency_periods: () => {
         database.prepare("DELETE FROM contingency_periods WHERE id = 'restore_period'").run();
@@ -4398,13 +4524,23 @@ describe("fiscal repository SQL on SQLite", () => {
          (SELECT COUNT(*) FROM contingency_periods) AS periods,
          (SELECT COUNT(*) FROM dte_events) AS events,
          (SELECT COUNT(*) FROM dte_documents) AS documents,
-         (SELECT COUNT(*) FROM wompi_events) AS wompi`
+         (SELECT COUNT(*) FROM wompi_events) AS wompi,
+         (SELECT COUNT(*) FROM stripe_checkout_sessions) AS stripe_checkouts,
+         (SELECT COUNT(*) FROM stripe_webhook_events) AS stripe_webhooks,
+         (SELECT COUNT(*) FROM stripe_gifts) AS stripe_gifts,
+         (SELECT COUNT(*) FROM stripe_acknowledgment_deliveries) AS stripe_acknowledgments,
+         (SELECT COUNT(*) FROM stripe_annual_statement_deliveries) AS stripe_annual_statements`
     ).get()).toEqual({
       corrections: 0,
       periods: 0,
       events: 0,
       documents: 0,
-      wompi: 0
+      wompi: 0,
+      stripe_checkouts: 0,
+      stripe_webhooks: 0,
+      stripe_gifts: 0,
+      stripe_acknowledgments: 0,
+      stripe_annual_statements: 0
     });
     database.close();
   });

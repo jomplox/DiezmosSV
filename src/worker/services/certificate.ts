@@ -71,12 +71,16 @@ export function elSalvadorYearWindow(year: number): { startIso: string; endIso: 
 // A certificate year must be a well-formed four-digit year that is the current
 // year or a completed one (mid-year statements for the current year are legitimate;
 // future years are not). Returns a Spanish error message, or null when valid.
-export function certificateYearError(yearParam: string | null | undefined, now: Date): string | null {
+export function certificateYearError(
+  yearParam: string | null | undefined,
+  now: Date,
+  timeZone = EL_SALVADOR_TIME_ZONE
+): string | null {
   if (!yearParam || !/^\d{4}$/.test(yearParam)) {
     return "Indique un año válido de cuatro dígitos.";
   }
   const year = Number(yearParam);
-  const currentYear = elSalvadorYear(now);
+  const currentYear = calendarYear(now, timeZone);
   if (year > currentYear) {
     return "No se pueden emitir constancias de un año que aún no ha iniciado.";
   }
@@ -86,8 +90,8 @@ export function certificateYearError(yearParam: string | null | undefined, now: 
   return null;
 }
 
-function elSalvadorYear(date: Date): number {
-  const parts = new Intl.DateTimeFormat("en-US", { timeZone: EL_SALVADOR_TIME_ZONE, year: "numeric" }).formatToParts(date);
+function calendarYear(date: Date, timeZone: string): number {
+  const parts = new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).formatToParts(date);
   return Number(parts.find((part) => part.type === "year")?.value ?? 0);
 }
 

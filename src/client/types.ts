@@ -184,7 +184,7 @@ export interface CredentialStatusItem {
   protected?: boolean;
 }
 
-interface CredentialStatusGroup {
+export interface CredentialStatusGroup {
   label: string;
   ready: boolean;
   items: CredentialStatusItem[];
@@ -199,6 +199,41 @@ export interface CredentialStatus {
   };
   groups: Record<string, CredentialStatusGroup>;
   certificateExpiresAt: string | null;
+  stripeOperational: StripeOperationalStatus;
+}
+
+export interface StripeOperationalStatus {
+  appEnv: string;
+  mode: "Simulado" | "Pruebas" | "Producción";
+  mockMode: boolean;
+  localProxyConfigured: boolean;
+}
+
+export interface StripeSettingsState {
+  credentials: CredentialStatusGroup;
+  operational: StripeOperationalStatus;
+  webhookHealth: {
+    state: "none" | "observed";
+    label?: string;
+    lastReceivedAt?: string;
+    eventType?: string;
+    processingStatus?: "PROCESSING" | "PROCESSED" | "FAILED";
+    livemodeMatches?: boolean;
+    verifiedByProcessedEvent?: boolean;
+  };
+}
+
+export interface StripeAcknowledgmentReconciliationItem {
+  id: string;
+  revision: number;
+  kind: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+  status: "FAILED" | "REVIEW";
+  grossAmountCents: number;
+  refundedAmountCents: number;
+  netAmountCents: number;
+  failureCode: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface EmissionEnvironmentState {
@@ -207,6 +242,39 @@ export interface EmissionEnvironmentState {
   appEnv: string;
   locked: true;
   allowedEnvironments: Array<"00" | "01">;
+}
+
+export interface StripeAnnualStatementPreviewDonor {
+  donorKey: string;
+  donorName: string;
+  donorEmail: string | null;
+  hasEmail: boolean;
+  count: number;
+  grossTotalLabel: string;
+  refundedTotalLabel: string;
+  netTotalLabel: string;
+}
+
+export interface StripeAnnualStatementPreview {
+  year: number;
+  livemode: boolean;
+  timeZone: string;
+  donors: StripeAnnualStatementPreviewDonor[];
+  hasMore: boolean;
+  nextCursor: string | null;
+}
+
+export interface StripeAnnualStatementSendResult {
+  year: number;
+  livemode: boolean;
+  mode: "bulk" | "single";
+  processed: number;
+  sent: number;
+  skipped: number;
+  failed: number;
+  review: number;
+  hasMore: boolean;
+  nextCursor: string | null;
 }
 
 export interface EmailTemplateValue {

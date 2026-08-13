@@ -1,5 +1,10 @@
 import { newId } from "../../utils/ids";
 
+export type StripeProviderRecoveryClaim =
+  | { kind: "CLAIMED"; id: string }
+  | { kind: "IN_PROGRESS" }
+  | { kind: "LIMITED" };
+
 export async function claimDonationIntentRateLimit(
   db: D1Database,
   keyHash: string,
@@ -38,6 +43,96 @@ export async function claimDonationIntentRateLimit(
     .bind(id, keyHash, now, expiresAt, keyHash, cutoff, clientIp, cutoff, limit)
     .first<{ id: string }>();
   return row?.id ?? null;
+}
+
+export async function releaseUnusedDonationIntentRateLimitClaim(
+  db: D1Database,
+  id: string
+): Promise<void> {
+  await db.prepare(
+    `DELETE FROM security_rate_limit_claims
+      WHERE id = ? AND scope = 'donation_intent'
+        AND NOT EXISTS (
+          SELECT 1 FROM donation_intents WHERE rate_limit_claim_id = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM stripe_checkout_sessions WHERE rate_limit_claim_id = ?
+        )`
+  ).bind(id, id, id).run();
+}
+
+export async function claimStripeProviderRecoveryRead(
+  db: D1Database,
+  input: {
+    kind: "OPEN_REPLAY" | "STATUS_RECOVERY";
+    identityHash: string;
+    ipHash: string;
+    now: string;
+    cutoff: string;
+    leaseExpiresAt: string;
+    expiresAt: string;
+    identityLimit: number;
+    ipLimit: number;
+  }
+): Promise<StripeProviderRecoveryClaim> {
+  await db.prepare(
+    `UPDATE stripe_provider_recovery_reads
+        SET status = 'FAILED', completed_at = ?, updated_at = ?
+      WHERE status = 'PROCESSING' AND lease_expires_at <= ?`
+  ).bind(input.now, input.now, input.now).run();
+  const id = newId("stripe_recovery_read");
+  const row = await db.prepare(
+    `INSERT INTO stripe_provider_recovery_reads (
+       id, kind, identity_hash, ip_hash, status, provider_started_at,
+       lease_expires_at, completed_at, created_at, updated_at, expires_at
+     )
+     SELECT ?, ?, ?, ?, 'PROCESSING', ?, ?, NULL, ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM stripe_provider_recovery_reads
+         WHERE kind = ? AND identity_hash = ? AND status = 'PROCESSING'
+      )
+        AND (SELECT COUNT(*) FROM stripe_provider_recovery_reads
+              WHERE identity_hash = ? AND created_at >= ?) < ?
+        AND (SELECT COUNT(*) FROM stripe_provider_recovery_reads
+              WHERE ip_hash = ? AND created_at >= ?) < ?
+     RETURNING id`
+  ).bind(
+    id,
+    input.kind,
+    input.identityHash,
+    input.ipHash,
+    input.now,
+    input.leaseExpiresAt,
+    input.now,
+    input.now,
+    input.expiresAt,
+    input.kind,
+    input.identityHash,
+    input.identityHash,
+    input.cutoff,
+    input.identityLimit,
+    input.ipHash,
+    input.cutoff,
+    input.ipLimit
+  ).first<{ id: string }>();
+  if (row) return { kind: "CLAIMED", id: row.id };
+  const active = await db.prepare(
+    `SELECT id FROM stripe_provider_recovery_reads
+      WHERE kind = ? AND identity_hash = ? AND status = 'PROCESSING'
+      LIMIT 1`
+  ).bind(input.kind, input.identityHash).first<{ id: string }>();
+  return active ? { kind: "IN_PROGRESS" } : { kind: "LIMITED" };
+}
+
+export async function finalizeStripeProviderRecoveryRead(
+  db: D1Database,
+  input: { id: string; outcome: "COMPLETE" | "FAILED"; now: string }
+): Promise<void> {
+  await db.prepare(
+    `UPDATE stripe_provider_recovery_reads
+        SET status = ?, completed_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'PROCESSING'`
+  ).bind(input.outcome, input.now, input.now, input.id).run();
 }
 
 export async function claimDonationDatosRateLimit(
@@ -192,4 +287,7 @@ export async function deleteExpiredSecurityRateLimitClaims(
     .prepare("DELETE FROM security_rate_limit_claims WHERE expires_at <= ?")
     .bind(now)
     .run();
+  await db.prepare(
+    "DELETE FROM stripe_provider_recovery_reads WHERE expires_at <= ? AND status <> 'PROCESSING'"
+  ).bind(now).run();
 }

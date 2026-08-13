@@ -593,7 +593,7 @@ function formatNrc(value: string | null | undefined): string {
 // Los StandardFonts de pdf-lib codifican WinAnsi: un emoji o CJK en un campo escrito
 // por el donante (Wompi los deja pasar) lanzaba en drawText y tumbaba el correo del
 // comprobante. Cada carácter no codificable se reemplaza por "?" antes de dibujar.
-function pdfSafeText(value: string, font: PDFFont): string {
+export function pdfSafeText(value: string, font: PDFFont): string {
   return Array.from(value, (char) => {
     try {
       font.encodeText(char);
@@ -604,7 +604,7 @@ function pdfSafeText(value: string, font: PDFFont): string {
   }).join("");
 }
 
-function drawTextSafe(page: PDFPage, text: string, options: Parameters<PDFPage["drawText"]>[1] & { font: PDFFont }): void {
+export function drawTextSafe(page: PDFPage, text: string, options: Parameters<PDFPage["drawText"]>[1] & { font: PDFFont }): void {
   page.drawText(pdfSafeText(text, options.font), options);
 }
 

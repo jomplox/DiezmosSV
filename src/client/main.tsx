@@ -1,7 +1,7 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
-import { isDonarGraciasPath, isDonarPath } from "./donation";
+import { isDonarGraciasPath, isDonarPath, isStripeResultPath } from "./donation";
 import { donorBrandingSettled } from "./donorReady";
 import { readPasswordResetLocation } from "./passwordReset";
 import "./styles.css";
@@ -27,7 +27,8 @@ function BootstrappedApp() {
 
     if (
       !isDonarPath(window.location.pathname) &&
-      !isDonarGraciasPath(window.location.pathname)
+      !isDonarGraciasPath(window.location.pathname) &&
+      !isStripeResultPath(window.location.pathname)
     ) {
       return;
     }

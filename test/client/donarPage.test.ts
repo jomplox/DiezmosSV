@@ -6,7 +6,6 @@ import {
   DONAR_AMOUNT_CHIPS,
   DONAR_BACK_LABEL,
   DONAR_CONTINUE_LABEL,
-  DONAR_DRAFT_REUSE_WINDOW_MS,
   DONAR_DOMESTIC_DEPARTMENTS,
   DONAR_EDIT_LABEL,
   DONAR_FALLBACK_MESSAGE,
@@ -28,17 +27,11 @@ import {
   DONAR_VERIFYING_NOTICE_DELAY_MS,
   DONAR_WIDGET_VERIFYING_MESSAGE,
   DONAR_WOMPI_CHECKOUT_ORIGIN,
-  GIVEBUTTER_CAMPAIGN,
-  GIVEBUTTER_EMBED_BASE_URL,
-  GIVEBUTTER_ENGLISH_NOTICE,
-  GIVEBUTTER_FALLBACK_CTA,
-  GIVEBUTTER_FALLBACK_HINT,
-  GIVEBUTTER_FREQ_MONTHLY_LABEL,
-  GIVEBUTTER_FREQ_ONCE_LABEL,
-  givebutterIntro,
-  GIVEBUTTER_MONTHLY_LABEL,
-  GIVEBUTTER_RENDER_TIMEOUT_MS,
-  GIVEBUTTER_US_COUNTRY_CODE,
+  STRIPE_FREQ_MONTHLY_LABEL,
+  STRIPE_FREQ_ONCE_LABEL,
+  STRIPE_MONTHLY_LABEL,
+  STRIPE_US_COUNTRY_CODE,
+  stripeIntro,
   DONAR_CHANGE_DOOR_LABEL,
   DONAR_DOOR_EEUU_DESC,
   DONAR_DOOR_EEUU_LABEL,
@@ -51,7 +44,6 @@ import {
   DONAR_LANDING_UNIFIER_LEAD,
   DONAR_ROUTE_PARAM,
   donarAmountDisplay,
-  donarDatosPath,
   donarStepIndicator,
   doorFromSearch,
   routeParamForDoor,
@@ -61,18 +53,12 @@ import {
   DONAR_STEP_TITLE_ENTREGA,
   clearDonationFieldErrors,
   donationAmountValidationMessage,
-  donationDatosBody,
-  donationDraftBody,
   donationFormValidationMessage,
   donationIntentBody,
   donationStep1FieldErrors,
   donationStep1ValidationMessage,
   donationStep2FieldErrors,
   donationStep2ValidationMessage,
-  draftMatchesForm,
-  givebutterEmbedUrl,
-  givebutterHostedUrl,
-  givebutterPrefillParams,
   isUsDonation,
   graciasDisplayFromSearch,
   isDonarGraciasPath,
@@ -86,6 +72,10 @@ import {
 const appSource = readFileSync(resolve(import.meta.dirname, "../../src/client/App.tsx"), "utf8");
 const donationSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donation.ts"), "utf8");
 const donarSource = readFileSync(resolve(import.meta.dirname, "../../src/client/donarPage.tsx"), "utf8");
+const stripeDonationFormSource = readFileSync(resolve(import.meta.dirname, "../../src/client/stripeDonationForm.tsx"), "utf8");
+const stripeResultPageSource = readFileSync(resolve(import.meta.dirname, "../../src/client/stripeResultPage.tsx"), "utf8");
+const stripeAcknowledgmentSource = readFileSync(resolve(import.meta.dirname, "../../src/worker/services/stripeAcknowledgment.ts"), "utf8");
+const stripeAnnualStatementSource = readFileSync(resolve(import.meta.dirname, "../../src/worker/services/stripeAnnualStatement.ts"), "utf8");
 const stylesSource = readFileSync(resolve(import.meta.dirname, "../../src/client/styles.css"), "utf8");
 const mainSource = readFileSync(resolve(import.meta.dirname, "../../src/client/main.tsx"), "utf8");
 
@@ -163,11 +153,9 @@ describe("donar form validation", () => {
     expect(donationStep2FieldErrors(base)).toEqual({});
   });
 
-  it("omits address and phone from the intent and datos bodies", () => {
+  it("omits address and phone from the intent body", () => {
     expect(donationIntentBody(base)).not.toHaveProperty("complemento");
     expect(donationIntentBody(base)).not.toHaveProperty("donorPhone");
-    expect(donationDatosBody(base)).not.toHaveProperty("complemento");
-    expect(donationDatosBody(base)).not.toHaveProperty("donorPhone");
   });
 
   it("requires the donor to choose diezmo or ofrenda first", () => {
@@ -236,7 +224,7 @@ describe("donar form validation", () => {
       expect(donationStep1ValidationMessage({ giftType: "OFRENDA", amount: "5.00" })).toBe("");
     });
 
-    it("the amount rule is reusable alone (US Paso 1 has no gift type)", () => {
+    it("the amount rule is reusable alone for the U.S. Paso 1", () => {
       expect(donationAmountValidationMessage("")).toBe("Ingrese un monto válido en dólares.");
       expect(donationAmountValidationMessage("abc")).toBe("Ingrese un monto válido en dólares.");
       expect(donationAmountValidationMessage("0.99")).toBe("El monto mínimo de donación es $1.00.");
@@ -275,9 +263,7 @@ describe("donar amount chips", () => {
     expect(DONAR_AMOUNT_CHIPS).toEqual([50, 150, 250, 500]);
   });
 
-  it("the US door bridges toward the Givebutter campaign presets", () => {
-    // The chip prefills the Givebutter embed, whose own presets anchor at
-    // $100–$2,000 — wildly different scales on consecutive screens read wrong.
+  it("the US door offers accessible round amount anchors", () => {
     expect(DONAR_AMOUNT_CHIPS_US).toEqual([50, 100, 250, 500]);
     expect(donarSource).toContain("usDonation ? DONAR_AMOUNT_CHIPS_US : DONAR_AMOUNT_CHIPS");
   });
@@ -389,9 +375,52 @@ describe("donar step labels", () => {
   // MH catalog labels (CAT-017 "forma de pago", "Cuentas por pagar del receptor") and
   // Wompi API field names (EnlacePago, formaPago) are external vocabulary and exempt —
   // neither appears in this file. See AGENTS.md → Donor-facing language.
-  it("keeps transactional vocabulary out of the donor wizard copy", () => {
-    for (const forbidden of ["al pagar", "Pagar", "su pago", "Su pago", "el pago", "comprar", "compra"]) {
-      expect(donarSource).not.toContain(forbidden);
+  it("keeps transactional vocabulary out of every donor-facing Stripe and wizard surface", () => {
+    const donorFacingSources = [
+      ["donation helpers", donationSource],
+      ["donor wizard", donarSource],
+      ["Stripe embedded form", stripeDonationFormSource],
+      ["Stripe result page", stripeResultPageSource],
+      ["Stripe immediate acknowledgment", stripeAcknowledgmentSource],
+      ["Stripe annual statement", stripeAnnualStatementSource]
+    ] as const;
+    const forbiddenTerms = [
+      "pagar",
+      "pago",
+      "comprar",
+      "compra",
+      "cliente",
+      "precio",
+      "costo",
+      "checkout",
+      "carrito",
+      "orden"
+    ];
+
+    for (const [name, source] of donorFacingSources) {
+      // Technical comments may correctly discuss a provider checkout. Strip them
+      // so the guard targets executable strings/JSX that can reach a donor.
+      let executableSource = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+      if (name === "donation helpers") {
+        // The helper also owns provider-only routing identifiers. Remove only the
+        // exact technical literals so an accidental donor-visible "checkout" copy
+        // elsewhere in the same module still trips this guard.
+        for (const literal of [
+          "../shared/checkout",
+          "/api/donations/stripe/checkout",
+          "checkout.stripe.com",
+          "checkout.stripe.test",
+          '"checkout"'
+        ]) {
+          executableSource = executableSource.replaceAll(literal, "technical-provider-token");
+        }
+      }
+      for (const forbidden of forbiddenTerms) {
+        expect(
+          executableSource,
+          `${name} contains donor-facing transactional vocabulary: ${forbidden}`
+        ).not.toMatch(new RegExp(`\\b${forbidden}\\b`, "iu"));
+      }
     }
   });
 
@@ -415,7 +444,7 @@ describe("donar wizard helpers", () => {
     expect(donarStepIndicator(2, 2)).toBe("Paso 2 de 2");
   });
 
-  it("counts 3 SV steps (monto, datos, pago) and 2 US steps (monto, Givebutter)", () => {
+  it("counts 3 SV steps (monto, datos, entrega) and 2 US steps (monto, Stripe)", () => {
     expect(DONAR_STEP_COUNT_SV).toBe(3);
     expect(DONAR_STEP_COUNT_US).toBe(2);
   });
@@ -434,8 +463,8 @@ describe("donar wizard helpers", () => {
     expect(DONAR_EDIT_LABEL).toBe("Editar");
     expect(DONAR_HERO_PLACEHOLDER).toBe("0.00");
     // US Paso 1 segmented control: Única | Mensual.
-    expect(GIVEBUTTER_FREQ_ONCE_LABEL).toBe("Única");
-    expect(GIVEBUTTER_FREQ_MONTHLY_LABEL).toBe("Mensual");
+    expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
+    expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
   });
 });
 
@@ -498,139 +527,6 @@ describe("donar intent body", () => {
     // validation without a país.
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => String(option.code) === DONAR_FOREIGN_GEOGRAPHY_CODE)).toBe(false);
     expect(DONAR_DOMESTIC_DEPARTMENTS.some((option) => option.code === "06")).toBe(true);
-  });
-});
-
-describe("donar premint (background draft + datos completion)", () => {
-  const base = {
-    amount: " 10.00 ",
-    giftType: "DIEZMO" as const,
-    donorDocumentType: "13" as const,
-    donorDocument: "10000001-9",
-    donorName: "",
-    foreignResident: false,
-    pais: "",
-    departamento: "06",
-    municipio: "23",
-    distrito: "14"
-  };
-
-  it("the draft body carries only the trimmed amount + gift type (no donor data)", () => {
-    expect(donationDraftBody(base)).toEqual({ amount: "10.00", giftType: "DIEZMO" });
-    // No document/address keys: the server treats this as a draft create.
-    expect(donationDraftBody(base)).not.toHaveProperty("donorDocument");
-    expect(donationDraftBody(base)).not.toHaveProperty("departamento");
-  });
-
-  it("the draft body omits giftType when none is chosen (never sends an empty string)", () => {
-    expect(donationDraftBody({ amount: "25", giftType: "" }).giftType).toBeUndefined();
-  });
-
-  it("the datos body carries the donor fiscal data ONLY (no amount, no giftType)", () => {
-    const body = donationDatosBody(base);
-    expect(body).not.toHaveProperty("amount");
-    expect(body).not.toHaveProperty("giftType");
-    expect(body).not.toHaveProperty("datosToken");
-    // Same field mapping as the full intent body minus amount/giftType.
-    expect(body).toMatchObject({
-      donorDocumentType: "13",
-      donorDocument: "10000001-9",
-        departamento: "06",
-      municipio: "23",
-      distrito: "14",
-    });
-  });
-
-  it("the datos body mirrors the full body's NIT razón social and foreign-path rules", () => {
-    const nit = donationDatosBody({ ...base, donorDocumentType: "36", donorDocument: "0614-280390-112-1", donorName: " Empresa " });
-    expect(nit.donorName).toBe("Empresa");
-    const foreign = donationDatosBody({ ...base, foreignResident: true, pais: "US", departamento: "", municipio: "", distrito: "" });
-    expect(foreign).toMatchObject({ departamento: DONAR_FOREIGN_GEOGRAPHY_CODE, pais: "US" });
-  });
-
-  it("builds the datos path from the intent id", () => {
-    expect(donarDatosPath("di_abc123")).toBe("/api/donations/intent/di_abc123/datos");
-  });
-
-  it("treats a draft as fresh only when the amount, the gift type, and the age are all valid", () => {
-    const now = Date.UTC(2026, 0, 1, 12, 0, 0);
-    const draft = { amount: "10.00", giftType: "DIEZMO" as const, mintedAt: now };
-    // Just inside the reuse window with amount + tipo unchanged → reuse.
-    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS - 1)).toBe(true);
-    // Edited amount → stale (abandon and full-POST).
-    expect(draftMatchesForm(draft, { ...base, amount: "20.00" }, now)).toBe(false);
-    // Switched Diezmo → Ofrenda → stale.
-    expect(draftMatchesForm(draft, { ...base, giftType: "OFRENDA" }, now)).toBe(false);
-    // Held past the reuse window (donor left the tab open) → stale even if values match,
-    // because the retained Wompi link is near/at expiry.
-    expect(draftMatchesForm(draft, base, now + DONAR_DRAFT_REUSE_WINDOW_MS)).toBe(false);
-  });
-
-  it("keeps the reuse window safely inside the worker's one-hour Wompi link vigencia", () => {
-    // INTENT_VALIDITY_HOURS / LINK_VALIDITY_HOURS are 1h on the worker; the client window
-    // must be a conservative margin under that so a retained draft is never reused near expiry.
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeGreaterThan(0);
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThan(60 * 60 * 1000);
-    expect(DONAR_DRAFT_REUSE_WINDOW_MS).toBeLessThanOrEqual(45 * 60 * 1000);
-  });
-});
-
-describe("donar premint source contract", () => {
-  it("mints the draft link in the background on the SV Paso 1→2 transition", () => {
-    // The background mint fires inside continueFromMonto (the else / SV branch), posting
-    // only the draft body, and must NOT block the step change.
-    expect(donarSource).toContain("mintDraftIntent(");
-    expect(donarSource).toContain("donationDraftBody(");
-    // Fire-and-forget: no await on the draft create, errors swallowed.
-    expect(donarSource).toContain("void donarApi");
-    expect(donarSource).toContain("setDraftIntent(");
-    // Re-entering Paso 2 WITHOUT editing amount/tipo (Atrás → Continuar) may reuse the
-    // draft already held only while it is comfortably inside Wompi's validity window —
-    // the draft records its mint time so draftMatchesForm can age it out.
-    expect(donarSource).toContain("mintedAt: Date.now()");
-    expect(donarSource).toContain("if (!draftIntent || !draftMatchesForm(draftIntent, form))");
-  });
-
-  it("completes via the datos endpoint on Paso 2 submit, with a full-POST fallback", () => {
-    // Fast path: a matching draft → datos call, receive the server-held link only
-    // after fiscal data commits, then advance immediately.
-    expect(donarSource).toContain("draftMatchesForm(draftIntent, form)");
-    expect(donarSource).toContain("donarDatosPath(draftIntent.intent.intentId)");
-    expect(donarSource).toContain("donationDatosBody(form)");
-    expect(donarSource).toContain("created = await donarApi<DonarIntent>");
-    // Fallback: no usable draft → the existing full-body POST still works.
-    expect(donarSource).toContain("donationIntentBody(form)");
-  });
-
-  it("keeps the one-time datos capability in memory and sends it only as a header", () => {
-    expect(donarSource).toContain("if (!created.datosToken)");
-    expect(donarSource).toContain('"X-Donation-Datos-Token": draftIntent.intent.datosToken ?? ""');
-    expect(donarSource).not.toMatch(/localStorage[^\n]*datosToken|sessionStorage[^\n]*datosToken/);
-    expect(donarSource).not.toMatch(/urlEnlace[^\n]*datosToken|datosToken[^\n]*urlEnlace/);
-  });
-
-  it("abandons a stale draft when the donor edits the amount or tipo (no extra deactivation call)", () => {
-    // Atrás from Paso 2 KEEPS the draft (reused if amount/tipo are unedited);
-    // Editar from Paso 3 and switching doors abandon it. A stale link simply expires
-    // on the sweep — there is no new deactivation call in the client.
-    expect(donarSource).toContain("abandonDraftIntent()");
-    expect(donarSource).toContain("draftGenerationRef.current += 1");
-    expect(donarSource).not.toContain("deactivate");
-  });
-
-  it("ignores an abandoned in-flight background draft via a generation guard", () => {
-    // A fire-and-forget mint can resolve AFTER the donor abandoned it (changed door,
-    // Editar). The mint captures a generation id; abandonDraftIntent bumps the ref, so
-    // the resolve path drops the stale response instead of repopulating draftIntent.
-    expect(donarSource).toContain("const generation = draftGenerationRef.current + 1");
-    expect(donarSource).toContain("if (draftGenerationRef.current !== generation)");
-  });
-
-  it("keeps the Paso 2 submit copy exactly as before", () => {
-    // The premint must not touch any donor-facing copy.
-    expect(donarSource).toContain("Preparando su entrega…");
-    expect(donarSource).toContain("Continuar con su diezmo");
-    expect(donarSource).toContain("Continuar con su ofrenda");
   });
 });
 
@@ -771,10 +667,10 @@ describe("donar wizard source contract", () => {
   // the whole "widget" stage; the verifying spinner may sit beside it, never instead.
   it("keeps the Wompi iframe mounted while verifying (the 3DS challenge lives in it)", () => {
     expect(donarSource).not.toContain('handoff === "verifying" ? (');
-    // Exactly one Wompi checkout iframe (donar-embed; the other is the US Givebutter
-    // frame), rendered unconditionally within the widget stage rather than behind a
+    // Exactly one hand-coded Wompi iframe; Stripe owns the US embed internally.
+    // It is rendered unconditionally within the widget stage rather than behind a
     // handoff ternary.
-    expect(donarSource.match(/className="donar-embed"/g) ?? []).toHaveLength(1);
+    expect(donarSource.match(/className="donar-hosted-surface donar-embed"/g) ?? []).toHaveLength(1);
   });
 
   // Wompi posts { message: "close" } at the 3DS HAND-OFF, not at payment. Showing
@@ -823,7 +719,7 @@ describe("donar wizard source contract", () => {
   it("renders Diezmo|Ofrenda as a segmented radiogroup of real radio inputs", () => {
     expect(donarSource).toContain("DONAR_GIFT_TYPE_LABEL");
     expect(donarSource).toContain("DONAR_GIFT_TYPE_FIELD_LABEL");
-    // Givebutter-style segmented control: real radios styled as two inverted halves.
+    // Segmented control: real radios styled as two inverted halves.
     expect(donarSource).toContain('role="radiogroup"');
     expect(donarSource).toContain('type="radio"');
     expect(donarSource).toContain('name="donar-gift-type"');
@@ -999,7 +895,7 @@ describe("donar wizard source contract", () => {
     // widget iframes the exact same URL with a plain {src, onLoad} iframe. Embedding
     // it directly keeps the donor inside the wizard: no popup, no overlay.
     expect(donarSource).toContain("<iframe");
-    expect(donarSource).toContain('className="donar-embed"');
+    expect(donarSource).toContain('className="donar-hosted-surface donar-embed"');
     expect(donarSource).toContain("src={widgetUrlFrom(intent.urlEnlaceLargo)}");
     expect(stylesSource).toContain(".donar-embed");
   });
@@ -1053,7 +949,7 @@ describe("donar wizard source contract", () => {
 
   it("preconnects to the checkout host only after the SV/Wompi path is chosen", () => {
     // DNS + TLS to pagos.wompi.sv are warmed after a donor chooses the SV door, so
-    // chooser-only visits and the EE. UU./Givebutter path do not contact Wompi.
+    // chooser-only visits and the EE. UU./Stripe path do not contact Wompi.
     expect(donarSource).toContain('"preconnect"');
     expect(donarSource).toContain('door !== "sv" || usDonation');
     expect(donarSource).toContain("[door, usDonation]");
@@ -1062,7 +958,7 @@ describe("donar wizard source contract", () => {
 
   it("never traps a form-forwarded US donor: Atrás and door choices clear the forwarding state", () => {
     // A donor on the SV door who checks extranjero + Estados Unidos is forwarded to
-    // the Givebutter path. Two escape hatches must exist:
+    // the Stripe path. Two escape hatches must exist:
     // 1. Atrás from the takeover returns to the SV datos screen by clearing the país
     //    (datos intact, extranjero still checked, país back to "Seleccione").
     const goBackStart = donarSource.indexOf("function goBack()");
@@ -1228,17 +1124,17 @@ describe("donar responsive donor layout", () => {
     expect(donarSource).toContain("isValidDui(");
   });
 
-  it("lets the Wompi iframe go edge-to-edge only on mobile", () => {
+  it("lets both hosted-provider surfaces go edge-to-edge only on mobile", () => {
     const handoffRule = stylesSource.match(/\.donar-handoff\s*\{[^}]*\}/)?.[0] ?? "";
-    const embedRule = stylesSource.match(/\.donar-embed\s*\{[^}]*\}/)?.[0] ?? "";
+    const hostedSurfaceRule = stylesSource.match(/\.donar-hosted-surface\s*\{[^}]*\}/)?.[0] ?? "";
 
     expect(handoffRule).toContain("width: 100%;");
     expect(handoffRule).toContain("justify-items: stretch;");
-    expect(embedRule).toContain("width: 100vw;");
-    expect(embedRule).toContain("max-width: none;");
-    expect(embedRule).toContain("margin-inline: calc((100% - 100vw) / 2);");
+    expect(hostedSurfaceRule).toContain("width: 100vw;");
+    expect(hostedSurfaceRule).toContain("max-width: none;");
+    expect(hostedSurfaceRule).toContain("margin-inline: calc((100% - 100vw) / 2);");
     expect(stylesSource).toMatch(
-      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-embed\s*\{[\s\S]{0,200}width:\s*calc\(100% \+ 80px\);[\s\S]{0,200}margin-inline:\s*-40px;/
+      /@media \(min-width: 520px\) \{[\s\S]{0,1000}\.donar-hosted-surface\s*\{[\s\S]{0,200}width:\s*calc\(100% \+ 80px\);[\s\S]{0,200}margin-inline:\s*-40px;/
     );
     expect(stylesSource).toMatch(/\.donar-handoff\s*>\s*\.donar-intro\s*\{[^}]*margin-top:\s*10px;/);
   });
@@ -1251,7 +1147,7 @@ describe("donar responsive donor layout", () => {
       /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-card\s*\{[\s\S]{0,200}border:\s*0;[\s\S]{0,120}border-radius:\s*0;[\s\S]{0,120}box-shadow:\s*none;/
     );
     expect(stylesSource).toMatch(
-      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-embed\s*\{[\s\S]{0,160}border:\s*0;[\s\S]{0,120}border-radius:\s*0;/
+      /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-hosted-surface\s*\{[\s\S]{0,160}border:\s*0;[\s\S]{0,120}border-radius:\s*0;/
     );
     expect(stylesSource).toMatch(
       /@media \(max-width: 430px\) \{[\s\S]{0,1000}\.donar-wizard-title\s*\{[\s\S]{0,160}gap:\s*6px;/
@@ -1262,39 +1158,22 @@ describe("donar responsive donor layout", () => {
   });
 });
 
-describe("givebutter constants", () => {
-  it("takes the campaign slug from build configuration, never from a source literal", () => {
-    // The deployment supplies its own campaign via VITE_GIVEBUTTER_CAMPAIGN at build
-    // time; the checked-in default is the neutral placeholder.
-    expect(donationSource).toContain("VITE_GIVEBUTTER_CAMPAIGN");
-    expect(donationSource).toContain('"example-campaign"');
-    // Whatever the build supplies must still be a single usable URL path segment.
-    expect(GIVEBUTTER_CAMPAIGN).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
-    // Reading the env bag must survive a non-Vite consumer (vitest, Playwright), where
-    // `import.meta.env` is undefined — a bare property access would throw on import.
-    expect(donationSource).not.toMatch(/\bimport\.meta\.env\./);
+describe("Stripe US path constants", () => {
+  it("routes only US residents to Stripe (CAT-020 código US)", () => {
+    expect(STRIPE_US_COUNTRY_CODE).toBe("US");
   });
 
-  it("pins the frameable Givebutter embed URL to the configured campaign", () => {
-    expect(GIVEBUTTER_EMBED_BASE_URL).toBe(`https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}`);
-    const embed = new URL(GIVEBUTTER_EMBED_BASE_URL);
-    expect(embed.protocol).toBe("https:");
-    expect(embed.host).toBe("givebutter.com");
-    // The frameable embed path — NOT the hosted campaign page, which refuses framing.
-    expect(embed.pathname).toBe(`/embed/c/${GIVEBUTTER_CAMPAIGN}`);
-    expect(embed.search).toBe("");
-  });
-
-  it("routes only US residents to Givebutter (CAT-020 código US)", () => {
-    expect(GIVEBUTTER_US_COUNTRY_CODE).toBe("US");
-  });
-
-  it("uses the same short render-probe budget as the Wompi fallback", () => {
-    expect(GIVEBUTTER_RENDER_TIMEOUT_MS).toBeLessThanOrEqual(6_000);
+  it("pins the Spanish frequency control without redundant Stripe reassurance copy", () => {
+    expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
+    expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
+    expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
+    expect(donarSource).not.toContain(
+      "Stripe mostrará en español las opciones disponibles para usted de forma segura."
+    );
   });
 });
 
-describe("givebutter US-path detection", () => {
+describe("Stripe US-path detection", () => {
   const base = { foreignResident: false, pais: "" };
 
   it("activates only when the donor is a foreign resident in the US", () => {
@@ -1307,51 +1186,12 @@ describe("givebutter US-path detection", () => {
   });
 });
 
-describe("givebutter prefill and URL helpers", () => {
-  it("writes amount and (when monthly) frequency=monthly for Givebutter URLs", () => {
-    expect(givebutterPrefillParams({ amount: "25.00", monthly: false })).toEqual({ amount: "25" });
-    expect(givebutterPrefillParams({ amount: "25", monthly: true })).toEqual({ amount: "25", frequency: "monthly" });
-    // A blank/invalid amount contributes no amount param.
-    expect(givebutterPrefillParams({ amount: "", monthly: false })).toEqual({});
-    expect(givebutterPrefillParams({ amount: "0", monthly: true })).toEqual({ frequency: "monthly" });
-    // Cents are preserved.
-    expect(givebutterPrefillParams({ amount: "12.50", monthly: false })).toEqual({ amount: "12.5" });
-  });
-
-  it("builds the frameable iframe URL with the configured slug and embed-only goalBar flag", () => {
-    expect(givebutterEmbedUrl({ amount: "25.00", monthly: false })).toBe(
-      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?amount=25&goalBar=false`
-    );
-    expect(givebutterEmbedUrl({ amount: "25", monthly: true })).toBe(
-      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?amount=25&frequency=monthly&goalBar=false`
-    );
-    expect(givebutterEmbedUrl({ amount: "", monthly: false })).toBe(
-      `https://givebutter.com/embed/c/${GIVEBUTTER_CAMPAIGN}?goalBar=false`
-    );
-  });
-
-  it("builds the hosted-page fallback link with the configured slug and prefill query", () => {
-    expect(givebutterHostedUrl({ amount: "25.00", monthly: false })).toBe(
-      `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?amount=25`
-    );
-    expect(givebutterHostedUrl({ amount: "25", monthly: true })).toBe(
-      `https://givebutter.com/${GIVEBUTTER_CAMPAIGN}?amount=25&frequency=monthly`
-    );
-    // No amount yet → bare slug URL (still valid).
-    expect(givebutterHostedUrl({ amount: "", monthly: false })).toBe(`https://givebutter.com/${GIVEBUTTER_CAMPAIGN}`);
-    // The hosted link is the campaign PAGE, not the embed endpoint.
-    expect(new URL(givebutterHostedUrl({ amount: "10", monthly: false })).pathname).toBe(`/${GIVEBUTTER_CAMPAIGN}`);
-    // The slug is used in the hosted URL (definitely works per Givebutter share URLs).
-    expect(givebutterHostedUrl({ amount: "10", monthly: false })).toContain(GIVEBUTTER_CAMPAIGN);
-  });
-});
-
-describe("givebutter donar page source contract", () => {
+describe("Stripe donar page source contract", () => {
   const pageSource = donarSource.slice(donarSource.indexOf("function DonarPage"));
 
-  it("collapses the SV fiscal fields when the US Givebutter path is active", () => {
+  it("collapses the SV fiscal fields when the US Stripe path is active", () => {
     // The form branches on isUsDonation(form): documento/razón social/teléfono/
-    // dirección must NOT render for a US resident (only monto + frequency + widget).
+    // dirección must not render for a US resident (only monto, frequency, and handoff).
     expect(pageSource).toContain("isUsDonation(");
   });
 
@@ -1359,82 +1199,51 @@ describe("givebutter donar page source contract", () => {
     // The US door renders the SAME hero amount input and pill chips, with the
     // monthly toggle restyled as the segmented control (real radios).
     expect(pageSource).toContain('name="donar-frequency"');
-    expect(pageSource).toContain("GIVEBUTTER_FREQ_ONCE_LABEL");
-    expect(pageSource).toContain("GIVEBUTTER_FREQ_MONTHLY_LABEL");
+    expect(pageSource).toContain("STRIPE_FREQ_ONCE_LABEL");
+    expect(pageSource).toContain("STRIPE_FREQ_MONTHLY_LABEL");
     // The pinned Spanish label still names the control for screen readers.
-    expect(pageSource).toContain("GIVEBUTTER_MONTHLY_LABEL");
-    expect(GIVEBUTTER_MONTHLY_LABEL).toBe("Donación mensual");
+    expect(pageSource).toContain("STRIPE_MONTHLY_LABEL");
+    expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
   });
 
-  it("shows the 501c3 explanation and the configured-campaign iframe", () => {
-    const intro = givebutterIntro("Iglesia Ejemplo Central");
-    expect(donarSource).toContain("givebutterIntro(organizationName)");
-    expect(intro).toContain("Friends of Iglesia Ejemplo Central");
-    expect(intro).toContain("501c3");
+  it("shows the 501(c)(3) explanation and mounts the Stripe form in place", () => {
+    const intro = stripeIntro("Iglesia Ejemplo Central");
+    expect(donarSource).toContain("stripeIntro(organizationName)");
+    expect(intro).toContain("501(c)(3)");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
-    // The embedded iframe targets the frameable Givebutter embed URL.
-    expect(pageSource).toContain("donar-givebutter-frame");
-    expect(pageSource).toContain("givebutterFrameUrl");
-    expect(pageSource).toContain("givebutterEmbedUrl({ amount: form.amount, monthly })");
+    expect(pageSource).toContain("<StripeDonationForm");
+    expect(pageSource).toContain("session={stripeSessionAttempt.session}");
   });
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
-    expect(givebutterIntro(null)).toContain("apoya a esta iglesia en El Salvador");
-    expect(givebutterIntro("   ")).toContain("una organización estadounidense 501c3");
-    expect(givebutterIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
+    expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
+    expect(stripeIntro("   ")).toContain("una organización estadounidense 501(c)(3)");
+    expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
-  it("uses human GiveButter anchor text, never a raw URL, in the fallback CTA and hint", () => {
-    // Brand style: capital G, capital B. "GiveButter" is the anchor text.
-    expect(GIVEBUTTER_FALLBACK_CTA).toBe("Donar en GiveButter");
-    expect(GIVEBUTTER_FALLBACK_HINT).toBe("¿Problemas con el formulario? Done en GiveButter");
-    // No raw givebutter.com URL is shown to the donor in either string.
-    expect(GIVEBUTTER_FALLBACK_CTA).not.toContain("givebutter.com");
-    expect(GIVEBUTTER_FALLBACK_HINT).not.toContain("givebutter.com");
-  });
-
-  it("does not execute the Givebutter widget script on our origin", () => {
-    expect(donarSource).not.toContain("GIVEBUTTER_SCRIPT_URL");
-    expect(donarSource).not.toContain("widgets.givebutter.com");
-    expect(pageSource).not.toContain("givebutter-giving-form");
-    expect(pageSource).toContain("<iframe");
-  });
-
-  it("prefills amount/frequency in the iframe src, not the /donar URL", () => {
-    expect(pageSource).toContain("src={givebutterFrameUrl}");
-    expect(pageSource).not.toContain("params.delete(\"frequency\")");
-  });
-
-  it("shows the hosted-page CTA if the direct iframe is slow to load", () => {
-    expect(donarSource).toContain("GIVEBUTTER_RENDER_TIMEOUT_MS");
-    expect(donarSource).toContain("givebutterFrameStatus");
-  });
-
-  it("renders the mandatory hosted-page fallback link with the slug URL", () => {
-    expect(donarSource).toContain("givebutterHostedUrl(");
-    expect(donarSource).toContain("GIVEBUTTER_FALLBACK_CTA");
-    expect(donarSource).toContain("GIVEBUTTER_FALLBACK_HINT");
-    // Opens in a new tab.
-    expect(pageSource).toContain('target="_blank"');
+  it("mounts Stripe Embedded Checkout without hand-coding an iframe", () => {
+    const stripeBlock = pageSource.slice(
+      pageSource.indexOf("{/* US Stripe step"),
+      pageSource.indexOf("{/* Paso 3", pageSource.indexOf("{/* US Stripe step"))
+    );
+    expect(stripeBlock).not.toContain("<iframe");
+    expect(stripeBlock).toContain("<StripeDonationForm");
+    expect(stripeBlock).not.toContain("donar-stripe-assurance");
   });
 
   it("no longer offers the US-path escape hatch back to the SV fiscal form", () => {
     // The donor deliberately chose the EE. UU. door; "← Cambiar opción" is the way
     // back. The forceFiscal escape hatch (and its state) is gone.
-    expect(donarSource).not.toContain("GIVEBUTTER_ESCAPE_HATCH");
     expect(donarSource).not.toContain("forceFiscal");
-    expect(donarSource).not.toContain("donar-givebutter-escape");
   });
 
   it("leaves the Wompi intent path untouched (non-US donors still submit an intent)", () => {
     // The non-US path still posts a donation intent through the shared helpers.
     expect(pageSource).toContain("donationIntentBody(");
     expect(pageSource).toContain("DONAR_INTENT_PATH");
-    // No Givebutter-specific backend endpoint is introduced.
-    expect(donarSource).not.toContain("/api/givebutter");
-    expect(appSource).not.toContain("/api/givebutter");
+    expect(pageSource).toContain("STRIPE_CHECKOUT_PATH");
   });
 });
 
@@ -1483,8 +1292,10 @@ describe("two-door landing copy", () => {
     expect(DONAR_CHANGE_DOOR_LABEL).toContain("Cambiar opción");
   });
 
-  it("tells EE. UU. donors the payment form is in English", () => {
-    expect(GIVEBUTTER_ENGLISH_NOTICE).toBe("El formulario se muestra en inglés.");
+  it("does not repeat how Stripe chooses methods on the EE. UU. handoff", () => {
+    expect(donarSource).not.toContain(
+      "Stripe mostrará en español las opciones disponibles para usted de forma segura."
+    );
   });
 });
 
@@ -1572,9 +1383,9 @@ describe("two-door landing source contract", () => {
     expect(subtitleRule).toContain("font-weight: 900;");
   });
 
-  it("routes door 1 to the existing SV fiscal form and door 2 to the Givebutter block", () => {
+  it("routes door 1 to the existing SV fiscal form and door 2 to Stripe Embedded Checkout", () => {
     // A door state gates which view renders. Door 1 keeps the SV form (documento,
-    // dirección, extranjero path); door 2 renders the Givebutter block directly.
+    // dirección, extranjero path); door 2 renders Stripe's hosted embed directly.
     expect(landingSource).toMatch(/door === "sv"|door === "eeuu"|setDoor\(/);
     expect(landingSource).toContain("setDoor");
   });
@@ -1583,8 +1394,8 @@ describe("two-door landing source contract", () => {
     expect(donarSource).toContain("DONAR_CHANGE_DOOR_LABEL");
   });
 
-  it("shows the English-form notice on the EE. UU. door", () => {
-    expect(donarSource).toContain("GIVEBUTTER_ENGLISH_NOTICE");
+  it("keeps the EE. UU. handoff free of redundant Stripe reassurance copy", () => {
+    expect(donarSource).not.toContain("donar-stripe-assurance");
   });
 
   it("reads the deep-link on mount and writes it back via history.replaceState", () => {

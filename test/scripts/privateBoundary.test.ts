@@ -71,6 +71,26 @@ describe("private artifact boundary checker", () => {
   });
 
   it.each([
+    ["", "Users", "example", "Documents", "private-artifact.png"].join("/"),
+    ["", "home", "example", "private", "config.json"].join("/")
+  ])("rejects a user-home absolute path in tracked text without printing it: %s", (privatePath) => {
+    const cwd = trackedFixture({ "docs/plan.md": `owner file: ${privatePath}` });
+    const result = run(cwd);
+
+    expect(result.status).not.toBe(0);
+    expect(output(result)).toContain("docs/plan.md");
+    expect(output(result)).not.toContain(privatePath);
+  });
+
+  it.each([
+    ["https://example.org", "Users", "example", "guide"].join("/"),
+    "/api/branding/logo?v=example",
+    "docs/examples/local-path.md"
+  ])("allows ordinary tracked URL and repository-path examples: %s", (examplePath) => {
+    expect(run(trackedFixture({ "docs/plan.md": examplePath })).status).toBe(0);
+  });
+
+  it.each([
     `https://tenant.${workersDevSuffix}/admin`,
     `https://api.cloudflare.com/client/v4/accounts/${"1000000019abcdef".repeat(2)}/workers/scripts/private`
   ])("rejects a tracked implementation endpoint without printing it: %s", (endpoint) => {

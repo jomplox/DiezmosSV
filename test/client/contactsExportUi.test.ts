@@ -7,10 +7,10 @@ const appSource =
   readFileSync(resolve(import.meta.dirname, "../../src/client/exportsPanel.tsx"), "utf8");
 
 describe("CRM contacts export UI contract", () => {
-  it("renders the Contactos para CRM panel with the GiveButter description and active-ambiente note", () => {
+  it("renders the Contactos para CRM panel with a provider-neutral description and active-ambiente note", () => {
     expect(appSource).toContain("Contactos para CRM");
     expect(appSource).toContain(
-      "Exporte los datos de contacto de sus donantes para importarlos en un CRM como GiveButter."
+      "Exporte los datos de contacto de sus donantes para importarlos en su CRM."
     );
     expect(appSource).toContain("Se exportan los contactos del ambiente activo");
     expect(appSource).toContain("<ContactsExportPanel");

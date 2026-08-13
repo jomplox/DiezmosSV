@@ -2,7 +2,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:os";
 import { pathToFileURL } from "node:url";
-import { assertDonationLaneConfigured } from "./assert-donation-lane-config.mjs";
 import { loadPrivateDeployConfig } from "./private-deploy-config.mjs";
 
 export async function runPrivateBuild({
@@ -11,15 +10,14 @@ export async function runPrivateBuild({
   repositoryRoot = process.cwd(),
   spawnImpl = spawn
 } = {}) {
-  const config = loadPrivateDeployConfig({ target, env, repositoryRoot });
-  assertDonationLaneConfigured({
-    environment: { VITE_GIVEBUTTER_CAMPAIGN: config.campaign }
-  });
+  // Validate the owner-only target, origin, and donor-logo contract before Vite
+  // starts. Stripe configuration is runtime-only and is never baked into the client.
+  loadPrivateDeployConfig({ target, env, repositoryRoot });
 
   return new Promise((resolve, reject) => {
     const child = spawnImpl(process.platform === "win32" ? "npm.cmd" : "npm", ["run", "build"], {
       cwd: repositoryRoot,
-      env: { ...env, VITE_GIVEBUTTER_CAMPAIGN: config.campaign },
+      env,
       stdio: "inherit"
     });
     child.once("error", reject);

@@ -1,4 +1,11 @@
 import { certificateExpiry } from "../domain/signer";
+import {
+  STRIPE_US_LEGAL_NAME_MAX_LENGTH,
+  STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
+  STRIPE_US_SIGNER_NAME_MAX_LENGTH,
+  STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_WEBSITE_MAX_LENGTH
+} from "../../shared/stripeUsConfiguration";
 import { getMhCertificateXml } from "../config";
 import type { Env } from "../types";
 import { deploymentEnvironmentPolicy } from "./environmentPolicy";
@@ -15,6 +22,21 @@ export interface CredentialUpdateInput {
   wompiSecret?: string;
   emailApiKey?: string;
   emailFrom?: string;
+}
+
+export interface StripeCredentialUpdateInput {
+  restrictedKey?: string;
+  publishableKey?: string;
+  paymentMethodConfigurationId?: string;
+  billingPortalConfigurationId?: string;
+  legalName?: string;
+  ein?: string;
+  timeZone?: string;
+  organizationPhone?: string;
+  organizationWebsite?: string;
+  organizationMailingAddress?: string;
+  signerName?: string;
+  signerTitle?: string;
 }
 
 interface SecretStatusItem {
@@ -40,6 +62,12 @@ export interface CredentialStatus {
   };
   groups: Record<string, SecretStatusGroup>;
   certificateExpiresAt: string | null;
+  stripeOperational: {
+    appEnv: string;
+    mode: "Simulado" | "Pruebas" | "Producción";
+    mockMode: boolean;
+    localProxyConfigured: boolean;
+  };
 }
 
 interface SecretText {
@@ -54,6 +82,13 @@ export class CredentialWriterConfigError extends Error {
   constructor(message = "El escritor de secretos de Cloudflare no está configurado para este Worker") {
     super(message);
     this.name = "CredentialWriterConfigError";
+  }
+}
+
+export class StripeCredentialValidationError extends Error {
+  constructor(readonly code: string) {
+    super(`Stripe credential update rejected: ${code}`);
+    this.name = "StripeCredentialValidationError";
   }
 }
 
@@ -93,6 +128,29 @@ export function credentialStatus(env: Env): CredentialStatus {
       emailFrom
     ]
   };
+  const stripeItems = [
+    protectedItem(env, "STRIPE_RESTRICTED_KEY", "Clave restringida"),
+    protectedItem(env, "STRIPE_PUBLISHABLE_KEY", "Clave publicable"),
+    protectedItem(env, "STRIPE_WEBHOOK_SECRET", "Secreto activo del webhook"),
+    protectedItem(env, "STRIPE_WEBHOOK_SECRET_NEXT", "Secreto siguiente del webhook"),
+    protectedItem(env, "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID", "Configuración de métodos de entrega"),
+    protectedItem(env, "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", "Configuración del portal de entregas mensuales"),
+    protectedItem(env, "STRIPE_US_LEGAL_NAME", "Nombre legal de la 501(c)(3)"),
+    protectedItem(env, "STRIPE_US_EIN", "EIN de la 501(c)(3)"),
+    visibleItem(env, "STRIPE_US_TIME_ZONE", "Zona horaria de EE. UU."),
+    protectedItem(env, "STRIPE_US_PHONE", "Teléfono de la organización en EE. UU."),
+    protectedItem(env, "STRIPE_US_WEBSITE", "Sitio web de la organización"),
+    protectedItem(env, "STRIPE_US_MAILING_ADDRESS", "Dirección postal de la 501(c)(3)"),
+    protectedItem(env, "STRIPE_US_SIGNER_NAME", "Nombre del firmante autorizado"),
+    protectedItem(env, "STRIPE_US_SIGNER_TITLE", "Cargo del firmante autorizado")
+  ];
+  const stripeRequiredNames = new Set(stripeItems.map((item) => item.name).filter((name) => name !== "STRIPE_WEBHOOK_SECRET_NEXT"));
+  const stripeMockMode = trim(env.STRIPE_MOCK_MODE) === "1";
+  const stripe = {
+    label: "Stripe EE. UU.",
+    ready: stripeMockMode || stripeItems.every((item) => !stripeRequiredNames.has(item.name) || item.configured),
+    items: stripeItems
+  };
   const allowedAmbiente = deploymentEnvironmentPolicy(env).allowedAmbiente;
   const mhGroups: Record<string, SecretStatusGroup> = allowedAmbiente === "00"
     ? { mhTest }
@@ -107,8 +165,14 @@ export function credentialStatus(env: Env): CredentialStatus {
       writerConfigured: writerMissing.length === 0,
       writerMissing
     },
-    groups: { ...mhGroups, signer, issuer, wompi, email },
-    certificateExpiresAt: readCertificateExpiresAt(env)
+    groups: { ...mhGroups, signer, issuer, wompi, stripe, email },
+    certificateExpiresAt: readCertificateExpiresAt(env),
+    stripeOperational: {
+      appEnv: env.APP_ENV ?? "unknown",
+      mode: stripeMockMode ? "Simulado" : env.APP_ENV === "production" ? "Producción" : "Pruebas",
+      mockMode: stripeMockMode,
+      localProxyConfigured: nonEmpty(env.STRIPE_API_PROXY_URL)
+    }
   };
 }
 
@@ -144,6 +208,140 @@ export function buildCredentialSecretPatch(input: CredentialUpdateInput): Secret
   }
 
   return patch;
+}
+
+export function buildStripeCredentialSecretPatch(
+  input: StripeCredentialUpdateInput,
+  env: Env
+): SecretPatch {
+  const patch: SecretPatch = {};
+  const restrictedKey = trim(input.restrictedKey);
+  const publishableKey = trim(input.publishableKey);
+  const paymentMethodConfigurationId = trim(input.paymentMethodConfigurationId);
+  const billingPortalConfigurationId = trim(input.billingPortalConfigurationId);
+  const legalName = trim(input.legalName);
+  const ein = trim(input.ein);
+  const timeZone = trim(input.timeZone);
+  const organizationPhone = trim(input.organizationPhone);
+  const organizationWebsite = trim(input.organizationWebsite);
+  const organizationMailingAddress = trim(input.organizationMailingAddress);
+  const signerName = trim(input.signerName);
+  const signerTitle = trim(input.signerTitle);
+  const appEnv = trim(env.APP_ENV);
+  if (!new Set(["local", "staging", "production"]).has(appEnv)) {
+    throw new StripeCredentialValidationError("invalid_app_environment");
+  }
+  const expectedMode = appEnv === "production" ? "live" : "test";
+
+  if (restrictedKey && !hasPrefixedValue(restrictedKey, `rk_${expectedMode}_`)) {
+    throw new StripeCredentialValidationError("invalid_restricted_key");
+  }
+  if (publishableKey && !hasPrefixedValue(publishableKey, `pk_${expectedMode}_`)) {
+    throw new StripeCredentialValidationError("invalid_publishable_key");
+  }
+  if (restrictedKey || publishableKey) {
+    const effectiveRestrictedKey = restrictedKey || trim(env.STRIPE_RESTRICTED_KEY);
+    const effectivePublishableKey = publishableKey || trim(env.STRIPE_PUBLISHABLE_KEY);
+    if (effectiveRestrictedKey && !hasPrefixedValue(effectiveRestrictedKey, `rk_${expectedMode}_`)) {
+      throw new StripeCredentialValidationError("restricted_key_environment_mismatch");
+    }
+    if (effectivePublishableKey && !hasPrefixedValue(effectivePublishableKey, `pk_${expectedMode}_`)) {
+      throw new StripeCredentialValidationError("publishable_key_environment_mismatch");
+    }
+  }
+  if (paymentMethodConfigurationId && !hasPrefixedValue(paymentMethodConfigurationId, "pmc_")) {
+    throw new StripeCredentialValidationError("invalid_payment_method_configuration");
+  }
+  if (billingPortalConfigurationId && !hasPrefixedValue(billingPortalConfigurationId, "bpc_")) {
+    throw new StripeCredentialValidationError("invalid_billing_portal_configuration");
+  }
+  if (legalName && (legalName.length > STRIPE_US_LEGAL_NAME_MAX_LENGTH || /[\u0000-\u001f\u007f-\u009f]/u.test(legalName))) {
+    throw new StripeCredentialValidationError("invalid_legal_name");
+  }
+  if (ein && (!/^\d{2}-\d{7}$/.test(ein) || ein === "00-0000000")) {
+    throw new StripeCredentialValidationError("invalid_ein");
+  }
+  if (timeZone && !isIanaTimeZone(timeZone)) {
+    throw new StripeCredentialValidationError("invalid_time_zone");
+  }
+  if (organizationPhone && (organizationPhone.length < 7 || organizationPhone.length > 40 || hasControlCharacters(organizationPhone))) {
+    throw new StripeCredentialValidationError("invalid_us_phone");
+  }
+  if (organizationWebsite && !isSecureWebsite(organizationWebsite)) {
+    throw new StripeCredentialValidationError("invalid_us_website");
+  }
+  if (organizationMailingAddress && !isMailingAddress(organizationMailingAddress)) {
+    throw new StripeCredentialValidationError("invalid_us_mailing_address");
+  }
+  if (signerName && (signerName.length > STRIPE_US_SIGNER_NAME_MAX_LENGTH || hasControlCharacters(signerName))) {
+    throw new StripeCredentialValidationError("invalid_us_signer_name");
+  }
+  if (signerTitle && (signerTitle.length > STRIPE_US_SIGNER_TITLE_MAX_LENGTH || hasControlCharacters(signerTitle))) {
+    throw new StripeCredentialValidationError("invalid_us_signer_title");
+  }
+
+  putIfPresent(patch, "STRIPE_RESTRICTED_KEY", restrictedKey);
+  putIfPresent(patch, "STRIPE_PUBLISHABLE_KEY", publishableKey);
+  putIfPresent(patch, "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID", paymentMethodConfigurationId);
+  putIfPresent(patch, "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", billingPortalConfigurationId);
+  putIfPresent(patch, "STRIPE_US_LEGAL_NAME", legalName);
+  putIfPresent(patch, "STRIPE_US_EIN", ein);
+  putIfPresent(patch, "STRIPE_US_TIME_ZONE", timeZone);
+  putIfPresent(patch, "STRIPE_US_PHONE", organizationPhone);
+  putIfPresent(patch, "STRIPE_US_WEBSITE", organizationWebsite);
+  putIfPresent(patch, "STRIPE_US_MAILING_ADDRESS", organizationMailingAddress);
+  putIfPresent(patch, "STRIPE_US_SIGNER_NAME", signerName);
+  putIfPresent(patch, "STRIPE_US_SIGNER_TITLE", signerTitle);
+  return patch;
+}
+
+function hasControlCharacters(value: string): boolean {
+  return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function isSecureWebsite(value: string): boolean {
+  if (value.length > STRIPE_US_WEBSITE_MAX_LENGTH || hasControlCharacters(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+function isMailingAddress(value: string): boolean {
+  if (value.length > 600 || hasControlCharacters(value.replace(/\r?\n/gu, ""))) return false;
+  const lines = value.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+  return lines.length >= 2 && lines.length <= 4
+    && lines.every((line) => line.length <= STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH);
+}
+
+export function buildStripeWebhookStagePatch(value: string): SecretPatch {
+  const nextSecret = trim(value);
+  if (!nextSecret.startsWith("whsec_") || nextSecret.length <= "whsec_".length) {
+    throw new StripeCredentialValidationError("invalid_webhook_secret");
+  }
+  return { STRIPE_WEBHOOK_SECRET_NEXT: secret("STRIPE_WEBHOOK_SECRET_NEXT", nextSecret) };
+}
+
+export function buildStripeWebhookPromotionPatch(env: Env): SecretPatch {
+  const activeSecret = trim(env.STRIPE_WEBHOOK_SECRET);
+  const nextSecret = trim(env.STRIPE_WEBHOOK_SECRET_NEXT);
+  if (!activeSecret || !nextSecret) {
+    throw new StripeCredentialValidationError("missing_staged_webhook_secret");
+  }
+  if (!activeSecret.startsWith("whsec_") || activeSecret.length <= "whsec_".length) {
+    throw new StripeCredentialValidationError("invalid_webhook_secret");
+  }
+  const staged = buildStripeWebhookStagePatch(nextSecret).STRIPE_WEBHOOK_SECRET_NEXT;
+  return {
+    STRIPE_WEBHOOK_SECRET: secret("STRIPE_WEBHOOK_SECRET", staged!.text),
+    STRIPE_WEBHOOK_SECRET_NEXT: secret("STRIPE_WEBHOOK_SECRET_NEXT", activeSecret)
+  };
+}
+
+export function buildStripeWebhookCancellationPatch(): SecretPatch {
+  return { STRIPE_WEBHOOK_SECRET_NEXT: null };
 }
 
 export async function patchCloudflareWorkerSecrets(env: Env, patch: SecretPatch): Promise<{ updated: string[]; deleted: string[] }> {
@@ -257,6 +455,19 @@ function secret(name: string, text: string): SecretText {
 
 function nonEmpty(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function isIanaTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasPrefixedValue(value: string, prefix: string): boolean {
+  return value.startsWith(prefix) && value.length > prefix.length;
 }
 
 function trim(value: string | undefined): string {

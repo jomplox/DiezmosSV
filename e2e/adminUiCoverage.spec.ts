@@ -13,6 +13,8 @@ interface AdminUiHarness {
   unhandledApiRequests: string[];
 }
 
+type AdminUiHandler = (route: Route, url: URL) => Promise<boolean>;
+
 async function fulfillJson(route: Route, value: unknown, status = 200): Promise<void> {
   await route.fulfill({
     status,
@@ -21,7 +23,7 @@ async function fulfillJson(route: Route, value: unknown, status = 200): Promise<
   });
 }
 
-async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
+async function installOwnerAdmin(page: Page, handleApi?: AdminUiHandler): Promise<AdminUiHarness> {
   const harness: AdminUiHarness = {
     createdUsers: [],
     f960Downloads: [],
@@ -37,6 +39,8 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+
+    if (await handleApi?.(route, url)) return;
 
     if (url.pathname === "/api/branding") {
       await fulfillJson(route, {
@@ -136,6 +140,17 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
       });
       return;
     }
+    if (url.pathname === "/api/statements/stripe/annual" && request.method() === "GET") {
+      await fulfillJson(route, {
+        year: Number(url.searchParams.get("year") ?? 2026),
+        livemode: false,
+        timeZone: "America/New_York",
+        donors: [],
+        hasMore: false,
+        nextCursor: null
+      });
+      return;
+    }
     if (url.pathname === "/api/donations/intents") {
       await fulfillJson(route, { intents: [] });
       return;
@@ -154,7 +169,32 @@ async function installOwnerAdmin(page: Page): Promise<AdminUiHarness> {
             writerMissing: ["CLOUDFLARE_ACCOUNT_ID", "CLOUDFLARE_API_TOKEN"]
           },
           groups: {},
-          certificateExpiresAt: null
+          certificateExpiresAt: null,
+          stripeOperational: {
+            appEnv: "staging",
+            mode: "Pruebas",
+            mockMode: false,
+            localProxyConfigured: false
+          }
+        }
+      });
+      return;
+    }
+    if (url.pathname === "/api/settings/stripe/acknowledgments") {
+      await fulfillJson(route, { acknowledgments: [] });
+      return;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: false, items: [] },
+          operational: {
+            appEnv: "staging",
+            mode: "Pruebas",
+            mockMode: false,
+            localProxyConfigured: false
+          },
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
         }
       });
       return;
@@ -241,15 +281,174 @@ test("covers every owner navigation surface with accessible filters and no app r
 
   await openView(page, "Exportar");
   await expect(page.getByRole("heading", { name: "F960" })).toBeVisible();
-  await expect(page.getByRole("searchbox", { name: "Buscar donante o correo" })).toBeVisible();
+  await expect(page.getByRole("searchbox", { name: "Buscar donante o correo", exact: true })).toBeVisible();
 
   await openView(page, "Configuración");
   const settingsNavigation = page.getByRole("navigation", { name: "Secciones de credenciales" });
-  await expect(settingsNavigation.getByRole("button")).toHaveCount(7);
+  await expect(settingsNavigation.getByRole("button")).toHaveCount(8);
   await expect(page.getByRole("button", { name: "Producción 01" }).first()).toBeDisabled();
 
   expect(harness.unhandledApiRequests).toEqual([]);
   expect(runtimeErrors).toEqual([]);
+});
+
+test("keeps Salvadoran and U.S. legal email templates visibly separated", async ({ page }) => {
+  await installOwnerAdmin(page, async (route, url) => {
+    if (url.pathname !== "/api/settings/email-templates") return false;
+    await fulfillJson(route, {
+      emailTemplates: {
+        definitions: [
+          {
+            type: "dteReceipt",
+            label: "Envío de comprobante",
+            description: "Correo que recibe el donante con su CDE en PDF y JSON.",
+            defaultSubject: "Comprobante de su donación {{numeroControl}}",
+            defaultBody: "Cuerpo salvadoreño"
+          },
+          {
+            type: "dteInvalidation",
+            label: "Invalidación de comprobante",
+            description: "Correo que recibe el donante cuando su CDE queda invalidado.",
+            defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
+            defaultBody: "Cuerpo de invalidación"
+          }
+        ],
+        placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"],
+        templates: {
+          dteReceipt: {
+            subject: "Comprobante de su donación {{numeroControl}}",
+            body: "Cuerpo salvadoreño"
+          },
+          dteInvalidation: {
+            subject: "Invalidación de su comprobante {{numeroControl}}",
+            body: "Cuerpo de invalidación"
+          }
+        }
+      }
+    });
+    return true;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Plantillas/ }).click();
+
+  const templatePanel = page.locator(".email-template-panel");
+  const salvadoranTemplates = templatePanel.getByRole("region", { name: "Plantillas de El Salvador — CDE" });
+  const usTemplates = templatePanel.getByRole("region", { name: "Plantillas de EE. UU. — Stripe 501(c)(3)" });
+  await expect(salvadoranTemplates.getByRole("heading", { name: "El Salvador — CDE" })).toBeVisible();
+  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas" })).toBeVisible();
+  await expect(usTemplates.getByRole("heading", { name: "EE. UU. — Stripe 501(c)(3)" })).toBeVisible();
+  await expect(usTemplates.getByText("Texto legal protegido")).toBeVisible();
+  await expect(usTemplates.getByText("Constancia inmediata")).toBeVisible();
+  await expect(usTemplates.getByText("Corrección o revocación por reembolso")).toBeVisible();
+  await expect(usTemplates.getByText("Constancia anual")).toBeVisible();
+  await expect(usTemplates.locator("input, textarea")).toHaveCount(0);
+});
+
+test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {
+  const rows = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      fechaEmision: `2026-08-${String(number).padStart(2, "0")}`,
+      nombre: `F960 Donante ${number}`,
+      correo: `f960-${number}@example.org`,
+      nit: "",
+      dui: String(100000000 + number),
+      monto: `${number}.00`,
+      periodo: "082026",
+      codigoGeneracion: `generation-${number}`,
+      sello: `seal-${number}`,
+      numeroControl: `DTE-${number}`
+    };
+  });
+  const svDonors = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      groupKey: `sv-${number}`,
+      donorName: `Donante SV ${number}`,
+      donorEmail: `sv-${number}@example.org`,
+      hasEmail: true,
+      count: 1,
+      totalLabel: `$${number}.00`,
+      hasTestEnvironment: true,
+      dossierTooLarge: false
+    };
+  });
+  const usDonors = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      donorKey: `us-${number}`,
+      donorName: `Donante EE. UU. ${number}`,
+      donorEmail: `us-${number}@example.org`,
+      hasEmail: true,
+      count: 1,
+      grossTotalLabel: `$${number}.00`,
+      refundedTotalLabel: "$0.00",
+      netTotalLabel: `$${number}.00`
+    };
+  });
+  const intents = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      id: `intent-${number}`,
+      status: "COMPLETED",
+      amount_cents: number * 100,
+      document_id: `document-${number}`,
+      gift_type: number % 2 === 0 ? "OFRENDA" : "DIEZMO",
+      created_at: `2026-08-${String(number).padStart(2, "0")}T12:00:00.000Z`,
+      numero_control: `DTE-${number}`,
+      document_donor_name: `Donante en línea ${number}`
+    };
+  });
+
+  await installOwnerAdmin(page, async (route, url) => {
+    if (url.pathname === "/api/exports/f960") {
+      await fulfillJson(route, { rows, rowCount: rows.length, amountTotal: "276.00" });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual") {
+      await fulfillJson(route, { year: 2026, donors: svDonors, hasMore: false, nextCursor: null });
+      return true;
+    }
+    if (url.pathname === "/api/statements/stripe/annual" && route.request().method() === "GET") {
+      await fulfillJson(route, {
+        year: 2026,
+        livemode: false,
+        timeZone: "America/New_York",
+        donors: usDonors,
+        hasMore: false,
+        nextCursor: null
+      });
+      return true;
+    }
+    if (url.pathname === "/api/donations/intents") {
+      await fulfillJson(route, { intents });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Exportar");
+
+  const f960 = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "F960", exact: true }) });
+  const sv = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "El Salvador — CDE", exact: true }) });
+  const us = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "EE. UU. — Stripe", exact: true }) });
+  const online = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "Donaciones en línea", exact: true }) });
+
+  for (const [panel, label] of [
+    [f960, "F960"],
+    [sv, "constancias de El Salvador"],
+    [us, "constancias de EE. UU."],
+    [online, "donaciones en línea"]
+  ] as const) {
+    await expect(panel.locator("tbody tr")).toHaveCount(10);
+    await expect(panel.getByRole("navigation", { name: `Paginación de ${label}` })).toContainText("Página 1 de 3");
+  }
+
+  const f960Pagination = f960.getByRole("navigation", { name: "Paginación de F960" });
+  await f960Pagination.getByRole("button", { name: "Siguiente" }).click();
+  await expect(f960.locator("tbody tr").first()).toContainText("F960 Donante 11");
+  await expect(f960Pagination).toContainText("Página 2 de 3");
 });
 
 test("does not dispatch user creation until name and a valid email are present", async ({ page }) => {
@@ -301,4 +500,276 @@ test("uses neutral placeholders and empty-draft branding previews", async ({ pag
   await expect(page.locator(".branding-preview-email-footer")).toHaveText("Correo de soporte");
   await expect(page.locator(".branding-preview-donor-mark")).toHaveText("Su organización");
   await expect(page.getByText(/ExamplePerson1|legacy-contact-1@example\.com/)).toHaveCount(0);
+});
+
+test("does not show the prior account Stripe status while the next account loads", async ({ page }) => {
+  let stripeGetCount = 0;
+  let releaseSecondStripeGet = () => {};
+  const secondStripeGet = new Promise<void>((resolve) => {
+    releaseSecondStripeGet = resolve;
+  });
+
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/auth/logout" && request.method() === "POST") {
+      await fulfillJson(route, {});
+      return true;
+    }
+    if (url.pathname === "/api/auth/bootstrap-status" && request.method() === "GET") {
+      await fulfillJson(route, { bootstrapAvailable: false });
+      return true;
+    }
+    if (url.pathname === "/api/auth/login" && request.method() === "POST") {
+      await fulfillJson(route, {
+        user: { ...OWNER, id: "next-ui-coverage-owner", email: "next-owner@example.org" },
+        token: "next-ui-coverage-token"
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      stripeGetCount += 1;
+      if (stripeGetCount === 2) await secondStripeGet;
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: false, items: [] },
+          operational: {
+            appEnv: "staging",
+            mode: stripeGetCount === 1 ? "Pruebas" : "Producción",
+            mockMode: false,
+            localProxyConfigured: false
+          },
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+        }
+      });
+      return true;
+    }
+    return false;
+  });
+
+  try {
+    await openView(page, "Configuración");
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    const stripeMode = page.locator(".stripe-status-grid > div").filter({ hasText: "Modo Stripe" }).locator("strong");
+    await expect(stripeMode).toHaveText("Pruebas");
+
+    await page.getByTitle("Cerrar sesión").click();
+    await expect(page.getByRole("button", { name: "Continuar" })).toBeVisible();
+    await page.getByLabel("Correo").fill("next-owner@example.org");
+    await page.getByLabel("Contraseña").fill("next-owner-password");
+    await page.getByRole("button", { name: "Continuar" }).click();
+    await expect(page.getByRole("heading", { name: "Documentos", exact: true })).toBeVisible();
+
+    await openView(page, "Configuración");
+    await expect.poll(() => stripeGetCount).toBe(2);
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(stripeMode).toHaveText("Sin cargar");
+
+    releaseSecondStripeGet();
+    await expect(stripeMode).toHaveText("Producción");
+  } finally {
+    releaseSecondStripeGet();
+  }
+});
+
+test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {
+  let postSucceeded = false;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (postSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: {},
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      postSucceeded = true;
+      await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
+      return true;
+    }
+    if (postSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, { error: "refresh_failed" }, 503);
+      return true;
+    }
+    return false;
+  });
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const replacement = page.getByLabel("Clave restringida");
+  await replacement.fill("rk_test_write_only_fixture");
+
+  await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
+
+  await expect.poll(() => postSucceeded).toBe(true);
+  await expect(replacement).toHaveValue("");
+  await expect(page.getByRole("status")).toContainText(
+    "Configuración de Stripe guardada, pero no se pudo actualizar el estado mostrado."
+  );
+});
+
+test("keeps Stripe controls busy while an unrelated settings action finishes", async ({ page }) => {
+  let stripePostStarted = false;
+  let releaseStripePost!: () => void;
+  const stripePostBarrier = new Promise<void>((resolve) => { releaseStripePost = resolve; });
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      await fulfillJson(route, {
+        credentials: {
+          target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+          groups: {},
+          certificateExpiresAt: null,
+          stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      stripePostStarted = true;
+      await stripePostBarrier;
+      await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
+      return true;
+    }
+    if (url.pathname === "/api/settings/email-sender" && request.method() === "PUT") {
+      await fulfillJson(route, {
+        emailSender: {
+          senderName: "MISION EXAMPLEORGANIZATION",
+          senderAddress: "envios@example.org",
+          replyToAddress: "soporte@example.org"
+        }
+      });
+      return true;
+    }
+    return false;
+  });
+
+  try {
+    await openView(page, "Configuración");
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    const stripeSave = page.getByRole("button", { name: "Guardar configuración de Stripe" });
+    await stripeSave.click();
+    await expect.poll(() => stripePostStarted).toBe(true);
+
+    await page.getByRole("button", { name: /^Correo/ }).click();
+    await page.getByRole("button", { name: "Guardar remitente" }).click();
+    await expect(page.getByRole("status")).toContainText("Configuración del remitente actualizada");
+
+    await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+    await expect(page.getByRole("button", { name: /Guardar configuración de Stripe|Guardando/ })).toBeDisabled();
+  } finally {
+    releaseStripePost();
+  }
+});
+
+test("clears the staged webhook secret after POST success even when status refresh fails", async ({ page }) => {
+  let stageSucceeded = false;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (stageSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: {},
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe/webhook-secret/stage" && request.method() === "POST") {
+      stageSucceeded = true;
+      await fulfillJson(route, { ok: true });
+      return true;
+    }
+    if (stageSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, { error: "refresh_failed" }, 503);
+      return true;
+    }
+    return false;
+  });
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const nextSecret = page.locator('input[name="stripe-webhook-secret-next"]');
+  await nextSecret.fill("whsec_next_write_only_fixture");
+
+  await page.getByRole("button", { name: "Preparar secreto siguiente" }).click();
+
+  await expect.poll(() => stageSucceeded).toBe(true);
+  await expect(nextSecret).toHaveValue("");
+  await expect(page.getByRole("status")).toContainText(
+    "Secreto siguiente preparado, pero no se pudo actualizar el estado mostrado."
+  );
+});
+
+test("commits webhook promotion before refresh and locks rotation until status reconciliation", async ({ page }) => {
+  let promotionSucceeded = false;
+  const stripeGroup = {
+    label: "Stripe EE. UU.",
+    ready: true,
+    items: [{ name: "STRIPE_WEBHOOK_SECRET_NEXT", label: "Secreto siguiente", configured: true, protected: true }]
+  };
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      if (promotionSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          credentials: {
+            target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+            groups: { stripe: stripeGroup },
+            certificateExpiresAt: null,
+            stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      if (promotionSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          stripe: {
+            credentials: stripeGroup,
+            operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+            webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+          }
+        });
+      }
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe/webhook-secret/promote" && request.method() === "POST") {
+      promotionSucceeded = true;
+      await fulfillJson(route, { ok: true, updated: ["STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_NEXT"], audit: "ok" });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+  const promote = page.getByRole("button", { name: "Promover secreto preparado" });
+  const cancel = page.getByRole("button", { name: "Cancelar secreto preparado" });
+  await promote.click();
+
+  await expect.poll(() => promotionSucceeded).toBe(true);
+  await expect(page.getByRole("status")).toContainText(
+    "Secreto promovido, pero el estado mostrado requiere conciliación."
+  );
+  await expect(promote).toBeDisabled();
+  await expect(cancel).toBeDisabled();
+  await expect(page.getByText("Rotación guardada; actualice el estado antes de otra acción.")).toBeVisible();
 });

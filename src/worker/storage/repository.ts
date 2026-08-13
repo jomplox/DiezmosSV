@@ -37,10 +37,13 @@ import {
 import {
   claimDonationDatosRateLimit as claimDonationDatosRateLimitRepository,
   claimDonationIntentRateLimit as claimDonationIntentRateLimitRepository,
+  claimStripeProviderRecoveryRead as claimStripeProviderRecoveryReadRepository,
   claimLoginAttempt as claimLoginAttemptRepository,
   claimPasswordResetBudgets as claimPasswordResetBudgetsRepository,
   deleteExpiredLoginRateLimits as deleteExpiredLoginRateLimitsRepository,
-  deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository
+  deleteExpiredSecurityRateLimitClaims as deleteExpiredSecurityRateLimitClaimsRepository,
+  finalizeStripeProviderRecoveryRead as finalizeStripeProviderRecoveryReadRepository,
+  releaseUnusedDonationIntentRateLimitClaim as releaseUnusedDonationIntentRateLimitClaimRepository
 } from "./repository/rateLimits";
 import {
   INTENT_EXPIRY_SWEEP_LIMIT as DONATION_INTENT_EXPIRY_SWEEP_LIMIT,
@@ -62,6 +65,58 @@ import {
   type CreateDonationIntentInput,
   type IntentDatosInput
 } from "./repository/donationIntents";
+import {
+  applyStripeRefund as applyStripeRefundRepository,
+  attachStripeCheckoutSession as attachStripeCheckoutSessionRepository,
+  attachStripeInvoicePaymentIntent as attachStripeInvoicePaymentIntentRepository,
+  claimNextStripeAcknowledgment as claimNextStripeAcknowledgmentRepository,
+  claimStripeWebhookEvent as claimStripeWebhookEventRepository,
+  failStripeCheckoutCreation as failStripeCheckoutCreationRepository,
+  finalizeStripeAcknowledgment as finalizeStripeAcknowledgmentRepository,
+  finalizeStripeWebhookEvent as finalizeStripeWebhookEventRepository,
+  getStripeAcknowledgmentEvidenceSource as getStripeAcknowledgmentEvidenceSourceRepository,
+  getStripeAcknowledgmentForGiftEvidence as getStripeAcknowledgmentForGiftEvidenceRepository,
+  getLatestStripeWebhookHealth as getLatestStripeWebhookHealthRepository,
+  hasRecentStripeWebhookSecretVerification as hasRecentStripeWebhookSecretVerificationRepository,
+  getStripeCheckoutById as getStripeCheckoutByIdRepository,
+  getStripeCheckoutByRequestId as getStripeCheckoutByRequestIdRepository,
+  getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
+  getStripeChargePaymentMethodByPaymentIntent as getStripeChargePaymentMethodByPaymentIntentRepository,
+  getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
+  markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
+  markStripeInvoiceSettlementRecorded as markStripeInvoiceSettlementRecordedRepository,
+  listStripeAcknowledgmentReconciliation as listStripeAcknowledgmentReconciliationRepository,
+  reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
+  reconcileStripeAcknowledgment as reconcileStripeAcknowledgmentRepository,
+  recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
+  recordStripePaymentMethodForCheckout as recordStripePaymentMethodForCheckoutRepository,
+  recordStripePaymentMethodForInvoiceByPaymentIntent as recordStripePaymentMethodForInvoiceByPaymentIntentRepository,
+  recordStripeWebhookPaymentMethodEvidence as recordStripeWebhookPaymentMethodEvidenceRepository,
+  reserveStripeCheckout as reserveStripeCheckoutRepository,
+  saveStripeAcknowledgmentSnapshot as saveStripeAcknowledgmentSnapshotRepository,
+  stageStripeInvoicePaid as stageStripeInvoicePaidRepository,
+  stageStripeInvoicePayment as stageStripeInvoicePaymentRepository,
+  updateStripeCheckoutFromEvent as updateStripeCheckoutFromEventRepository,
+  updateStripeCheckoutFromInvoice as updateStripeCheckoutFromInvoiceRepository,
+  updateStripeSubscriptionStatus as updateStripeSubscriptionStatusRepository,
+  type StripeAcknowledgmentClaim,
+  type StripeAcknowledgmentReconciliationRecord,
+  type StripeChargePaymentMethodRecord,
+  type StripeCheckoutRecord,
+  type StripeGiftRecord,
+  type StripeWebhookHealthRecord
+} from "./repository/stripeDonations";
+import {
+  claimStripeAnnualStatementDelivery as claimStripeAnnualStatementDeliveryRepository,
+  finalizeStripeAnnualStatementDelivery as finalizeStripeAnnualStatementDeliveryRepository,
+  listStripeAnnualStatementDonorGifts as listStripeAnnualStatementDonorGiftsRepository,
+  listStripeAnnualStatementDonorTargets as listStripeAnnualStatementDonorTargetsRepository,
+  markStripeAnnualStatementDispatchStarted as markStripeAnnualStatementDispatchStartedRepository,
+  reserveStripeAnnualStatementDelivery as reserveStripeAnnualStatementDeliveryRepository,
+  type StripeAnnualStatementDeliveryRecord,
+  type StripeAnnualStatementDonorTarget,
+  type StripeAnnualStatementGift
+} from "./repository/stripeAnnualStatements";
 import {
   claimEmailDelivery as claimEmailDeliveryRepository,
   claimManualEmailDelivery as claimManualEmailDeliveryRepository,
@@ -94,6 +149,7 @@ import {
   listAcceptedWompiContactRows as listAcceptedWompiContactRowsRepository,
   listAnnualCertificateDonorDocuments as listAnnualCertificateDonorDocumentsRepository,
   listAnnualCertificateDonorTargets as listAnnualCertificateDonorTargetsRepository,
+  captureStripeRetentionFence as captureStripeRetentionFenceRepository,
   listAllRowsPaged as listAllRowsPagedRepository,
   listDocumentSequencesPaged as listDocumentSequencesPagedRepository,
   listRowsCreatedBetween as listRowsCreatedBetweenRepository,
@@ -102,7 +158,9 @@ import {
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
-  type RetentionTable
+  type RetentionTable,
+  type StripeRetentionCursor,
+  type StripeRetentionFence
 } from "./repository/retentionReads";
 import {
   listDonors as listDonorsRepository,
@@ -222,17 +280,34 @@ export type {
   ReceiptEmailDeliveryState
 } from "./repository/deliveries";
 export type { DteDocumentListPage } from "./repository/dteDocuments";
+export type {
+  StripeAcknowledgmentClaim,
+  StripeCheckoutRecord,
+  StripeDonorAddress,
+  StripeGiftFrequency,
+  StripeGiftType,
+  StripeGiftRecord
+} from "./repository/stripeDonations";
+export type {
+  StripeAnnualStatementDeliveryRecord,
+  StripeAnnualStatementDonorTarget,
+  StripeAnnualStatementGift
+} from "./repository/stripeAnnualStatements";
 export {
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
-  RETENTION_WINDOWED_TABLES
+  RETENTION_WINDOWED_TABLES,
+  STRIPE_RETENTION_SNAPSHOT_TABLES
 } from "./repository/retentionReads";
 export type {
   AnnualCertificateDonorTarget,
   DocumentSequenceRetentionCursor,
   RetentionCursor,
   RetentionSnapshotTable,
-  RetentionTable
+  RetentionTable,
+  StripeRetentionFence,
+  StripeRetentionSnapshotTable,
+  StripeRetentionCursor
 } from "./repository/retentionReads";
 export type {
   DonorExplorerFilters,
@@ -256,6 +331,228 @@ export class Repository {
 
   async setSetting(key: string, value: string, updatedBy?: string | null): Promise<void> {
     return setSetting(this.db, key, value, updatedBy);
+  }
+
+  async reserveStripeCheckout(
+    input: Parameters<typeof reserveStripeCheckoutRepository>[1]
+  ): ReturnType<typeof reserveStripeCheckoutRepository> {
+    return reserveStripeCheckoutRepository(this.db, input);
+  }
+
+  async getStripeCheckoutByRequestId(requestId: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutByRequestIdRepository(this.db, requestId);
+  }
+
+  async getStripeCheckoutBySessionId(sessionId: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutBySessionIdRepository(this.db, sessionId);
+  }
+
+  async getStripeCheckoutById(id: string): Promise<StripeCheckoutRecord | null> {
+    return getStripeCheckoutByIdRepository(this.db, id);
+  }
+
+  async attachStripeCheckoutSession(
+    input: Parameters<typeof attachStripeCheckoutSessionRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return attachStripeCheckoutSessionRepository(this.db, input);
+  }
+
+  async failStripeCheckoutCreation(
+    input: Parameters<typeof failStripeCheckoutCreationRepository>[1]
+  ): Promise<boolean> {
+    return failStripeCheckoutCreationRepository(this.db, input);
+  }
+
+  async reclaimStripeCheckoutCreation(
+    input: Parameters<typeof reclaimStripeCheckoutCreationRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return reclaimStripeCheckoutCreationRepository(this.db, input);
+  }
+
+  async updateStripeCheckoutFromEvent(
+    input: Parameters<typeof updateStripeCheckoutFromEventRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeCheckoutFromEventRepository(this.db, input);
+  }
+
+  async updateStripeSubscriptionStatus(
+    input: Parameters<typeof updateStripeSubscriptionStatusRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeSubscriptionStatusRepository(this.db, input);
+  }
+
+  async updateStripeCheckoutFromInvoice(
+    input: Parameters<typeof updateStripeCheckoutFromInvoiceRepository>[1]
+  ): Promise<StripeCheckoutRecord | null> {
+    return updateStripeCheckoutFromInvoiceRepository(this.db, input);
+  }
+
+  async claimStripeWebhookEvent(
+    input: Parameters<typeof claimStripeWebhookEventRepository>[1]
+  ): ReturnType<typeof claimStripeWebhookEventRepository> {
+    return claimStripeWebhookEventRepository(this.db, input);
+  }
+
+  async finalizeStripeWebhookEvent(
+    input: Parameters<typeof finalizeStripeWebhookEventRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeWebhookEventRepository(this.db, input);
+  }
+
+  async getLatestStripeWebhookHealth(): Promise<StripeWebhookHealthRecord | null> {
+    return getLatestStripeWebhookHealthRepository(this.db);
+  }
+
+  async hasRecentStripeWebhookSecretVerification(
+    input: Parameters<typeof hasRecentStripeWebhookSecretVerificationRepository>[1]
+  ): Promise<boolean> {
+    return hasRecentStripeWebhookSecretVerificationRepository(this.db, input);
+  }
+
+  async recordStripeGiftAndAcknowledgment(
+    input: Parameters<typeof recordStripeGiftAndAcknowledgmentRepository>[1]
+  ): Promise<{ inserted: boolean; record: StripeGiftRecord; acknowledgmentId: string }> {
+    return recordStripeGiftAndAcknowledgmentRepository(this.db, input);
+  }
+
+  async recordStripePaymentMethodForCheckout(
+    input: Parameters<typeof recordStripePaymentMethodForCheckoutRepository>[1]
+  ) {
+    return recordStripePaymentMethodForCheckoutRepository(this.db, input);
+  }
+
+  async recordStripeWebhookPaymentMethodEvidence(
+    input: Parameters<typeof recordStripeWebhookPaymentMethodEvidenceRepository>[1]
+  ) {
+    return recordStripeWebhookPaymentMethodEvidenceRepository(this.db, input);
+  }
+
+  async getStripeChargePaymentMethodByPaymentIntent(
+    paymentIntentId: string
+  ): Promise<StripeChargePaymentMethodRecord | null> {
+    return getStripeChargePaymentMethodByPaymentIntentRepository(this.db, paymentIntentId);
+  }
+
+  async recordStripePaymentMethodForInvoiceByPaymentIntent(
+    input: Parameters<typeof recordStripePaymentMethodForInvoiceByPaymentIntentRepository>[1]
+  ) {
+    return recordStripePaymentMethodForInvoiceByPaymentIntentRepository(this.db, input);
+  }
+
+  async applyStripeRefund(
+    input: Parameters<typeof applyStripeRefundRepository>[1]
+  ): Promise<StripeGiftRecord | null> {
+    return applyStripeRefundRepository(this.db, input);
+  }
+
+  async stageStripeInvoicePaid(input: Parameters<typeof stageStripeInvoicePaidRepository>[1]) {
+    return stageStripeInvoicePaidRepository(this.db, input);
+  }
+
+  async stageStripeInvoicePayment(input: Parameters<typeof stageStripeInvoicePaymentRepository>[1]) {
+    return stageStripeInvoicePaymentRepository(this.db, input);
+  }
+
+  async markStripeInvoiceSettlementRecorded(
+    input: Parameters<typeof markStripeInvoiceSettlementRecordedRepository>[1]
+  ): Promise<void> {
+    return markStripeInvoiceSettlementRecordedRepository(this.db, input);
+  }
+
+  async getStripeGiftBySourceId(sourceId: string): Promise<StripeGiftRecord | null> {
+    return getStripeGiftBySourceIdRepository(this.db, sourceId);
+  }
+
+  async attachStripeInvoicePaymentIntent(
+    input: Parameters<typeof attachStripeInvoicePaymentIntentRepository>[1]
+  ): Promise<StripeGiftRecord | null> {
+    return attachStripeInvoicePaymentIntentRepository(this.db, input);
+  }
+
+  async claimNextStripeAcknowledgment(
+    input: Parameters<typeof claimNextStripeAcknowledgmentRepository>[1]
+  ): Promise<StripeAcknowledgmentClaim | null> {
+    return claimNextStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async markStripeAcknowledgmentDispatchStarted(
+    input: Parameters<typeof markStripeAcknowledgmentDispatchStartedRepository>[1]
+  ): Promise<boolean> {
+    return markStripeAcknowledgmentDispatchStartedRepository(this.db, input);
+  }
+
+  async finalizeStripeAcknowledgment(
+    input: Parameters<typeof finalizeStripeAcknowledgmentRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async getStripeAcknowledgmentEvidenceSource(
+    id: string
+  ): ReturnType<typeof getStripeAcknowledgmentEvidenceSourceRepository> {
+    return getStripeAcknowledgmentEvidenceSourceRepository(this.db, id);
+  }
+
+  async getStripeAcknowledgmentForGiftEvidence(
+    giftId: string,
+    refundedAmountCents: number
+  ): Promise<{ id: string } | null> {
+    return getStripeAcknowledgmentForGiftEvidenceRepository(this.db, giftId, refundedAmountCents);
+  }
+
+  async saveStripeAcknowledgmentSnapshot(
+    input: Parameters<typeof saveStripeAcknowledgmentSnapshotRepository>[1]
+  ): Promise<boolean> {
+    return saveStripeAcknowledgmentSnapshotRepository(this.db, input);
+  }
+
+  async listStripeAcknowledgmentReconciliation(): Promise<StripeAcknowledgmentReconciliationRecord[]> {
+    return listStripeAcknowledgmentReconciliationRepository(this.db);
+  }
+
+  async reconcileStripeAcknowledgment(
+    input: Parameters<typeof reconcileStripeAcknowledgmentRepository>[1]
+  ): Promise<boolean> {
+    return reconcileStripeAcknowledgmentRepository(this.db, input);
+  }
+
+  async listStripeAnnualStatementDonorTargets(
+    range: { startIso: string; endIso: string },
+    options: Parameters<typeof listStripeAnnualStatementDonorTargetsRepository>[2]
+  ): Promise<StripeAnnualStatementDonorTarget[]> {
+    return listStripeAnnualStatementDonorTargetsRepository(this.db, range, options);
+  }
+
+  async listStripeAnnualStatementDonorGifts(
+    range: { startIso: string; endIso: string },
+    livemode: boolean,
+    donorKey: string
+  ): Promise<StripeAnnualStatementGift[]> {
+    return listStripeAnnualStatementDonorGiftsRepository(this.db, range, livemode, donorKey);
+  }
+
+  async reserveStripeAnnualStatementDelivery(
+    input: Parameters<typeof reserveStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<StripeAnnualStatementDeliveryRecord> {
+    return reserveStripeAnnualStatementDeliveryRepository(this.db, input);
+  }
+
+  async claimStripeAnnualStatementDelivery(
+    input: Parameters<typeof claimStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<StripeAnnualStatementDeliveryRecord | null> {
+    return claimStripeAnnualStatementDeliveryRepository(this.db, input);
+  }
+
+  async markStripeAnnualStatementDispatchStarted(
+    input: Parameters<typeof markStripeAnnualStatementDispatchStartedRepository>[1]
+  ): Promise<boolean> {
+    return markStripeAnnualStatementDispatchStartedRepository(this.db, input);
+  }
+
+  async finalizeStripeAnnualStatementDelivery(
+    input: Parameters<typeof finalizeStripeAnnualStatementDeliveryRepository>[1]
+  ): Promise<boolean> {
+    return finalizeStripeAnnualStatementDeliveryRepository(this.db, input);
   }
 
   async insertWompiEvent(payload: WompiWebhook, rawBody: string, headers: Record<string, string>, environment: Ambiente): Promise<{ record: WompiEventRecord; inserted: boolean }> {
@@ -1280,6 +1577,22 @@ export class Repository {
     );
   }
 
+  async releaseUnusedDonationIntentRateLimitClaim(id: string): Promise<void> {
+    return releaseUnusedDonationIntentRateLimitClaimRepository(this.db, id);
+  }
+
+  async claimStripeProviderRecoveryRead(
+    input: Parameters<typeof claimStripeProviderRecoveryReadRepository>[1]
+  ) {
+    return claimStripeProviderRecoveryReadRepository(this.db, input);
+  }
+
+  async finalizeStripeProviderRecoveryRead(
+    input: Parameters<typeof finalizeStripeProviderRecoveryReadRepository>[1]
+  ): Promise<void> {
+    return finalizeStripeProviderRecoveryReadRepository(this.db, input);
+  }
+
   async claimDonationDatosRateLimit(
     keyHash: string,
     now: string,
@@ -1435,8 +1748,17 @@ export class Repository {
     return listRowsCreatedBetweenRepository(this.db, table, range, cursor, limit);
   }
 
-  async listAllRowsPaged(table: RetentionSnapshotTable, cursor: RetentionCursor | null, limit = RETENTION_PAGE_SIZE): Promise<Array<Record<string, unknown>>> {
-    return listAllRowsPagedRepository(this.db, table, cursor, limit);
+  async captureStripeRetentionFence(): Promise<StripeRetentionFence> {
+    return captureStripeRetentionFenceRepository(this.db);
+  }
+
+  async listAllRowsPaged(
+    table: RetentionSnapshotTable,
+    cursor: RetentionCursor | StripeRetentionCursor | null,
+    limit = RETENTION_PAGE_SIZE,
+    stripeFence?: StripeRetentionFence
+  ): Promise<Array<Record<string, unknown>>> {
+    return listAllRowsPagedRepository(this.db, table, cursor, limit, stripeFence);
   }
 
   async listDocumentSequencesPaged(

@@ -44,9 +44,20 @@ const status: CredentialStatus = {
       label: "Emisor",
       ready: true,
       items: []
+    },
+    stripe: {
+      label: "Stripe EE. UU.",
+      ready: true,
+      items: []
     }
   },
-  certificateExpiresAt: null
+  certificateExpiresAt: null,
+  stripeOperational: {
+    appEnv: "staging",
+    mode: "Pruebas",
+    mockMode: false,
+    localProxyConfigured: false
+  }
 };
 
 describe("credentialSectionState", () => {
@@ -107,6 +118,7 @@ describe("credentialSectionState", () => {
   test("marks a section ready when all mapped secret groups are ready", () => {
     expect(credentialSectionState("wompi", status)).toBe("ready");
     expect(credentialSectionState("emisor", status)).toBe("ready");
+    expect(credentialSectionState("stripe", status)).toBe("ready");
   });
 });
 
@@ -255,6 +267,19 @@ describe("Correo provider destination authority (source contract)", () => {
 
     expect(brandingSaveHandler).toContain('accountApi<{ emailSender: EmailSenderState }>("/api/settings/email-sender")');
     expect(brandingSaveHandler).toContain("applyEmailSender(emailSenderResult.emailSender)");
+  });
+});
+
+describe("Stripe operational status loading (source contract)", () => {
+  test("does not report the local proxy as unconfigured before Stripe settings load", () => {
+    const start = credentialsPanelSource.indexOf("<span>Proxy local</span>");
+    const proxyStatus = credentialsPanelSource.slice(
+      start,
+      credentialsPanelSource.indexOf("</div>", start)
+    );
+
+    expect(proxyStatus).toContain("stripeSettings ?");
+    expect(proxyStatus).toContain('"Sin cargar"');
   });
 });
 

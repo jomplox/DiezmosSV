@@ -14,6 +14,13 @@ import {
   X
 } from "lucide-react";
 import { type FormEvent, useMemo, useRef, useState } from "react";
+import {
+  STRIPE_US_LEGAL_NAME_MAX_LENGTH,
+  STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
+  STRIPE_US_SIGNER_NAME_MAX_LENGTH,
+  STRIPE_US_SIGNER_TITLE_MAX_LENGTH,
+  STRIPE_US_WEBSITE_MAX_LENGTH
+} from "../shared/stripeUsConfiguration";
 import type {
   CredentialStatus,
   CredentialStatusItem,
@@ -21,6 +28,8 @@ import type {
   EmailTemplateSettings,
   EmailTemplateValue,
   EmissionEnvironmentState,
+  StripeAcknowledgmentReconciliationItem,
+  StripeSettingsState,
   WompiNotificationSettings
 } from "./types";
 import {
@@ -65,6 +74,9 @@ import {
 
 export function CredentialsPanel({
   status,
+  stripeSettings,
+  stripeRotationStatusStale,
+  stripeAcknowledgmentReconciliation,
   emissionEnvironment,
   emailTemplates,
   emailTemplateDraft,
@@ -83,8 +95,14 @@ export function CredentialsPanel({
   wompiNotificationsBusy,
   alertEmailBusy,
   writerBusy,
+  stripeBusy,
   onChange,
   onSubmit,
+  onStripeSubmit,
+  onStripeWebhookStage,
+  onStripeWebhookPromote,
+  onStripeWebhookCancel,
+  onStripeAcknowledgmentReconcile,
   onEmailTemplateChange,
   onEmailTemplateSubmit,
   onEmailSenderChange,
@@ -101,6 +119,9 @@ export function CredentialsPanel({
   onRefresh
 }: {
   status: CredentialStatus | null;
+  stripeSettings: StripeSettingsState | null;
+  stripeRotationStatusStale: boolean;
+  stripeAcknowledgmentReconciliation: StripeAcknowledgmentReconciliationItem[];
   emissionEnvironment: EmissionEnvironmentState | null;
   emailTemplates: EmailTemplateSettings | null;
   emailTemplateDraft: Record<string, EmailTemplateValue>;
@@ -119,8 +140,17 @@ export function CredentialsPanel({
   wompiNotificationsBusy: boolean;
   alertEmailBusy: boolean;
   writerBusy: boolean;
+  stripeBusy: boolean;
   onChange: (input: CredentialFormInput) => void;
   onSubmit: () => Promise<void>;
+  onStripeSubmit: () => Promise<void>;
+  onStripeWebhookStage: () => Promise<void>;
+  onStripeWebhookPromote: () => Promise<void>;
+  onStripeWebhookCancel: () => Promise<void>;
+  onStripeAcknowledgmentReconcile: (
+    id: string,
+    resolution: "CONFIRMED_SENT" | "CONFIRMED_NOT_SENT"
+  ) => Promise<void>;
   onEmailTemplateChange: (type: string, patch: Partial<EmailTemplateValue>) => void;
   onEmailTemplateSubmit: () => Promise<void>;
   onEmailSenderChange: (value: string) => void;
@@ -141,6 +171,7 @@ export function CredentialsPanel({
   const mhPasswordSecret = input.environment === "test" ? "MH_PASSWORD_TEST" : "MH_PASSWORD_PROD";
   const activeMhGroup = input.environment === "test" ? status?.groups.mhTest : status?.groups.mhProduction;
   const webhookUrl = typeof window === "undefined" ? "/webhooks/wompi" : new URL("/webhooks/wompi", window.location.origin).toString();
+  const stripeWebhookUrl = typeof window === "undefined" ? "/webhooks/stripe" : new URL("/webhooks/stripe", window.location.origin).toString();
   const writerConfigured = status?.target.writerConfigured === true;
   const writerMissing = status?.target.writerMissing ?? [];
   const writerNeedsOnlyToken = writerMissing.length === 1 && writerMissing[0] === "CLOUDFLARE_API_TOKEN";
@@ -148,6 +179,7 @@ export function CredentialsPanel({
   const certificateExpiry = certificateExpiryStatus(status?.certificateExpiresAt ?? null);
   const [certificateFileError, setCertificateFileError] = useState("");
   const [webhookCopied, setWebhookCopied] = useState(false);
+  const [stripeWebhookCopied, setStripeWebhookCopied] = useState(false);
   const [writerCommandCopied, setWriterCommandCopied] = useState(false);
   const [writerToken, setWriterToken] = useState("");
   const [writerTokenError, setWriterTokenError] = useState("");
@@ -191,6 +223,15 @@ export function CredentialsPanel({
       window.setTimeout(() => setWebhookCopied(false), 1600);
     } catch {
       setWebhookCopied(false);
+    }
+  }
+  async function copyStripeWebhookUrl(): Promise<void> {
+    try {
+      await copyText(stripeWebhookUrl);
+      setStripeWebhookCopied(true);
+      window.setTimeout(() => setStripeWebhookCopied(false), 1600);
+    } catch {
+      setStripeWebhookCopied(false);
     }
   }
   async function copyWriterSetupCommand(): Promise<void> {
@@ -487,6 +528,184 @@ export function CredentialsPanel({
                   </div>
                 )}
 
+                {activeSection === "stripe" && (
+                  <div className="credential-fields stripe-settings-fields">
+                    <div className="credential-section-title span-2">
+                      <h3>Configuración operativa de Stripe EE. UU.</h3>
+                      <p>La presencia indica Configurado; no prueba que el valor pertenezca a la cuenta correcta de Stripe.</p>
+                    </div>
+                    <div className="stripe-status-grid span-2">
+                      <div><span>APP_ENV</span><strong>{stripeSettings?.operational.appEnv ?? "Sin cargar"}</strong></div>
+                      <div><span>Modo Stripe</span><strong>{stripeSettings?.operational.mode ?? "Sin cargar"}</strong></div>
+                      <div><span>Proxy local</span><strong>{stripeSettings ? (stripeSettings.operational.localProxyConfigured ? "Configurado" : "No configurado") : "Sin cargar"}</strong></div>
+                    </div>
+                    <div className="credential-field-block span-2">
+                      <span className="plain-field-label">URL del webhook de Stripe</span>
+                      <div className="credential-readonly-row">
+                        <div className="credential-readonly-endpoint"><code>{stripeWebhookUrl}</code></div>
+                        <button className="endpoint-copy-button" type="button" onClick={() => void copyStripeWebhookUrl()} title="Copiar URL del webhook de Stripe">
+                          <Copy size={15} />{stripeWebhookCopied ? "Copiado" : "Copiar"}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="credential-field-block span-2 stripe-webhook-health">
+                      <span className="plain-field-label">Salud observada del webhook</span>
+                      {stripeSettings?.webhookHealth.state === "observed" ? (
+                        <div>
+                          <strong>{stripeSettings.webhookHealth.verifiedByProcessedEvent ? "Verificado por último evento procesado" : "Evento observado sin verificación completa"}</strong>
+                          <small>Último evento: {stripeSettings.webhookHealth.eventType} · {stripeSettings.webhookHealth.processingStatus} · {stripeSettings.webhookHealth.lastReceivedAt}</small>
+                          <small>Modo del evento: {stripeSettings.webhookHealth.livemodeMatches ? "coincide con el despliegue" : "no coincide con el despliegue"}</small>
+                        </div>
+                      ) : <strong>Sin eventos recibidos</strong>}
+                    </div>
+                    <div className="credential-field-block span-2">
+                      <div className="credential-section-title">
+                        <h3>Constancias inmediatas</h3>
+                        <p>Requiere conciliación cuando no se pudo confirmar el resultado del proveedor.</p>
+                      </div>
+                      {stripeAcknowledgmentReconciliation.length === 0 ? (
+                        <small>No hay constancias pendientes de conciliación.</small>
+                      ) : stripeAcknowledgmentReconciliation.map((acknowledgment) => (
+                        <div className="legal-box" key={acknowledgment.id}>
+                          <AlertTriangle size={17} />
+                          <div>
+                            <strong>
+                              Revisión {acknowledgment.revision} · {acknowledgment.kind === "FULL_REFUND"
+                                ? "Reembolso total"
+                                : acknowledgment.kind === "PARTIAL_REFUND"
+                                  ? "Corrección por reembolso"
+                                  : "Constancia original"}
+                            </strong>
+                            <small>
+                              Estado {acknowledgment.status} · código {acknowledgment.failureCode} · neto ${(acknowledgment.netAmountCents / 100).toFixed(2)} USD
+                            </small>
+                            <div className="stripe-rotation-actions">
+                              <button
+                                className="primary"
+                                type="button"
+                                disabled={stripeBusy}
+                                onClick={() => void onStripeAcknowledgmentReconcile(
+                                  acknowledgment.id,
+                                  "CONFIRMED_SENT"
+                                )}
+                              >
+                                Confirmar que se envió
+                              </button>
+                              <button
+                                className="secondary"
+                                type="button"
+                                disabled={stripeBusy}
+                                onClick={() => void onStripeAcknowledgmentReconcile(
+                                  acknowledgment.id,
+                                  "CONFIRMED_NOT_SENT"
+                                )}
+                              >
+                                Confirmar que no se envió
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <small className="span-2">Los campos de reemplazo nunca se precargan y se limpian después de guardarse.</small>
+                    <label>
+                      <CredentialFieldLabel label="Clave restringida" configured={credentialConfigured(status, "STRIPE_RESTRICTED_KEY")} />
+                      <CredentialActiveValue status={status} name="STRIPE_RESTRICTED_KEY" />
+                      <input type="password" autoComplete="new-password" value={input.stripeRestrictedKey} onChange={(event) => onChange({ ...input, stripeRestrictedKey: event.target.value })} placeholder="rk_test_… o rk_live_…" />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Clave publicable" configured={credentialConfigured(status, "STRIPE_PUBLISHABLE_KEY")} />
+                      <CredentialActiveValue status={status} name="STRIPE_PUBLISHABLE_KEY" />
+                      <input type="password" autoComplete="new-password" value={input.stripePublishableKey} onChange={(event) => onChange({ ...input, stripePublishableKey: event.target.value })} placeholder="pk_test_… o pk_live_…" />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Configuración de métodos de entrega" configured={credentialConfigured(status, "STRIPE_PAYMENT_METHOD_CONFIGURATION_ID")} />
+                      <CredentialActiveValue status={status} name="STRIPE_PAYMENT_METHOD_CONFIGURATION_ID" />
+                      <input type="password" autoComplete="new-password" value={input.stripePaymentMethodConfigurationId} onChange={(event) => onChange({ ...input, stripePaymentMethodConfigurationId: event.target.value })} placeholder="pmc_…" />
+                      <small>No verificado por la aplicación.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Configuración del portal" configured={credentialConfigured(status, "STRIPE_BILLING_PORTAL_CONFIGURATION_ID")} />
+                      <CredentialActiveValue status={status} name="STRIPE_BILLING_PORTAL_CONFIGURATION_ID" />
+                      <input type="password" autoComplete="new-password" value={input.stripeBillingPortalConfigurationId} onChange={(event) => onChange({ ...input, stripeBillingPortalConfigurationId: event.target.value })} placeholder="bpc_…" />
+                      <small>No verificado por la aplicación.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Nombre legal" configured={credentialConfigured(status, "STRIPE_US_LEGAL_NAME")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_LEGAL_NAME" />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_LEGAL_NAME_MAX_LENGTH} value={input.stripeLegalName} onChange={(event) => onChange({ ...input, stripeLegalName: event.target.value })} />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="EIN" configured={credentialConfigured(status, "STRIPE_US_EIN")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_EIN" />
+                      <input type="password" autoComplete="new-password" value={input.stripeEin} onChange={(event) => onChange({ ...input, stripeEin: event.target.value })} placeholder="12-3456789" />
+                    </label>
+                    <label className="span-2">
+                      <CredentialFieldLabel label="Zona horaria" configured={credentialConfigured(status, "STRIPE_US_TIME_ZONE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_TIME_ZONE" />
+                      <input type="text" value={input.stripeTimeZone} onChange={(event) => onChange({ ...input, stripeTimeZone: event.target.value })} placeholder="America/New_York" />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Teléfono de la organización" configured={credentialConfigured(status, "STRIPE_US_PHONE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_PHONE" />
+                      <input type="tel" autoComplete="off" value={input.stripeOrganizationPhone} onChange={(event) => onChange({ ...input, stripeOrganizationPhone: event.target.value })} placeholder="+1 (000) 000-0000" />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Sitio web" configured={credentialConfigured(status, "STRIPE_US_WEBSITE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_WEBSITE" />
+                      <input type="url" autoComplete="off" maxLength={STRIPE_US_WEBSITE_MAX_LENGTH} value={input.stripeOrganizationWebsite} onChange={(event) => onChange({ ...input, stripeOrganizationWebsite: event.target.value })} placeholder="https://example.org" />
+                    </label>
+                    <label className="span-2">
+                      <CredentialFieldLabel label="Dirección postal" configured={credentialConfigured(status, "STRIPE_US_MAILING_ADDRESS")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_MAILING_ADDRESS" />
+                      <textarea value={input.stripeOrganizationMailingAddress} onChange={(event) => onChange({ ...input, stripeOrganizationMailingAddress: event.target.value })} placeholder={"Calle y número\nCiudad, estado, código postal, EE. UU."} rows={4} />
+                      <small>Use de 2 a 4 renglones, con hasta {STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH} caracteres por renglón.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Nombre del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_NAME")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_NAME" />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_NAME_MAX_LENGTH} value={input.stripeSignerName} onChange={(event) => onChange({ ...input, stripeSignerName: event.target.value })} />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Cargo del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_TITLE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_TITLE" />
+                      <input type="text" autoComplete="off" maxLength={STRIPE_US_SIGNER_TITLE_MAX_LENGTH} value={input.stripeSignerTitle} onChange={(event) => onChange({ ...input, stripeSignerTitle: event.target.value })} placeholder="Treasurer" />
+                    </label>
+                    <div className="credential-field-block span-2">
+                      <CredentialFieldLabel label="Secreto activo del webhook" configured={credentialConfigured(status, "STRIPE_WEBHOOK_SECRET")} />
+                      <CredentialActiveValue status={status} name="STRIPE_WEBHOOK_SECRET" />
+                      <small>Estado solamente. Para rotarlo, prepare primero el secreto siguiente.</small>
+                    </div>
+                    <label className="span-2">
+                      <CredentialFieldLabel label="Secreto siguiente del webhook" configured={credentialConfigured(status, "STRIPE_WEBHOOK_SECRET_NEXT")} />
+                      <CredentialActiveValue status={status} name="STRIPE_WEBHOOK_SECRET_NEXT" />
+                      <input name="stripe-webhook-secret-next" type="password" autoComplete="new-password" value={input.stripeWebhookSecretNext} onChange={(event) => onChange({ ...input, stripeWebhookSecretNext: event.target.value })} placeholder="whsec_…" />
+                    </label>
+                    <div className="stripe-rotation-actions span-2">
+                      <button className="secondary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured || !input.stripeWebhookSecretNext.trim()} onClick={() => void onStripeWebhookStage()}>Preparar secreto siguiente</button>
+                      {credentialConfigured(status, "STRIPE_WEBHOOK_SECRET_NEXT") && (
+                        <>
+                          <button className="primary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured} onClick={() => void onStripeWebhookPromote()}>Promover secreto preparado</button>
+                          <button className="secondary" type="button" disabled={stripeBusy || stripeRotationStatusStale || !writerConfigured} onClick={() => void onStripeWebhookCancel()}>Cancelar secreto preparado</button>
+                        </>
+                      )}
+                    </div>
+                    {stripeRotationStatusStale && (
+                      <small className="span-2">Rotación guardada; actualice el estado antes de otra acción.</small>
+                    )}
+                    <div className="legal-box span-2">
+                      <ShieldCheck size={17} />
+                      <div>
+                        <strong>Métodos elegibles y exclusión de BNPL</strong>
+                        <small>Se administran en Stripe Dashboard Payment Method Configuration; este panel no simula interruptores del proveedor.</small>
+                      </div>
+                    </div>
+                    <button className="primary span-2" type="button" disabled={stripeBusy || !writerConfigured} onClick={() => void onStripeSubmit()}>
+                      {stripeBusy ? "Guardando" : "Guardar configuración de Stripe"}
+                    </button>
+                  </div>
+                )}
+
                 {activeSection === "emisor" && (
                   <div className="credential-fields">
                     <IssuerConfigEditor status={status} input={input} onChange={onChange} />
@@ -603,7 +822,7 @@ export function CredentialsPanel({
                   </div>
                 )}
 
-                {activeSection !== "ambiente" && (
+                {activeSection !== "ambiente" && activeSection !== "stripe" && (
                   <div className="credential-actions">
                     <div>
                       <EyeOff size={16} />
@@ -1152,51 +1371,87 @@ function EmailTemplateEditor({
         <div className="empty-state">Cargando plantillas de correo.</div>
       ) : (
         <>
-          <div className="email-template-guidance">
-            <span>Use variables para insertar datos del CDE. Los nuevos tipos de correo aparecerán en esta misma sección.</span>
-            <div className="email-template-placeholders" aria-label="Variables disponibles">
-              {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+          <section className="email-template-country-group" aria-label="Plantillas de El Salvador — CDE">
+            <div className="email-template-country-head">
+              <div>
+                <h3>El Salvador — CDE</h3>
+                <p>Mensajes fiscales salvadoreños vinculados al comprobante electrónico.</p>
+              </div>
+              <span className="email-template-country-badge">Editables</span>
             </div>
-          </div>
-          <div className="email-template-list">
-            {definitions.map((definition) => {
-              const value = draft[definition.type] ?? { subject: "", body: "" };
-              return (
-                <section className="email-template-card" key={definition.type}>
-                  <div>
-                    <h3>{definition.label}</h3>
-                    <p>{definition.description}</p>
-                  </div>
-                  <label>
-                    <span>Asunto</span>
-                    <input
-                      value={value.subject}
-                      onChange={(event) => onChange(definition.type, { subject: event.target.value })}
-                      placeholder={definition.defaultSubject}
-                    />
-                  </label>
-                  <label>
-                    <span>Cuerpo del correo</span>
-                    <textarea
-                      value={value.body}
-                      onChange={(event) => onChange(definition.type, { body: event.target.value })}
-                      placeholder={definition.defaultBody}
-                    />
-                  </label>
-                </section>
-              );
-            })}
-          </div>
-          <div className="credential-actions email-template-actions">
-            <div>
-              <Mail size={16} />
-              <span>Estos textos se aplican al próximo envío o reenvío de correo.</span>
+            <div className="email-template-guidance">
+              <span>Use estas variables solamente en los correos CDE de El Salvador.</span>
+              <div className="email-template-placeholders" aria-label="Variables disponibles para El Salvador">
+                {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+              </div>
             </div>
-            <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
-              <Mail size={16} />
-              {busy ? "Guardando" : "Guardar plantillas"}
-            </button>
-          </div>
+            <div className="email-template-list">
+              {definitions.map((definition) => {
+                const value = draft[definition.type] ?? { subject: "", body: "" };
+                return (
+                  <section className="email-template-card" key={definition.type}>
+                    <div>
+                      <h4>{definition.label}</h4>
+                      <p>{definition.description}</p>
+                    </div>
+                    <label>
+                      <span>Asunto</span>
+                      <input
+                        value={value.subject}
+                        onChange={(event) => onChange(definition.type, { subject: event.target.value })}
+                        placeholder={definition.defaultSubject}
+                      />
+                    </label>
+                    <label>
+                      <span>Cuerpo del correo</span>
+                      <textarea
+                        value={value.body}
+                        onChange={(event) => onChange(definition.type, { body: event.target.value })}
+                        placeholder={definition.defaultBody}
+                      />
+                    </label>
+                  </section>
+                );
+              })}
+            </div>
+            <div className="credential-actions email-template-actions">
+              <div>
+                <Mail size={16} />
+                <span>Estos textos se aplican al próximo envío o reenvío de CDE.</span>
+              </div>
+              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+                <Mail size={16} />
+                {busy ? "Guardando" : "Guardar plantillas"}
+              </button>
+            </div>
+          </section>
+
+          <section className="email-template-country-group email-template-country-group-protected" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
+            <div className="email-template-country-head">
+              <div>
+                <h3>EE. UU. — Stripe 501(c)(3)</h3>
+                <p>Constancias estadounidenses separadas de los mensajes CDE salvadoreños.</p>
+              </div>
+              <span className="email-template-protected-badge"><Lock size={13} />Texto legal protegido</span>
+            </div>
+            <p className="email-template-protected-note">
+              El sistema incorpora el nombre legal, EIN, fecha, monto y la declaración sobre bienes o servicios. Estas cláusulas no usan ni modifican las plantillas de El Salvador. La marca, el remitente y el correo de respuesta se configuran en sus secciones correspondientes.
+            </p>
+            <div className="email-template-managed-list">
+              <article>
+                <h4>Constancia inmediata</h4>
+                <p>Se envía al confirmarse una donación única o mensual de Stripe.</p>
+              </article>
+              <article>
+                <h4>Corrección o revocación por reembolso</h4>
+                <p>Reemplaza o revoca la constancia anterior según el monto reembolsado.</p>
+              </article>
+              <article>
+                <h4>Constancia anual</h4>
+                <p>Resume el total neto anual y emite una corrección si cambian las donaciones o reembolsos.</p>
+              </article>
+            </div>
+          </section>
         </>
       )}
     </section>
@@ -1512,6 +1767,7 @@ function credentialSettingsPanelDescription(section: CredentialSettingsSectionId
     ambiente: "Controle el ambiente que usarán los DTE nuevos y el par de credenciales del Ministerio de Hacienda que desea revisar.",
     mh: `Administre el usuario API de ${activeEnvironmentLabel} y el certificado firmador usado para firmar DTE antes de transmitirlos.`,
     wompi: "Configure la firma, el webhook y los avisos que se incorporarán a cada enlace nuevo de Wompi.",
+    stripe: "Administre presencia, rotación segura y salud observada de Stripe para el carril de EE. UU.",
     emisor: "Revise los datos fiscales y catálogos usados para construir cada CDE.",
     correo: "Revise el remitente de Cloudflare Email y el respaldo HTTP operativo.",
     plantillas: "Edite los asuntos y cuerpos de los correos automáticos.",

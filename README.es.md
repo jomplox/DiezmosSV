@@ -138,8 +138,8 @@ Solo se emiten los eventos con `ResultadoTransaccion = ExitosaAprobada`. Todo lo
 Wompi o al donante queda registrado en D1 y en la bitácora de auditoría.
 
 La página pública `/donar` abre con una portada de dos puertas: **El Salvador y el mundo** dirige al
-formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige directamente al bloque de Givebutter para un
-comprobante deducible en EE. UU. (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
+formulario fiscal SV (Wompi + CDE), y **EE. UU.** dirige a Stripe Embedded Checkout en español y dentro de la misma página sobre la
+cuenta 501(c)(3) estadounidense para entregas únicas o mensuales (`?ruta=sv` / `?ruta=eeuu` enlaza directo a una puerta). Toda la
 interfaz web (páginas del donante y panel de administración) usa **Gotham**, autoalojada como woff2
 del subconjunto latino en `src/client/fonts/` — los OTF licenciados nunca se versionan; solo se
 versionan los subconjuntos woff2 generados.
@@ -206,7 +206,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0031)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0040)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -310,7 +310,7 @@ Las pruebas unitarias cubren, entre otras áreas:
 - Limitación de tasa de autenticación, restablecimiento de contraseña y plantillas de correo con marca
 - Propiedad del claim de corrección fiscal, reserva del número de control y recuperación
 - Agrupación, filtros y límites de exportación CSV del explorador de donantes
-- Scripts de guarda del despliegue (`assert-fiscal-cutover`, `assert-donation-lane-config`,
+- Scripts de guarda del despliegue (`assert-fiscal-cutover`, configuración privada de release/marca,
   configuración privada de wrangler, preflight de migraciones de D1)
 
 CI (`.github/workflows/ci.yml`) ejecuta dos jobs en los push a `main` y `codex/**`, y en los pull
@@ -368,7 +368,6 @@ fuera de este repositorio y sin enlaces simbólicos:
 ```dotenv
 # /ruta/privada/absoluta/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
-VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/ruta/privada/absoluta/logo.png
 ```
@@ -408,6 +407,18 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env stagin
 node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env staging   # token opcional del proveedor alternativo
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env staging
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_RESTRICTED_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PUBLISHABLE_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_WEBHOOK_SECRET --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PAYMENT_METHOD_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_BILLING_PORTAL_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_LEGAL_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_EIN --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_PHONE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
 
 # Migre y despliegue con los scripts de npm, que usan la misma envoltura privada.
 npm run cf:migrate:staging
@@ -432,7 +443,7 @@ Dos guardas de despliegue hacen fallar el comando en vez de publicar un desplieg
 | Guarda | Se ejecuta en | Bloquea salvo que |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` esté definido. Las migraciones 0020/0021 y el Worker con soporte de claims deben entrar en **una sola ventana de mantenimiento con tráfico detenido**: drene las solicitudes del Worker anterior, pause colas/cron y el tráfico que muta datos, y luego reconozca la ventana. |
-| `scripts/run-private-build.mjs`, que aplica `scripts/assert-donation-lane-config.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` en el archivo de despliegue seleccionado y vinculado al ambiente apunte a un slug real — ni vacío ni el marcador `example-campaign`. Un build con el marcador publicaría un carril de donación apuntando a una campaña inexistente, y nada aguas abajo lo reportaría. |
+| `scripts/run-private-build.mjs` | `build:private`, y a través de él `cf:deploy:staging` y `cf:deploy:prod` | El archivo de despliegue vinculado al ambiente y exclusivo del dueño, el origen y el raster del donante pasan validación. Los valores de Stripe son solo de runtime y nunca se inyectan en Vite. |
 
 Guarde los parámetros de la prueba de humo en ese archivo `0600` fuera del árbol del repositorio. El
 runner usa esa ruta aprobada por defecto, así que `npm run smoke:staging` basta salvo que
@@ -563,20 +574,31 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `EMAIL` (binding) | Binding `send_email` de Cloudflare usado para enviar los correos del comprobante con los adjuntos PDF/JSON. Los bindings remotos de raíz, staging y producción se declaran únicamente en la configuración privada seleccionada. |
 | `ARCHIVE` (binding) | Binding del bucket de R2 para la exportación mensual de retención legal y los objetos del logo de marca blanca. La configuración de ejemplo versionada nombra `diezmossv-local-archive-example`, `diezmossv-staging-archive-example` y `diezmossv-production-archive-example`; los nombres reales de bucket pertenecen únicamente a la configuración privada seleccionada. |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Marcador opcional `"true"` que se define después de confirmar que Cloudflare Email Sending puede alcanzar direcciones externas de donantes. El ejemplo versionado ya lo define para `staging`; local y producción lo dejan sin definir. |
-| `DONATION_INTAKE_DISABLED` | Interruptor de emergencia del carril público de donaciones. Cuando vale exactamente `"true"`, `POST /api/donations/intent` y `/api/donations/intent/*` responden `503 donation_intake_disabled`, y `/`, `/donar` y `/donar/gracias` sirven un documento vacío y cerrado. Se evalúa antes del router de la API, así que el webhook de Wompi, la tubería de emisión y el panel de administración siguen funcionando — las donaciones en curso igual reciben su CDE. El ejemplo versionado lo fija en `"true"` para `production`; sin definir o con cualquier otro valor, la recepción queda abierta. |
+| `DONATION_INTAKE_DISABLED` | Interruptor de emergencia para nueva recepción pública. Cuando vale exactamente `"true"`, las mutaciones de intentos Wompi y `POST /api/donations/stripe/checkout` responden `503 donation_intake_disabled`; `/`, `/donar` y `/donar/gracias` sirven un documento vacío y cerrado. La página de resultado de Stripe, lecturas de estado, webhook, recibos y Billing Portal siguen disponibles para no dejar varado a un donante existente o mensual. El webhook de Wompi, la tubería de emisión y el panel de administración también siguen funcionando. El ejemplo versionado lo fija en `"true"` para `production`; sin definir o con cualquier otro valor, la recepción queda abierta. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | Endpoints de MH disponibles solo para el carril de credenciales del despliegue. `MH_AUTH_URL_TEST_FALLBACK` es el respaldo acotado de autenticación central para cuentas TEST tras el código 106 de MH; no es una capacidad de transmisión en PROD. |
 | `MH_USER_AGENT` | Encabezado User-Agent enviado a MH. |
 | `EMISOR_CONFIG_JSON` | La configuración del emisor de demostración/local vive en el archivo de entorno privado seleccionado; el valor remoto real se define como secreto de Cloudflare. |
+| `STRIPE_RESTRICTED_KEY` | Clave de servidor `rk_test_…` (staging) o `rk_live_…` (producción), con privilegios mínimos para Checkout Sessions y Billing Portal. Se rechazan las claves amplias `sk_…`. |
+| `STRIPE_PUBLISHABLE_KEY` | Clave segura para el navegador `pk_test_…` (staging) o `pk_live_…` (producción), devuelta por el Worker solo con una sesión de Embedded Checkout creada; debe coincidir con el ambiente de la clave restringida. |
+| `STRIPE_WEBHOOK_SECRET` | `whsec_…` propio del ambiente, usado para verificar el cuerpo crudo exacto recibido en `/webhooks/stripe`. |
+| `STRIPE_WEBHOOK_SECRET_NEXT` | `whsec_…` preparado y de solo escritura para una rotación dual; se acepta junto al activo hasta que un OWNER lo promueva o cancele explícitamente. |
+| `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | `pmc_…` activo del carril de EE. UU. Habilita métodos elegibles dinámicos y excluye todo BNPL/financiamiento sin publicar código. |
+| `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` para la ruta en español de administración de la entrega mensual. |
+| `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Identidad legal exacta de la 501(c)(3) estadounidense que aparece en el recibo en español. |
+| `STRIPE_US_TIME_ZONE` | Zona IANA que define el año calendario y las fechas de aportación de la constancia anual estadounidense; solo es visible/editable para OWNER. |
+| `STRIPE_US_PHONE` · `STRIPE_US_WEBSITE` · `STRIPE_US_MAILING_ADDRESS` | Bloque de contacto de la organización estadounidense que aparece en el recibo individual y la constancia anual. Separe los renglones de la dirección postal con saltos de línea. |
+| `STRIPE_US_SIGNER_NAME` · `STRIPE_US_SIGNER_TITLE` | Representante autorizado que aparece en cada recibo caritativo inmediato de EE. UU. |
+| `STRIPE_MOCK_MODE` | Transporte determinista solo para local/staging cuando vale `"1"`; producción lo rechaza. Nunca lo coloque en una configuración de producción. |
+| `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
-**Vars de tiempo de build** - las lee Vite y quedan incrustadas en el bundle del cliente. Los scripts
-de despliegue ejecutan la envoltura vinculada al ambiente
-`npm run build:private -- --env staging|production`, que obtiene la campaña del archivo de despliegue
-exclusivo del dueño; `npm run build` sin envoltura queda para clones públicos y pruebas. **No** son
-vars del Worker ni secretos: todo lo que se defina aquí viaja al navegador:
-
-| Variable | Propósito |
-|---|---|
-| `VITE_GIVEBUTTER_CAMPAIGN` | Slug de la campaña de Givebutter para la puerta de donantes de **EE. UU.** Es el segmento de ruta tanto en `https://givebutter.com/embed/c/<slug>` (el formulario de donación embebido) como en `https://givebutter.com/<slug>` (el enlace alojado de respaldo). Sin definir, el cliente recurre al marcador `example-campaign`, de modo que un clon nuevo funciona sin apuntar a la campaña real de nadie. Defínalo antes de compilar cualquier despliegue que atienda donantes de EE. UU. |
+**Frontera de tiempo de build.** La envoltura vinculada al ambiente
+`npm run build:private -- --env staging|production` valida el archivo externo de release/marca, pero
+no inyecta ningún valor de proveedor en Vite. Las claves, IDs de configuración, identidad legal y
+política BNPL de Stripe son configuración de runtime del Worker. Solo la clave publicable se devuelve
+al navegador, junto con una sesión de Embedded Checkout creada; la clave restringida y el secreto del webhook
+nunca salen del Worker. Colocar cualquiera en un valor `VITE_*` está prohibido porque fijaría el ambiente
+de la cuenta en el bundle público. Vea el handoff completo de sandbox/live en
+[`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
 
 La entrega de correo remota en staging/producción selecciona exactamente un proveedor antes del envío.
 Cuando ambos están configurados, defina `EMAIL_ARBITRARY_RECIPIENTS=true` solo después de que el
@@ -704,32 +726,63 @@ intento guarda los códigos `00/00/00` de "Otro (Para extranjeros)" (CAT-008/012
 `donor_pais`; el CDE emitido marca al receptor con `codDomiciliado: 2` y el `codPais` del intento, y
 el PDF imprime el complemento + el nombre del país en lugar de las etiquetas de relleno del catálogo.
 
-**Donantes de EE. UU. → Givebutter (sin CDE — a propósito).** Cuando "Resido en el extranjero" está
-marcado **y el país es Estados Unidos (`US`)**, los campos fiscales SV desaparecen por completo y la
-página embebe el formulario de donación de **Givebutter** para la campaña configurada del despliegue
-(vea `VITE_GIVEBUTTER_CAMPAIGN` en la [referencia de configuración](#-referencia-de-configuración)),
-operada por la 501(c)(3) estadounidense que sirve de vehículo de donación en EE. UU. para la iglesia.
-Un contribuyente estadounidense necesita un comprobante deducible en EE. UU., no un CDE salvadoreño, y
-la aportación corresponde a los libros de la entidad estadounidense — por eso estas donaciones fluyen
-enteramente por Givebutter y **nunca tocan Wompi, la tabla de intentos, el webhook ni la tubería del
-CDE**. **No hay participación del backend**: no se crea ningún intento, no existe ninguna migración y
-Givebutter envía por correo su propio comprobante tributario. La página embebe directamente el iframe
-enmarcable de Givebutter `https://givebutter.com/embed/c/<campaign>` — **no** el script de
-`widgets.givebutter.com` — para que no se ejecute JavaScript de terceros en el origen de la
-aplicación. (La página alojada de la campaña envía `x-frame-options: sameorigin`, y por eso se usa la
-URL de embebido en lugar de la página de campaña.) El monto elegido más un control segmentado
-**"Donación mensual"** (**Única** | **Mensual**, un radiogroup cuyo nombre accesible sigue siendo
-"Donación mensual") se precargan en la URL del iframe — `frequency=monthly` se envía solo para una
-aportación mensual, y una aportación única no lleva parámetro de frecuencia. Un aviso corto indica que
-el formulario embebido está en inglés. El texto introductorio del bloque se compone en tiempo de
-ejecución a partir del propio registro de marca del despliegue, nunca de un literal, de modo que un
-build reutilizable jamás publique el nombre de otra organización. Si el formulario embebido no carga
-en unos ~4 s, se muestra un enlace prominente **"Donar en GiveButter"** hacia
-`https://givebutter.com/<campaign>?amount=…` (abre en una pestaña nueva); una versión pequeña de ese
-enlace, **"Done en GiveButter"**, está siempre presente debajo del formulario (GiveButter es el texto
-del enlace — no se muestra ninguna URL cruda). **No hay puerta de escape** de regreso al formulario
-SV: el donante eligió deliberadamente la puerta de EE. UU., y **"← Cambiar opción"** es el camino de
-vuelta. Las constantes de Givebutter (campaña, URL de embebido) viven en `src/client/donation.ts`.
+**Donantes de EE. UU. → Stripe (sin CDE — a propósito).** Cuando el donante elige la puerta
+**EE. UU.**, o marca "Resido en el extranjero" y selecciona Estados Unidos (`US`), desaparecen los
+campos fiscales salvadoreños. El donante elige explícitamente **Tipo de entrega** (**Diezmo** u
+**Ofrenda**) y **Frecuencia** (**Única** o **Mensual**), revisa el monto y continúa al formulario Stripe
+Embedded Checkout en español dentro de la cuenta 501(c)(3) estadounidense conectada. El Worker crea una
+Checkout Session idempotente para esa selección y la verifica de nuevo mediante webhooks firmados; la página
+de resultado lee el estado durable de D1, no el regreso del navegador. Un contribuyente estadounidense
+necesita un acuse de EE. UU., no un CDE salvadoreño, por lo que este carril **nunca toca Wompi,
+`donation_intents` ni la tubería del CDE**.
+
+El asistente SV no crea un enlace Wompi en el Paso 1, cuando todavía se desconoce la residencia del
+donante. Si después el donante de la ruta SV selecciona Estados Unidos, la ruta de seguridad conserva el
+monto y la elección Diezmo/Ofrenda que siguen siendo veraces, restablece la frecuencia a Única y regresa al
+Paso 1 explícito de EE. UU. No existe ninguna Checkout Session de Stripe hasta que el donante revise y
+confirme ese paso estadounidense; por eso la corrección no puede dejar activos a la vez un carril Wompi
+utilizable y uno Stripe para la misma entrega.
+
+El Worker crea una Embedded Checkout Session idempotente con un `payment_method_configuration` dedicado; el
+código del navegador nunca envía `payment_method_types`. Stripe muestra así todos los métodos
+habilitados que sean elegibles para el donante, dispositivo, monto USD y flujo único/mensual, mientras
+la configuración de la cuenta excluye BNPL y otros métodos de financiamiento. Stripe firma el cuerpo
+crudo del webhook; el Worker valida ambiente, versión de API, monto, moneda, metadatos del carril, tipo de
+entrega, frecuencia e identificadores antes de guardar en D1 el historial durable de sesiones y entregas. La
+página de resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
+Una factura mensual produce una sola entrega únicamente cuando `invoice.paid` y un InvoicePayment pagado
+de Stripe demuestran una liquidación respaldada por PaymentIntent; ambos órdenes de eventos convergen una
+sola vez. Billing Portal ofrece la ruta de administración recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, firmante autorizado, bloque de contacto, tipo,
+frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La dirección de facturación y el teléfono recogidos por Stripe se conservan como evidencia inmutable del donante para el recibo y la constancia anual correspondientes. La
+**Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
+netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
+
+El cargador puro de Stripe.js se invoca únicamente cuando una Session estadounidense real, no simulada,
+llega al formulario embebido. El selector inicial, la ruta SV/Wompi, la simulación local, la página de
+resultado y el panel administrativo no solicitan `js.stripe.com`.
+
+La configuración de test y live es exclusiva del dueño y solo de runtime. Ningún secreto o ID de
+Stripe se incrusta en el cliente; solo se devuelve la clave publicable del ambiente con una sesión creada.
+La configuración dinámica/BNPL, permisos mínimos de clave, eventos
+exactos del webhook, gates de sandbox, rollback y handoff live están documentados en
+[`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
+
+**Configuración OWNER y frontera live.** **Configuración → Stripe EE. UU.** muestra solo presencia para
+`STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, `STRIPE_US_EIN`,
+`STRIPE_US_PHONE`, `STRIPE_US_WEBSITE`, `STRIPE_US_MAILING_ADDRESS`, `STRIPE_US_SIGNER_NAME` y
+`STRIPE_US_SIGNER_TITLE`; solo expone la
+no-secreta `STRIPE_US_TIME_ZONE`. «Configurado» no significa verificado por el proveedor: configuración de
+métodos, Billing Portal y propiedad de cuenta siguen sin verificar por la aplicación. La dirección derivada
+`/webhooks/stripe` y la salud resumida del último evento son de solo lectura; únicamente un evento
+procesado con `livemode` compatible muestra «Verificado por último evento procesado». El secreto preparado
+se escribe y luego se promueve mediante un intercambio atómico (el preparado pasa a activo y el activo previo
+queda preparado para rollback), o se cancela. Después de una mutación remota exitosa cuya actualización de
+estado falle, el panel bloquea otra rotación hasta que una actualización exitosa concilie el estado mostrado.
+Las pruebas locales deterministas y este código no modifican una cuenta
+Stripe live. Registrar el webhook live, Payment Method Configuration, Billing Portal y la exclusión BNPL sigue
+siendo un cutover del propietario después de UAT sandbox.
 
 Ambas puertas financian a la **misma** iglesia madre en El Salvador — la 501(c)(3) estadounidense es
 solo el vehículo de donación en EE. UU., nunca un beneficiario distinto; el texto se basa en la
@@ -848,13 +901,13 @@ Exportar, Configuración.
   agrupadas en America/El_Salvador (UTC-6 fijo). Los CDE emitidos a mano (rápido/avanzado) se excluyen
   **por diseño** — no llevan `wompi_event_id`. Las respuestas están acotadas por filas y por bytes,
   así que un rango de fechas excesivo le pide acotarlo en vez de fundir el Worker.
-- **Exportar** agrupa la suite de reportes: exportaciones F960 (JSON/CSV/XLSX), las últimas 50
-  donaciones en línea, la **Constancia anual de donaciones** (enviar a cada donante un resumen anual
-  con la marca de la organización de sus donaciones aceptadas — por donante o en lote, con cada envío
-  auditado), **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
+- **Exportar** mantiene dos carriles legales: **El Salvador — CDE** conserva F960 y su dossier de CDE
+  aceptados, mientras **EE. UU. — Stripe** previsualiza/envía la distinta **Constancia anual de
+  donaciones — EE. UU.** desde entregas Stripe liquidadas. No es un documento fiscal salvadoreño. La
+  suite restante incluye las últimas 50 donaciones en línea, **Contactos para CRM** (exportación agregada de contactos de donantes para importar a un
   CRM) y **Respaldos mensuales** (explorar y verificar las instantáneas legales mensuales en R2,
   descargar un mes como ZIP de hasta 32 MiB).
-- **Configuración** está organizada en secciones: Ambiente, MH, Wompi, **Notificaciones de Wompi**
+- **Configuración** está organizada en secciones: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de Wompi**
   (correos y teléfonos de notificación del comercio, más si Wompi mismo le escribe al donante —
   apagado por defecto, porque la aplicación envía el CDE), Emisor, Correo, Plantillas y **Marca** —
   marca blanca con nombre visible, color de acento, correo de soporte y dos logos (panel y cara al
@@ -866,7 +919,7 @@ Exportar, Configuración.
 | `VIEWER` (Consulta) | Leer documentos, intentos de donación en línea, fallos de emisión previos al CDE, el historial de contingencia, la bitácora de auditoría y Analítica. |
 | `OPERATOR` (Operador) | Además: CDE rápido, reenviar correo, reintentar fallos (de CDE y previos al CDE), **correcciones fiscales y reemisión**, e iniciar una invalidación. |
 | `ADMIN` (Administrador) | Además: gestionar usuarios y roles, el explorador **Donantes** y su exportación CSV, y la suite **Exportar** — F960, constancias anuales, contactos para CRM, respaldos mensuales. |
-| `OWNER` (Propietario) | Además: el espacio de trabajo **Configuración** — credenciales, ambiente de emisión, plantillas de correo, ajustes de notificación de Wompi, marca (Marca), dirección de alertas y exportación de retención bajo demanda. Solo un owner puede otorgar el rol de owner o modificar a otro owner. |
+| `OWNER` (Propietario) | Además: el espacio de trabajo **Configuración** — credenciales, controles Stripe EE. UU. de secreto preparado, ambiente de emisión, plantillas de correo, ajustes de notificación de Wompi, marca (Marca), dirección de alertas y exportación de retención bajo demanda. Solo un owner puede otorgar el rol de owner o modificar a otro owner. |
 
 > La navegación se filtra por rol para **Donantes** y **Exportar** (ADMIN) y para **Configuración**
 > (OWNER). **Usuarios** siempre está visible, pero su contenido está restringido a ADMIN: un usuario
@@ -969,7 +1022,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0031)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0040)</strong></summary>
 
 <br/>
 
@@ -986,6 +1039,15 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `document_sequences` | Contadores de número de control por ambiente/prefijo. Los avanza la tubería de emisión y, para las correcciones fiscales, un trigger de base de datos que incrementa el contador dentro de la misma transacción de la sentencia que hace la reserva y aborta salvo que mueva exactamente una fila. |
 | `email_deliveries` | Intentos de correo reclamados, evidencia de envío/resultado, IDs del proveedor y hashes de evidencia del PDF/JSON. |
 | `operational_alert_deliveries` | Claims por incidente y por destinatario para la entrega del correo de alerta. |
+| `stripe_checkout_sessions` | Intento de Checkout del carril estadounidense y estado saneado del proveedor, con cronologías monotónicas independientes de Checkout y suscripción. |
+| `stripe_webhook_events` | Cerca contra repeticiones de eventos Stripe firmados y resultado saneado del procesamiento; nunca conserva cuerpos crudos de webhook. |
+| `stripe_provider_recovery_reads` | Registros de admisión acotados y con concesión para lecturas públicas de recuperación de Session respaldadas por el proveedor. |
+| `stripe_invoice_settlements` | Evidencia independiente del orden de factura mensual, InvoicePayment pagado y método real no sensible; registra la entrega al validar la evidencia financiera y retiene la constancia hasta que converja la evidencia Charge firmada. |
+| `stripe_gifts` | Fuente de verdad de entregas estadounidenses liquidadas, incluido el tipo elegido por el donante, la clasificación no sensible del método realmente usado y el estado durable de reembolso/neto. |
+| `stripe_acknowledgment_deliveries` | Evidencia inmutable y revisionada de acuses/correcciones inmediatas 501(c)(3) y resultados del proveedor. |
+| `stripe_annual_statement_deliveries` | Instantáneas inmutables de constancias anuales estadounidenses, linaje de revisiones, claims con concesión y resultados de envío. |
+| `stripe_retention_generations` | Libro interno y monotónico de pertenencia para exportaciones de retención Stripe acotadas y consistentes en sus referencias. Es metadato de restauración mantenido por triggers, no forma parte del payload archivado y se reconstruye automáticamente al restaurar las filas de Stripe. |
+| `stripe_invoice_settlement_retention_generations` | Libro interno y monotónico de pertenencia para instantáneas de convergencia de facturas mensuales. No forma parte del payload archivado y se reconstruye automáticamente al restaurar. |
 | `contingency_batches` · `contingency_batch_lines` | Envíos históricos de lotes de contingencia a MH y sus resultados por CDE (solo lectura). |
 | `app_settings` | Configuración en tiempo de ejecución (ambiente de emisión, plantillas de correo, marca, correo de alertas). |
 | `users` · `sessions` · `password_reset_tokens` | Autenticación, RBAC y restablecimiento de contraseña autogestionado. |

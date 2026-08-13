@@ -5,6 +5,7 @@ import {
   InMemoryD1
 } from "./support/inMemoryD1";
 import { installWorkerFetchGlobals } from "./support/workerFetchGlobals";
+import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
 
 installWorkerFetchGlobals();
 
@@ -161,6 +162,416 @@ describe("credential administration", () => {
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://cf.test/accounts/account-id/workers/scripts/diezmossv-staging-example/secrets-bulk");
     expect(init.headers).toMatchObject({ Authorization: "Bearer cf-writer-token" });
+  });
+});
+
+describe("Stripe owner settings", () => {
+  it("returns presence-only configuration and safe last-webhook health to owners", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.stripeWebhookEvents.push({
+      id: "evt_private_object_id",
+      event_type: "checkout.session.completed",
+      livemode: 0,
+      status: "PROCESSED",
+      received_at: "2026-08-11T10:00:00.000Z",
+      processed_at: "2026-08-11T10:00:01.000Z",
+      failure_code: "private_failure_internal",
+      donor_email: "donor@example.org"
+    });
+
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/stripe", {
+        headers: { Authorization: "Bearer test-token" }
+      }),
+      env(db, {
+        APP_ENV: "staging",
+        STRIPE_RESTRICTED_KEY: "rk_test_private",
+        STRIPE_PUBLISHABLE_KEY: "pk_test_private",
+        STRIPE_WEBHOOK_SECRET: "whsec_private",
+        STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_private",
+        STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_private",
+        STRIPE_US_LEGAL_NAME: "Private Legal Name",
+        STRIPE_US_EIN: "12-3456789",
+        STRIPE_US_TIME_ZONE: "America/New_York",
+        STRIPE_US_PHONE: "+1 555 010 0100",
+        STRIPE_US_WEBSITE: "https://example.org",
+        STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+        STRIPE_US_SIGNER_NAME: "Test Signer",
+        STRIPE_US_SIGNER_TITLE: "Treasurer"
+      })
+    );
+
+    expect(response.status).toBe(200);
+    const data = await response.json() as Record<string, unknown>;
+    expect(data).toMatchObject({
+      stripe: {
+        credentials: { ready: true },
+        operational: { appEnv: "staging", mode: "Pruebas", mockMode: false },
+        webhookHealth: {
+          lastReceivedAt: "2026-08-11T10:00:00.000Z",
+          eventType: "checkout.session.completed",
+          processingStatus: "PROCESSED",
+          livemodeMatches: true,
+          verifiedByProcessedEvent: true
+        }
+      }
+    });
+    const serialized = JSON.stringify(data);
+    for (const privateValue of [
+      "rk_test_private", "pk_test_private", "whsec_private", "pmc_private", "bpc_private",
+      "Private Legal Name", "12-3456789", "evt_private_object_id", "donor@example.org", "private_failure_internal"
+    ]) {
+      expect(serialized).not.toContain(privateValue);
+    }
+  });
+
+  it("reports a clear no-events state and remains owner-only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const forbidden = await worker.fetch(
+      new Request("https://example.org/api/settings/stripe", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    expect(forbidden.status).toBe(403);
+
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const response = await worker.fetch(
+      new Request("https://example.org/api/settings/stripe", { headers: { Authorization: "Bearer test-token" } }),
+      env(db)
+    );
+    await expect(response.json()).resolves.toMatchObject({
+      stripe: { webhookHealth: { state: "none", label: "Sin eventos recibidos" } }
+    });
+  });
+
+  it("exposes sanitized acknowledgment reconciliation and keeps resolution owner-only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.stripeAcknowledgmentDeliveries.push({
+      id: "stripe_ack_review_fixture",
+      revision: 2,
+      kind: "PARTIAL_REFUND",
+      status: "REVIEW",
+      amount_cents: 5000,
+      refunded_amount_cents: 1000,
+      failure_code: "EMAIL_DISPATCH_UNKNOWN",
+      created_at: "2026-08-11T10:00:00.000Z",
+      updated_at: "2026-08-11T10:01:00.000Z",
+      donor_name: "Private Donor",
+      donor_email: "private-donor@example.org"
+    });
+
+    const list = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments",
+      { headers: { Authorization: "Bearer test-token" } }
+    ), env(db));
+    expect(list.status).toBe(200);
+    const body = await list.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
+      acknowledgments: [{
+        id: "stripe_ack_review_fixture",
+        revision: 2,
+        kind: "PARTIAL_REFUND",
+        status: "REVIEW",
+        grossAmountCents: 5000,
+        refundedAmountCents: 1000,
+        netAmountCents: 4000,
+        failureCode: "EMAIL_DISPATCH_UNKNOWN"
+      }]
+    });
+    expect(JSON.stringify(body)).not.toContain("Private Donor");
+    expect(JSON.stringify(body)).not.toContain("private-donor@example.org");
+
+    const resolved = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments/stripe_ack_review_fixture/reconcile",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ resolution: "CONFIRMED_NOT_SENT" })
+      }
+    ), env(db));
+    expect(resolved.status).toBe(200);
+    expect(db.stripeAcknowledgmentDeliveries[0]).toMatchObject({ status: "FAILED", retry_safe: 1 });
+    expect(db.audits).toContainEqual(expect.objectContaining({
+      action: "STRIPE_ACKNOWLEDGMENT_RECONCILED",
+      entity_id: "stripe_ack_review_fixture"
+    }));
+
+    db.sessionUser = { id: "user_admin", email: "admin@example.org", name: "Admin", role: "ADMIN" };
+    const forbidden = await worker.fetch(new Request(
+      "https://example.org/api/settings/stripe/acknowledgments",
+      { headers: { Authorization: "Bearer test-token" } }
+    ), env(db));
+    expect(forbidden.status).toBe(403);
+  });
+
+  it("rejects invalid replacements before calling Cloudflare", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({ restrictedKey: "rk_live_wrong" })
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          CLOUDFLARE_API_TOKEN: "writer-token",
+          CLOUDFLARE_SCRIPT_NAME: "worker"
+        })
+      );
+      expect(response.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("writes valid replacements through the bulk writer and audits names only", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(
+        new Request("https://example.org/api/settings/stripe", {
+          method: "POST",
+          headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+          body: JSON.stringify({
+            restrictedKey: "rk_test_new_private",
+            publishableKey: "pk_test_new_private",
+            timeZone: "America/Chicago"
+          })
+        }),
+        env(db, {
+          APP_ENV: "staging",
+          CLOUDFLARE_ACCOUNT_ID: "account",
+          CLOUDFLARE_API_TOKEN: "writer-token",
+          CLOUDFLARE_SCRIPT_NAME: "worker"
+        })
+      );
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        updated: ["STRIPE_RESTRICTED_KEY", "STRIPE_PUBLISHABLE_KEY", "STRIPE_US_TIME_ZONE"],
+        deleted: []
+      });
+      const audit = db.audits.find((row) => row.action === "STRIPE_CREDENTIALS_UPDATED");
+      expect(JSON.parse(String(audit?.metadata_json))).toEqual({
+        updated: ["STRIPE_RESTRICTED_KEY", "STRIPE_PUBLISHABLE_KEY", "STRIPE_US_TIME_ZONE"],
+        deleted: []
+      });
+      expect(JSON.stringify(audit)).not.toContain("rk_test_new_private");
+      expect(JSON.stringify(audit)).not.toContain("America/Chicago");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("stages, promotes, and cancels webhook secrets with value-free audits", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockImplementation(async () => new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const base = {
+      APP_ENV: "staging",
+      CLOUDFLARE_ACCOUNT_ID: "account",
+      CLOUDFLARE_API_TOKEN: "writer-token",
+      CLOUDFLARE_SCRIPT_NAME: "worker",
+      CLOUDFLARE_API_BASE_URL: "https://cf.test",
+      STRIPE_WEBHOOK_SECRET: "whsec_active_private"
+    };
+    try {
+      const stage = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/stage", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+        body: JSON.stringify({ webhookSecretNext: "whsec_next_private" })
+      }), env(db, base));
+      expect(stage.status).toBe(200);
+
+      db.stripeWebhookEvents.push({
+        id: "evt_verified_next",
+        event_type: "checkout.session.completed",
+        livemode: 0,
+        status: "PROCESSED",
+        verified_secret_slot: "NEXT",
+        verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+        received_at: new Date().toISOString()
+      });
+
+      const promote = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }), env(db, { ...base, STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private" }));
+      expect(promote.status).toBe(200);
+
+      const cancel = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/cancel", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }), env(db, { ...base, STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private" }));
+      expect(cancel.status).toBe(200);
+
+      const bodies = fetchMock.mock.calls.map((call) => JSON.parse(String((call[1] as RequestInit).body)).secrets);
+      expect(bodies[0]).toEqual({
+        STRIPE_WEBHOOK_SECRET_NEXT: { type: "secret_text", name: "STRIPE_WEBHOOK_SECRET_NEXT", text: "whsec_next_private" }
+      });
+      expect(bodies[1]).toEqual({
+        STRIPE_WEBHOOK_SECRET: { type: "secret_text", name: "STRIPE_WEBHOOK_SECRET", text: "whsec_next_private" },
+        STRIPE_WEBHOOK_SECRET_NEXT: { type: "secret_text", name: "STRIPE_WEBHOOK_SECRET_NEXT", text: "whsec_active_private" }
+      });
+      expect(bodies[2]).toEqual({ STRIPE_WEBHOOK_SECRET_NEXT: null });
+      expect(JSON.stringify(await stage.json())).not.toContain("whsec_next_private");
+      expect(JSON.stringify(db.audits)).not.toContain("whsec_next_private");
+      expect(db.audits.map((audit) => audit.action)).toEqual(expect.arrayContaining([
+        "STRIPE_WEBHOOK_SECRET_STAGED",
+        "STRIPE_WEBHOOK_SECRET_PROMOTED",
+        "STRIPE_WEBHOOK_SECRET_CANCELED"
+      ]));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns remote mutation success with an audit-degraded signal when the value-free audit fails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    db.failNextAuditAction = "STRIPE_WEBHOOK_SECRET_PROMOTED";
+    db.stripeWebhookEvents.push({
+      id: "evt_verified_next_audit_degraded",
+      event_type: "checkout.session.completed",
+      livemode: 0,
+      status: "PROCESSED",
+      verified_secret_slot: "NEXT",
+      verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+      received_at: new Date().toISOString()
+    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const response = await worker.fetch(new Request(
+        "https://example.org/api/settings/stripe/webhook-secret/promote",
+        { method: "POST", headers: { Authorization: "Bearer test-token" } }
+      ), env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_API_TOKEN: "writer-token",
+        CLOUDFLARE_SCRIPT_NAME: "worker",
+        STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+        STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private"
+      }));
+
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        ok: true,
+        updated: ["STRIPE_WEBHOOK_SECRET", "STRIPE_WEBHOOK_SECRET_NEXT"],
+        deleted: [],
+        audit: "degraded"
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(expect.objectContaining({
+        event: "stripe_webhook_secret_audit_failed"
+      }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("rejects promotion until the staged secret verifies a recent correct-mode event", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true }), {
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      const response = await worker.fetch(new Request(
+        "https://example.org/api/settings/stripe/webhook-secret/promote",
+        { method: "POST", headers: { Authorization: "Bearer test-token" } }
+      ), env(db, {
+        APP_ENV: "staging",
+        CLOUDFLARE_ACCOUNT_ID: "account",
+        CLOUDFLARE_API_TOKEN: "writer-token",
+        CLOUDFLARE_SCRIPT_NAME: "worker",
+        STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+        STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private"
+      }));
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({ error: "staged_webhook_secret_not_verified" });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("preserves the active secret when promotion is missing or the atomic writer fails", async () => {
+    const db = new InMemoryD1();
+    db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: false }), {
+      status: 500,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const base = {
+      APP_ENV: "staging",
+      CLOUDFLARE_ACCOUNT_ID: "account",
+      CLOUDFLARE_API_TOKEN: "writer-token",
+      CLOUDFLARE_SCRIPT_NAME: "worker",
+      STRIPE_WEBHOOK_SECRET: "whsec_active_private"
+    };
+    try {
+      const missing = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }), env(db, base));
+      expect(missing.status).toBe(400);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      db.stripeWebhookEvents.push({
+        id: "evt_verified_next_for_failure",
+        event_type: "checkout.session.completed",
+        livemode: 0,
+        status: "PROCESSED",
+        verified_secret_slot: "NEXT",
+        verified_secret_generation: await sha256Hex(utf8Bytes("whsec_next_private")),
+        received_at: new Date().toISOString()
+      });
+
+      const noWriter = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }), env(db, {
+        APP_ENV: "staging",
+        STRIPE_WEBHOOK_SECRET: "whsec_active_private",
+        STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private"
+      }));
+      expect(noWriter.status).toBe(503);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      const failed = await worker.fetch(new Request("https://example.org/api/settings/stripe/webhook-secret/promote", {
+        method: "POST",
+        headers: { Authorization: "Bearer test-token" }
+      }), env(db, { ...base, STRIPE_WEBHOOK_SECRET_NEXT: "whsec_next_private" }));
+      expect(failed.status).toBe(502);
+      expect(JSON.stringify(await failed.json())).not.toContain("whsec_active_private");
+      expect(db.audits.find((audit) => audit.action === "STRIPE_WEBHOOK_SECRET_PROMOTED")).toBeUndefined();
+      const requestPatch = JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)).secrets;
+      expect(requestPatch).toHaveProperty("STRIPE_WEBHOOK_SECRET", expect.objectContaining({ text: "whsec_next_private" }));
+      expect(requestPatch).toHaveProperty("STRIPE_WEBHOOK_SECRET_NEXT", expect.objectContaining({ text: "whsec_active_private" }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

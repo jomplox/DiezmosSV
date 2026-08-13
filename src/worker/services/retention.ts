@@ -2,11 +2,14 @@ import {
   Repository,
   RETENTION_PAGE_SIZE,
   RETENTION_SNAPSHOT_TABLES,
+  STRIPE_RETENTION_SNAPSHOT_TABLES,
   RETENTION_WINDOWED_TABLES,
   type DocumentSequenceRetentionCursor,
   type RetentionCursor,
   type RetentionSnapshotTable,
-  type RetentionTable
+  type RetentionTable,
+  type StripeRetentionCursor,
+  type StripeRetentionFence
 } from "../storage/repository";
 import type { Env } from "../types";
 import { EL_SALVADOR_TIME_ZONE } from "../../shared/legalWindows";
@@ -25,11 +28,14 @@ export interface RetentionExportResult {
 }
 
 interface TableManifestEntry {
+  key?: string;
   rowCount: number;
   sha256: string;
 }
 
 export interface RetentionManifest {
+  version?: 1 | 2;
+  runId?: string;
   month: string;
   generatedAt: string;
   tables: Record<string, TableManifestEntry>;
@@ -140,7 +146,12 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
   restorePhases: [
     {
       name: "roots",
-      tables: ["wompi_events", "document_sequences"]
+      tables: [
+        "wompi_events",
+        "document_sequences",
+        "stripe_checkout_sessions",
+        "stripe_webhook_events"
+      ]
     },
     {
       name: "deferred-cycle",
@@ -152,24 +163,40 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
         "fiscal_corrections",
         "email_deliveries",
         "contingency_batches",
-        "donation_intents"
+        "donation_intents",
+        "stripe_gifts"
       ]
     },
     {
       name: "leaves",
-      tables: ["contingency_batch_lines", "audit_logs"]
+      tables: [
+        "contingency_batch_lines",
+        "audit_logs",
+        "stripe_invoice_settlements",
+        "stripe_acknowledgment_deliveries",
+        "stripe_annual_statement_deliveries"
+      ]
     }
   ],
   deletePhases: [
     {
-      name: "leaves-and-dependents",
+      name: "leaves",
+      tables: [
+        "stripe_invoice_settlements",
+        "stripe_acknowledgment_deliveries",
+        "stripe_annual_statement_deliveries",
+        "contingency_batch_lines",
+        "audit_logs"
+      ]
+    },
+    {
+      name: "dependents",
       tables: [
         "fiscal_corrections",
         "email_deliveries",
-        "contingency_batch_lines",
         "contingency_batches",
         "donation_intents",
-        "audit_logs"
+        "stripe_gifts"
       ]
     },
     {
@@ -178,7 +205,12 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
     },
     {
       name: "roots",
-      tables: ["wompi_events", "document_sequences"]
+      tables: [
+        "wompi_events",
+        "document_sequences",
+        "stripe_checkout_sessions",
+        "stripe_webhook_events"
+      ]
     }
   ],
   authoritativeOverlays: [
@@ -194,7 +226,8 @@ export const RETENTION_FOREIGN_KEY_PROTOCOL: {
 
 // Single source of truth for the R2 archive key layout, shared with the backups
 // service so month listing/verification/download derive keys the same way the
-// export writes them: retention/<YYYY>/<YYYY-MM>/{manifest.json,<table>.ndjson}.
+// export writes them. Version 2 manifests stay canonical at the month root and
+// name immutable run-scoped table objects; retentionTableKey remains the v1 fallback.
 export const RETENTION_KEY_ROOT = "retention";
 
 function retentionMonthPrefix(month: string): string {
@@ -217,7 +250,8 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
   const month = options.month ?? previousElSalvadorMonth(now);
   const incidentId = `${month}:${now.toISOString()}`;
   const repo = new Repository(env.DB);
-  const prefix = retentionMonthPrefix(month);
+  const runId = crypto.randomUUID();
+  const prefix = `${retentionMonthPrefix(month)}/runs/${runId}`;
   const manifestKey = retentionManifestKey(month);
 
   try {
@@ -233,6 +267,8 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     }
 
     const manifest: RetentionManifest = {
+      version: 2,
+      runId,
       month,
       generatedAt: now.toISOString(),
       tables: {}
@@ -249,6 +285,7 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     manifest.tables[FISCAL_CORRECTION_LATEST_SNAPSHOT] = fiscalCorrectionSnapshotEntry;
     totalRows += fiscalCorrectionSnapshotEntry.rowCount;
     for (const table of RETENTION_SNAPSHOT_TABLES) {
+      if ((STRIPE_RETENTION_SNAPSHOT_TABLES as readonly string[]).includes(table)) continue;
       const entry = await exportSnapshotTable(env, repo, table, prefix);
       manifest.tables[table] = entry;
       totalRows += entry.rowCount;
@@ -257,8 +294,35 @@ export async function runRetentionExport(env: Env, now: Date, options: { month?:
     manifest.tables[DOCUMENT_SEQUENCES_SNAPSHOT] = sequenceEntry;
     totalRows += sequenceEntry.rowCount;
 
+    // Capture immediately before the six Stripe streams, then prove no
+    // material insert/update/delete occurred before publishing the manifest.
+    const stripeFence = await repo.captureStripeRetentionFence();
+    for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+      const entry = await exportSnapshotTable(env, repo, table, prefix, stripeFence);
+      manifest.tables[table] = entry;
+      totalRows += entry.rowCount;
+    }
+    const completedStripeFence = await repo.captureStripeRetentionFence();
+    if (completedStripeFence.materialMutationEpoch !== stripeFence.materialMutationEpoch) {
+      throw new Error("retention_stripe_material_epoch_changed");
+    }
+
     // Manifest last: its existence is the idempotency/completion marker.
-    await env.ARCHIVE.put(manifestKey, utf8Bytes(JSON.stringify(manifest, null, 2)));
+    const published = await env.ARCHIVE.put(
+      manifestKey,
+      utf8Bytes(JSON.stringify(manifest, null, 2)),
+      { onlyIf: { etagDoesNotMatch: "*" } }
+    );
+    if (!published) {
+      await repo.createAudit({
+        action: "RETENTION_EXPORT_SKIPPED",
+        entityType: "retention_export",
+        entityId: month,
+        summary: `Otra exportación publicó primero el respaldo de ${month}; se omite este intento`,
+        metadata: { month, runId }
+      });
+      return { status: "skipped", month };
+    }
 
     await repo.createAudit({
       action: "RETENTION_EXPORT_COMPLETED",
@@ -342,12 +406,43 @@ async function exportFiscalCorrectionSnapshot(
   );
 }
 
-async function exportSnapshotTable(env: Env, repo: Repository, table: RetentionSnapshotTable, prefix: string): Promise<TableManifestEntry> {
-  const cursorColumn = table === "wompi_events" ? "received_at" : "created_at";
+async function exportSnapshotTable(
+  env: Env,
+  repo: Repository,
+  table: RetentionSnapshotTable,
+  prefix: string,
+  stripeFence?: StripeRetentionFence
+): Promise<TableManifestEntry> {
+  if (table.startsWith("stripe_")) {
+    if (!stripeFence) throw new Error("retention_stripe_fence_required");
+    return streamRetentionTable<StripeRetentionCursor>(
+      env,
+      `${prefix}/${table}.ndjson`,
+      (cursor) => repo.listAllRowsPaged(
+        table,
+        cursor,
+        RETENTION_PAGE_SIZE,
+        stripeFence
+      ),
+      (row) => ({ generation: String(row.__retention_generation) }),
+      (row) => {
+        const { __retention_generation: _generation, ...archivedRow } = row;
+        return archivedRow;
+      }
+    );
+  }
+  const cursorColumn = table === "wompi_events" || table === "stripe_webhook_events"
+    ? "received_at"
+    : "created_at";
   return streamRetentionTable<RetentionCursor>(
     env,
     `${prefix}/${table}.ndjson`,
-    (cursor) => repo.listAllRowsPaged(table, cursor, RETENTION_PAGE_SIZE),
+    (cursor) => repo.listAllRowsPaged(
+      table,
+      cursor,
+      RETENTION_PAGE_SIZE,
+      stripeFence
+    ),
     (row) => ({
       createdAt: String(row[cursorColumn]),
       id: String(row.id)
@@ -375,7 +470,8 @@ async function streamRetentionTable<Cursor>(
   env: Env,
   key: string,
   readPage: (cursor: Cursor | null) => Promise<Array<Record<string, unknown>>>,
-  cursorFrom: (row: Record<string, unknown>) => Cursor
+  cursorFrom: (row: Record<string, unknown>) => Cursor,
+  archiveRow: (row: Record<string, unknown>) => Record<string, unknown> = (row) => row
 ): Promise<TableManifestEntry> {
   const tempKey = `${key}.tmp.${crypto.randomUUID()}`;
   const digest = new crypto.DigestStream("SHA-256");
@@ -399,7 +495,7 @@ async function streamRetentionTable<Cursor>(
       const rows = await readPage(cursor);
       if (rows.length === 0) break;
       for (const row of rows) {
-        const bytes = utf8Bytes(`${JSON.stringify(row)}\n`);
+        const bytes = utf8Bytes(`${JSON.stringify(archiveRow(row))}\n`);
         await digestWriter.write(bytes);
         let sourceOffset = 0;
         while (sourceOffset < bytes.byteLength) {
@@ -442,7 +538,7 @@ async function streamRetentionTable<Cursor>(
     await env.ARCHIVE.put(key, tempObject.body);
     await cleanupRetentionTempObject(env, tempKey);
     const sha256 = hexFromBytes(new Uint8Array(digestResult.value));
-    return { rowCount, sha256 };
+    return { key, rowCount, sha256 };
   } catch (error) {
     await Promise.allSettled([digestWriter.abort(error), digestResultPromise]);
     const cleanupResults = await Promise.allSettled([

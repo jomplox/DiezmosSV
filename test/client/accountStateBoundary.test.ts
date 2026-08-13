@@ -20,7 +20,8 @@ describe("authenticated account state boundary", () => {
       "setAdvancedDteOpen(false)",
       "setDonationIntents([])",
       "setBackups([])",
-      "setAnalytics(null)"
+      "setAnalytics(null)",
+      "setStripeStatementPreview(null)"
     ]) {
       expect(appSource).toContain(reset);
     }
@@ -29,5 +30,13 @@ describe("authenticated account state boundary", () => {
   it("defense-in-depth guards privileged panels by the current account role", () => {
     expect(appSource).toContain('view === "credentials" && can(user, "OWNER")');
     expect(appSource).toContain('advancedDteOpen && can(user, "OPERATOR")');
+  });
+
+  it("invalidates the independent Stripe statement lane at the account boundary", () => {
+    expect(appSource).toContain("stripeStatementOperationClaimsRef.current.clear()");
+    expect(appSource).toContain("stripeStatementSearchInputGenerationRef.current += 1");
+    expect(appSource).toContain("invalidateStripeStatementPreview(certificateResetYear, \"\")");
+    expect(appSource).toContain("resetStripeStatementBulkTraversal(certificateResetYear)");
+    expect(appSource).toContain("annualReportOperationClaimsRef.current.clear()");
   });
 });

@@ -109,16 +109,43 @@ propio donante en el formulario, no tomados del aviso de pago.
 pago de Wompi. Esas donaciones no aparecen en la lista de **Donaciones en línea** porque no pasaron
 por el formulario.
 
-**Donantes en Estados Unidos (NO reciben CDE — es intencional).** Si en /donar el donante marca
-«Resido en el extranjero» y elige **Estados Unidos**, desaparecen los campos fiscales salvadoreños y
-la página muestra el formulario de **Givebutter** de la organización aliada en Estados Unidos, una
-entidad 501c3 estadounidense. Un contribuyente de EE. UU. necesita un recibo deducible en su país,
-no un CDE salvadoreño, así que esas donaciones se procesan por completo en Givebutter: **no pasan por
-Wompi, no generan una donación en línea, no aparecen en la lista de Exportar y no se emite ningún CDE.**
-El propio Givebutter le envía al donante su recibo. Si el formulario incrustado no carga, el enlace
-**«Done en GiveButter»** abre la página alojada de Givebutter en una pestaña nueva. Si algún donante
-de EE. UU. le escribe preguntando por su CDE, la respuesta correcta es que su donación se procesó en
-EE. UU. y su recibo proviene de Givebutter y de la organización aliada, no del sistema salvadoreño.
+**Donantes en Estados Unidos (NO reciben CDE — es intencional).** La puerta **EE. UU.** y el caso
+«Resido en el extranjero» + **Estados Unidos** usan Stripe en la cuenta 501(c)(3) estadounidense
+conectada. El donante elige **Tipo de entrega** (**Diezmo** u **Ofrenda**) y **Frecuencia** (**Única** o
+**Mensual**), revisa el monto y continúa a Stripe Embedded Checkout en español. La selección llega a la
+Checkout Session y Stripe debe confirmarla por webhook firmado antes de que la aplicación la considere
+registrada.
+Stripe muestra solamente los métodos habilitados y elegibles para esa persona; las opciones pueden
+variar por dispositivo, ubicación, monto y frecuencia. Los métodos de financiamiento BNPL deben
+permanecer desactivados en la configuración de Stripe.
+
+Estas entregas **no pasan por Wompi, no crean un intento Wompi, no aparecen en la lista fiscal de
+Exportar y no emiten ningún CDE salvadoreño.** El sistema confirma el evento firmado de Stripe, guarda
+la entrega en su historial separado y envía por correo un acuse 501(c)(3) con nombre legal, EIN, tipo,
+frecuencia, fecha, monto y declaración de bienes/servicios. Una entrega mensual puede administrarse desde
+el botón **«Administrar mi entrega mensual»** de la página de confirmación. Si un donante pregunta por
+su CDE, explique que su entrega se registró en EE. UU. y que su acuse estadounidense llega por correo;
+no intente emitirle un CDE manualmente.
+
+En **Exportar**, el ADMIN verá dos carriles: **El Salvador — CDE** conserva los dossiers salvadoreños;
+**EE. UU. — Stripe** muestra la **Constancia anual de donaciones — EE. UU.** por donante y en lote. La
+constancia se calcula sobre entregas Stripe liquidadas en el año de la organización, netas de reembolsos.
+No sustituye ni debe llamarse CDE. Una fila sin correo puede revisarse, pero no enviarse; una constancia
+corregida tras un reembolso conserva su propio historial. Si el sistema informa un resultado de envío
+desconocido, no reenvíe: contacte a soporte para conciliar primero con el proveedor de correo.
+
+La configuración técnica, eventos de webhook, prueba sandbox y handoff live están en
+[`docs/stripe-us-giving.md`](stripe-us-giving.md).
+
+**Solo Propietario — configuración Stripe.** En **Configuración → Stripe EE. UU.**, `Configurado`
+significa que el runtime tiene un valor, no que Stripe lo haya verificado. La salud del webhook muestra
+solo el último evento seguro; «Verificado por último evento procesado» requiere que ese evento haya sido
+procesado y coincida con el ambiente. El propietario puede escribir reemplazos para las claves, IDs,
+identidad estadounidense y zona horaria; los valores sensibles nunca se muestran. La rotación del secreto
+de webhook se hace preparando el secreto siguiente, verificando un evento compatible y promoviendo o
+cancelando de forma explícita. Si la promoción falla o su resultado es desconocido, no borre ni repita
+el cambio hasta que soporte concilie el estado. Payment Method Configuration, Billing Portal y la exclusión
+de BNPL se administran en Stripe Dashboard, no desde el panel de esta aplicación.
 
 > **Nota técnica (para quien instala):** la página /donar necesita dos secretos nuevos,
 > `WOMPI_CLIENT_ID` y `WOMPI_CLIENT_SECRET`, que se obtienen del panel de Wompi en **Datos del

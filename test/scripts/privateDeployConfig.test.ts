@@ -40,7 +40,6 @@ describe("private deployment configuration", () => {
       })
     ).toMatchObject({
       target: "staging",
-      campaign: "campaign-fixture",
       origin: "https://staging.example.invalid",
       donorLogo: { contentType: "image/png", bytes: pngBytes }
     });
@@ -90,7 +89,6 @@ describe("private deployment configuration", () => {
 
   it.each([
     "DIEZMOSSV_DEPLOY_TARGET",
-    "VITE_GIVEBUTTER_CAMPAIGN",
     "DIEZMOSSV_APP_ORIGIN",
     "DIEZMOSSV_DONOR_LOGO_FILE"
   ])("names %s when that required setting is absent", (key) => {
@@ -115,23 +113,6 @@ describe("private deployment configuration", () => {
         repositoryRoot: fixture.repositoryRoot
       }), fixture
     );
-  });
-
-  it("keeps the placeholder campaign diagnostic distinct from a blank one", () => {
-    const fixture = deploymentFixture();
-    writeFileSync(
-      fixture.configPath,
-      fixture.configContents.replace("campaign-fixture", "example-campaign"),
-      { mode: 0o600 }
-    );
-
-    expect(() =>
-      loadPrivateDeployConfig({
-        target: "staging",
-        env: { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath },
-        repositoryRoot: fixture.repositoryRoot
-      })
-    ).toThrow(/still the "example-campaign" placeholder/);
   });
 
   it("rejects a missing config file and an empty one without disclosure", () => {
@@ -209,14 +190,6 @@ describe("private deployment configuration", () => {
       writeFileSync(
         fixture.configPath,
         fixture.configContents.replace(/^DIEZMOSSV_APP_ORIGIN=.*\n/m, ""),
-        { mode: 0o600 }
-      );
-      return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
-    }],
-    ["placeholder campaign", (fixture: Fixture) => {
-      writeFileSync(
-        fixture.configPath,
-        fixture.configContents.replace("campaign-fixture", "example-campaign"),
         { mode: 0o600 }
       );
       return { DIEZMOSSV_DEPLOY_CONFIG: fixture.configPath };
@@ -427,7 +400,6 @@ function deploymentFixture(options: {
   const configPath = join(privateRoot, "staging.env");
   const configContents = [
     `DIEZMOSSV_DEPLOY_TARGET=${options.target ?? "staging"}`,
-    "VITE_GIVEBUTTER_CAMPAIGN=campaign-fixture",
     `DIEZMOSSV_APP_ORIGIN=${options.origin ?? "https://staging.example.invalid"}`,
     `DIEZMOSSV_DONOR_LOGO_FILE=${logoPath}`,
     ""
@@ -452,7 +424,6 @@ function expectSanitizedFailure(action: () => unknown, fixture: Fixture): void {
   expect(message).not.toBe("");
   for (const privateValue of [
     "private-fixture-bytes",
-    "campaign-fixture",
     "password-fixture",
     fixture.logoPath,
     fixture.configPath,

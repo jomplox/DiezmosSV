@@ -3,12 +3,18 @@ import { resolve } from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  Repository,
+  STRIPE_RETENTION_SNAPSHOT_TABLES
+} from "../../src/worker/storage/repository";
+import {
   RETENTION_FOREIGN_KEY_PROTOCOL,
   previousElSalvadorMonth,
   runRetentionExport
 } from "../../src/worker/services/retention";
 import type { Env } from "../../src/worker/types";
 import { sha256Hex, utf8Bytes } from "../../src/worker/utils/encoding";
+import { migratedDatabase, migratedDatabaseThrough } from "./support/migratedDatabase";
+import { SqliteD1, sqliteD1 } from "./support/sqliteD1";
 
 const nativeCrypto = crypto;
 
@@ -71,7 +77,7 @@ interface FakeR2Object {
   body: Uint8Array;
 }
 
-class FakeArchiveBucket implements Partial<R2Bucket> {
+class FakeArchiveBucket {
   private readonly knownLengthStreams = new WeakSet<ReadableStream>();
   readonly objects = new Map<string, FakeR2Object>();
   readonly putCalls: Array<{ key: string; bytes: Uint8Array; streamed: boolean }> = [];
@@ -82,8 +88,16 @@ class FakeArchiveBucket implements Partial<R2Bucket> {
   readonly multipartCompleteCalls: string[] = [];
   readonly multipartAbortCalls: string[] = [];
 
-  async put(key: string, value: unknown): Promise<R2Object> {
+  async put(
+    key: string,
+    value: unknown,
+    options?: R2PutOptions
+  ): Promise<R2Object | null> {
     const bytes = await this.bytesFromValue(value);
+    const conditional = options?.onlyIf;
+    if (!(conditional instanceof Headers) && conditional?.etagDoesNotMatch === "*" && this.objects.has(key)) {
+      return null;
+    }
     this.objects.set(key, { key, body: bytes });
     this.putCalls.push({ key, bytes, streamed: value instanceof ReadableStream });
     return { key } as R2Object;
@@ -181,6 +195,27 @@ class Deferred {
 
   resolve(): void {
     this.resolvePromise();
+  }
+}
+
+class InterleavedManifestArchiveBucket extends FakeArchiveBucket {
+  readonly secondManifestAttempt = new Deferred();
+  manifestPublicationAttempts = 0;
+
+  override async put(
+    key: string,
+    value: unknown,
+    options?: R2PutOptions
+  ): Promise<R2Object | null> {
+    if (key.endsWith("/manifest.json")) {
+      this.manifestPublicationAttempts += 1;
+      if (this.manifestPublicationAttempts === 1) {
+        await this.secondManifestAttempt.promise;
+      } else {
+        this.secondManifestAttempt.resolve();
+      }
+    }
+    return super.put(key, value, options);
   }
 }
 
@@ -345,6 +380,12 @@ class InMemoryRetentionD1 {
   readonly dteEvents: Array<Record<string, unknown>> = [];
   readonly emailDeliveries: Array<Record<string, unknown>> = [];
   readonly fiscalCorrections: Array<Record<string, unknown>> = [];
+  readonly stripeCheckoutSessions: Array<Record<string, unknown>> = [];
+  readonly stripeWebhookEvents: Array<Record<string, unknown>> = [];
+  readonly stripeGifts: Array<Record<string, unknown>> = [];
+  readonly stripeInvoiceSettlements: Array<Record<string, unknown>> = [];
+  readonly stripeAcknowledgmentDeliveries: Array<Record<string, unknown>> = [];
+  readonly stripeAnnualStatementDeliveries: Array<Record<string, unknown>> = [];
   readonly wompiEvents: Array<Record<string, unknown>> = [];
   readonly auditLogs: Array<Record<string, unknown>> = [];
   readonly contingencyPeriods: Array<Record<string, unknown>> = [];
@@ -357,6 +398,7 @@ class InMemoryRetentionD1 {
   readonly preparedSql: string[] = [];
   readonly appliedLimits: number[] = [];
   retentionPageError: Error | null = null;
+  materialMutationEpoch = "0";
 
   tableFor(sql: string): Array<Record<string, unknown>> | null {
     if (sql.includes("FROM dte_documents")) return this.dteDocuments;
@@ -364,6 +406,17 @@ class InMemoryRetentionD1 {
     if (sql.includes("FROM dte_events")) return this.dteEvents;
     if (sql.includes("FROM email_deliveries")) return this.emailDeliveries;
     if (sql.includes("FROM fiscal_corrections")) return this.fiscalCorrections;
+    if (sql.includes("JOIN stripe_checkout_sessions AS snapshot")) return this.stripeCheckoutSessions;
+    if (sql.includes("JOIN stripe_webhook_events AS snapshot")) return this.stripeWebhookEvents;
+    if (sql.includes("JOIN stripe_gifts AS snapshot")) return this.stripeGifts;
+    if (sql.includes("JOIN stripe_invoice_settlements AS snapshot")) return this.stripeInvoiceSettlements;
+    if (sql.includes("JOIN stripe_acknowledgment_deliveries AS snapshot")) return this.stripeAcknowledgmentDeliveries;
+    if (sql.includes("JOIN stripe_annual_statement_deliveries AS snapshot")) return this.stripeAnnualStatementDeliveries;
+    if (sql.includes("FROM stripe_checkout_sessions")) return this.stripeCheckoutSessions;
+    if (sql.includes("FROM stripe_webhook_events")) return this.stripeWebhookEvents;
+    if (sql.includes("FROM stripe_gifts")) return this.stripeGifts;
+    if (sql.includes("FROM stripe_acknowledgment_deliveries")) return this.stripeAcknowledgmentDeliveries;
+    if (sql.includes("FROM stripe_annual_statement_deliveries")) return this.stripeAnnualStatementDeliveries;
     if (sql.includes("FROM wompi_events")) return this.wompiEvents;
     if (sql.includes("FROM audit_logs")) return this.auditLogs;
     if (sql.includes("FROM contingency_periods")) return this.contingencyPeriods;
@@ -393,6 +446,19 @@ class RetentionStatement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (this.sql.includes("MAX(generation)") && this.sql.includes("FROM stripe_retention_generations")) {
+      return {
+        maxGeneration: String(
+          this.db.stripeCheckoutSessions.length
+          + this.db.stripeWebhookEvents.length
+          + this.db.stripeGifts.length
+          + this.db.stripeAcknowledgmentDeliveries.length
+          + this.db.stripeAnnualStatementDeliveries.length
+        ),
+        maxInvoiceSettlementGeneration: String(this.db.stripeInvoiceSettlements.length),
+        materialMutationEpoch: this.db.materialMutationEpoch
+      } as T;
+    }
     if (this.sql.includes("SELECT value FROM app_settings WHERE key = ?")) {
       return (this.db.settings.find((setting) => setting.key === this.args[0]) ?? null) as T | null;
     }
@@ -525,6 +591,19 @@ class RetentionStatement {
       this.db.appliedLimits.push(limit);
       return { results: rows.slice(0, limit) as T[] };
     }
+    if (this.sql.includes("ORDER BY retention_generation.generation ASC")) {
+      const table = this.db.tableFor(this.sql) ?? [];
+      const cursorIndex = this.sql.includes("retention_generation.generation > ?") ? 0 : -1;
+      const afterGeneration = cursorIndex >= 0 ? Number(this.args[cursorIndex]) : 0;
+      const limit = Number(this.args.at(-1) ?? 500);
+      this.db.appliedLimits.push(limit);
+      return {
+        results: table
+          .map((row, index) => ({ ...row, __retention_generation: String(index + 1) }))
+          .filter((row) => Number(row.__retention_generation) > afterGeneration)
+          .slice(0, limit) as T[]
+      };
+    }
     const column = this.sql.includes("received_at") ? "received_at" : "created_at";
     let rows = [...table];
     if (this.sql.includes(`${column} >= ?`) && this.sql.includes(`${column} < ?`)) {
@@ -606,6 +685,135 @@ function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+function d1WithAfterFinalCheckoutPage(
+  database: D1Database,
+  afterPage: () => void
+): D1Database {
+  let injected = false;
+  return {
+    prepare(sql: string) {
+      const statement = database.prepare(sql);
+      const wrapped = {
+        bind(...values: unknown[]) {
+          statement.bind(...values);
+          return wrapped;
+        },
+        first<T>() {
+          return statement.first<T>();
+        },
+        run() {
+          return statement.run();
+        },
+        async all<T>() {
+          const result = await statement.all<T>();
+          if (
+            !injected
+            && (
+              sql.includes("SELECT * FROM stripe_checkout_sessions")
+              || sql.includes("JOIN stripe_checkout_sessions AS snapshot")
+            )
+          ) {
+            injected = true;
+            afterPage();
+          }
+          return result;
+        }
+      };
+      return wrapped as unknown as D1PreparedStatement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return database.batch(statements);
+    }
+  } as D1Database;
+}
+
+function d1WithAfterFirstPageMatching(
+  database: D1Database,
+  sqlMatches: (sql: string) => boolean,
+  afterPage: () => void
+): D1Database {
+  let injected = false;
+  return {
+    prepare(sql: string) {
+      const statement = database.prepare(sql);
+      const wrapped = {
+        bind(...values: unknown[]) {
+          statement.bind(...values);
+          return wrapped;
+        },
+        first<T>() {
+          return statement.first<T>();
+        },
+        run() {
+          return statement.run();
+        },
+        async all<T>() {
+          const result = await statement.all<T>();
+          if (!injected && sqlMatches(sql)) {
+            injected = true;
+            afterPage();
+          }
+          return result;
+        }
+      };
+      return wrapped as unknown as D1PreparedStatement;
+    },
+    batch(statements: D1PreparedStatement[]) {
+      return database.batch(statements);
+    }
+  } as D1Database;
+}
+
+function archivedRows(
+  archive: FakeArchiveBucket,
+  month: string,
+  table: string
+): Array<Record<string, SQLInputValue>> {
+  const object = archivedObject(archive, month, table);
+  if (!object) throw new Error(`missing archived table ${table}`);
+  return new TextDecoder()
+    .decode(object.body)
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line) as Record<string, SQLInputValue>);
+}
+
+function archivedObject(
+  archive: FakeArchiveBucket,
+  month: string,
+  table: string
+): FakeR2Object | undefined {
+  const manifestKey = `retention/${month.slice(0, 4)}/${month}/manifest.json`;
+  const manifestObject = archive.objects.get(manifestKey);
+  if (!manifestObject) return undefined;
+  const manifest = JSON.parse(new TextDecoder().decode(manifestObject.body)) as {
+    tables: Record<string, { key?: string }>;
+  };
+  const key = manifest.tables[table]?.key
+    ?? `retention/${month.slice(0, 4)}/${month}/${table}.ndjson`;
+  return archive.objects.get(key);
+}
+
+function isRunScopedDteTempKey(key: string): boolean {
+  return key.startsWith("retention/2026/2026-06/runs/")
+    && key.includes("/dte_documents.ndjson.tmp.");
+}
+
+function restoreArchivedRows(
+  database: DatabaseSync,
+  archive: FakeArchiveBucket,
+  month: string,
+  table: string
+): void {
+  for (const row of archivedRows(archive, month, table)) {
+    const columns = Object.keys(row);
+    const quotedColumns = columns.map((column) => `"${column.replaceAll('"', '""')}"`);
+    database.prepare(
+      `INSERT INTO "${table}" (${quotedColumns.join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`
+    ).run(...Object.values(row));
+  }
+}
+
 describe("runRetentionExport", () => {
   it("exports the previous El Salvador calendar month for windowed tables into NDJSON keyed objects", async () => {
     const db = new InMemoryRetentionD1();
@@ -625,9 +833,9 @@ describe("runRetentionExport", () => {
     expect(result.status).toBe("completed");
     expect(result.month).toBe("2026-06");
 
-    const dteKey = "retention/2026/2026-06/dte_documents.ndjson";
-    expect(archive.objects.has(dteKey)).toBe(true);
-    const body = new TextDecoder().decode(archive.objects.get(dteKey)!.body);
+    const dteObject = archivedObject(archive, "2026-06", "dte_documents");
+    expect(dteObject).toBeDefined();
+    const body = new TextDecoder().decode(dteObject!.body);
     const lines = body.split("\n").filter(Boolean);
     expect(lines).toHaveLength(3);
     expect(lines.map((line) => JSON.parse(line).id)).toEqual(["dte_1", "dte_2", "dte_3"]);
@@ -657,11 +865,534 @@ describe("runRetentionExport", () => {
     expect(manifest.tables.dte_documents.rowCount).toBe(1);
     expect(manifest.tables.contingency_periods.rowCount).toBe(1);
 
-    const dteBody = archive.objects.get("retention/2026/2026-06/dte_documents.ndjson")!.body;
+    const dteBody = archivedObject(archive, "2026-06", "dte_documents")!.body;
     expect(manifest.tables.dte_documents.sha256).toBe(await sha256Hex(dteBody));
 
     // manifest must be the last object written
     expect(archive.putCalls.at(-1)?.key).toBe(manifestKey);
+  });
+
+  it("publishes one fenced manifest whose entries reference immutable run-scoped objects", async () => {
+    const db = new InMemoryRetentionD1();
+    db.dteDocuments.push(row({ id: "dte_run_scoped", created_at: "2026-06-10T12:00:00.000Z" }));
+    const archive = new InterleavedManifestArchiveBucket();
+    const workerEnv = envWithArchive(db, archive);
+    const now = new Date("2026-07-04T15:00:00.000Z");
+
+    const [left, right] = await Promise.all([
+      runRetentionExport(workerEnv, now),
+      runRetentionExport(workerEnv, now)
+    ]);
+    expect([left.status, right.status].sort()).toEqual(["completed", "skipped"]);
+
+    const manifestKey = "retention/2026/2026-06/manifest.json";
+    const manifest = JSON.parse(new TextDecoder().decode(archive.objects.get(manifestKey)!.body)) as {
+      version: number;
+      runId: string;
+      tables: Record<string, { key: string; rowCount: number; sha256: string }>;
+    };
+    expect(manifest.version).toBe(2);
+    expect(manifest.runId).toMatch(/^[A-Za-z0-9_-]+$/);
+    for (const [table, entry] of Object.entries(manifest.tables)) {
+      expect(entry.key).toBe(`retention/2026/2026-06/runs/${manifest.runId}/${table}.ndjson`);
+      const object = archive.objects.get(entry.key);
+      expect(object, table).toBeDefined();
+      expect(await sha256Hex(object!.body), table).toBe(entry.sha256);
+    }
+    expect(archive.objects.has("retention/2026/2026-06/dte_documents.ndjson")).toBe(false);
+    expect(archive.manifestPublicationAttempts).toBe(2);
+  });
+
+  it("snapshots every Stripe source table and publishes dependency-safe restore and cleanup phases", async () => {
+    const db = new InMemoryRetentionD1();
+    const oldCreatedAt = "2025-01-10T12:00:00.000Z";
+    db.stripeCheckoutSessions.push(row({ id: "checkout_1", created_at: oldCreatedAt, status: "COMPLETE" }));
+    db.stripeWebhookEvents.push(row({ id: "evt_1", created_at: undefined, received_at: oldCreatedAt, status: "PROCESSED" }));
+    db.stripeGifts.push(row({ id: "gift_1", created_at: oldCreatedAt, checkout_id: "checkout_1", refunded_amount_cents: 250 }));
+    db.stripeInvoiceSettlements.push(row({
+      id: undefined,
+      invoice_id: "in_1",
+      created_at: oldCreatedAt,
+      checkout_id: "checkout_1",
+      gift_id: "gift_1",
+      status: "RECORDED"
+    }));
+    db.stripeAcknowledgmentDeliveries.push(row({ id: "ack_1", created_at: oldCreatedAt, gift_id: "gift_1", status: "SENT" }));
+    db.stripeAnnualStatementDeliveries.push(row({ id: "annual_1", created_at: oldCreatedAt, status: "SENT", snapshot_hash: "a".repeat(64) }));
+    const archive = new FakeArchiveBucket();
+
+    await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
+
+    const stripeTables = [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_invoice_settlements",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ];
+    const manifest = JSON.parse(new TextDecoder().decode(
+      archive.objects.get("retention/2026/2026-06/manifest.json")!.body
+    )) as { tables: Record<string, { key: string; rowCount: number; sha256: string }> };
+    for (const table of stripeTables) {
+      const body = archivedObject(archive, "2026-06", table)!.body;
+      expect(manifest.tables[table]).toMatchObject({ rowCount: 1, sha256: await sha256Hex(body) });
+      const exported = JSON.parse(new TextDecoder().decode(body).trim()) as Record<string, unknown>;
+      expect(exported[table === "stripe_invoice_settlements" ? "invoice_id" : "id"]).toEqual(expect.any(String));
+    }
+
+    const restorePhase = (table: string) => RETENTION_FOREIGN_KEY_PROTOCOL.restorePhases.findIndex((phase) => phase.tables.includes(table));
+    const deletePhase = (table: string) => RETENTION_FOREIGN_KEY_PROTOCOL.deletePhases.findIndex((phase) => phase.tables.includes(table));
+    expect(restorePhase("stripe_gifts")).toBeGreaterThan(restorePhase("stripe_checkout_sessions"));
+    expect(restorePhase("stripe_invoice_settlements")).toBeGreaterThan(restorePhase("stripe_gifts"));
+    expect(restorePhase("stripe_acknowledgment_deliveries")).toBeGreaterThan(restorePhase("stripe_gifts"));
+    expect(deletePhase("stripe_invoice_settlements")).toBeLessThan(deletePhase("stripe_gifts"));
+    expect(deletePhase("stripe_acknowledgment_deliveries")).toBeLessThan(deletePhase("stripe_gifts"));
+    expect(deletePhase("stripe_gifts")).toBeLessThan(deletePhase("stripe_checkout_sessions"));
+  });
+
+  it("upgrades an exact populated 0037 database and restores its emitted Stripe archive with clean foreign keys", async () => {
+    const source = migratedDatabaseThrough("0037");
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    try {
+      const createdAt = "2026-06-15T12:00:00.000Z";
+      source.exec(`
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, stripe_session_id, frequency,
+          gift_type, amount_cents, livemode, status, payment_status,
+          creation_outcome_class, idempotency_generation, created_at, updated_at
+        ) VALUES (
+          'checkout_restore', 'request_restore', 'fingerprint_restore',
+          'cs_test_restore', 'ONCE', 'TITHE', 5000, 0, 'COMPLETE', 'PAID',
+          NULL, 2, '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_webhook_events (
+          id, event_type, livemode, status, processing_claim_id,
+          verified_secret_slot, verified_secret_generation,
+          received_at, processed_at, updated_at
+        ) VALUES (
+          'evt_restore', 'checkout.session.completed', 0, 'PROCESSED', 'claim_restore',
+          'NEXT', '${"a".repeat(64)}', '${createdAt}', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_gifts (
+          id, source_type, source_id, checkout_id, stripe_invoice_id,
+          stripe_subscription_id,
+          frequency, gift_type, amount_cents, donor_name, donor_email,
+          settled_at, status, created_at, updated_at
+        ) VALUES (
+          'gift_restore', 'INVOICE', 'in_restore', 'checkout_restore', 'in_restore',
+          'sub_restore',
+          'MONTHLY', 'TITHE', 5000, 'Restore Donor', 'restore@example.org',
+          '${createdAt}', 'PAID', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_acknowledgment_deliveries (
+          id, gift_id, status, attempt_count, failure_code, retry_safe, next_attempt_at,
+          created_at, updated_at
+        ) VALUES (
+          'ack_restore', 'gift_restore', 'FAILED', 1, 'EMAIL_PRE_DISPATCH_FAILED', 1,
+          '2026-06-15T12:05:00.000Z', '${createdAt}', '${createdAt}'
+        );
+        INSERT INTO stripe_annual_statement_deliveries (
+          id, year, livemode, donor_key, donor_name, donor_email,
+          snapshot_hash, snapshot_json, revision, status, created_at, updated_at
+        ) VALUES (
+          'annual_restore', 2025, 0, 'restore@example.org', 'Restore Donor',
+          'restore@example.org', '${"b".repeat(64)}', '{}', 1, 'PENDING',
+          '${createdAt}', '${createdAt}'
+        );
+      `);
+      source.exec(readFileSync(
+        resolve(import.meta.dirname, "../../migrations/0038_stripe_integrity_fences.sql"),
+        "utf8"
+      ));
+      source.exec(`
+        INSERT INTO stripe_invoice_settlements (
+          invoice_id, checkout_id, subscription_id, amount_cents, currency,
+          donor_name, donor_email, settled_at, invoice_livemode, invoice_event_id,
+          invoice_payment_id, payment_intent_id, payment_amount_cents,
+          payment_currency, payment_livemode, payment_event_id,
+          status, gift_id, recorded_at, created_at, updated_at
+        ) VALUES (
+          'in_restore', 'checkout_restore', 'sub_restore', 5000, 'usd',
+          'Restore Donor', 'restore@example.org', '${createdAt}', 0, 'evt_invoice_restore',
+          'inpay_restore', 'pi_restore', 5000,
+          'usd', 0, 'evt_invoice_payment_restore',
+          'RECORDED', 'gift_restore', '${createdAt}', '${createdAt}', '${createdAt}'
+        );
+      `);
+      expect(source.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      expect(source.prepare(
+        "SELECT revision, kind, evidence_refunded_amount_cents FROM stripe_acknowledgment_deliveries WHERE id = ?"
+      ).get("ack_restore")).toEqual({
+        revision: 1,
+        kind: "ORIGINAL",
+        evidence_refunded_amount_cents: 0
+      });
+
+      const result = await runRetentionExport({
+        DB: sqliteD1(source),
+        ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+        ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+        ARCHIVE: archive as unknown as R2Bucket
+      } as Env, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("completed");
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(true);
+
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.begin);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.deferForeignKeys);
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        restoreArchivedRows(destination, archive, "2026-06", table);
+      }
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      destination.exec(RETENTION_FOREIGN_KEY_PROTOCOL.localSqliteTransaction.commit);
+      expect(destination.prepare(RETENTION_FOREIGN_KEY_PROTOCOL.wranglerFile.verify).all()).toEqual([]);
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        expect(destination.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 1 });
+      }
+    } finally {
+      source.close();
+      destination.close();
+    }
+  });
+
+  it("refuses to publish a Stripe snapshot when material rows mutate after the export fence", async () => {
+    const source = migratedDatabaseThrough("0035");
+    const destination = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    const createdAt = "2026-06-15T12:00:00.000Z";
+    const lateCreatedAt = "2025-01-01T00:00:00.000Z";
+    source.exec(`
+      INSERT INTO stripe_checkout_sessions (
+        id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+        livemode, status, payment_status, created_at, updated_at
+      ) VALUES
+        ('checkout_stable', 'request_stable', 'fingerprint_stable', 'ONCE', 'TITHE', 1000,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}'),
+        ('checkout_retargeted', 'request_retargeted', 'fingerprint_retargeted', 'ONCE', 'OFFERING', 1200,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}'),
+        ('checkout_deleted', 'request_deleted', 'fingerprint_deleted', 'ONCE', 'TITHE', 1300,
+         0, 'COMPLETE', 'PAID', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_webhook_events (
+        id, event_type, livemode, status, processing_claim_id, received_at, updated_at
+      ) VALUES ('evt_existing', 'checkout.session.completed', 0, 'PROCESSING', 'claim_existing',
+                '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_gifts (
+        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+        frequency, gift_type, amount_cents, donor_name, donor_email, settled_at,
+        status, created_at, updated_at
+      ) VALUES
+        ('gift_stable', 'PAYMENT_INTENT', 'pi_stable', 'checkout_stable', 'pi_stable',
+         'ONCE', 'TITHE', 1000, 'Stable Donor', 'stable@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}'),
+        ('gift_retargeted', 'PAYMENT_INTENT', 'pi_retargeted', 'checkout_retargeted', 'pi_retargeted',
+         'ONCE', 'OFFERING', 1200, 'Retargeted Donor', 'retargeted@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}'),
+        ('gift_deleted', 'PAYMENT_INTENT', 'pi_deleted', 'checkout_deleted', 'pi_deleted',
+         'ONCE', 'TITHE', 1300, 'Deleted Donor', 'deleted@example.org', '${createdAt}',
+         'PAID', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_acknowledgment_deliveries (
+        id, gift_id, status, created_at, updated_at
+      ) VALUES
+        ('ack_stable', 'gift_stable', 'PENDING', '${createdAt}', '${createdAt}'),
+        ('ack_retargeted', 'gift_retargeted', 'PENDING', '${createdAt}', '${createdAt}'),
+        ('ack_deleted', 'gift_deleted', 'PENDING', '${createdAt}', '${createdAt}');
+      INSERT INTO stripe_annual_statement_deliveries (
+        id, year, livemode, donor_key, donor_name, donor_email, snapshot_hash,
+        snapshot_json, revision, status, created_at, updated_at
+      ) VALUES (
+        'annual_r1', 2025, 0, 'annual@example.org', 'Annual Donor', 'annual@example.org',
+        '${"a".repeat(64)}', '{}', 1, 'PENDING', '${createdAt}', '${createdAt}'
+      );
+    `);
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
+      "utf8"
+    ));
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0037_stripe_delivery_safety.sql"),
+      "utf8"
+    ));
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0038_stripe_integrity_fences.sql"),
+      "utf8"
+    ));
+
+    let raceInserted = false;
+    const db = d1WithAfterFinalCheckoutPage(sqliteD1(source), () => {
+      raceInserted = true;
+      source.exec(`
+        UPDATE stripe_webhook_events
+           SET status = 'PROCESSED', processed_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'evt_existing';
+        UPDATE stripe_gifts
+           SET status = 'PARTIALLY_REFUNDED', refunded_amount_cents = 250, updated_at = '${createdAt}'
+         WHERE id = 'gift_stable';
+        UPDATE stripe_acknowledgment_deliveries
+           SET status = 'SENT', dispatch_started_at = '${createdAt}',
+               sent_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'ack_stable';
+        UPDATE stripe_annual_statement_deliveries
+           SET status = 'SENT', attempt_count = 1, dispatch_started_at = '${createdAt}',
+               provider_id_hash = 'provider-hash', sent_at = '${createdAt}', updated_at = '${createdAt}'
+         WHERE id = 'annual_r1';
+        DELETE FROM stripe_acknowledgment_deliveries WHERE id = 'ack_deleted';
+        DELETE FROM stripe_gifts WHERE id = 'gift_deleted';
+        DELETE FROM stripe_checkout_sessions WHERE id = 'checkout_deleted';
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+          livemode, status, payment_status, created_at, updated_at
+        ) VALUES ('checkout_reused', 'request_reused', 'fingerprint_reused', 'ONCE', 'TITHE', 1400,
+                  0, 'COMPLETE', 'PAID', '${lateCreatedAt}', '${lateCreatedAt}');
+        INSERT INTO stripe_checkout_sessions (
+          id, request_id, request_fingerprint, frequency, gift_type, amount_cents,
+          livemode, status, payment_status, created_at, updated_at
+        ) VALUES ('checkout_late', 'request_late', 'fingerprint_late', 'ONCE', 'TITHE', 1500,
+                  0, 'COMPLETE', 'PAID', '${lateCreatedAt}', '${lateCreatedAt}');
+        UPDATE stripe_gifts SET checkout_id = 'checkout_late' WHERE id = 'gift_retargeted';
+        INSERT INTO stripe_gifts (
+          id, source_type, source_id, checkout_id, stripe_payment_intent_id,
+          frequency, gift_type, amount_cents, donor_name, donor_email, settled_at,
+          status, created_at, updated_at
+        ) VALUES (
+          'gift_reused', 'PAYMENT_INTENT', 'pi_reused', 'checkout_reused', 'pi_reused',
+          'ONCE', 'TITHE', 1400, 'Reused Donor', 'reused@example.org', '${lateCreatedAt}',
+          'PAID', '${lateCreatedAt}', '${lateCreatedAt}'
+        );
+        INSERT INTO stripe_acknowledgment_deliveries (
+          id, gift_id, revision, kind, evidence_refunded_amount_cents,
+          status, created_at, updated_at
+        ) VALUES (
+          'ack_reused', 'gift_reused', 1, 'ORIGINAL', 0,
+          'PENDING', '${lateCreatedAt}', '${lateCreatedAt}'
+        );
+        INSERT INTO stripe_webhook_events (
+          id, event_type, livemode, status, processing_claim_id, received_at, updated_at
+        ) VALUES ('evt_late', 'invoice.paid', 0, 'PROCESSED', 'claim_late',
+                  '${lateCreatedAt}', '${lateCreatedAt}');
+        INSERT INTO stripe_annual_statement_deliveries (
+          id, year, livemode, donor_key, donor_name, donor_email, snapshot_hash,
+          snapshot_json, revision, supersedes_delivery_id, status, created_at, updated_at
+        ) VALUES (
+          'annual_r2', 2025, 0, 'annual@example.org', 'Annual Donor', 'annual@example.org',
+          '${"b".repeat(64)}', '{}', 2, 'annual_r1', 'PENDING', '${lateCreatedAt}', '${lateCreatedAt}'
+        );
+      `);
+    });
+    const runtime = {
+      DB: db,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("failed");
+      expect(raceInserted).toBe(true);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
+    } finally {
+      source.close();
+      destination.close();
+    }
+  });
+
+  it("aborts when annual lineage chronology mutates between pages", async () => {
+    const source = migratedDatabase();
+    const archive = new FakeArchiveBucket();
+    const insert = source.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, created_at, updated_at
+       ) VALUES (?, 2025, 0, ?, ?, ?, ?, '{}', ?, ?, 'PENDING', ?, ?)`
+    );
+    insert.run(
+      "annual_parent_late_cursor",
+      "lineage@example.org",
+      "Lineage Donor",
+      "lineage@example.org",
+      "1".repeat(64),
+      1,
+      null,
+      "2026-06-30T00:00:00.000Z",
+      "2026-06-30T00:00:00.000Z"
+    );
+    insert.run(
+      "annual_child_early_cursor",
+      "lineage@example.org",
+      "Lineage Donor",
+      "lineage@example.org",
+      "2".repeat(64),
+      2,
+      "annual_parent_late_cursor",
+      "2025-01-01T00:00:00.000Z",
+      "2025-01-01T00:00:00.000Z"
+    );
+    for (let index = 0; index < 499; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      insert.run(
+        `annual_filler_${suffix}`,
+        `filler-${suffix}@example.org`,
+        `Filler ${suffix}`,
+        `filler-${suffix}@example.org`,
+        index.toString(16).padStart(64, "0"),
+        1,
+        null,
+        "2025-06-01T00:00:00.000Z",
+        "2025-06-01T00:00:00.000Z"
+      );
+    }
+
+    let raced = false;
+    const racedDb = d1WithAfterFirstPageMatching(
+      sqliteD1(source),
+      (sql) => sql.includes("stripe_annual_statement_deliveries AS snapshot"),
+      () => {
+        raced = true;
+        source.prepare(
+          `UPDATE stripe_annual_statement_deliveries
+              SET created_at = '2026-12-31T00:00:00.000Z',
+                  updated_at = '2026-12-31T00:00:00.000Z'
+            WHERE id = 'annual_parent_late_cursor'`
+        ).run();
+      }
+    );
+    const runtime = {
+      DB: racedDb,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("failed");
+      expect(raced).toBe(true);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
+    } finally {
+      source.close();
+    }
+  });
+
+  it("aborts when migration-gap annual lineage is deleted between pages", async () => {
+    const source = migratedDatabaseThrough("0035");
+    const archive = new FakeArchiveBucket();
+    const migration = readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0036_stripe_retention_generations.sql"),
+      "utf8"
+    );
+    const backfillStart = migration.indexOf("-- Idempotent backfills cover rows");
+    expect(backfillStart).toBeGreaterThan(0);
+    const insert = source.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, created_at, updated_at
+       ) VALUES (?, 2025, 0, ?, ?, ?, ?, '{}', ?, ?, 'PENDING', ?, ?)`
+    );
+    insert.run(
+      "annual_gap_parent",
+      "gap-lineage@example.org",
+      "Gap Lineage Donor",
+      "gap-lineage@example.org",
+      "a".repeat(64),
+      1,
+      null,
+      "2026-06-30T00:00:00.000Z",
+      "2026-06-30T00:00:00.000Z"
+    );
+    source.exec(migration.slice(0, backfillStart));
+    insert.run(
+      "annual_gap_child",
+      "gap-lineage@example.org",
+      "Gap Lineage Donor",
+      "gap-lineage@example.org",
+      "b".repeat(64),
+      2,
+      "annual_gap_parent",
+      "2025-01-01T00:00:00.000Z",
+      "2025-01-01T00:00:00.000Z"
+    );
+    for (let index = 0; index < 499; index += 1) {
+      const suffix = String(index).padStart(3, "0");
+      insert.run(
+        `annual_gap_filler_${suffix}`,
+        `gap-filler-${suffix}@example.org`,
+        `Gap Filler ${suffix}`,
+        `gap-filler-${suffix}@example.org`,
+        index.toString(16).padStart(64, "0"),
+        1,
+        null,
+        "2025-06-01T00:00:00.000Z",
+        "2025-06-01T00:00:00.000Z"
+      );
+    }
+    source.exec(migration.slice(backfillStart));
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0037_stripe_delivery_safety.sql"),
+      "utf8"
+    ));
+    source.exec(readFileSync(
+      resolve(import.meta.dirname, "../../migrations/0038_stripe_integrity_fences.sql"),
+      "utf8"
+    ));
+
+    let raced = false;
+    const racedDb = d1WithAfterFirstPageMatching(
+      sqliteD1(source),
+      (sql) => sql.includes("stripe_annual_statement_deliveries AS snapshot"),
+      () => {
+        raced = true;
+        source.exec(`
+          DELETE FROM stripe_annual_statement_deliveries WHERE id = 'annual_gap_child';
+          DELETE FROM stripe_annual_statement_deliveries WHERE id = 'annual_gap_parent';
+        `);
+      }
+    );
+    const runtime = {
+      DB: racedDb,
+      ISSUANCE_QUEUE: { send: async () => undefined } as unknown as Queue,
+      ASSETS: { fetch: () => Promise.resolve(new Response("asset")) } as unknown as Fetcher,
+      ARCHIVE: archive as unknown as R2Bucket
+    } as Env;
+
+    try {
+      const result = await runRetentionExport(runtime, new Date("2026-07-04T15:00:00.000Z"));
+      expect(result.status).toBe("failed");
+      expect(raced).toBe(true);
+      expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
+    } finally {
+      source.close();
+    }
+  });
+
+  it("drives every Stripe retention page from the bounded generation index", async () => {
+    const database = migratedDatabase();
+    const d1 = new SqliteD1(database);
+    const repository = new Repository(d1.database);
+    try {
+      const fence = await repository.captureStripeRetentionFence();
+      for (const table of STRIPE_RETENTION_SNAPSHOT_TABLES) {
+        for (const cursor of [null, { generation: "1" }]) {
+          await repository.listAllRowsPaged(table, cursor, 500, fence);
+          const statement = d1.statements.at(-1);
+          if (!statement) throw new Error(`missing retention statement for ${table}`);
+          const plan = database.prepare(`EXPLAIN QUERY PLAN ${statement.sql}`)
+            .all(...statement.args) as Array<{ detail: string }>;
+          const detail = plan.map((row) => row.detail).join("\n");
+          expect(detail).toContain(
+            table === "stripe_invoice_settlements"
+              ? "idx_stripe_invoice_settlement_retention_generation"
+              : "idx_stripe_retention_generations_table_generation"
+          );
+          expect(detail).not.toContain("USE TEMP B-TREE");
+          expect(detail).not.toMatch(/(?:^|\n)SCAN /);
+        }
+      }
+    } finally {
+      database.close();
+    }
   });
 
   it("retains Wompi issuance lifecycle evidence with a valid manifest count and digest", async () => {
@@ -688,8 +1419,7 @@ describe("runRetentionExport", () => {
 
     await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
 
-    const wompiKey = "retention/2026/2026-06/wompi_events.ndjson";
-    const wompiBody = archive.objects.get(wompiKey)!.body;
+    const wompiBody = archivedObject(archive, "2026-06", "wompi_events")!.body;
     const exportedRows = new TextDecoder().decode(wompiBody).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     expect(exportedRows).toHaveLength(1);
     expect(exportedRows[0]).toMatchObject({
@@ -765,8 +1495,7 @@ describe("runRetentionExport", () => {
       new Date("2026-07-04T15:00:00.000Z")
     );
 
-    const correctionKey = "retention/2026/2026-06/fiscal_corrections.ndjson";
-    const correctionBody = archive.objects.get(correctionKey)!.body;
+    const correctionBody = archivedObject(archive, "2026-06", "fiscal_corrections")!.body;
     const exported = new TextDecoder()
       .decode(correctionBody)
       .split("\n")
@@ -783,13 +1512,13 @@ describe("runRetentionExport", () => {
         archive.objects.get("retention/2026/2026-06/manifest.json")!.body
       )
     ) as { tables: Record<string, { rowCount: number; sha256: string }> };
-    expect(manifest.tables.fiscal_corrections).toEqual({
+    expect(manifest.tables.fiscal_corrections).toMatchObject({
       rowCount: 1,
       sha256: await sha256Hex(correctionBody)
     });
 
     const auditBody = new TextDecoder().decode(
-      archive.objects.get("retention/2026/2026-06/audit_logs.ndjson")!.body
+      archivedObject(archive, "2026-06", "audit_logs")!.body
     );
     expect(auditBody).not.toContain("12345678-9");
     expect(auditBody).not.toContain("10000002-7");
@@ -844,7 +1573,7 @@ describe("runRetentionExport", () => {
 
     const readSnapshot = (month: string) =>
       new TextDecoder()
-        .decode(archive.objects.get(`retention/2026/${month}/wompi_events.ndjson`)!.body)
+        .decode(archivedObject(archive, month, "wompi_events")!.body)
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line));
@@ -910,7 +1639,7 @@ describe("runRetentionExport", () => {
 
     const readRows = (month: string, name: string) =>
       new TextDecoder()
-        .decode(archive.objects.get(`retention/2026/${month}/${name}.ndjson`)!.body)
+        .decode(archivedObject(archive, month, name)!.body)
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -925,10 +1654,8 @@ describe("runRetentionExport", () => {
         archive.objects.get("retention/2026/2026-06/manifest.json")!.body
       )
     ) as { tables: Record<string, { rowCount: number; sha256: string }> };
-    const latestBody = archive.objects.get(
-      "retention/2026/2026-06/fiscal_corrections_latest.ndjson"
-    )!.body;
-    expect(manifest.tables.fiscal_corrections_latest).toEqual({
+    const latestBody = archivedObject(archive, "2026-06", "fiscal_corrections_latest")!.body;
+    expect(manifest.tables.fiscal_corrections_latest).toMatchObject({
       rowCount: 1,
       sha256: await sha256Hex(latestBody)
     });
@@ -950,8 +1677,7 @@ describe("runRetentionExport", () => {
       new Date("2026-07-04T15:00:00.000Z")
     );
 
-    const key = "retention/2026/2026-06/document_sequences.ndjson";
-    const body = archive.objects.get(key)!.body;
+    const body = archivedObject(archive, "2026-06", "document_sequences")!.body;
     const exported = new TextDecoder().decode(body).split("\n").filter(Boolean).map((line) => JSON.parse(line));
     expect(exported).toHaveLength(1_200);
     expect(exported[0]).toEqual({
@@ -971,7 +1697,7 @@ describe("runRetentionExport", () => {
     const manifest = JSON.parse(
       new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)
     ) as { tables: Record<string, { rowCount: number; sha256: string }> };
-    expect(manifest.tables.document_sequences).toEqual({
+    expect(manifest.tables.document_sequences).toMatchObject({
       rowCount: 1_200,
       sha256: await sha256Hex(body)
     });
@@ -989,9 +1715,9 @@ describe("runRetentionExport", () => {
     const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
 
     expect(result.status).toBe("completed");
-    const key = "retention/2026/2026-06/donation_intents.ndjson";
-    expect(archive.objects.has(key)).toBe(true);
-    const lines = new TextDecoder().decode(archive.objects.get(key)!.body).split("\n").filter(Boolean);
+    const donationIntentObject = archivedObject(archive, "2026-06", "donation_intents");
+    expect(donationIntentObject).toBeDefined();
+    const lines = new TextDecoder().decode(donationIntentObject!.body).split("\n").filter(Boolean);
     expect(lines.map((line) => JSON.parse(line).id)).toEqual(["intent_1"]);
 
     const manifest = JSON.parse(new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/manifest.json")!.body)) as {
@@ -1024,9 +1750,8 @@ describe("runRetentionExport", () => {
 
     await runRetentionExport(envWithArchive(db, archive), new Date("2026-07-04T15:00:00.000Z"));
 
-    const key = "retention/2026/2026-06/audit_logs.ndjson";
     const records = new TextDecoder()
-      .decode(archive.objects.get(key)!.body)
+      .decode(archivedObject(archive, "2026-06", "audit_logs")!.body)
       .split("\n")
       .filter(Boolean)
       .map((line) => JSON.parse(line) as Record<string, unknown>);
@@ -1106,7 +1831,7 @@ describe("runRetentionExport", () => {
     const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
 
     expect(result.status).toBe("completed");
-    const body = new TextDecoder().decode(archive.objects.get("retention/2026/2026-06/dte_documents.ndjson")!.body);
+    const body = new TextDecoder().decode(archivedObject(archive, "2026-06", "dte_documents")!.body);
     const lines = body.split("\n").filter(Boolean);
     expect(lines).toHaveLength(1200);
     // Confirm every page request was bounded to 500 rows (3 pages for 1200 rows),
@@ -1130,14 +1855,15 @@ describe("runRetentionExport", () => {
 
     expect(result.status).toBe("completed");
     const finalTablePuts = archive.putCalls.filter((call) => call.key.endsWith(".ndjson"));
-    expect(finalTablePuts).toHaveLength(12);
+    // Six windowed tables, ten full snapshots (including six Stripe source
+    // tables), plus the fiscal-correction and document-sequence overlays.
+    expect(finalTablePuts).toHaveLength(18);
     expect(finalTablePuts.every((call) => call.streamed)).toBe(true);
-    expect(archive.multipartCreateCalls).toHaveLength(12);
-    expect(archive.multipartCompleteCalls).toHaveLength(12);
-    expect(archive.multipartPartCalls).toHaveLength(12);
+    expect(archive.multipartCreateCalls).toHaveLength(18);
+    expect(archive.multipartCompleteCalls).toHaveLength(18);
+    expect(archive.multipartPartCalls).toHaveLength(18);
     expect(archive.multipartPartCalls.every((call) => call.bytes.byteLength <= 5 * 1024 * 1024)).toBe(true);
-    const key = "retention/2026/2026-06/dte_documents.ndjson";
-    const bytes = archive.objects.get(key)!.body;
+    const bytes = archivedObject(archive, "2026-06", "dte_documents")!.body;
     const expectedBytes = utf8Bytes(db.dteDocuments.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
     expect(bytes).toEqual(expectedBytes);
     const manifest = JSON.parse(
@@ -1189,8 +1915,8 @@ describe("runRetentionExport", () => {
 
     const key = "retention/2026/2026-06/dte_documents.ndjson";
     expect(result.status).toBe("failed");
-    expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
-    expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+    expect(archive.multipartAbortCalls.some(isRunScopedDteTempKey)).toBe(true);
+    expect(archive.deleteCalls.some(isRunScopedDteTempKey)).toBe(true);
     expect(archive.deleteCalls).not.toContain(key);
     expect(archive.objects.has(key)).toBe(false);
     expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
@@ -1208,7 +1934,7 @@ describe("runRetentionExport", () => {
     const result = await runRetentionExport(env, new Date("2026-07-04T15:00:00.000Z"));
 
     expect(result.status).toBe("failed");
-    expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+    expect(archive.deleteCalls.some(isRunScopedDteTempKey)).toBe(true);
     expect(archive.deleteCalls).not.toContain(key);
     expect(archive.objects.get(key)?.body).toEqual(existingBytes);
     expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
@@ -1232,8 +1958,8 @@ describe("runRetentionExport", () => {
       const key = "retention/2026/2026-06/dte_documents.ndjson";
       expect(result).toMatchObject({ status: "failed", error: "page read failed" });
       expect(digest.abortReasons).toContain(primaryError);
-      expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
-      expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+      expect(archive.multipartAbortCalls.some(isRunScopedDteTempKey)).toBe(true);
+      expect(archive.deleteCalls.some(isRunScopedDteTempKey)).toBe(true);
       expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
       expect(unhandled.reasons).toEqual([]);
@@ -1261,7 +1987,7 @@ describe("runRetentionExport", () => {
       const key = "retention/2026/2026-06/dte_documents.ndjson";
       expect(result).toMatchObject({ status: "failed", error: "page read failed before cleanup" });
       expect(digest.abortReasons).toContain(primaryError);
-      const deletedTempKey = archive.deleteCalls.find((deleteKey) => deleteKey.startsWith(`${key}.tmp.`));
+      const deletedTempKey = archive.deleteCalls.find(isRunScopedDteTempKey);
       expect(deletedTempKey).toBeDefined();
       expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
@@ -1314,8 +2040,8 @@ describe("runRetentionExport", () => {
       const key = "retention/2026/2026-06/dte_documents.ndjson";
       expect(result).toMatchObject({ status: "failed", error: "digest finalization failed" });
       expect(digestProbe.abortReasons).toEqual([]);
-      expect(archive.multipartAbortCalls.some((abortKey) => abortKey.startsWith(`${key}.tmp.`))).toBe(true);
-      expect(archive.deleteCalls.some((deleteKey) => deleteKey.startsWith(`${key}.tmp.`))).toBe(true);
+      expect(archive.multipartAbortCalls.some(isRunScopedDteTempKey)).toBe(true);
+      expect(archive.deleteCalls.some(isRunScopedDteTempKey)).toBe(true);
       expect(archive.deleteCalls).not.toContain(key);
       expect(archive.objects.has(key)).toBe(false);
       expect(archive.objects.has("retention/2026/2026-06/manifest.json")).toBe(false);
@@ -1443,6 +2169,41 @@ describe("retention restore guidance", () => {
       "`contingency_periods` ↔ `dte_events` ↔ `dte_documents`"
     );
     expect(guidance).not.toContain("Foreign keys matter for ordering");
+    for (const table of [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_invoice_settlements",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ]) {
+      expect(guidance).toContain(`${table}.ndjson`);
+    }
+    expect(guidance).toContain("latest verified Stripe snapshots");
+    expect(guidance).toContain("refund");
+  });
+
+  it("documents dependency-safe cleanup and requires all six Stripe tables empty", () => {
+    const guidance = readFileSync(
+      resolve(import.meta.dirname, "../../docs/retention-restore.md"),
+      "utf8"
+    );
+    const cleanup = guidance.slice(
+      guidance.indexOf("Cleanup uses a separate Wrangler file"),
+      guidance.indexOf("5. After restoring")
+    );
+    const stripeTables = [
+      "stripe_checkout_sessions",
+      "stripe_webhook_events",
+      "stripe_gifts",
+      "stripe_invoice_settlements",
+      "stripe_acknowledgment_deliveries",
+      "stripe_annual_statement_deliveries"
+    ];
+    for (const table of stripeTables) expect(cleanup).toContain(table);
+    expect(cleanup).toContain("All six Stripe business tables must be empty");
+    const protocolTables = RETENTION_FOREIGN_KEY_PROTOCOL.deletePhases.flatMap((phase) => phase.tables);
+    expect(protocolTables).toEqual(expect.arrayContaining(stripeTables));
   });
 
   it("applies the latest fiscal correction snapshot last and idempotently", () => {

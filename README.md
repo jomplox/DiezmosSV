@@ -136,8 +136,8 @@ Only events with `ResultadoTransaccion = ExitosaAprobada` are issued. Everything
 Wompi, or the donor is recorded in D1 and the audit log.
 
 The public `/donar` page opens on a two-door landing: **El Salvador y el mundo** routes to the
-SV fiscal form (Wompi + CDE), and **EE. UU.** routes straight to the Givebutter block for a
-US-deductible receipt (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
+SV fiscal form (Wompi + CDE), and **EE. UU.** routes to Stripe's Spanish Embedded Checkout form on the US 501(c)(3)
+account for one-time or monthly gifts (`?ruta=sv` / `?ruta=eeuu` deep-links a door). The whole web UI (donor pages
 and admin) uses **Gotham**, self-hosted as latin-subset woff2 under `src/client/fonts/` — the
 licensed OTFs are never committed; only the generated woff2 subsets are.
 
@@ -200,7 +200,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0031)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0040)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -301,7 +301,7 @@ The unit tests cover, among other areas:
 - Auth rate limiting, password reset, and branded email templates
 - Fiscal-correction claim ownership, control-number reservation, and recovery
 - Donor-explorer grouping, filters, and CSV export bounds
-- Deploy-guard scripts (`assert-fiscal-cutover`, `assert-donation-lane-config`,
+- Deploy-guard scripts (`assert-fiscal-cutover`, private release/branding configuration,
   private-wrangler-config, D1 migration preflight)
 
 CI (`.github/workflows/ci.yml`) runs two jobs on pushes to `main` and `codex/**`, and
@@ -357,7 +357,6 @@ owner-owned `0600` files outside this repository, without symlinks:
 ```dotenv
 # /absolute/private/path/staging.env
 DIEZMOSSV_DEPLOY_TARGET=staging
-VITE_GIVEBUTTER_CAMPAIGN=campaign-placeholder
 DIEZMOSSV_APP_ORIGIN=https://staging.example.invalid
 DIEZMOSSV_DONOR_LOGO_FILE=/absolute/private/path/logo.png
 ```
@@ -395,6 +394,18 @@ node scripts/run-private-wrangler.mjs secret put EMAIL_PROVIDER_URL --env stagin
 node scripts/run-private-wrangler.mjs secret put EMAIL_API_KEY --env staging   # optional alternative-provider token
 node scripts/run-private-wrangler.mjs secret put EMAIL_FROM --env staging
 node scripts/run-private-wrangler.mjs secret put EMISOR_CONFIG_JSON --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_RESTRICTED_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PUBLISHABLE_KEY --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_WEBHOOK_SECRET --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_PAYMENT_METHOD_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_BILLING_PORTAL_CONFIGURATION_ID --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_LEGAL_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_EIN --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_PHONE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
 
 # Migrate and deploy through package scripts that use the same private wrapper.
 npm run cf:migrate:staging
@@ -419,7 +430,7 @@ Two deploy guards fail the command closed rather than shipping a broken deployme
 | Guard | Runs on | Blocks unless |
 |---|---|---|
 | `scripts/assert-fiscal-cutover.mjs` | `cf:migrate:prod`, `cf:deploy:prod`, `cf:cutover:staging` | `FISCAL_CUTOVER_QUIESCED=1` is set. Migrations 0020/0021 and the claim-aware Worker must land in **one quiesced maintenance window**: drain old Worker requests, pause queues/cron and mutating traffic, then acknowledge. |
-| `scripts/run-private-build.mjs`, which applies `scripts/assert-donation-lane-config.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | `VITE_GIVEBUTTER_CAMPAIGN` in the selected target-bound deploy file is a real slug — not blank, not the `example-campaign` placeholder. A placeholder build would ship a donation lane pointing at a campaign that does not exist, and nothing downstream would report it. |
+| `scripts/run-private-build.mjs` | `build:private`, and through it `cf:deploy:staging` and `cf:deploy:prod` | The selected target-bound owner-only deploy file, origin, and donor raster pass validation. Stripe values are runtime-only and are never injected into Vite. |
 
 Store the smoke settings in that `0600` out-of-tree file. The runner uses this approved path by
 default, so `npm run smoke:staging` is sufficient unless you intentionally select another file.
@@ -545,19 +556,30 @@ selected private config and are duplicated per Wrangler environment:
 | `EMAIL` (binding) | Cloudflare `send_email` binding used to send receipt emails with PDF/JSON attachments. Remote root, staging, and production bindings are declared only in the selected private config. |
 | `ARCHIVE` (binding) | R2 bucket binding for the monthly legal-retention export and the white-label logo objects. The committed example config names `diezmossv-local-archive-example`, `diezmossv-staging-archive-example`, and `diezmossv-production-archive-example`; real bucket names belong only in the selected private config. |
 | `EMAIL_ARBITRARY_RECIPIENTS` | Optional `"true"` marker set after Cloudflare Email Sending is confirmed able to reach external donor addresses. The committed example already sets it for `staging`; local and production leave it unset. |
-| `DONATION_INTAKE_DISABLED` | Emergency kill switch for the public donation lane. When exactly `"true"`, `POST /api/donations/intent` and `/api/donations/intent/*` return `503 donation_intake_disabled`, and `/`, `/donar`, and `/donar/gracias` serve an empty locked-down document. Checked before the API router, so the Wompi webhook, the issuance pipeline, and the admin panel keep working — in-flight donations still receive their CDE. The committed example sets it to `"true"` for `production`; unset or any other value leaves intake open. |
+| `DONATION_INTAKE_DISABLED` | Emergency kill switch for new public intake. When exactly `"true"`, Wompi intent mutations and `POST /api/donations/stripe/checkout` return `503 donation_intake_disabled`; `/`, `/donar`, and `/donar/gracias` serve an empty locked-down document. Stripe's result page, status reads, webhook, acknowledgments, and Billing Portal remain available so an existing or monthly donor is not stranded. The Wompi webhook, issuance pipeline, and admin panel also keep working. The committed example sets it to `"true"` for `production`; unset or any other value leaves intake open. |
 | `MH_AUTH_URL_*` · `MH_RECEPCION_URL_*` · `MH_ANULACION_URL_*` | MH endpoints available only for the deployment's credential lane. `MH_AUTH_URL_TEST_FALLBACK` is the narrow central-auth fallback for TEST accounts after MH code 106; it is not a PROD transmission capability. |
 | `MH_USER_AGENT` | User-Agent header sent to MH. |
 | `EMISOR_CONFIG_JSON` | Demo/local issuer config lives in the selected private env file; set the real remote value as a Cloudflare secret. |
+| `STRIPE_RESTRICTED_KEY` | Server-only `rk_test_…` (staging) or `rk_live_…` (production) key with least privilege for Checkout Sessions and Billing Portal. Broad `sk_…` keys are rejected. |
+| `STRIPE_PUBLISHABLE_KEY` | Browser-safe `pk_test_…` (staging) or `pk_live_…` (production) key returned by the Worker only with a created Embedded Checkout Session; it must match the restricted key's environment. |
+| `STRIPE_WEBHOOK_SECRET` | Environment-specific `whsec_…` used to verify the exact raw body received at `/webhooks/stripe`. |
+| `STRIPE_WEBHOOK_SECRET_NEXT` | Write-only staged `whsec_…` for a dual-secret webhook rotation. It is accepted alongside the active secret until an OWNER explicitly promotes or cancels it. |
+| `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID` | Active `pmc_…` for the US donor lane. It enables dynamic eligible methods and excludes every BNPL/financing method without a code release. |
+| `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` for the Spanish monthly-gift management path. |
+| `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Exact US 501(c)(3) legal identity printed in the Spanish acknowledgment. |
+| `STRIPE_US_TIME_ZONE` | IANA timezone used to define the U.S. annual-statement calendar year and contribution dates. It is visible/editable only in the OWNER settings panel. |
+| `STRIPE_US_PHONE` · `STRIPE_US_WEBSITE` · `STRIPE_US_MAILING_ADDRESS` | U.S. organization contact block printed on the one-gift receipt and annual giving statement. Use newline-separated mailing-address lines. |
+| `STRIPE_US_SIGNER_NAME` · `STRIPE_US_SIGNER_TITLE` | Authorized representative printed on each immediate U.S. charitable receipt. |
+| `STRIPE_MOCK_MODE` | Deterministic local/staging-only transport when exactly `"1"`; production rejects it. Never place it in a production config. |
+| `STRIPE_API_PROXY_URL` | Optional loopback-only HTTP bridge for local `workerd` environments without outbound HTTPS. Run `npm run dev:stripe-api-proxy`; staging, production, non-loopback hosts, credentials, and URL paths are rejected. |
 
-**Build-time vars** - read by Vite and baked into the client bundle. Deployment scripts run the
-target-bound `npm run build:private -- --env staging|production` wrapper, which supplies the campaign
-from the owner-only deploy file; plain `npm run build` remains for public clones and tests. These are
-**not** Worker vars and are **not** secrets — anything set here ships to the browser:
-
-| Variable | Purpose |
-|---|---|
-| `VITE_GIVEBUTTER_CAMPAIGN` | Givebutter campaign slug for the **EE. UU.** donor door. It is the path segment in both `https://givebutter.com/embed/c/<slug>` (the framed giving form) and `https://givebutter.com/<slug>` (the hosted fallback link). Unset, the client falls back to the placeholder `example-campaign`, so a fresh clone runs without pointing at anyone's real campaign. Set it before building any deployment that serves US donors. |
+**Build-time boundary.** The target-bound `npm run build:private -- --env staging|production`
+wrapper validates the external release/branding file but injects no provider setting into Vite.
+Stripe keys, configuration IDs, legal identity, and BNPL policy are Worker runtime configuration.
+Only the publishable key is returned to the browser, together with a created Embedded Checkout Session; the
+restricted key and webhook secret never leave the Worker. Putting any of them in a `VITE_*` value is
+prohibited because it would hard-code the account environment into the public bundle. See the complete
+sandbox/live owner handoff in [`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
 
 Remote staging/production email delivery selects exactly one provider before dispatch. When both are
 configured, set `EMAIL_ARBITRARY_RECIPIENTS=true` only after the Cloudflare `send_email` binding can
@@ -675,29 +697,61 @@ Carnet de Residente.
 emitted CDE marks the receptor `codDomiciliado: 2` with `codPais` from the intent, and the PDF prints
 the complemento + country name instead of the placeholder catalog labels.
 
-**US donors → Givebutter (no CDE — deliberate).** When "Resido en el extranjero" is checked **and the
-país is Estados Unidos (`US`)**, the SV fiscal fields collapse entirely and the page embeds the
-**Givebutter** giving form for the deployment's configured campaign (see `VITE_GIVEBUTTER_CAMPAIGN` in
-the [configuration reference](#-configuration-reference)), run by the US 501(c)(3) that acts as the
-church's US giving vehicle. A US taxpayer needs a US-deductible receipt, not a Salvadoran CDE, and the
-gift belongs on the US entity's books — so these donations flow entirely through Givebutter and
-**never touch Wompi, the intent table, the webhook, or the CDE pipeline**. There is **no backend
-involvement**: no intent is created, no migration exists, and Givebutter emails its own tax receipt.
-The page embeds Givebutter's frameable `https://givebutter.com/embed/c/<campaign>` iframe directly —
-**not** the `widgets.givebutter.com` script — so third-party JavaScript does not execute on the app
-origin. (The hosted campaign page sends `x-frame-options: sameorigin`, which is why the embed URL is
-used rather than the campaign page.) The chosen amount plus a **"Donación mensual"**
-segmented control (**Única** | **Mensual**, a radiogroup whose accessible name is still
-"Donación mensual") are prefilled in the
-iframe URL — `frequency=monthly` is sent only for a monthly gift, and a one-time gift
-carries no frequency param. A short notice states that the embedded form is in English.
-The block's intro copy is composed at runtime from the deployment's own branding record,
-never from a literal, so a reusable build never ships someone else's organization name.
-If the embedded form does not load within ~4 s, a prominent **"Donar en GiveButter"**
-link to `https://givebutter.com/<campaign>?amount=…` (opens in a new tab) is shown; a small **"Done en GiveButter"** version of that link is always present beneath the
-form (GiveButter is the anchor text — no raw URL is shown). There is **no escape hatch** back to the SV
-form: the donor deliberately chose the EE. UU. door, and **"← Cambiar opción"** is the way back. The
-Givebutter constants (campaign, embed URL) live in `src/client/donation.ts`.
+**US donors → Stripe (no CDE — deliberate).** When the donor chooses the **EE. UU.** door, or checks
+"Resido en el extranjero" and selects Estados Unidos (`US`), the Salvadoran fiscal fields collapse.
+The donor explicitly chooses **Tipo de entrega** (**Diezmo** or **Ofrenda**) and **Frecuencia** (**Única** or
+**Mensual**) before reviewing the amount and continuing to Stripe's Spanish Embedded Checkout form inside
+the page on the connected US 501(c)(3) account. The Worker creates one idempotent Checkout Session for that
+selection and verifies it again through signed Stripe webhooks; the result page reads durable D1 state instead
+of trusting a browser return. A US taxpayer needs a US acknowledgment, not a Salvadoran CDE, so this lane
+**never touches Wompi, `donation_intents`, or the CDE pipeline**.
+
+The SV wizard does not mint a Wompi link on Step 1, while the donor's residence is still unknown. If an
+SV-path donor later selects Estados Unidos, the safety route preserves the truthful amount and Diezmo/Ofrenda
+choice, resets frequency to Única, and returns to an explicit U.S. Step 1. No Stripe Session exists until the
+donor reviews and confirms that U.S. step, so the correction cannot leave both a usable Wompi rail and a Stripe
+rail active for the same gift.
+
+The Worker creates an idempotent Embedded Checkout Session using a dedicated
+`payment_method_configuration`; browser code never sends `payment_method_types`. Stripe Checkout therefore
+shows every enabled method that is eligible for the donor, device, USD amount, and one-time/monthly
+flow, while the account configuration excludes BNPL and other financing methods. Stripe signs the
+raw webhook body; the Worker validates environment, API version, amount, currency, lane metadata,
+gift type, frequency, and identifiers before recording durable session/gift history in D1. The Spanish result page polls
+that durable state rather than trusting the browser redirect. A monthly invoice becomes one gift only
+after `invoice.paid` and a paid Stripe InvoicePayment prove a PaymentIntent-backed settlement; either
+event order converges once. Billing Portal provides the recurring-management path. The app sends a distinct Spanish
+501(c)(3) immediate acknowledgment with the configured legal name, EIN, authorized signer, contact block,
+type, frequency, date, amount, and no-goods-or-services statement through its durable email fence. Stripe's
+billing address and phone are retained as immutable donor evidence for the matching receipt and annual-statement
+layout. Its **Constancia anual de donaciones —
+EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
+`STRIPE_US_TIME_ZONE`; it is never a Salvadoran CDE or a Salvadoran annual dossier.
+
+The pure Stripe.js loader is invoked only after a real, non-mock U.S. Session reaches the embedded form.
+The chooser, SV/Wompi path, local mock, result page, and admin do not request `js.stripe.com`.
+
+Both test and live setup are owner-only and runtime-only. No Stripe secret or configuration ID is
+baked into the client; only the environment-matched publishable key is returned with a created Session.
+Dynamic-method/BNPL configuration, least-privilege key permissions, exact
+webhook events, sandbox gates, rollback, and the live handoff are documented in
+[`docs/stripe-us-giving.md`](docs/stripe-us-giving.md).
+
+**OWNER settings and live boundary.** **Configuración → Stripe EE. UU.** lists presence-only status for
+`STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
+`STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, `STRIPE_US_EIN`,
+`STRIPE_US_PHONE`, `STRIPE_US_WEBSITE`, `STRIPE_US_MAILING_ADDRESS`, `STRIPE_US_SIGNER_NAME`, and
+`STRIPE_US_SIGNER_TITLE`; it exposes only
+the non-secret `STRIPE_US_TIME_ZONE`. “Configurado” does not mean provider-verified: payment-method,
+Billing Portal, and account ownership remain unverified by the app. The derived `/webhooks/stripe` address
+and sanitized latest-event health are read-only; only a successfully processed, mode-matching event earns
+“Verificado por último evento procesado.” The staged secret is written, then explicitly promoted by an
+atomic swap (staged becomes active and the previous active remains staged for rollback) or cancelled.
+After a successful remote mutation whose status refresh fails, the panel locks further rotation until a
+successful refresh reconciles the displayed state.
+Local deterministic tests and this code do not modify a live Stripe account. Registering the live webhook,
+Payment Method Configuration, Billing Portal, and BNPL exclusion remains an owner cutover after sandbox UAT.
 
 Both doors fund the **same** mother church in El Salvador — the US 501(c)(3) is only the US giving
 vehicle, never a different beneficiary; the copy is residence-based, not
@@ -812,12 +866,13 @@ Configuración.
   America/El_Salvador (fixed UTC-6). Hand-issued CDEs (quick/advanced) are excluded **by design** —
   they carry no `wompi_event_id`. Responses are row- and byte-bounded, so an oversized date range
   asks you to narrow it instead of melting the Worker.
-- **Exportar** bundles the reporting suite: F960 exports (JSON/CSV/XLSX), the last 50 online
-  donations, the **Constancia anual de donaciones** (send each donor a branded annual summary of
-  accepted donations — per donor or in bulk, every send audited), **Contactos para CRM** (aggregate
+- **Exportar** keeps two legal reporting lanes: **El Salvador — CDE** retains F960 and its accepted-CDE
+  dossier, while **EE. UU. — Stripe** previews/sends the distinct **Constancia anual de donaciones —
+  EE. UU.** from settled Stripe gifts. It is not a Salvadoran fiscal document. The remaining suite includes
+  the last 50 online donations, **Contactos para CRM** (aggregate
   donor contact export for CRM import), and **Respaldos mensuales** (browse and verify the monthly
   R2 legal snapshots, download a month as a ZIP up to 32 MiB).
-- **Configuración** is organized in sections: Ambiente, MH, Wompi, **Notificaciones de
+- **Configuración** is organized in sections: Ambiente, MH, Wompi, **Stripe EE. UU.**, **Notificaciones de
   Wompi** (merchant notification emails and phones, plus whether Wompi itself emails
   the donor — off by default, because the app sends the CDE), Emisor, Correo,
   Plantillas, and **Marca** — white-label branding with a display name, accent color,
@@ -829,7 +884,7 @@ Configuración.
 | `VIEWER` (Consulta) | Read documents, online-donation intents, pre-CDE issuance failures, the contingency history, the audit log, and Analítica. |
 | `OPERATOR` (Operador) | Also: quick CDE, resend email, retry failures (CDE and pre-CDE), **fiscal corrections and reissue**, and initiate invalidation. |
 | `ADMIN` (Administrador) | Also: manage users and roles, the **Donantes** explorer and its CSV export, and the **Exportar** suite — F960, annual certificates, CRM contacts, monthly backups. |
-| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
+| `OWNER` (Propietario) | Also: the **Configuración** workspace — credentials, Stripe EE. UU. staged-secret controls, emission environment, email templates, Wompi notification settings, branding (Marca), alert address, and on-demand retention export. Only an owner may grant the owner role or modify another owner. |
 
 > Navigation is filtered by role for **Donantes**, **Exportar** (ADMIN) and
 > **Configuración** (OWNER). **Usuarios** is always visible but its body is
@@ -930,7 +985,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0031)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0040)</strong></summary>
 
 <br/>
 
@@ -947,6 +1002,15 @@ The safety model is the fiscal-claim model applied to a repair path:
 | `document_sequences` | Control-number counters per environment/prefix. Advanced by the issuance pipeline and, for fiscal corrections, by a database trigger that increments the counter inside the same statement transaction as the reservation and aborts unless it moves exactly one row. |
 | `email_deliveries` | Claimed email attempts, dispatch/outcome evidence, provider IDs, and PDF/JSON evidence hashes. |
 | `operational_alert_deliveries` | Incident- and recipient-scoped claims for alert email delivery. |
+| `stripe_checkout_sessions` | U.S.-lane Checkout intent and sanitized provider state, including independent monotonic checkout/subscription chronology. |
+| `stripe_webhook_events` | Signed Stripe event replay fence and sanitized processing outcome; raw webhook bodies are never retained. |
+| `stripe_provider_recovery_reads` | Bounded, leased admission records for public provider-backed Session recovery reads. |
+| `stripe_invoice_settlements` | Order-independent monthly invoice, paid InvoicePayment, and non-sensitive actual-method evidence; records a gift after the financial evidence validates and holds acknowledgment delivery until signed Charge evidence converges. |
+| `stripe_gifts` | Settled U.S. gift source of truth, including donor-selected type, non-sensitive actual payment-method classification, and durable refund/net state. |
+| `stripe_acknowledgment_deliveries` | Immutable, revisioned immediate 501(c)(3) acknowledgment/correction evidence and provider outcomes. |
+| `stripe_annual_statement_deliveries` | Immutable U.S. annual statement snapshots, revision lineage, leased claims, and dispatch outcomes. |
+| `stripe_retention_generations` | Internal monotonic membership ledger for bounded, referentially consistent Stripe retention exports. It is restore metadata maintained by triggers, is not an archive payload, and is rebuilt automatically when Stripe rows are restored. |
+| `stripe_invoice_settlement_retention_generations` | Internal monotonic membership ledger for monthly-invoice convergence snapshots. It is not an archive payload and is rebuilt automatically on restore. |
 | `contingency_batches` · `contingency_batch_lines` | Historical MH contingency batch submissions and per-CDE results (read-only). |
 | `app_settings` | Runtime settings (emission environment, email templates, branding, alert email). |
 | `users` · `sessions` · `password_reset_tokens` | Authentication, RBAC, and self-service password reset. |

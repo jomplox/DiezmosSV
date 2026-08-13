@@ -18,6 +18,11 @@ export interface EmailDeliveryResult {
   providerDeliveryId: string | null;
 }
 
+export interface StripeAcknowledgmentDeliveryResult {
+  providerResponse: unknown;
+  providerDeliveryId: string | null;
+}
+
 export function emailDeliveryAuditEvidence(
   result: EmailDeliveryResult
 ): Omit<EmailDeliveryResult, "providerResponse"> {
@@ -299,6 +304,77 @@ export class EmailService {
     ]);
   }
 
+  async sendStripeAcknowledgment(
+    input: {
+      toEmail: string;
+      subject: string;
+      text: string;
+      html: string;
+      pdfBytes: Uint8Array;
+      filename: string;
+      idempotencyKey: string;
+    },
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<StripeAcknowledgmentDeliveryResult> {
+    const payload: EmailPayload = {
+      from: this.resolveFrom(),
+      to: input.toEmail,
+      idempotencyKey: input.idempotencyKey,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: [{
+        filename: input.filename,
+        contentType: "application/pdf",
+        contentBase64: bytesToBase64(input.pdfBytes)
+      }]
+    };
+    const providerResponse = await this.dispatch(payload, [{
+      filename: input.filename,
+      type: "application/pdf",
+      disposition: "attachment",
+      content: input.pdfBytes
+    }], beforeProviderDispatch);
+    return {
+      providerResponse,
+      providerDeliveryId: deliveryIdFromProvider(providerResponse)
+    };
+  }
+
+  async sendStripeAnnualStatement(
+    input: {
+      toEmail: string;
+      subject: string;
+      text: string;
+      html: string;
+      pdfBytes: Uint8Array;
+      filename: string;
+      idempotencyKey: string;
+    },
+    beforeProviderDispatch?: () => void | Promise<void>
+  ): Promise<StripeAcknowledgmentDeliveryResult> {
+    const payload: EmailPayload = {
+      from: this.resolveFrom(),
+      to: input.toEmail,
+      idempotencyKey: input.idempotencyKey,
+      subject: input.subject,
+      text: input.text,
+      html: input.html,
+      attachments: [{
+        filename: input.filename,
+        contentType: "application/pdf",
+        contentBase64: bytesToBase64(input.pdfBytes)
+      }]
+    };
+    const providerResponse = await this.dispatch(payload, [{
+      filename: input.filename,
+      type: "application/pdf",
+      disposition: "attachment",
+      content: input.pdfBytes
+    }], beforeProviderDispatch);
+    return { providerResponse, providerDeliveryId: deliveryIdFromProvider(providerResponse) };
+  }
+
   async sendPasswordReset(toEmail: string, name: string, link: string, expiresMinutes: number): Promise<unknown> {
     const branding = this.resolveBranding();
     const payload: EmailPayload = {
@@ -344,6 +420,7 @@ export class EmailService {
   ): Promise<unknown> {
     assertSafeEmailSubject(payload.subject);
     if (isMockMode(this.env)) {
+      await beforeProviderDispatch?.();
       return {
         provider: "mock-email",
         messageId: await hashProviderDeliveryId("mock-email-accepted")

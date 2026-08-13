@@ -197,6 +197,12 @@ export class InMemoryD1 {
   readonly settings: Array<Record<string, unknown>> = [];
   readonly resetTokens: Array<Record<string, unknown>> = [];
   readonly donationIntents: Array<Record<string, unknown>> = [];
+  readonly stripeCheckoutSessions: Array<Record<string, unknown>> = [];
+  readonly stripeWebhookEvents: Array<Record<string, unknown>> = [];
+  readonly stripeGifts: Array<Record<string, unknown>> = [];
+  readonly stripeInvoiceSettlements: Array<Record<string, unknown>> = [];
+  readonly stripeAcknowledgmentDeliveries: Array<Record<string, unknown>> = [];
+  readonly stripeAnnualStatementDeliveries: Array<Record<string, unknown>> = [];
   documentLookupCount = 0;
   wompiIssuanceFailureLookupCount = 0;
   wompiIssuanceRetryClaimCount = 0;
@@ -401,6 +407,40 @@ export class Statement {
   }
 
   async first<T>(): Promise<T | null> {
+    if (
+      this.sql.includes("MAX(generation)") &&
+      this.sql.includes("FROM stripe_retention_generations")
+    ) {
+      return {
+        maxGeneration: "0",
+        maxInvoiceSettlementGeneration: "0",
+        materialMutationEpoch: "0"
+      } as T;
+    }
+    if (
+      this.sql.includes("verified_secret_slot = 'NEXT'")
+      && this.sql.includes("verified_secret_generation = ?")
+    ) {
+      const [livemode, generation, receivedAfter] = this.args;
+      return (this.db.stripeWebhookEvents.find((row) =>
+        row.status === "PROCESSED"
+        && row.livemode === livemode
+        && row.verified_secret_slot === "NEXT"
+        && row.verified_secret_generation === generation
+        && String(row.received_at) >= String(receivedAfter)
+      ) ?? null) as T | null;
+    }
+    if (
+      this.sql.includes("FROM stripe_webhook_events") &&
+      this.sql.includes("ORDER BY received_at DESC")
+    ) {
+      return (this.db.stripeWebhookEvents
+        .slice()
+        .sort((left, right) =>
+          String(right.received_at).localeCompare(String(left.received_at)) ||
+          String(right.id).localeCompare(String(left.id))
+        )[0] ?? null) as T | null;
+    }
     if (
       this.sql.includes("INSERT INTO operational_alert_deliveries") &&
       this.sql.includes("RETURNING id, claim_token")
@@ -1830,6 +1870,32 @@ export class Statement {
 
   async all<T>(): Promise<{ results: T[] }> {
     if (
+      this.sql.includes("FROM stripe_acknowledgment_deliveries AS delivery") &&
+      this.sql.includes("delivery.status IN ('FAILED', 'REVIEW')")
+    ) {
+      const rows = this.db.stripeAcknowledgmentDeliveries
+        .filter((row) => row.status === "FAILED" || row.status === "REVIEW")
+        .sort(
+          (left, right) =>
+            String(right.updated_at).localeCompare(String(left.updated_at)) ||
+            String(right.id).localeCompare(String(left.id))
+        )
+        .slice(0, 50)
+        .map((row) => ({
+          id: row.id,
+          revision: row.revision,
+          kind: row.kind,
+          status: row.status,
+          amount_cents: row.amount_cents,
+          evidence_refunded_amount_cents:
+            row.evidence_refunded_amount_cents ?? row.refunded_amount_cents ?? 0,
+          failure_code: row.failure_code,
+          created_at: row.created_at,
+          updated_at: row.updated_at
+        }));
+      return { results: rows as T[] };
+    }
+    if (
       this.sql.includes("FROM dte_documents") &&
       this.sql.includes("post_accept_finalized_at IS NULL") &&
       this.sql.includes("ORDER BY created_at ASC, id ASC LIMIT ?")
@@ -2048,6 +2114,19 @@ export class Statement {
           };
         });
       return { results: rows as T[] };
+    }
+    if (this.sql.includes("ORDER BY retention_generation.generation ASC")) {
+      const table = retentionTableFor(this.db, this.sql) ?? [];
+      const afterGeneration = this.sql.includes("retention_generation.generation > ?")
+        ? Number(this.args[0])
+        : 0;
+      const limit = Number(this.args.at(-1) ?? 500);
+      return {
+        results: table
+          .map((row, index) => ({ ...row, __retention_generation: String(index + 1) }))
+          .filter((row) => Number(row.__retention_generation) > afterGeneration)
+          .slice(0, limit) as T[]
+      };
     }
     const orderByMatch = this.sql.match(/ORDER BY (created_at|received_at) ASC, id ASC LIMIT \?/);
     if (orderByMatch) {
@@ -2502,6 +2581,38 @@ export class Statement {
 
   async run(): Promise<StatementRunResult> {
     let changes = 0;
+    if (
+      this.sql.includes("UPDATE stripe_acknowledgment_deliveries") &&
+      this.sql.includes("owner_confirmed_not_sent")
+    ) {
+      const resolution = String(this.args[0]);
+      const now = String(this.args[2]);
+      const id = String(this.args[11]);
+      const row = this.db.stripeAcknowledgmentDeliveries.find(
+        (candidate) => candidate.id === id &&
+          (candidate.status === "FAILED" || candidate.status === "REVIEW")
+      );
+      const evidenceRefunded = Number(
+        row?.evidence_refunded_amount_cents ?? row?.refunded_amount_cents ?? 0
+      );
+      const currentRefunded = Number(row?.refunded_amount_cents ?? evidenceRefunded);
+      if (row && (resolution === "CONFIRMED_SENT" || evidenceRefunded === currentRefunded)) {
+        row.status = resolution === "CONFIRMED_SENT" ? "SENT" : "FAILED";
+        row.processing_claim_id = null;
+        row.dispatch_started_at = resolution === "CONFIRMED_SENT"
+          ? row.dispatch_started_at ?? now
+          : null;
+        row.provider_id_hash = resolution === "CONFIRMED_SENT"
+          ? row.provider_id_hash ?? "owner-confirmed"
+          : null;
+        row.failure_code = resolution === "CONFIRMED_SENT" ? null : "owner_confirmed_not_sent";
+        row.retry_safe = resolution === "CONFIRMED_NOT_SENT" ? 1 : 0;
+        row.next_attempt_at = resolution === "CONFIRMED_NOT_SENT" ? now : null;
+        row.sent_at = resolution === "CONFIRMED_SENT" ? row.sent_at ?? now : null;
+        row.updated_at = now;
+        changes = 1;
+      }
+    }
     if (
       this.sql.includes("UPDATE operational_alert_deliveries") &&
       this.sql.includes("SET status = ?, finalized_at = ?")
@@ -4238,6 +4349,12 @@ export function retentionTableFor(db: InMemoryD1, sql: string): Array<Record<str
   if (sql.includes("FROM contingency_periods")) return db.contingencies;
   if (sql.includes("FROM contingency_batch_lines")) return db.contingencyBatchLines;
   if (sql.includes("FROM contingency_batches")) return db.contingencyBatches;
+  if (sql.includes("JOIN stripe_checkout_sessions AS snapshot")) return db.stripeCheckoutSessions;
+  if (sql.includes("JOIN stripe_webhook_events AS snapshot")) return db.stripeWebhookEvents;
+  if (sql.includes("JOIN stripe_gifts AS snapshot")) return db.stripeGifts;
+  if (sql.includes("JOIN stripe_invoice_settlements AS snapshot")) return db.stripeInvoiceSettlements;
+  if (sql.includes("JOIN stripe_acknowledgment_deliveries AS snapshot")) return db.stripeAcknowledgmentDeliveries;
+  if (sql.includes("JOIN stripe_annual_statement_deliveries AS snapshot")) return db.stripeAnnualStatementDeliveries;
   return null;
 }
 

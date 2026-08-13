@@ -61,14 +61,27 @@ const RETENTION_DOWNLOAD_TABLES = new Set<string>([
 ]);
 
 export async function isManifestedBackupTable(env: Env, month: string, table: string): Promise<boolean> {
+  return (await manifestedBackupTableKey(env, month, table)) !== null;
+}
+
+export async function manifestedBackupTableKey(
+  env: Env,
+  month: string,
+  table: string
+): Promise<string | null> {
   if (!RETENTION_DOWNLOAD_TABLES.has(table)) {
-    return false;
+    return null;
   }
   const manifest = await getManifest(env, month);
-  return manifest !== null
-    && typeof manifest.tables === "object"
-    && manifest.tables !== null
-    && Object.hasOwn(manifest.tables, table);
+  if (
+    manifest === null
+    || typeof manifest.tables !== "object"
+    || manifest.tables === null
+    || !Object.hasOwn(manifest.tables, table)
+  ) {
+    return null;
+  }
+  return tableObjectKey(month, table, manifest.tables[table]);
 }
 
 // Ground truth is the set of manifests in R2, never the audit log. A month is
@@ -135,7 +148,8 @@ export async function verifyBackupMonth(env: Env, repo: Repository, month: strin
 
   const files: BackupVerifyFile[] = [];
   for (const [table, entry] of Object.entries(manifest.tables)) {
-    const object = await env.ARCHIVE.get(retentionTableKey(month, table));
+    const key = tableObjectKey(month, table, entry);
+    const object = key ? await env.ARCHIVE.get(key) : null;
     if (!object) {
       files.push({ table, ok: false, expected: entry.sha256, actual: "" });
       continue;
@@ -202,8 +216,9 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
   }
 
   const entries: Array<{ name: string; data: Uint8Array }> = [{ name: "manifest.json", data: manifestBytes }];
-  for (const table of Object.keys(manifest.tables)) {
-    const object = await env.ARCHIVE.get(retentionTableKey(month, table));
+  for (const [table, manifestEntry] of Object.entries(manifest.tables)) {
+    const key = tableObjectKey(month, table, manifestEntry);
+    const object = key ? await env.ARCHIVE.get(key) : null;
     if (!object) {
       continue;
     }
@@ -214,6 +229,23 @@ export async function collectBackupMonthObjects(env: Env, month: string): Promis
     entries.push({ name: `${table}.ndjson`, data });
   }
   return entries;
+}
+
+function tableObjectKey(
+  month: string,
+  table: string,
+  entry: RetentionManifest["tables"][string]
+): string | null {
+  if (!entry.key) {
+    return retentionTableKey(month, table);
+  }
+  const prefix = `${RETENTION_KEY_ROOT}/${month.slice(0, 4)}/${month}/runs/`;
+  const suffix = `/${table}.ndjson`;
+  if (!entry.key.startsWith(prefix) || !entry.key.endsWith(suffix)) {
+    return null;
+  }
+  const runId = entry.key.slice(prefix.length, -suffix.length);
+  return /^[A-Za-z0-9_-]{1,100}$/.test(runId) ? entry.key : null;
 }
 
 function enforceBackupArchiveLimit(totalBytes: number): void {
