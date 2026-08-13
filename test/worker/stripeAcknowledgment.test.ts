@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PDFDocument, PDFPage } from "pdf-lib";
@@ -10,6 +11,7 @@ import {
   renderStripeAcknowledgmentPdf,
   stripeAcknowledgmentContent
 } from "../../src/worker/services/stripeAcknowledgment";
+import * as stripePdfAssets from "../../src/worker/services/stripePdfAssets";
 import { Repository } from "../../src/worker/storage/repository";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
@@ -17,6 +19,7 @@ import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 
 describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
+  const directories: string[] = [];
   let database: ReturnType<typeof migratedDatabase>;
   let repo: Repository;
   let workerEnv: Env;
@@ -38,6 +41,18 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     database.close();
+    directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }));
+  });
+
+  it("embeds the approved logo asset for the immediate receipt", () => {
+    const assets = stripePdfAssets as Record<string, unknown>;
+    const bytes = assets.STRIPE_RECEIPT_ELIM_LOGO_BYTES as Uint8Array;
+
+    expect(assets.STRIPE_RECEIPT_ELIM_LOGO_SHA256)
+      .toBe("57bc3660089f4046d42ab3598c1be039d0911a9d0540f0355e9227d42815fac1");
+    expect(createHash("sha256").update(bytes).digest("hex"))
+      .toBe("57bc3660089f4046d42ab3598c1be039d0911a9d0540f0355e9227d42815fac1");
+    expect(pngDimensions(bytes)).toEqual({ width: 300, height: 120 });
   });
 
   it("renders escaped Spanish substantiation copy with all legally relevant facts", () => {
@@ -90,7 +105,8 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(content.text).not.toContain("Fecha: 1 de enero de 2026");
   });
 
-  it("renders the supplied one-page U.S. charitable receipt composition", async () => {
+  it("renders the approved logo at readable scale on a U.S. Letter charitable receipt", async () => {
+    const drawImage = vi.spyOn(PDFPage.prototype, "drawImage");
     const drawRectangle = vi.spyOn(PDFPage.prototype, "drawRectangle");
     const drawText = vi.spyOn(PDFPage.prototype, "drawText");
     const bytes = await renderStripeAcknowledgmentPdf({
@@ -118,8 +134,20 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     });
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPageCount()).toBe(1);
+    expect(pdf.getPage(0).getMediaBox()).toEqual({ x: 0, y: 0, width: 612, height: 792 });
+
+    expect(drawImage).toHaveBeenCalledTimes(1);
+    const logoCall = drawImage.mock.calls[0];
+    if (!logoCall) throw new Error("Receipt logo was not drawn");
+    const [logo, logoOptions] = logoCall;
+    if (!logoOptions) throw new Error("Receipt logo dimensions were not supplied");
+    expect({ width: logo.width, height: logo.height }).toEqual({ width: 300, height: 120 });
+    expect(logoOptions.width).toBeGreaterThanOrEqual(180);
+    expect(logoOptions.height).toBeGreaterThanOrEqual(60);
+    expect(logoOptions.width! / logoOptions.height!).toBeCloseTo(300 / 120, 8);
 
     const directory = mkdtempSync(join(tmpdir(), "stripe-ack-pdf-"));
+    directories.push(directory);
     const pdfPath = join(directory, "receipt.pdf");
     writeFileSync(pdfPath, bytes);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -153,6 +181,8 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       "2885 Sanford Ave SW, PMB 41357 Grandville, MI 49418, USA",
       expect.objectContaining({ y: 177.3, size: 9.5 })
     ]);
+    const salutation = drawText.mock.calls.find(([text]) => text === "Dear Edith Anaya,");
+    expect(logoOptions.y).toBeGreaterThan((salutation?.[1]?.y ?? Number.POSITIVE_INFINITY) + 24);
   });
 
   it("attaches the immutable one-page receipt before crossing the email provider boundary", async () => {
@@ -232,6 +262,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const pdf = await PDFDocument.load(pdfBytes!);
     expect(pdf.getPageCount()).toBe(1);
     const directory = mkdtempSync(join(tmpdir(), "stripe-ack-wiring-"));
+    directories.push(directory);
     const pdfPath = join(directory, "acknowledgment.pdf");
     writeFileSync(pdfPath, pdfBytes!);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -517,6 +548,11 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     });
   });
 });
+
+function pngDimensions(bytes: Uint8Array): { width: number; height: number } {
+  const buffer = Buffer.from(bytes);
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
 
 async function seedGift(repo: Repository): Promise<void> {
   await repo.reserveStripeCheckout({

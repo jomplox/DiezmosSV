@@ -47,12 +47,15 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
     donorName: "Preview Annual Donor 517",
     donorEmail: "preview-annual-donor@example.org",
     document: {
-      rendererVersion: "stripe-annual-statement-pdf:v3",
+      rendererVersion: "stripe-annual-statement-pdf:v4",
       legalName: "Preview Annual Legal Foundation",
       ein: "51-7000517",
       timeZone: "America/New_York",
       accentColor: "#0f766e",
-      logo: null,
+      logo: {
+        format: "png",
+        hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c"
+      },
       organizationContact: {
         phone: "+1 555 010 0517",
         website: "https://preview-annual.example.org",

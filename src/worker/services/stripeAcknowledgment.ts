@@ -16,10 +16,11 @@ import { resolveStripeConfiguration } from "./stripeDonations";
 import { stripeUsTimeZone } from "./stripeAnnualStatement";
 import { logWorkerError } from "./observability";
 import { pdfSafeText } from "./pdf";
-import { STRIPE_RECEIPT_LOGO_BYTES } from "./stripePdfAssets";
+import { STRIPE_RECEIPT_ELIM_LOGO_BYTES } from "./stripePdfAssets";
 
-export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v2" as const;
-const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v1" as const;
+export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v3" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2 = "stripe-acknowledgment-pdf:v2" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1 = "stripe-acknowledgment-pdf:v1" as const;
 
 export interface StripeAcknowledgmentContentInput {
   donorName: string | null;
@@ -129,12 +130,12 @@ export async function renderStripeAcknowledgmentPdf(
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);
-  const logo = await pdf.embedPng(STRIPE_RECEIPT_LOGO_BYTES);
+  const logo = await pdf.embedPng(STRIPE_RECEIPT_ELIM_LOGO_BYTES);
   const contentX = 113.22;
   const contentWidth = 385.56;
   const muted = rgb(0.28, 0.28, 0.28);
 
-  page.drawImage(logo, { x: 224.3, y: 713.5, width: 163.75, height: 34.38 });
+  page.drawImage(logo, { x: 201, y: 684, width: 210, height: 84 });
 
   drawPdfText(page, `Dear ${input.donorName?.trim() || "Donor"},`, {
     x: contentX,
@@ -352,7 +353,10 @@ type StripeAcknowledgmentPdfEvidence = Omit<
   RenderStripeAcknowledgmentPdfInput,
   "organizationPhone" | "organizationWebsite" | "organizationMailingAddress" | "signerName" | "signerTitle"
 > & {
-  rendererVersion: typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION;
+  rendererVersion:
+    | typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+    | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
+    | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1;
   organizationPhone?: string;
   organizationWebsite?: string;
   organizationMailingAddress?: string[];
@@ -511,7 +515,7 @@ export async function deliverNextStripeAcknowledgment(
   let providerDispatchStarted = false;
   try {
     const pdfInput = completeStripeAcknowledgmentPdfInput(evidence.pdf ?? {
-      rendererVersion: LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION,
+      rendererVersion: LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1,
       donorName: claim.donor_name,
       amountCents: claim.amount_cents,
       refundedAmountCents: evidence.refundedAmountCents,
@@ -592,7 +596,8 @@ export async function deliverNextStripeAcknowledgment(
 function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAcknowledgmentPdfEvidence {
   if (!isRecord(value)) return false;
   return (value.rendererVersion === STRIPE_ACKNOWLEDGMENT_PDF_VERSION
-      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION)
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V1)
     && (value.donorName === null || typeof value.donorName === "string")
     && Number.isSafeInteger(value.amountCents)
     && Number(value.amountCents) >= 0

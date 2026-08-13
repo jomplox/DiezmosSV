@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PDFDocument, PDFPage } from "pdf-lib";
@@ -13,12 +14,19 @@ import {
   stripeUsCurrentYear,
   stripeUsYearWindow
 } from "../../src/worker/services/stripeAnnualStatement";
+import * as stripePdfAssets from "../../src/worker/services/stripePdfAssets";
 import { Repository } from "../../src/worker/storage/repository";
 import type { StripeAnnualStatementGift } from "../../src/worker/storage/repository/stripeAnnualStatements";
 import type { Env } from "../../src/worker/types";
 import { env, InMemoryD1 } from "./support/inMemoryD1";
 import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
+
+const temporaryDirectories: string[] = [];
+
+afterEach(() => {
+  temporaryDirectories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }));
+});
 
 describe("Stripe U.S. annual statement calendar", () => {
   it("fails closed without a valid configured IANA zone outside Stripe mock mode", () => {
@@ -44,6 +52,57 @@ describe("Stripe U.S. annual statement calendar", () => {
 });
 
 describe("Stripe U.S. annual statement snapshot and rendering", () => {
+  it("embeds the approved logo asset for annual legal statements", () => {
+    const assets = stripePdfAssets as Record<string, unknown>;
+    const bytes = assets.STRIPE_ANNUAL_FMCE_LOGO_BYTES as Uint8Array;
+
+    expect(assets.STRIPE_ANNUAL_FMCE_LOGO_SHA256)
+      .toBe("ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c");
+    expect(createHash("sha256").update(bytes).digest("hex"))
+      .toBe("ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c");
+    expect(pngDimensions(bytes)).toEqual({ width: 2393, height: 672 });
+  });
+
+  it("keeps the fixed approved logo beside the title on U.S. Letter despite a runtime raster", async () => {
+    const drawImage = vi.spyOn(PDFPage.prototype, "drawImage");
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "logo@example.org",
+      donorName: "Logo Donor",
+      donorEmail: "logo@example.org",
+      document: statementDocument(),
+      gifts: [gift({ id: "gift_logo" })]
+    });
+    const runtimeRaster = Uint8Array.from(Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64"
+    ));
+
+    const bytes = await renderStripeAnnualStatementPdf({
+      snapshot,
+      issuedOn: "2026-01-10T12:00:00.000Z",
+      corrected: false,
+      logo: { format: "png", bytes: runtimeRaster }
+    });
+    const pdf = await PDFDocument.load(bytes);
+    expect(pdf.getPages().map((page) => page.getMediaBox()))
+      .toEqual([{ x: 0, y: 0, width: 612, height: 792 }]);
+
+    expect(drawImage).toHaveBeenCalledTimes(1);
+    const logoCall = drawImage.mock.calls[0];
+    if (!logoCall) throw new Error("Annual-statement logo was not drawn");
+    const [logo, logoOptions] = logoCall;
+    if (!logoOptions) throw new Error("Annual-statement logo dimensions were not supplied");
+    expect({ width: logo.width, height: logo.height }).toEqual({ width: 2393, height: 672 });
+    expect(logoOptions.width).toBeGreaterThanOrEqual(180);
+    expect(logoOptions.height).toBeGreaterThanOrEqual(50);
+    expect(logoOptions.width! / logoOptions.height!).toBeCloseTo(2393 / 672, 8);
+    const title = drawText.mock.calls.find(([text]) => text === "Annual Giving Statement");
+    expect(logoOptions.x! + logoOptions.width!).toBeLessThanOrEqual(title?.[1]?.x ?? 0);
+  });
+
   it("hashes normalized identity and ordered durable refund facts, including a zero-net refund", async () => {
     const gifts = [
       gift({ id: "gift_b", settled_at: "2025-07-01T12:00:00.000Z", gift_type: "OFFERING", frequency: "MONTHLY", amount_cents: 5_000, refunded_amount_cents: 5_000, status: "REFUNDED" }),
@@ -158,6 +217,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       corrected: true
     });
     const directory = mkdtempSync(join(tmpdir(), "stripe-annual-"));
+    temporaryDirectories.push(directory);
     const pdfPath = join(directory, "statement.pdf");
     writeFileSync(pdfPath, bytes);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -232,8 +292,13 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     });
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPageCount()).toBe(2);
+    expect(pdf.getPages().map((page) => page.getMediaBox())).toEqual([
+      { x: 0, y: 0, width: 612, height: 792 },
+      { x: 0, y: 0, width: 612, height: 792 }
+    ]);
 
     const directory = mkdtempSync(join(tmpdir(), "stripe-annual-layout-"));
+    temporaryDirectories.push(directory);
     const pdfPath = join(directory, "statement.pdf");
     writeFileSync(pdfPath, bytes);
     const pageOne = execFileSync("pdftotext", ["-f", "1", "-l", "1", "-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -511,6 +576,7 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     const pdf = await PDFDocument.load(pdfBytes!);
     expect(pdf.getPageCount()).toBe(1);
     const directory = mkdtempSync(join(tmpdir(), "stripe-annual-wiring-"));
+    temporaryDirectories.push(directory);
     const pdfPath = join(directory, "annual-statement.pdf");
     writeFileSync(pdfPath, pdfBytes!);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -711,6 +777,7 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       attachments: Array<{ content: Uint8Array }>;
     };
     const directory = mkdtempSync(join(tmpdir(), "stripe-annual-issue-date-"));
+    temporaryDirectories.push(directory);
     const pdfPath = join(directory, "statement.pdf");
     writeFileSync(pdfPath, message.attachments[0].content);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
@@ -1095,6 +1162,11 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
   });
 });
 
+function pngDimensions(bytes: Uint8Array): { width: number; height: number } {
+  const buffer = Buffer.from(bytes);
+  return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
+}
+
 function statementDocument(overrides: Partial<{
   legalName: string;
   ein: string;
@@ -1113,12 +1185,15 @@ function statementDocument(overrides: Partial<{
   };
 }> = {}) {
   return {
-    rendererVersion: "stripe-annual-statement-pdf:v3" as const,
+    rendererVersion: "stripe-annual-statement-pdf:v4" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",
     accentColor: "#0f766e",
-    logo: null,
+    logo: {
+      format: "png" as const,
+      hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c"
+    },
     email: overrides.email ?? {
       organizationName: "ExamplePerson1",
       supportEmail: "legacy-contact-1@example.com",

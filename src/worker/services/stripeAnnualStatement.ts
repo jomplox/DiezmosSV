@@ -22,20 +22,22 @@ import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
 import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./emailSender";
 import {
-  loadPdfBrandingLogo,
   pdfSafeText,
   type PdfBrandingLogo
 } from "./pdf";
 import { logWorkerError } from "./observability";
 import { resolveStripeConfiguration } from "./stripeDonations";
-import { STRIPE_ANNUAL_LOGO_BYTES } from "./stripePdfAssets";
+import {
+  STRIPE_ANNUAL_FMCE_LOGO_BYTES,
+  STRIPE_ANNUAL_FMCE_LOGO_SHA256
+} from "./stripePdfAssets";
 
 export const STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE = 50;
 export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
-export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v3" as const;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v4" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -254,6 +256,7 @@ export interface RenderStripeAnnualStatementPdfInput {
   snapshot: StripeAnnualStatementSnapshot;
   issuedOn: string;
   corrected: boolean;
+  // Retained as a compatibility no-op for callers replaying older render inputs.
   logo?: PdfBrandingLogo | null;
 }
 
@@ -264,7 +267,7 @@ export async function renderStripeAnnualStatementPdf(
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
   const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);
-  const logo = await annualStatementLogo(pdf, input.logo);
+  const logo = await annualStatementLogo(pdf);
   const firstPageItems = input.snapshot.items.slice(0, 5);
   const continuationItems = input.snapshot.items.slice(5);
   const pages: StripeAnnualStatementItem[][] = [firstPageItems];
@@ -498,8 +501,7 @@ export async function sendStripeAnnualStatements(
       const pdfBytes = await renderStripeAnnualStatementPdf({
         snapshot,
         issuedOn: claim.updated_at,
-        corrected,
-        logo: context.logo
+        corrected
       });
       const finalContext = await loadStripeAnnualStatementContext(env, repo, year, livemode);
       const rechecked = await snapshotForTarget(
@@ -630,7 +632,6 @@ async function loadStripeAnnualStatementContext(
 ): Promise<{
   window: StripeUsYearWindow;
   branding: Awaited<ReturnType<typeof loadEmailBranding>>;
-  logo: PdfBrandingLogo | null;
   document: StripeAnnualStatementDocumentEvidence;
 }> {
   const window = stripeUsYearWindow(env, year);
@@ -638,24 +639,20 @@ async function loadStripeAnnualStatementContext(
   if (configuration.livemode !== livemode) {
     throw new StripeAnnualStatementConfigurationError("El ambiente solicitado no coincide con la configuración de Stripe.");
   }
-  const [settings, logo] = await Promise.all([
-    loadStripeAnnualStatementSettingEvidence(repo),
-    loadPdfBrandingLogo(env)
-  ]);
+  const settings = await loadStripeAnnualStatementSettingEvidence(repo);
   const branding = await loadEmailBranding({
     getSetting: async (key) => settingEvidenceValue(settings, key)
   }, env);
   return {
     window,
     branding,
-    logo,
     document: {
       rendererVersion: STRIPE_ANNUAL_STATEMENT_PDF_VERSION,
       legalName: configuration.legalName,
       ein: configuration.ein,
       timeZone: window.timeZone,
       accentColor: branding.brandColor,
-      logo: logo ? { format: logo.format, hash: await sha256Hex(logo.bytes) } : null,
+      logo: { format: "png", hash: STRIPE_ANNUAL_FMCE_LOGO_SHA256 },
       email: {
         organizationName: branding.organizationName,
         supportEmail: branding.supportEmail,
@@ -756,21 +753,8 @@ function previewDonor(target: StripeAnnualStatementDonorTarget): StripeAnnualSta
   };
 }
 
-async function annualStatementLogo(
-  pdf: PDFDocument,
-  configured: PdfBrandingLogo | null | undefined
-): Promise<PDFImage> {
-  if (configured) {
-    try {
-      return configured.format === "png"
-        ? await pdf.embedPng(configured.bytes)
-        : await pdf.embedJpg(configured.bytes);
-    } catch {
-      // The approved built-in mark keeps the statement renderable when an
-      // operator-uploaded raster is corrupt or unsupported by pdf-lib.
-    }
-  }
-  return pdf.embedPng(STRIPE_ANNUAL_LOGO_BYTES);
+async function annualStatementLogo(pdf: PDFDocument): Promise<PDFImage> {
+  return pdf.embedPng(STRIPE_ANNUAL_FMCE_LOGO_BYTES);
 }
 
 function drawAnnualCover(
@@ -785,10 +769,10 @@ function drawAnnualCover(
   const right = 566.646;
   const preparedX = 316.426;
   const gray = rgb(0.32, 0.32, 0.32);
-  const logoFit = Math.min(75 / logo.width, 30 / logo.height);
+  const logoFit = Math.min(200 / logo.width, 58 / logo.height);
   page.drawImage(logo, {
     x: left,
-    y: 716,
+    y: 706,
     width: logo.width * logoFit,
     height: logo.height * logoFit
   });

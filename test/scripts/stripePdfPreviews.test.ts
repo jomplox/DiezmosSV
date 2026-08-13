@@ -13,7 +13,7 @@ describe("Stripe U.S. PDF preview command", () => {
     directories.splice(0).forEach((directory) => rmSync(directory, { recursive: true, force: true }));
   });
 
-  it("renders production receipt and annual statement previews with unmistakable sample values", async () => {
+  it("renders production receipt and annual statement previews as U.S. Letter with unmistakable sample values", async () => {
     const directory = mkdtempSync(join(tmpdir(), "stripe-us-pdf-previews-"));
     directories.push(directory);
 
