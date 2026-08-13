@@ -622,7 +622,7 @@ export interface StripeChargePaymentMethodRecord {
   stripe_payment_intent_id: string;
   payment_method_type: string;
   payment_method_wallet: string | null;
-  payment_method_charge_id: string;
+  payment_method_charge_id: string | null;
   payment_method_amount_cents: number;
   livemode: 0 | 1;
 }
@@ -1038,7 +1038,7 @@ export async function recordStripePaymentMethodForCheckout(
     livemode: boolean;
     methodType: string;
     methodWallet: string | null;
-    chargeId: string;
+    chargeId: string | null;
     eventId: string;
     now: string;
   }
@@ -1053,7 +1053,7 @@ export async function recordStripePaymentMethodForCheckout(
         AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
           OR (payment_method_type = ?
             AND payment_method_wallet IS ?
-            AND payment_method_charge_id = ?
+            AND payment_method_charge_id IS ?
             AND payment_method_event_id = ?))
       RETURNING *`
   ).bind(
@@ -1081,7 +1081,7 @@ export async function recordStripePaymentMethodForCheckout(
         AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
           OR (payment_method_type = ?
             AND payment_method_wallet IS ?
-            AND payment_method_charge_id = ?
+            AND payment_method_charge_id IS ?
             AND payment_method_event_id = ?))
       RETURNING *`
   ).bind(
@@ -1108,7 +1108,7 @@ export async function recordStripeWebhookPaymentMethodEvidence(
     livemode: boolean;
     methodType: string;
     methodWallet: string | null;
-    chargeId: string;
+    chargeId: string | null;
     now: string;
   }
 ): Promise<StripeChargePaymentMethodRecord> {
@@ -1121,7 +1121,7 @@ export async function recordStripeWebhookPaymentMethodEvidence(
         AND livemode = ? AND status = 'PROCESSING'
         AND (payment_method_type IS NULL OR (
           stripe_payment_intent_id = ? AND payment_method_type = ?
-          AND payment_method_wallet IS ? AND payment_method_charge_id = ?
+          AND payment_method_wallet IS ? AND payment_method_charge_id IS ?
           AND payment_method_amount_cents = ?
         ))
       RETURNING id AS event_id, stripe_payment_intent_id,
@@ -1171,7 +1171,7 @@ export async function recordStripePaymentMethodForInvoiceByPaymentIntent(
     livemode: boolean;
     methodType: string;
     methodWallet: string | null;
-    chargeId: string;
+    chargeId: string | null;
     eventId: string;
     now: string;
   }
@@ -1192,7 +1192,7 @@ export async function recordStripePaymentMethodForInvoiceByPaymentIntent(
         AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
           OR (payment_method_type = ?
             AND payment_method_wallet IS ?
-            AND payment_method_charge_id = ?
+            AND payment_method_charge_id IS ?
             AND payment_method_payment_intent_id = ?
             AND payment_method_amount_cents = ?
             AND payment_method_livemode = ?))
@@ -1234,7 +1234,7 @@ export async function recordStripePaymentMethodForInvoiceByPaymentIntent(
         AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
           OR (payment_method_type = ?
             AND payment_method_wallet IS ?
-            AND payment_method_charge_id = ?))
+            AND payment_method_charge_id IS ?))
       RETURNING *`
   ).bind(
     input.methodType,

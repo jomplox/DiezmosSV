@@ -130,6 +130,62 @@ describe("Stripe signed webhooks", () => {
     });
   });
 
+  it("accepts Stripe ACH Charge evidence whose provider identifier uses py_", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "a731a0b0-3e06-4e5c-953b-8c6c08c1f39c",
+      amount: 50,
+      frequency: "once"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const completed = stripeEvent(
+      "evt_checkout_ach_payment_record",
+      "checkout.session.async_payment_succeeded",
+      checkoutSession({
+        id: checkout.sessionId,
+        checkoutId: row.id,
+        amountCents: 5000,
+        frequency: "once",
+        paymentIntentId: "pi_ach_payment_record"
+      })
+    );
+    expect((await sendSignedWebhook(workerEnv, completed)).status).toBe(200);
+
+    const charge = stripeEvent(
+      "evt_charge_ach_payment_record",
+      "charge.succeeded",
+      succeededCharge({
+        id: "py_ach_payment_record",
+        paymentIntentId: "pi_ach_payment_record",
+        amountCents: 5000,
+        checkoutId: row.id,
+        methodType: "us_bank_account"
+      })
+    );
+    expect((await sendSignedWebhook(workerEnv, charge)).status).toBe(200);
+
+    expect(database.prepare(
+      `SELECT status, payment_method_type, payment_method_charge_id
+         FROM stripe_webhook_events WHERE id = 'evt_charge_ach_payment_record'`
+    ).get()).toEqual({
+      status: "PROCESSED",
+      payment_method_type: "us_bank_account",
+      payment_method_charge_id: null
+    });
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_charge_id
+         FROM stripe_gifts WHERE source_id = 'pi_ach_payment_record'`
+    ).get()).toEqual({
+      payment_method_type: "us_bank_account",
+      payment_method_charge_id: null
+    });
+    const snapshot = database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({
+      pdf: { paymentMethod: "ACH Direct Debit" }
+    });
+  });
+
   it("converges the actual method into a monthly gift when Charge arrives first", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "6221cf52-a7b8-4225-873e-7d8d27038d7b",
@@ -138,7 +194,7 @@ describe("Stripe signed webhooks", () => {
     });
     const row = checkoutRow(database, checkout.sessionId);
     const charge = stripeEvent("evt_charge_ach_first", "charge.succeeded", succeededCharge({
-      id: "ch_ach_first",
+      id: "py_ach_first",
       paymentIntentId: "pi_ach_first",
       amountCents: 2500,
       methodType: "us_bank_account"
@@ -150,7 +206,7 @@ describe("Stripe signed webhooks", () => {
     ).get()).toEqual({
       stripe_payment_intent_id: "pi_ach_first",
       payment_method_type: "us_bank_account",
-      payment_method_charge_id: "ch_ach_first"
+      payment_method_charge_id: null
     });
 
     expect((await sendSignedWebhook(workerEnv, stripeEvent(
@@ -180,7 +236,7 @@ describe("Stripe signed webhooks", () => {
     ).get()).toEqual({
       payment_method_type: "us_bank_account",
       payment_method_wallet: null,
-      payment_method_charge_id: "ch_ach_first"
+      payment_method_charge_id: null
     });
     const snapshot = database.prepare(
       "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"

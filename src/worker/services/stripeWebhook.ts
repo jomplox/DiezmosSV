@@ -336,16 +336,18 @@ async function recordReadyInvoiceSettlement(
   ) {
     throw new StripeWebhookEventError("invoice_payment_amount_mismatch");
   }
-  const methodEvidence = [
+  const requiredMethodEvidence = [
     settlement.payment_method_type,
-    settlement.payment_method_charge_id,
     settlement.payment_method_event_id,
     settlement.payment_method_payment_intent_id,
     settlement.payment_method_amount_cents,
     settlement.payment_method_livemode
   ];
-  const hasAnyMethodEvidence = methodEvidence.some((value) => value !== null);
-  const hasCompleteMethodEvidence = methodEvidence.every((value) => value !== null);
+  const hasAnyMethodEvidence = [
+    ...requiredMethodEvidence,
+    settlement.payment_method_charge_id
+  ].some((value) => value !== null);
+  const hasCompleteMethodEvidence = requiredMethodEvidence.every((value) => value !== null);
   if (
     hasAnyMethodEvidence !== hasCompleteMethodEvidence
     || (hasCompleteMethodEvidence && (

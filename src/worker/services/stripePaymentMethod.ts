@@ -1,7 +1,7 @@
 export interface StripePaymentMethodEvidence {
   type: string;
   wallet: string | null;
-  chargeId: string;
+  chargeId: string | null;
   eventId: string;
 }
 
@@ -21,7 +21,7 @@ export function stripePaymentMethodEvidence(
   return {
     type,
     wallet,
-    chargeId: providerId(charge.id, "ch_"),
+    chargeId: legacyChargeId(charge.id),
     eventId: providerId(eventId, "evt_")
   };
 }
@@ -71,6 +71,21 @@ function providerId(value: unknown, prefix: string): string {
     throw new Error("stripe_identifier_invalid");
   }
   return value;
+}
+
+function legacyChargeId(value: unknown): string | null {
+  if (
+    typeof value !== "string"
+    || (!value.startsWith("ch_") && !value.startsWith("py_"))
+    || value.length > 255
+    || !/^[A-Za-z0-9_-]+$/u.test(value)
+  ) {
+    throw new Error("stripe_identifier_invalid");
+  }
+  // The original evidence column is constrained to historical ch_ IDs.
+  // Dahlia can identify non-card Charge objects with py_; the signed event ID
+  // and PaymentIntent remain the durable identity for those records.
+  return value.startsWith("ch_") ? value : null;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
