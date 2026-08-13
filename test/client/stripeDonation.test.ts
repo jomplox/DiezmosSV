@@ -72,14 +72,16 @@ describe("Stripe donor browser contract", () => {
     expect(stripeSessionIdFromSearch("")).toBeNull();
   });
 
-  it("keeps all DiezmosSV-owned US copy in Spanish and voluntary-gift language", () => {
+  it("keeps the production US explanatory paragraph while Stripe replaces Givebutter", () => {
     expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
     expect(STRIPE_FREQ_ONCE_LABEL).toBe("Única");
     expect(STRIPE_FREQ_MONTHLY_LABEL).toBe("Mensual");
-    expect(stripeIntro("Iglesia Ejemplo Central")).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
-    expect(stripeIntro("Iglesia Ejemplo Central")).toContain("organización estadounidense 501(c)(3)");
-    expect(stripeIntro("Iglesia Ejemplo Central")).not.toContain("Friends of");
-    expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
+    expect(stripeIntro("Iglesia Ejemplo Central")).toBe(
+      "Su diezmo u ofrenda apoya a Iglesia Ejemplo Central en El Salvador. Se procesa en EE. UU. a través de Friends of Iglesia Ejemplo Central (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+    );
+    expect(stripeIntro(null)).toBe(
+      "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo."
+    );
   });
 });
 

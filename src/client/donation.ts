@@ -88,13 +88,15 @@ export const STRIPE_CANCELED_MESSAGE =
 export const STRIPE_RESULT_POLL_INTERVAL_MS = 5_000;
 export const STRIPE_RESULT_POLL_TIMEOUT_MS = 3 * 60 * 1_000;
 
-// The US door funds the same mother church as the SV door. The 501(c)(3) is the
-// giving vehicle, never a different beneficiary, and its legal identity is supplied
-// by the Stripe acknowledgment rather than fabricated from the church display name.
+// Keep the production US-door explanation unchanged while Stripe replaces the
+// previous hosted form. The formal receipt still supplies the configured
+// legal entity name and EIN independently of this familiar donor-facing copy.
 export function stripeIntro(organizationName: string | null): string {
   const name = organizationName?.trim();
-  const beneficiary = name ? `${name} en El Salvador` : "esta iglesia en El Salvador";
-  return `Su diezmo u ofrenda apoya a ${beneficiary}. La entrega se realiza en EE. UU. a través de una organización estadounidense 501(c)(3), que enviará su recibo por correo electrónico.`;
+  if (!name) {
+    return "Su diezmo u ofrenda apoya a esta iglesia en El Salvador. Se procesa en EE. UU. a través de una organización estadounidense 501c3 y recibirá un recibo deducible de impuestos en EE. UU. por correo.";
+  }
+  return `Su diezmo u ofrenda apoya a ${name} en El Salvador. Se procesa en EE. UU. a través de Friends of ${name} (501c3) y recibirá un recibo deducible de impuestos en EE. UU. por correo.`;
 }
 
 export function stripeCheckoutBody(input: {

@@ -1206,10 +1206,10 @@ describe("Stripe donar page source contract", () => {
     expect(STRIPE_MONTHLY_LABEL).toBe("Frecuencia de la entrega");
   });
 
-  it("shows the 501(c)(3) explanation and mounts the Stripe form in place", () => {
+  it("shows the production 501c3 explanation and mounts the Stripe form in place", () => {
     const intro = stripeIntro("Iglesia Ejemplo Central");
     expect(donarSource).toContain("stripeIntro(organizationName)");
-    expect(intro).toContain("501(c)(3)");
+    expect(intro).toContain("501c3");
     // The US door funds the SAME church — the intro says so, never implying a
     // different beneficiary.
     expect(intro).toContain("apoya a Iglesia Ejemplo Central en El Salvador");
@@ -1219,7 +1219,7 @@ describe("Stripe donar page source contract", () => {
 
   it("uses neutral donor copy when public branding has no configured organization", () => {
     expect(stripeIntro(null)).toContain("apoya a esta iglesia en El Salvador");
-    expect(stripeIntro("   ")).toContain("una organización estadounidense 501(c)(3)");
+    expect(stripeIntro("   ")).toContain("una organización estadounidense 501c3");
     expect(stripeIntro(null)).not.toMatch(/ExampleOrganization|ExamplePerson1/);
   });
 
