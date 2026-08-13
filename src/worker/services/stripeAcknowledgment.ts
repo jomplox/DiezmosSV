@@ -165,14 +165,39 @@ export async function renderStripeAcknowledgmentPdf(
   });
 
   let signatureY = Math.min(535.5, contributionBottom - 4);
+  const signatureTypography = fitReceiptSignatureTypography(
+    [
+      { text: input.signerName, font: bold },
+      { text: `${input.signerTitle.replace(/[.]$/u, "")}.`, font: regular },
+      { text: input.organizationName, font: regular }
+    ],
+    signatureY,
+    442.5 + bold.heightAtSize(12.5) + 2,
+    contentWidth
+  );
   signatureY = drawPdfWrapped(page, input.signerName, {
-    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: bold
+    x: contentX,
+    y: signatureY,
+    size: signatureTypography.size,
+    lineHeight: signatureTypography.lineHeight,
+    maxWidth: contentWidth,
+    font: bold
   });
   signatureY = drawPdfWrapped(page, `${input.signerTitle.replace(/[.]$/u, "")}.`, {
-    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: regular
+    x: contentX,
+    y: signatureY,
+    size: signatureTypography.size,
+    lineHeight: signatureTypography.lineHeight,
+    maxWidth: contentWidth,
+    font: regular
   });
   drawPdfWrapped(page, input.organizationName, {
-    x: contentX, y: signatureY, size: 10, lineHeight: 12, maxWidth: contentWidth, font: regular
+    x: contentX,
+    y: signatureY,
+    size: signatureTypography.size,
+    lineHeight: signatureTypography.lineHeight,
+    maxWidth: contentWidth,
+    font: regular
   });
 
   drawPdfText(page, "Receipt of Charitable Donation:", {
@@ -210,40 +235,75 @@ export async function renderStripeAcknowledgmentPdf(
     });
   });
 
+  const contactGap = 12;
+  const contactLeft = 45;
+  const contactColumnWidth = (522 - contactGap) / 2;
+  const leftContactLines = [input.supportEmail, input.organizationPhone, input.organizationWebsite];
+  const contactTypography = fitReceiptContactTypography(
+    leftContactLines,
+    input.organizationMailingAddress,
+    bold,
+    contactColumnWidth
+  );
+  const contactTop = 232 + bold.heightAtSize(contactTypography.size);
+  const legalTypography = fitReceiptLegalTypography(
+    input.legalName,
+    bold,
+    italic,
+    contactTop,
+    171
+  );
   drawPdfWrapped(page, input.legalName, {
     x: contentX,
     y: 294.1,
-    size: 10,
-    lineHeight: 12,
+    size: legalTypography.size,
+    lineHeight: legalTypography.lineHeight,
     maxWidth: 171,
     font: bold
   });
-  drawPdfText(page, "A 501(c)(3) Public Charity", { x: contentX, y: 275, size: 10, font: italic });
-  drawPdfText(page, `EIN ${input.ein}`, { x: contentX, y: 254.7, size: 10, font: bold });
+  drawPdfText(page, "A 501(c)(3) Public Charity", {
+    x: contentX,
+    y: legalTypography.charityY,
+    size: 10,
+    font: italic
+  });
+  drawPdfText(page, `EIN ${input.ein}`, {
+    x: contentX,
+    y: legalTypography.einY,
+    size: 10,
+    font: bold
+  });
 
+  const spanishLegalText =
+    `La organización ${input.legalName} es una organización sin fines de lucro 501(c)(3) que apoya la labor de ${input.organizationName} en su misión de difusión y servicio del evangelio.`;
+  const spanishLegalTypography = fitReceiptWrappedTypography(
+    spanishLegalText,
+    regular,
+    203.1,
+    297.8,
+    contactTop + 1.5,
+    { size: 9.2, lineHeight: 12 }
+  );
   drawPdfWrapped(
     page,
-    `La organización ${input.legalName} es una organización sin fines de lucro 501(c)(3) que apoya la labor de ${input.organizationName} en su misión de difusión y servicio del evangelio.`,
+    spanishLegalText,
     {
       x: 292.1,
       y: 297.8,
-      size: 9.2,
-      lineHeight: 12,
+      size: spanishLegalTypography.size,
+      lineHeight: spanishLegalTypography.lineHeight,
       maxWidth: 203.1,
       font: regular
     }
   );
 
-  const contactGap = 12;
-  const contactLeft = 45;
-  const contactColumnWidth = (522 - contactGap) / 2;
   let leftContactY = 232;
-  for (const line of [input.supportEmail, input.organizationPhone, input.organizationWebsite]) {
+  for (const line of leftContactLines) {
     leftContactY = drawPdfWrapped(page, line, {
       x: contactLeft,
       y: leftContactY,
-      size: 7.2,
-      lineHeight: 8,
+      size: contactTypography.size,
+      lineHeight: contactTypography.lineHeight,
       maxWidth: contactColumnWidth,
       font: bold
     });
@@ -253,8 +313,8 @@ export async function renderStripeAcknowledgmentPdf(
     addressY = drawPdfWrapped(page, line, {
       x: contactLeft + contactColumnWidth + contactGap,
       y: addressY,
-      size: 7.2,
-      lineHeight: 8,
+      size: contactTypography.size,
+      lineHeight: contactTypography.lineHeight,
       maxWidth: contactColumnWidth,
       font: bold
     });
@@ -362,6 +422,87 @@ function wrapStripePdfText(text: string, font: PDFFont, size: number, maxWidth: 
   }
   if (current) lines.push(current);
   return lines;
+}
+
+function fitReceiptSignatureTypography(
+  lines: Array<{ text: string; font: PDFFont }>,
+  startY: number,
+  minimumBaseline: number,
+  maxWidth: number
+): { size: number; lineHeight: number } {
+  for (let size = 10; size >= 3.6; size -= 0.2) {
+    const lineHeight = size + 2;
+    const lineCount = lines.reduce(
+      (count, line) => count + wrapStripePdfText(line.text, line.font, size, maxWidth).length,
+      0
+    );
+    if (startY - (lineCount - 1) * lineHeight >= minimumBaseline) {
+      return { size, lineHeight };
+    }
+  }
+  throw new Error("Stripe acknowledgment signature does not fit its reserved band");
+}
+
+function fitReceiptLegalTypography(
+  legalName: string,
+  legalFont: PDFFont,
+  charityFont: PDFFont,
+  contactTop: number,
+  maxWidth: number
+): { size: number; lineHeight: number; charityY: number; einY: number } {
+  const startY = 294.1;
+  for (let size = 10; size >= 3.6; size -= 0.2) {
+    const lineHeight = size + 2;
+    const lineCount = wrapStripePdfText(legalName, legalFont, size, maxWidth).length;
+    const finalLegalBaseline = startY - (lineCount - 1) * lineHeight;
+    const charityY = Math.min(275, finalLegalBaseline - charityFont.heightAtSize(10) - 2);
+    const einY = Math.min(254.7, charityY - legalFont.heightAtSize(10) - 2);
+    if (einY >= contactTop + 1.5) return { size, lineHeight, charityY, einY };
+  }
+  throw new Error("Stripe acknowledgment legal identity does not fit its reserved band");
+}
+
+function fitReceiptWrappedTypography(
+  text: string,
+  font: PDFFont,
+  maxWidth: number,
+  startY: number,
+  minimumBaseline: number,
+  preferred: { size: number; lineHeight: number }
+): { size: number; lineHeight: number } {
+  const lineHeightOffset = preferred.lineHeight - preferred.size;
+  for (let size = preferred.size; size >= 3.6; size -= 0.2) {
+    const lineHeight = size + lineHeightOffset;
+    const lineCount = wrapStripePdfText(text, font, size, maxWidth).length;
+    if (startY - (lineCount - 1) * lineHeight >= minimumBaseline) {
+      return { size, lineHeight };
+    }
+  }
+  throw new Error("Stripe acknowledgment text does not fit its reserved band");
+}
+
+function fitReceiptContactTypography(
+  leftLines: string[],
+  rightLines: string[],
+  font: PDFFont,
+  maxWidth: number
+): { size: number; lineHeight: number } {
+  const availableBaselineDrop = 232 - 177;
+  for (let size = 7.2; size >= 3.6; size -= 0.2) {
+    const lineHeight = size + 0.5;
+    const leftCount = leftLines.reduce(
+      (count, line) => count + wrapStripePdfText(line, font, size, maxWidth).length,
+      0
+    );
+    const rightCount = rightLines.reduce(
+      (count, line) => count + wrapStripePdfText(line, font, size, maxWidth).length,
+      0
+    );
+    if ((Math.max(leftCount, rightCount) - 1) * lineHeight <= availableBaselineDrop) {
+      return { size, lineHeight };
+    }
+  }
+  return { size: 3.6, lineHeight: 4.1 };
 }
 
 function formatEnglishDate(iso: string, timeZone: string): string {

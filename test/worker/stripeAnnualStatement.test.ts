@@ -25,6 +25,12 @@ import { migratedDatabase } from "./support/migratedDatabase";
 import { sqliteD1 } from "./support/sqliteD1";
 
 const temporaryDirectories: string[] = [];
+type AnnualDrawTextCall = Parameters<PDFPage["drawText"]>;
+type PositionedAnnualDrawTextOptions = NonNullable<AnnualDrawTextCall[1]> & {
+  font: NonNullable<NonNullable<AnnualDrawTextCall[1]>["font"]>;
+  x: number;
+  y: number;
+};
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -482,6 +488,80 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       expect(options.x).toBeGreaterThanOrEqual(45.354);
       expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(566.646);
       expect(options.y).toBeGreaterThanOrEqual(45.5);
+    }
+    const fromCalls = drawText.mock.calls.filter(([, options]) =>
+      options?.x === 45.354 && typeof options.y === "number" && options.y > 450
+    );
+    expect(fromCalls.length).toBeGreaterThanOrEqual(10);
+    for (const [drawn, options] of fromCalls) {
+      expect(options?.y, String(drawn)).toBeGreaterThanOrEqual(520);
+    }
+  });
+
+  it("keeps both maximum-length legal-name repetitions inside the annual acknowledgment panel", async () => {
+    const legalName = `LEGAL-PANEL ${"L".repeat(68)}`;
+    expect(legalName).toHaveLength(80);
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "legal-panel@example.org",
+      donorName: "Legal Panel Donor",
+      donorEmail: "legal-panel@example.org",
+      document: statementDocument({ legalName }),
+      gifts: [gift({ id: "gift_legal_panel", source_id: "pi_legal_panel" })]
+    });
+    await renderStripeAnnualStatementPdf({
+      snapshot,
+      issuedOn: "2026-01-10T12:00:00.000Z",
+      corrected: false
+    });
+
+    const calls = drawText.mock.calls;
+    const text = (index: number): string => String(calls[index]?.[0]);
+    const options = (index: number): PositionedAnnualDrawTextOptions => {
+      const value = calls[index]?.[1];
+      if (!value?.font || typeof value.x !== "number" || typeof value.y !== "number") {
+        throw new Error(`Annual acknowledgment geometry missing for ${text(index)}`);
+      }
+      return value as PositionedAnnualDrawTextOptions;
+    };
+    const requiredIndex = (predicate: (value: string, index: number) => boolean, label: string): number => {
+      const index = calls.findIndex(([value], callIndex) => predicate(String(value), callIndex));
+      if (index < 0) throw new Error(`Annual acknowledgment draw call missing: ${label}`);
+      return index;
+    };
+    const headerIndex = requiredIndex((value) => value === "Tax-Deductible Contribution Acknowledgment", "panel heading");
+    const firstStart = requiredIndex((value, index) => index > headerIndex && value.startsWith("LEGAL-PANEL"), "first legal paragraph");
+    const secondStart = requiredIndex((value, index) => index > firstStart && value.startsWith("This letter is"), "second legal paragraph");
+    const thirdStart = requiredIndex((value, index) => index > secondStart && value.startsWith("Please retain"), "third legal paragraph");
+    const panelEnd = requiredIndex((value, index) => index > thirdStart && value.startsWith("Le expresamos"), "first text after panel");
+    const groups = [
+      calls.slice(firstStart, secondStart),
+      calls.slice(secondStart, thirdStart),
+      calls.slice(thirdStart, panelEnd)
+    ];
+    expect(groups[0]!.map(([value]) => String(value)).join(" ").match(/LEGAL-PANEL/gu))
+      .toHaveLength(2);
+
+    const top = (callIndex: number): number => {
+      const value = options(callIndex);
+      return value.y + value.font.heightAtSize(value.size ?? 12);
+    };
+    const minBaseline = (start: number, end: number): number =>
+      Math.min(...calls.slice(start, end).map((_, offset) => options(start + offset).y));
+    const maxTop = (start: number, end: number): number =>
+      Math.max(...calls.slice(start, end).map((_, offset) => top(start + offset)));
+
+    expect(maxTop(firstStart, secondStart)).toBeLessThanOrEqual(491);
+    expect(minBaseline(firstStart, secondStart)).toBeGreaterThanOrEqual(maxTop(secondStart, thirdStart) + 1.5);
+    expect(minBaseline(secondStart, thirdStart)).toBeGreaterThanOrEqual(maxTop(thirdStart, panelEnd) + 1.5);
+    expect(minBaseline(thirdStart, panelEnd)).toBeGreaterThanOrEqual(370.184);
+    for (let index = firstStart; index < panelEnd; index += 1) {
+      const value = options(index);
+      expect(value.x, text(index)).toBeGreaterThanOrEqual(58.104);
+      expect(value.x + value.font.widthOfTextAtSize(text(index), value.size ?? 12), text(index))
+        .toBeLessThanOrEqual(553.896);
     }
   });
 

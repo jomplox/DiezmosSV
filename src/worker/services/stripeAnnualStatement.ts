@@ -800,19 +800,26 @@ function drawAnnualCover(
     font: bold
   });
   fromY -= 1;
-  for (const line of [
+  const fromContactLines = [
     "A 501(c)(3) Public Charity",
     `EIN ${input.snapshot.document.ein}`,
     input.snapshot.document.email.supportEmail,
     input.snapshot.document.organizationContact.phone,
     input.snapshot.document.organizationContact.website,
     ...input.snapshot.document.organizationContact.mailingAddress
-  ]) {
+  ];
+  const contactTypography = annualContactTypography(
+    fromContactLines,
+    regular,
+    fromWidth,
+    fromY
+  );
+  for (const line of fromContactLines) {
     fromY = drawWrappedText(page, line, {
       x: left,
       y: fromY,
-      size: 7,
-      lineHeight: 7.5,
+      size: contactTypography.size,
+      lineHeight: contactTypography.lineHeight,
       maxWidth: fromWidth,
       font: regular,
       color: gray
@@ -874,30 +881,28 @@ function drawAnnualCover(
   });
   drawPdfTextLine(page, "Tax-Deductible Contribution Acknowledgment", left + 12.75, 493, 9.4, bold);
   const legalName = input.snapshot.document.legalName;
-  drawWrappedText(page, `${legalName} is a tax-exempt organization as described in Section 501(c)(3) of the Internal Revenue Code (EIN ${input.snapshot.document.ein}). Contributions to ${legalName} are tax-deductible to the extent allowed by law.`, {
-    x: left + 12.75,
-    y: 477.8,
-    size: 8,
-    lineHeight: 13.05,
-    maxWidth: right - left - 25.5,
-    font: regular
-  });
-  drawWrappedText(page, `This letter is your contemporaneous written acknowledgment of the charitable contributions itemized below. During ${annualPeriodLabel(input.snapshot.year)}, you made cash contributions totaling ${formatCents(input.snapshot.totals.netAmountCents)} USD. No goods or services were provided to you in exchange for these contributions.`, {
-    x: left + 12.75,
-    y: 447.2,
-    size: 8,
-    lineHeight: 13.05,
-    maxWidth: right - left - 25.5,
-    font: regular
-  });
-  drawWrappedText(page, "Please retain this acknowledgment with your tax records. To claim a charitable deduction, the IRS requires that you obtain written acknowledgment of each contribution of $250 or more before the earlier of the date you file your federal income tax return for the year of the contribution or the due date (including extensions) of that return. This document does not constitute tax advice.", {
-    x: left + 12.75,
-    y: 403,
-    size: 8,
-    lineHeight: 11.85,
-    maxWidth: right - left - 25.5,
-    font: regular
-  });
+  const acknowledgmentParagraphs = [
+    `${legalName} is a tax-exempt organization as described in Section 501(c)(3) of the Internal Revenue Code (EIN ${input.snapshot.document.ein}). Contributions to ${legalName} are tax-deductible to the extent allowed by law.`,
+    `This letter is your contemporaneous written acknowledgment of the charitable contributions itemized below. During ${annualPeriodLabel(input.snapshot.year)}, you made cash contributions totaling ${formatCents(input.snapshot.totals.netAmountCents)} USD. No goods or services were provided to you in exchange for these contributions.`,
+    "Please retain this acknowledgment with your tax records. To claim a charitable deduction, the IRS requires that you obtain written acknowledgment of each contribution of $250 or more before the earlier of the date you file your federal income tax return for the year of the contribution or the due date (including extensions) of that return. This document does not constitute tax advice."
+  ];
+  const acknowledgmentWidth = right - left - 25.5;
+  const acknowledgmentTypography = annualAcknowledgmentTypography(
+    acknowledgmentParagraphs,
+    regular,
+    acknowledgmentWidth
+  );
+  let acknowledgmentY = 477.8;
+  for (const paragraph of acknowledgmentParagraphs) {
+    acknowledgmentY = drawWrappedText(page, paragraph, {
+      x: left + 12.75,
+      y: acknowledgmentY,
+      size: acknowledgmentTypography.size,
+      lineHeight: acknowledgmentTypography.lineHeight,
+      maxWidth: acknowledgmentWidth,
+      font: regular
+    }) - acknowledgmentTypography.paragraphGap;
+  }
 
   drawWrappedText(page, "Le expresamos nuestro más sincero agradecimiento por su generoso apoyo a la Obra del Señor. Su aporte marca una gran diferencia en el alcance del evangelio y nos impulsa a seguir cumpliendo nuestra misión.", {
     x: left,
@@ -934,6 +939,45 @@ function drawAnnualCover(
     font: regular,
     color: gray
   });
+}
+
+function annualContactTypography(
+  lines: string[],
+  font: PDFFont,
+  maxWidth: number,
+  startY: number
+): { size: number; lineHeight: number } {
+  for (let size = 7; size >= 5; size -= 0.2) {
+    const lineHeight = size + 0.4;
+    const lineCount = lines.reduce(
+      (count, line) => count + wrapPdfText(line, font, size, maxWidth).length,
+      0
+    );
+    if (startY - (lineCount - 1) * lineHeight >= 520) return { size, lineHeight };
+  }
+  return { size: 5, lineHeight: 5.4 };
+}
+
+function annualAcknowledgmentTypography(
+  paragraphs: string[],
+  font: PDFFont,
+  maxWidth: number
+): { size: number; lineHeight: number; paragraphGap: number } {
+  const startY = 477.8;
+  const minimumBaseline = 370.184;
+  const paragraphGap = 2;
+  for (let size = 8; size >= 5; size -= 0.2) {
+    const lineHeight = size + 2.4;
+    const lineCount = paragraphs.reduce(
+      (count, paragraph) => count + wrapPdfText(paragraph, font, size, maxWidth).length,
+      0
+    );
+    const finalBaseline = startY
+      - (lineCount - 1) * lineHeight
+      - (paragraphs.length - 1) * paragraphGap;
+    if (finalBaseline >= minimumBaseline) return { size, lineHeight, paragraphGap };
+  }
+  throw new Error("Stripe annual acknowledgment does not fit its reserved panel");
 }
 
 function drawAnnualContributionTable(

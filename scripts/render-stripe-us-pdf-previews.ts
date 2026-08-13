@@ -22,17 +22,17 @@ export async function renderStripeUsPdfPreviews(
       sourceId: "pi_preview_receipt_413",
       settledAt: "2025-04-13T16:00:00.000Z",
       timeZone: "America/New_York",
-      legalName: "Preview Receipt Legal Foundation",
+      legalName: `Preview Receipt Legal Foundation ${"L".repeat(47)}`,
       ein: "41-3000413",
       organizationName: "Preview Receipt Ministry",
       supportEmail: "preview-receipt@example.org",
-      organizationPhone: "+1 555 010 0413",
-      organizationWebsite: "https://preview-receipt.example.org",
+      organizationPhone: `+1${"2".repeat(38)}`,
+      organizationWebsite: `https://preview-receipt.example.org/${"w".repeat(64)}`,
       organizationMailingAddress: [
-        "413 Preview Receipt Way",
-        "Preview Receipt Address 2",
-        "Preview Receipt Address 3",
-        "Preview Receipt Address 4"
+        `413 Preview Receipt Way ${"A".repeat(56)}`,
+        `Preview Receipt Address 2 ${"A".repeat(54)}`,
+        `Preview Receipt Address 3 ${"A".repeat(54)}`,
+        `Preview Receipt Address 4 ${"A".repeat(54)}`
       ],
       signerName: "Preview Receipt Signer",
       signerTitle: "Preview Treasurer",
@@ -53,7 +53,7 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
     donorEmail: "preview-annual-donor@example.org",
     document: {
       rendererVersion: "stripe-annual-statement-pdf:v5",
-      legalName: "Preview Annual Legal Foundation",
+      legalName: `Preview Annual Legal Foundation ${"L".repeat(48)}`,
       ein: "51-7000517",
       timeZone: "America/New_York",
       accentColor: "#0f766e",
@@ -62,13 +62,13 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
         hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c"
       },
       organizationContact: {
-        phone: "+1 555 010 0517",
-        website: "https://preview-annual.example.org",
+        phone: `+1${"2".repeat(38)}`,
+        website: `https://preview-annual.example.org/${"w".repeat(65)}`,
         mailingAddress: [
-          "517 Preview Annual Avenue",
-          "Preview Annual Address 2",
-          "Preview Annual Address 3",
-          "Preview Annual Address 4"
+          `517 Preview Annual Avenue ${"A".repeat(54)}`,
+          `Preview Annual Address 2 ${"A".repeat(55)}`,
+          `Preview Annual Address 3 ${"A".repeat(55)}`,
+          `Preview Annual Address 4 ${"A".repeat(55)}`
         ]
       },
       email: {

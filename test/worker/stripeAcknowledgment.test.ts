@@ -239,6 +239,66 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(567);
       expect(options.y, String(drawn)).toBeGreaterThanOrEqual(176);
     }
+    const contactCalls = drawText.mock.calls.filter(([, options]) =>
+      options?.x === 45 || options?.x === 312
+    );
+    expect(contactCalls.length).toBeGreaterThanOrEqual(7);
+    for (const [drawn, options] of contactCalls) {
+      expect(options?.y, String(drawn)).toBeGreaterThanOrEqual(177);
+    }
+    expectReceiptReservedBandGeometry(drawText.mock.calls, {
+      legalMarker: "LEGAL",
+      signerMarker: "SIGNER",
+      titleMarker: "TITLE"
+    });
+  });
+
+  it("fits legacy v1-v3 contact maxima above the later-painted scripture panel", async () => {
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const bytes = await renderStripeAcknowledgmentPdf({
+      donorName: "Legacy Contact Donor",
+      amountCents: 10_000,
+      refundedAmountCents: 0,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      sourceId: "pi_legacy_contact",
+      settledAt: "2025-01-01T12:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName: `LEGACY-LEGAL ${"L".repeat(187)}`,
+      ein: "12-3456789",
+      organizationName: "Legacy Contact Ministry",
+      supportEmail: `${"e".repeat(88)}@example.org`,
+      organizationPhone: `+1${"2".repeat(38)}`,
+      organizationWebsite: `https://example.org/${"w".repeat(180)}`,
+      organizationMailingAddress: [1, 2, 3, 4].map((line) => `LEGACY-ADDRESS-${line} ${"A".repeat(183)}`),
+      signerName: `LEGACY-SIGNER ${"S".repeat(106)}`,
+      signerTitle: `LEGACY-TITLE ${"T".repeat(107)}`,
+      kind: "ORIGINAL"
+    });
+    expect((await PDFDocument.load(bytes)).getPageCount()).toBe(1);
+    const directory = mkdtempSync(join(tmpdir(), "stripe-ack-legacy-contact-"));
+    directories.push(directory);
+    const pdfPath = join(directory, "receipt.pdf");
+    writeFileSync(pdfPath, bytes);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    for (const marker of ["LEGACY-LEGAL", "LEGACY-SIGNER", "LEGACY-TITLE", "LEGACY-ADDRESS-1", "LEGACY-ADDRESS-2", "LEGACY-ADDRESS-3", "LEGACY-ADDRESS-4"]) {
+      expect(text).toContain(marker);
+    }
+    const contactCalls = drawText.mock.calls.filter(([, options]) =>
+      options?.x === 45 || options?.x === 312
+    );
+    expect(contactCalls.length).toBeGreaterThanOrEqual(12);
+    for (const [drawn, options] of contactCalls) {
+      if (!options?.font || typeof options.x !== "number") throw new Error("Contact draw geometry missing");
+      expect(options.y, String(drawn)).toBeGreaterThanOrEqual(177);
+      expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12))
+        .toBeLessThanOrEqual(567);
+    }
+    expectReceiptReservedBandGeometry(drawText.mock.calls, {
+      legalMarker: "LEGACY-LEGAL",
+      signerMarker: "LEGACY-SIGNER",
+      titleMarker: "LEGACY-TITLE"
+    });
   });
 
   it("attaches the immutable one-page receipt before crossing the email provider boundary", async () => {
@@ -628,6 +688,101 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     });
   });
 });
+
+type DrawTextCall = Parameters<PDFPage["drawText"]>;
+type PositionedDrawTextOptions = NonNullable<DrawTextCall[1]> & {
+  font: NonNullable<NonNullable<DrawTextCall[1]>["font"]>;
+  x: number;
+  y: number;
+};
+
+function expectReceiptReservedBandGeometry(
+  calls: DrawTextCall[],
+  markers: { legalMarker: string; signerMarker: string; titleMarker: string }
+): void {
+  const text = (call: DrawTextCall): string => String(call[0]);
+  const options = (call: DrawTextCall): PositionedDrawTextOptions => {
+    const value = call[1];
+    if (!value?.font || typeof value.x !== "number" || typeof value.y !== "number") {
+      throw new Error(`Receipt draw geometry missing for ${text(call)}`);
+    }
+    return value as PositionedDrawTextOptions;
+  };
+  const top = (call: DrawTextCall): number => {
+    const value = options(call);
+    return value.y + value.font.heightAtSize(value.size ?? 12);
+  };
+  const right = (call: DrawTextCall): number => {
+    const value = options(call);
+    return value.x + value.font.widthOfTextAtSize(text(call), value.size ?? 12);
+  };
+  const requiredIndex = (predicate: (call: DrawTextCall, index: number) => boolean, label: string): number => {
+    const index = calls.findIndex(predicate);
+    if (index < 0) throw new Error(`Receipt draw call missing: ${label}`);
+    return index;
+  };
+
+  const headingIndex = requiredIndex(([value]) => value === "Receipt of Charitable Donation:", "receipt heading");
+  const signatureStart = requiredIndex(
+    ([value], index) => index < headingIndex && String(value).startsWith(markers.signerMarker),
+    markers.signerMarker
+  );
+  const signatureCalls = calls.slice(signatureStart, headingIndex);
+  expect(signatureCalls.some(([value]) => String(value).startsWith(markers.titleMarker))).toBe(true);
+  const headingTop = top(calls[headingIndex]!);
+  for (const call of signatureCalls) {
+    const value = options(call);
+    expect(value.y, text(call)).toBeGreaterThanOrEqual(headingTop + 2);
+    expect(value.x, text(call)).toBeGreaterThanOrEqual(113.22);
+    expect(right(call), text(call)).toBeLessThanOrEqual(498.78);
+  }
+
+  const charityIndex = requiredIndex(([value]) => value === "A 501(c)(3) Public Charity", "charity status");
+  const einIndex = requiredIndex(([value]) => String(value).startsWith("EIN "), "EIN");
+  const legalStart = requiredIndex(
+    ([value], index) => index > headingIndex && index < charityIndex && String(value).startsWith(markers.legalMarker),
+    markers.legalMarker
+  );
+  const leftLegalCalls = calls.slice(legalStart, charityIndex);
+  expect(Math.min(...leftLegalCalls.map((call) => options(call).y)))
+    .toBeGreaterThanOrEqual(top(calls[charityIndex]!) + 1.5);
+  for (const call of leftLegalCalls) {
+    expect(options(call).x, text(call)).toBeGreaterThanOrEqual(113.22);
+    expect(right(call), text(call)).toBeLessThanOrEqual(284.22);
+  }
+  expect(options(calls[charityIndex]!).y)
+    .toBeGreaterThanOrEqual(top(calls[einIndex]!) + 1.5);
+
+  const spanishStart = requiredIndex(
+    ([value], index) => index > einIndex && String(value).startsWith(`La organización ${markers.legalMarker}`),
+    "Spanish legal acknowledgment"
+  );
+  const contactStart = requiredIndex(
+    ([, value], index) => index > spanishStart && (value?.x === 45 || value?.x === 312),
+    "contact block"
+  );
+  const rightLegalCalls = calls.slice(spanishStart, contactStart);
+  const leftContactCalls = calls.filter(([, value], index) => index >= contactStart && value?.x === 45);
+  const rightContactCalls = calls.filter(([, value], index) => index >= contactStart && value?.x === 312);
+  expect(leftContactCalls.length).toBeGreaterThan(0);
+  expect(rightContactCalls.length).toBeGreaterThan(0);
+  expect(options(calls[einIndex]!).y)
+    .toBeGreaterThanOrEqual(Math.max(...leftContactCalls.map(top)) + 1.5);
+  expect(Math.min(...rightLegalCalls.map((call) => options(call).y)))
+    .toBeGreaterThanOrEqual(Math.max(...rightContactCalls.map(top)) + 1.5);
+  for (const call of rightLegalCalls) {
+    expect(options(call).x, text(call)).toBeGreaterThanOrEqual(292.1);
+    expect(right(call), text(call)).toBeLessThanOrEqual(495.2);
+  }
+  for (const call of leftContactCalls) {
+    expect(options(call).y, text(call)).toBeGreaterThanOrEqual(177);
+    expect(right(call), text(call)).toBeLessThanOrEqual(300);
+  }
+  for (const call of rightContactCalls) {
+    expect(options(call).y, text(call)).toBeGreaterThanOrEqual(177);
+    expect(right(call), text(call)).toBeLessThanOrEqual(567);
+  }
+}
 
 function pngDimensions(bytes: Uint8Array): { width: number; height: number } {
   const buffer = Buffer.from(bytes);
