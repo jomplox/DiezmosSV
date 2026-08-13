@@ -35,6 +35,61 @@ import {
 } from "./App";
 import { StackedCell } from "./documentsView";
 
+export const EXPORT_PREVIEW_PAGE_SIZE = 10;
+
+function usePaginatedRows<T>(rows: T[], resetKey: string) {
+  const [requestedPage, setRequestedPage] = useState(1);
+  const totalPages = Math.max(1, Math.ceil(rows.length / EXPORT_PREVIEW_PAGE_SIZE));
+  const page = Math.min(requestedPage, totalPages);
+
+  useEffect(() => {
+    setRequestedPage(1);
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (requestedPage > totalPages) setRequestedPage(totalPages);
+  }, [requestedPage, totalPages]);
+
+  const startIndex = (page - 1) * EXPORT_PREVIEW_PAGE_SIZE;
+  return {
+    page,
+    totalPages,
+    visibleRows: rows.slice(startIndex, startIndex + EXPORT_PREVIEW_PAGE_SIZE),
+    setPage: setRequestedPage
+  };
+}
+
+function ExportTablePagination({
+  label,
+  page,
+  totalPages,
+  totalRows,
+  onPageChange
+}: {
+  label: string;
+  page: number;
+  totalPages: number;
+  totalRows: number;
+  onPageChange: (page: number) => void;
+}) {
+  if (totalRows <= EXPORT_PREVIEW_PAGE_SIZE) return null;
+  const start = (page - 1) * EXPORT_PREVIEW_PAGE_SIZE + 1;
+  const end = Math.min(page * EXPORT_PREVIEW_PAGE_SIZE, totalRows);
+  return (
+    <nav className="export-pagination" aria-label={`Paginación de ${label}`}>
+      <button type="button" className="ghost" disabled={page === 1} onClick={() => onPageChange(page - 1)}>
+        <ChevronLeft size={15} />
+        Anterior
+      </button>
+      <span aria-live="polite">Página {page} de {totalPages} · {start}–{end} de {totalRows}</span>
+      <button type="button" className="ghost" disabled={page === totalPages} onClick={() => onPageChange(page + 1)}>
+        Siguiente
+        <ChevronRight size={15} />
+      </button>
+    </nav>
+  );
+}
+
 export function ExportPanel({
   startDate,
   endDate,
@@ -129,7 +184,7 @@ export function ExportPanel({
         <strong>${preview.amountTotal}</strong>
         <span>total</span>
       </div>
-      <F960PreviewTable rows={preview.rows} />
+      <F960PreviewTable rows={preview.rows} resetKey={`${startDate}:${endDate}`} />
     </section>
   );
 }
@@ -189,43 +244,47 @@ function DatePickerCalendar({
   );
 }
 
-function F960PreviewTable({ rows }: { rows: F960PreviewRow[] }) {
+function F960PreviewTable({ rows, resetKey }: { rows: F960PreviewRow[]; resetKey: string }) {
+  const pagination = usePaginatedRows(rows, resetKey);
   return (
-    <div className="table-scroll export-table">
-      <table>
-        <thead>
-          <tr>
-            <th>Fecha</th>
-            <th>Donante</th>
-            <th>Documento</th>
-            <th className="numeric">Monto</th>
-            <th>Periodo</th>
-            <th>Código de generación</th>
-            <th>Sello</th>
-            <th>Control</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row) => (
-            <tr key={row.codigoGeneracion}>
-              <td className="numeric">{row.fechaEmision}</td>
-              <td><StackedCell primary={row.nombre} secondary={row.correo} /></td>
-              <td className="mono">{row.nit || row.dui || "—"}</td>
-              <td className="numeric">${row.monto}</td>
-              <td className="mono">{row.periodo}</td>
-              <td className="mono">{shortCode(row.codigoGeneracion)}</td>
-              <td className="mono">{shortCode(row.sello)}</td>
-              <td className="mono">{row.numeroControl}</td>
-            </tr>
-          ))}
-          {rows.length === 0 && (
+    <>
+      <div className="table-scroll export-table">
+        <table>
+          <thead>
             <tr>
-              <td colSpan={8}>Sin datos para este rango.</td>
+              <th>Fecha</th>
+              <th>Donante</th>
+              <th>Documento</th>
+              <th className="numeric">Monto</th>
+              <th>Periodo</th>
+              <th>Código de generación</th>
+              <th>Sello</th>
+              <th>Control</th>
             </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody>
+            {pagination.visibleRows.map((row) => (
+              <tr key={row.codigoGeneracion}>
+                <td className="numeric">{row.fechaEmision}</td>
+                <td><StackedCell primary={row.nombre} secondary={row.correo} /></td>
+                <td className="mono">{row.nit || row.dui || "—"}</td>
+                <td className="numeric">${row.monto}</td>
+                <td className="mono">{row.periodo}</td>
+                <td className="mono">{shortCode(row.codigoGeneracion)}</td>
+                <td className="mono">{shortCode(row.sello)}</td>
+                <td className="mono">{row.numeroControl}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={8}>Sin datos para este rango.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+      <ExportTablePagination label="F960" page={pagination.page} totalPages={pagination.totalPages} totalRows={rows.length} onPageChange={pagination.setPage} />
+    </>
   );
 }
 
@@ -318,6 +377,7 @@ export function StripeAnnualStatementPanel({
   onResetBulk: () => void;
 }) {
   const donors = preview?.donors ?? [];
+  const pagination = usePaginatedRows(donors, `${year}:${search}`);
   const anySending = busy || rowBusy.startsWith("stripe-statements-send") || rowBusy === "stripe-statements-preview-more";
   const bulkComplete = bulkTraversalStarted && !bulkHasMore;
   return (
@@ -358,7 +418,7 @@ export function StripeAnnualStatementPanel({
         <table>
           <thead><tr><th>Donante</th><th className="numeric">Donaciones</th><th className="numeric">Total neto</th><th>Correo</th><th>Enviar</th></tr></thead>
           <tbody>
-            {donors.map((donor) => {
+            {pagination.visibleRows.map((donor) => {
               const rowSending = rowBusy === `stripe-statements-send-${donor.donorKey}`;
               return (
                 <tr key={donor.donorKey}>
@@ -374,6 +434,7 @@ export function StripeAnnualStatementPanel({
           </tbody>
         </table>
       </div>
+      <ExportTablePagination label="constancias de EE. UU." page={pagination.page} totalPages={pagination.totalPages} totalRows={donors.length} onPageChange={pagination.setPage} />
       {preview?.hasMore && <button className="ghost" disabled={anySending} onClick={() => void onLoadMore()}>{rowBusy === "stripe-statements-preview-more" ? "Cargando" : "Ver más donantes"}</button>}
     </section>
   );
@@ -412,6 +473,7 @@ export function AnnualCertificatePanel({
   onResetBulk: () => void;
 }) {
   const donors = preview?.donors ?? [];
+  const pagination = usePaginatedRows(donors, `${year}:${search}`);
   // Certificate actions are serialized so a preview append cannot race a send refresh.
   const anySending = busy || rowBusy.startsWith("certificates-send") || rowBusy === "certificates-preview-more";
   const bulkComplete = bulkTraversalStarted && !bulkHasMore;
@@ -471,7 +533,7 @@ export function AnnualCertificatePanel({
             </tr>
           </thead>
           <tbody>
-            {donors.map((donor) => {
+            {pagination.visibleRows.map((donor) => {
               const rowSending = rowBusy === `certificates-send-${donor.groupKey}`;
               return (
                 <tr key={donor.groupKey}>
@@ -507,6 +569,7 @@ export function AnnualCertificatePanel({
           </tbody>
         </table>
       </div>
+      <ExportTablePagination label="constancias de El Salvador" page={pagination.page} totalPages={pagination.totalPages} totalRows={donors.length} onPageChange={pagination.setPage} />
       {preview?.hasMore && (
         <button
           className="ghost"
@@ -631,6 +694,7 @@ function donationGiftTypeLabel(giftType: DonationIntentListItem["gift_type"]): s
 }
 
 export function OnlineDonationsPanel({ intents }: { intents: DonationIntentListItem[] }) {
+  const pagination = usePaginatedRows(intents, `${intents[0]?.id ?? ""}:${intents.length}`);
   return (
     <section className="single-panel export-panel">
       <div className="panel-head">
@@ -653,7 +717,7 @@ export function OnlineDonationsPanel({ intents }: { intents: DonationIntentListI
             </tr>
           </thead>
           <tbody>
-            {intents.map((intent) => (
+            {pagination.visibleRows.map((intent) => (
               <tr key={intent.id}>
                 <td>
                   <span className={`status ${intent.status.toLowerCase()}`}>
@@ -675,6 +739,7 @@ export function OnlineDonationsPanel({ intents }: { intents: DonationIntentListI
           </tbody>
         </table>
       </div>
+      <ExportTablePagination label="donaciones en línea" page={pagination.page} totalPages={pagination.totalPages} totalRows={intents.length} onPageChange={pagination.setPage} />
     </section>
   );
 }

@@ -25,6 +25,11 @@ export interface StripeCredentialUpdateInput {
   legalName?: string;
   ein?: string;
   timeZone?: string;
+  organizationPhone?: string;
+  organizationWebsite?: string;
+  organizationMailingAddress?: string;
+  signerName?: string;
+  signerTitle?: string;
 }
 
 interface SecretStatusItem {
@@ -125,7 +130,12 @@ export function credentialStatus(env: Env): CredentialStatus {
     protectedItem(env, "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", "Configuración del portal de entregas mensuales"),
     protectedItem(env, "STRIPE_US_LEGAL_NAME", "Nombre legal de la 501(c)(3)"),
     protectedItem(env, "STRIPE_US_EIN", "EIN de la 501(c)(3)"),
-    visibleItem(env, "STRIPE_US_TIME_ZONE", "Zona horaria de EE. UU.")
+    visibleItem(env, "STRIPE_US_TIME_ZONE", "Zona horaria de EE. UU."),
+    protectedItem(env, "STRIPE_US_PHONE", "Teléfono de la organización en EE. UU."),
+    protectedItem(env, "STRIPE_US_WEBSITE", "Sitio web de la organización"),
+    protectedItem(env, "STRIPE_US_MAILING_ADDRESS", "Dirección postal de la 501(c)(3)"),
+    protectedItem(env, "STRIPE_US_SIGNER_NAME", "Nombre del firmante autorizado"),
+    protectedItem(env, "STRIPE_US_SIGNER_TITLE", "Cargo del firmante autorizado")
   ];
   const stripeRequiredNames = new Set(stripeItems.map((item) => item.name).filter((name) => name !== "STRIPE_WEBHOOK_SECRET_NEXT"));
   const stripeMockMode = trim(env.STRIPE_MOCK_MODE) === "1";
@@ -205,6 +215,11 @@ export function buildStripeCredentialSecretPatch(
   const legalName = trim(input.legalName);
   const ein = trim(input.ein);
   const timeZone = trim(input.timeZone);
+  const organizationPhone = trim(input.organizationPhone);
+  const organizationWebsite = trim(input.organizationWebsite);
+  const organizationMailingAddress = trim(input.organizationMailingAddress);
+  const signerName = trim(input.signerName);
+  const signerTitle = trim(input.signerTitle);
   const appEnv = trim(env.APP_ENV);
   if (!new Set(["local", "staging", "production"]).has(appEnv)) {
     throw new StripeCredentialValidationError("invalid_app_environment");
@@ -242,6 +257,21 @@ export function buildStripeCredentialSecretPatch(
   if (timeZone && !isIanaTimeZone(timeZone)) {
     throw new StripeCredentialValidationError("invalid_time_zone");
   }
+  if (organizationPhone && (organizationPhone.length < 7 || organizationPhone.length > 40 || hasControlCharacters(organizationPhone))) {
+    throw new StripeCredentialValidationError("invalid_us_phone");
+  }
+  if (organizationWebsite && !isSecureWebsite(organizationWebsite)) {
+    throw new StripeCredentialValidationError("invalid_us_website");
+  }
+  if (organizationMailingAddress && !isMailingAddress(organizationMailingAddress)) {
+    throw new StripeCredentialValidationError("invalid_us_mailing_address");
+  }
+  if (signerName && (signerName.length > 120 || hasControlCharacters(signerName))) {
+    throw new StripeCredentialValidationError("invalid_us_signer_name");
+  }
+  if (signerTitle && (signerTitle.length > 120 || hasControlCharacters(signerTitle))) {
+    throw new StripeCredentialValidationError("invalid_us_signer_title");
+  }
 
   putIfPresent(patch, "STRIPE_RESTRICTED_KEY", restrictedKey);
   putIfPresent(patch, "STRIPE_PUBLISHABLE_KEY", publishableKey);
@@ -250,7 +280,32 @@ export function buildStripeCredentialSecretPatch(
   putIfPresent(patch, "STRIPE_US_LEGAL_NAME", legalName);
   putIfPresent(patch, "STRIPE_US_EIN", ein);
   putIfPresent(patch, "STRIPE_US_TIME_ZONE", timeZone);
+  putIfPresent(patch, "STRIPE_US_PHONE", organizationPhone);
+  putIfPresent(patch, "STRIPE_US_WEBSITE", organizationWebsite);
+  putIfPresent(patch, "STRIPE_US_MAILING_ADDRESS", organizationMailingAddress);
+  putIfPresent(patch, "STRIPE_US_SIGNER_NAME", signerName);
+  putIfPresent(patch, "STRIPE_US_SIGNER_TITLE", signerTitle);
   return patch;
+}
+
+function hasControlCharacters(value: string): boolean {
+  return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
+}
+
+function isSecureWebsite(value: string): boolean {
+  if (value.length > 200 || hasControlCharacters(value)) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+  } catch {
+    return false;
+  }
+}
+
+function isMailingAddress(value: string): boolean {
+  if (value.length > 600 || hasControlCharacters(value.replace(/\r?\n/gu, ""))) return false;
+  const lines = value.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+  return lines.length >= 2 && lines.length <= 4 && lines.every((line) => line.length <= 200);
 }
 
 export function buildStripeWebhookStagePatch(value: string): SecretPatch {

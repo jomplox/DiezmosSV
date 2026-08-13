@@ -5,6 +5,15 @@ export type StripeGiftType = "TITHE" | "OFFERING" | "UNSPECIFIED";
 export type StripeCheckoutStatus = "CREATING" | "OPEN" | "COMPLETE" | "EXPIRED" | "FAILED";
 export type StripePaymentStatus = "UNPAID" | "PAID" | "NO_PAYMENT_REQUIRED";
 
+export interface StripeDonorAddress {
+  line1: string | null;
+  line2: string | null;
+  city: string | null;
+  state: string | null;
+  postalCode: string | null;
+  country: string | null;
+}
+
 const STRIPE_PROCESSING_CLAIM_LEASE_MS = 5 * 60 * 1000;
 
 export interface StripeCheckoutRecord {
@@ -28,6 +37,8 @@ export interface StripeCheckoutRecord {
   stripe_payment_intent_id: string | null;
   donor_name: string | null;
   donor_email: string | null;
+  donor_phone: string | null;
+  donor_address_json: string | null;
   rate_limit_claim_id: string | null;
   error_code: string | null;
   expires_at: string | null;
@@ -56,6 +67,8 @@ export interface StripeGiftRecord {
   currency: "usd";
   donor_name: string | null;
   donor_email: string | null;
+  donor_phone: string | null;
+  donor_address_json: string | null;
   settled_at: string;
   status: "PAID" | "PARTIALLY_REFUNDED" | "REFUNDED";
   refunded_amount_cents: number;
@@ -72,6 +85,9 @@ export interface StripeAcknowledgmentClaim {
   dispatch_started_at: string | null;
   donor_name: string | null;
   donor_email: string | null;
+  donor_phone: string | null;
+  donor_address_json: string | null;
+  source_id: string;
   frequency: StripeGiftFrequency;
   gift_type: StripeGiftType;
   amount_cents: number;
@@ -103,6 +119,8 @@ export interface StripeInvoiceSettlementRecord {
   currency: "usd" | null;
   donor_name: string | null;
   donor_email: string | null;
+  donor_phone: string | null;
+  donor_address_json: string | null;
   settled_at: string | null;
   invoice_livemode: 0 | 1 | null;
   invoice_event_id: string | null;
@@ -294,6 +312,8 @@ export async function updateStripeCheckoutFromEvent(
     stripePaymentIntentId: string | null;
     donorName: string | null;
     donorEmail: string | null;
+    donorPhone?: string | null;
+    donorAddressJson?: string | null;
     completedAt: string | null;
     eventCreated: number;
     eventRank: number;
@@ -306,8 +326,9 @@ export async function updateStripeCheckoutFromEvent(
     `WITH incoming (
        event_created, event_rank, event_id, next_status, next_payment_status,
        customer_id, subscription_id, subscription_status, subscription_event_rank,
-       payment_intent_id, donor_name, donor_email, completed_at, updated_at
-     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+       payment_intent_id, donor_name, donor_email, donor_phone,
+       donor_address_json, completed_at, updated_at
+     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
      UPDATE stripe_checkout_sessions
         SET status = CASE
               WHEN payment_status = 'PAID' OR (SELECT next_payment_status FROM incoming) = 'PAID'
@@ -341,6 +362,8 @@ export async function updateStripeCheckoutFromEvent(
             stripe_payment_intent_id = COALESCE((SELECT payment_intent_id FROM incoming), stripe_payment_intent_id),
             donor_name = COALESCE((SELECT donor_name FROM incoming), donor_name),
             donor_email = COALESCE((SELECT donor_email FROM incoming), donor_email),
+            donor_phone = COALESCE((SELECT donor_phone FROM incoming), donor_phone),
+            donor_address_json = COALESCE((SELECT donor_address_json FROM incoming), donor_address_json),
             completed_at = COALESCE((SELECT completed_at FROM incoming), completed_at),
             checkout_event_created = CASE
               WHEN (SELECT event_created FROM incoming) > checkout_event_created
@@ -406,6 +429,8 @@ export async function updateStripeCheckoutFromEvent(
     input.stripePaymentIntentId,
     input.donorName,
     input.donorEmail,
+    input.donorPhone ?? null,
+    input.donorAddressJson ?? null,
     input.completedAt,
     input.now,
     input.stripeSessionId
@@ -475,6 +500,8 @@ export async function updateStripeCheckoutFromInvoice(
     subscriptionStatus: NonNullable<StripeCheckoutRecord["subscription_status"]>;
     donorName: string | null;
     donorEmail: string | null;
+    donorPhone?: string | null;
+    donorAddressJson?: string | null;
     settled: boolean;
     completedAt: string | null;
     eventCreated: number;
@@ -486,9 +513,10 @@ export async function updateStripeCheckoutFromInvoice(
   return db.prepare(
     `WITH incoming (
        settled, customer_id, subscription_id, subscription_status,
-       donor_name, donor_email, completed_at, event_created, event_rank,
+       donor_name, donor_email, donor_phone, donor_address_json,
+       completed_at, event_created, event_rank,
        event_id, updated_at
-     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
+     ) AS (VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?))
      UPDATE stripe_checkout_sessions
         SET status = CASE WHEN (SELECT settled FROM incoming) = 1 THEN 'COMPLETE' ELSE status END,
             payment_status = CASE WHEN (SELECT settled FROM incoming) = 1 THEN 'PAID' ELSE payment_status END,
@@ -504,6 +532,8 @@ export async function updateStripeCheckoutFromInvoice(
             END,
             donor_name = COALESCE((SELECT donor_name FROM incoming), donor_name),
             donor_email = COALESCE((SELECT donor_email FROM incoming), donor_email),
+            donor_phone = COALESCE((SELECT donor_phone FROM incoming), donor_phone),
+            donor_address_json = COALESCE((SELECT donor_address_json FROM incoming), donor_address_json),
             completed_at = CASE
               WHEN (SELECT settled FROM incoming) = 1
                 THEN COALESCE((SELECT completed_at FROM incoming), completed_at)
@@ -544,6 +574,8 @@ export async function updateStripeCheckoutFromInvoice(
     input.subscriptionStatus,
     input.donorName,
     input.donorEmail,
+    input.donorPhone ?? null,
+    input.donorAddressJson ?? null,
     input.completedAt,
     input.eventCreated,
     input.eventRank,
@@ -735,6 +767,8 @@ export async function recordStripeGiftAndAcknowledgment(
     amountCents: number;
     donorName: string | null;
     donorEmail: string | null;
+    donorPhone?: string | null;
+    donorAddressJson?: string | null;
     settledAt: string;
     now: string;
   }
@@ -743,9 +777,10 @@ export async function recordStripeGiftAndAcknowledgment(
     `INSERT OR IGNORE INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
        stripe_invoice_id, stripe_subscription_id, frequency, gift_type, amount_cents,
-       currency, donor_name, donor_email, settled_at, status,
+       currency, donor_name, donor_email, donor_phone, donor_address_json,
+       settled_at, status,
        refunded_amount_cents, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, 'PAID', 0, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, 'PAID', 0, ?, ?)`
   ).bind(
     input.giftId,
     input.sourceType,
@@ -759,6 +794,8 @@ export async function recordStripeGiftAndAcknowledgment(
     input.amountCents,
     input.donorName,
     input.donorEmail,
+    input.donorPhone ?? null,
+    input.donorAddressJson ?? null,
     input.settledAt,
     input.now,
     input.now
@@ -801,6 +838,8 @@ export async function stageStripeInvoicePaid(
     amountCents: number;
     donorName: string | null;
     donorEmail: string | null;
+    donorPhone?: string | null;
+    donorAddressJson?: string | null;
     settledAt: string;
     livemode: boolean;
     eventId: string;
@@ -810,9 +849,10 @@ export async function stageStripeInvoicePaid(
   const row = await db.prepare(
     `INSERT INTO stripe_invoice_settlements (
        invoice_id, checkout_id, subscription_id, amount_cents, currency,
-       donor_name, donor_email, settled_at, invoice_livemode, invoice_event_id,
+       donor_name, donor_email, donor_phone, donor_address_json,
+       settled_at, invoice_livemode, invoice_event_id,
        status, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, 'PENDING', ?, ?)
+     ) VALUES (?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, ?)
      ON CONFLICT(invoice_id) DO UPDATE SET
        checkout_id = excluded.checkout_id,
        subscription_id = excluded.subscription_id,
@@ -820,6 +860,8 @@ export async function stageStripeInvoicePaid(
        currency = excluded.currency,
        donor_name = excluded.donor_name,
        donor_email = excluded.donor_email,
+       donor_phone = COALESCE(excluded.donor_phone, stripe_invoice_settlements.donor_phone),
+       donor_address_json = COALESCE(excluded.donor_address_json, stripe_invoice_settlements.donor_address_json),
        settled_at = excluded.settled_at,
        invoice_livemode = excluded.invoice_livemode,
        invoice_event_id = excluded.invoice_event_id,
@@ -845,6 +887,8 @@ export async function stageStripeInvoicePaid(
     input.amountCents,
     input.donorName,
     input.donorEmail,
+    input.donorPhone ?? null,
+    input.donorAddressJson ?? null,
     input.settledAt,
     input.livemode ? 1 : 0,
     input.eventId,
@@ -999,7 +1043,8 @@ export async function claimNextStripeAcknowledgment(
             delivery.dispatch_started_at, delivery.revision, delivery.kind,
             delivery.evidence_refunded_amount_cents,
             delivery.snapshot_hash, delivery.snapshot_json,
-            gift.donor_name, gift.donor_email,
+            gift.donor_name, gift.donor_email, gift.donor_phone,
+            gift.donor_address_json, gift.source_id,
             gift.frequency, gift.gift_type, gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
@@ -1170,7 +1215,7 @@ export async function getStripeAcknowledgmentEvidenceSource(
             delivery.dispatch_started_at, delivery.revision, delivery.kind,
             delivery.evidence_refunded_amount_cents,
             delivery.snapshot_hash, delivery.snapshot_json,
-            gift.donor_name, gift.donor_email, gift.frequency, gift.gift_type,
+            gift.donor_name, gift.donor_email, gift.source_id, gift.frequency, gift.gift_type,
             gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id

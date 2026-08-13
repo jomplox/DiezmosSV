@@ -638,6 +638,32 @@ export function CredentialsPanel({
                       <CredentialActiveValue status={status} name="STRIPE_US_TIME_ZONE" />
                       <input type="text" value={input.stripeTimeZone} onChange={(event) => onChange({ ...input, stripeTimeZone: event.target.value })} placeholder="America/New_York" />
                     </label>
+                    <label>
+                      <CredentialFieldLabel label="Teléfono de la organización" configured={credentialConfigured(status, "STRIPE_US_PHONE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_PHONE" />
+                      <input type="tel" autoComplete="off" value={input.stripeOrganizationPhone} onChange={(event) => onChange({ ...input, stripeOrganizationPhone: event.target.value })} placeholder="+1 (000) 000-0000" />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Sitio web" configured={credentialConfigured(status, "STRIPE_US_WEBSITE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_WEBSITE" />
+                      <input type="url" autoComplete="off" value={input.stripeOrganizationWebsite} onChange={(event) => onChange({ ...input, stripeOrganizationWebsite: event.target.value })} placeholder="https://example.org" />
+                    </label>
+                    <label className="span-2">
+                      <CredentialFieldLabel label="Dirección postal" configured={credentialConfigured(status, "STRIPE_US_MAILING_ADDRESS")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_MAILING_ADDRESS" />
+                      <textarea value={input.stripeOrganizationMailingAddress} onChange={(event) => onChange({ ...input, stripeOrganizationMailingAddress: event.target.value })} placeholder={"Calle y número\nCiudad, estado, código postal, EE. UU."} rows={3} />
+                      <small>Use una línea por renglón tal como debe aparecer en las constancias.</small>
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Nombre del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_NAME")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_NAME" />
+                      <input type="text" autoComplete="off" value={input.stripeSignerName} onChange={(event) => onChange({ ...input, stripeSignerName: event.target.value })} />
+                    </label>
+                    <label>
+                      <CredentialFieldLabel label="Cargo del firmante autorizado" configured={credentialConfigured(status, "STRIPE_US_SIGNER_TITLE")} />
+                      <CredentialActiveValue status={status} name="STRIPE_US_SIGNER_TITLE" />
+                      <input type="text" autoComplete="off" value={input.stripeSignerTitle} onChange={(event) => onChange({ ...input, stripeSignerTitle: event.target.value })} placeholder="Treasurer" />
+                    </label>
                     <div className="credential-field-block span-2">
                       <CredentialFieldLabel label="Secreto activo del webhook" configured={credentialConfigured(status, "STRIPE_WEBHOOK_SECRET")} />
                       <CredentialActiveValue status={status} name="STRIPE_WEBHOOK_SECRET" />
@@ -1338,51 +1364,87 @@ function EmailTemplateEditor({
         <div className="empty-state">Cargando plantillas de correo.</div>
       ) : (
         <>
-          <div className="email-template-guidance">
-            <span>Use variables para insertar datos del CDE. Los nuevos tipos de correo aparecerán en esta misma sección.</span>
-            <div className="email-template-placeholders" aria-label="Variables disponibles">
-              {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+          <section className="email-template-country-group" aria-label="Plantillas de El Salvador — CDE">
+            <div className="email-template-country-head">
+              <div>
+                <h3>El Salvador — CDE</h3>
+                <p>Mensajes fiscales salvadoreños vinculados al comprobante electrónico.</p>
+              </div>
+              <span className="email-template-country-badge">Editables</span>
             </div>
-          </div>
-          <div className="email-template-list">
-            {definitions.map((definition) => {
-              const value = draft[definition.type] ?? { subject: "", body: "" };
-              return (
-                <section className="email-template-card" key={definition.type}>
-                  <div>
-                    <h3>{definition.label}</h3>
-                    <p>{definition.description}</p>
-                  </div>
-                  <label>
-                    <span>Asunto</span>
-                    <input
-                      value={value.subject}
-                      onChange={(event) => onChange(definition.type, { subject: event.target.value })}
-                      placeholder={definition.defaultSubject}
-                    />
-                  </label>
-                  <label>
-                    <span>Cuerpo del correo</span>
-                    <textarea
-                      value={value.body}
-                      onChange={(event) => onChange(definition.type, { body: event.target.value })}
-                      placeholder={definition.defaultBody}
-                    />
-                  </label>
-                </section>
-              );
-            })}
-          </div>
-          <div className="credential-actions email-template-actions">
-            <div>
-              <Mail size={16} />
-              <span>Estos textos se aplican al próximo envío o reenvío de correo.</span>
+            <div className="email-template-guidance">
+              <span>Use estas variables solamente en los correos CDE de El Salvador.</span>
+              <div className="email-template-placeholders" aria-label="Variables disponibles para El Salvador">
+                {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+              </div>
             </div>
-            <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
-              <Mail size={16} />
-              {busy ? "Guardando" : "Guardar plantillas"}
-            </button>
-          </div>
+            <div className="email-template-list">
+              {definitions.map((definition) => {
+                const value = draft[definition.type] ?? { subject: "", body: "" };
+                return (
+                  <section className="email-template-card" key={definition.type}>
+                    <div>
+                      <h4>{definition.label}</h4>
+                      <p>{definition.description}</p>
+                    </div>
+                    <label>
+                      <span>Asunto</span>
+                      <input
+                        value={value.subject}
+                        onChange={(event) => onChange(definition.type, { subject: event.target.value })}
+                        placeholder={definition.defaultSubject}
+                      />
+                    </label>
+                    <label>
+                      <span>Cuerpo del correo</span>
+                      <textarea
+                        value={value.body}
+                        onChange={(event) => onChange(definition.type, { body: event.target.value })}
+                        placeholder={definition.defaultBody}
+                      />
+                    </label>
+                  </section>
+                );
+              })}
+            </div>
+            <div className="credential-actions email-template-actions">
+              <div>
+                <Mail size={16} />
+                <span>Estos textos se aplican al próximo envío o reenvío de CDE.</span>
+              </div>
+              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+                <Mail size={16} />
+                {busy ? "Guardando" : "Guardar plantillas"}
+              </button>
+            </div>
+          </section>
+
+          <section className="email-template-country-group email-template-country-group-protected" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
+            <div className="email-template-country-head">
+              <div>
+                <h3>EE. UU. — Stripe 501(c)(3)</h3>
+                <p>Constancias estadounidenses separadas de los mensajes CDE salvadoreños.</p>
+              </div>
+              <span className="email-template-protected-badge"><Lock size={13} />Texto legal protegido</span>
+            </div>
+            <p className="email-template-protected-note">
+              El sistema incorpora el nombre legal, EIN, fecha, monto y la declaración sobre bienes o servicios. Estas cláusulas no usan ni modifican las plantillas de El Salvador. La marca, el remitente y el correo de respuesta se configuran en sus secciones correspondientes.
+            </p>
+            <div className="email-template-managed-list">
+              <article>
+                <h4>Constancia inmediata</h4>
+                <p>Se envía al confirmarse una donación única o mensual de Stripe.</p>
+              </article>
+              <article>
+                <h4>Corrección o revocación por reembolso</h4>
+                <p>Reemplaza o revoca la constancia anterior según el monto reembolsado.</p>
+              </article>
+              <article>
+                <h4>Constancia anual</h4>
+                <p>Resume el total neto anual y emite una corrección si cambian las donaciones o reembolsos.</p>
+              </article>
+            </div>
+          </section>
         </>
       )}
     </section>

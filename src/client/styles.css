@@ -1421,6 +1421,27 @@ select,
   margin-top: 0;
 }
 
+.export-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.export-pagination span {
+  min-width: 190px;
+  color: var(--ink-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.export-pagination button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
 .contacts-columns {
   margin: 12px 0 0;
   padding: 12px 14px;
@@ -2638,6 +2659,84 @@ input.file-input-hidden {
   gap: 12px;
 }
 
+.email-template-country-group {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.email-template-country-group + .email-template-country-group {
+  margin-top: 2px;
+}
+
+.email-template-country-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.email-template-country-head h3 {
+  margin: 0 0 3px;
+  font-size: 15px;
+}
+
+.email-template-country-head p,
+.email-template-protected-note,
+.email-template-managed-list p {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.email-template-country-badge,
+.email-template-protected-badge {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.email-template-country-badge {
+  background: var(--accent-tint);
+  color: var(--accent-ink);
+}
+
+.email-template-protected-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  background: var(--surface-muted);
+  color: var(--ink-secondary);
+}
+
+.email-template-country-group-protected {
+  background: var(--surface-muted);
+}
+
+.email-template-managed-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.email-template-managed-list article {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--surface);
+}
+
+.email-template-managed-list h4,
+.email-template-card h4 {
+  margin: 0 0 3px;
+  font-size: 13px;
+}
+
 .email-template-card {
   display: grid;
   gap: 10px;
@@ -2650,7 +2749,8 @@ input.file-input-hidden {
   border-top: 0;
 }
 
-.email-template-card h3 {
+.email-template-card h3,
+.email-template-card h4 {
   margin-bottom: 3px;
   font-size: 14px;
 }
@@ -4605,6 +4705,21 @@ pre {
 
   .credential-fields {
     grid-template-columns: 1fr;
+  }
+
+  .email-template-country-head,
+  .export-pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .email-template-managed-list {
+    grid-template-columns: 1fr;
+  }
+
+  .export-pagination span {
+    order: -1;
+    min-width: 0;
   }
 
   .credential-settings-nav {

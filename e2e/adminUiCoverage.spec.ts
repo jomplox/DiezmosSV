@@ -292,6 +292,165 @@ test("covers every owner navigation surface with accessible filters and no app r
   expect(runtimeErrors).toEqual([]);
 });
 
+test("keeps Salvadoran and U.S. legal email templates visibly separated", async ({ page }) => {
+  await installOwnerAdmin(page, async (route, url) => {
+    if (url.pathname !== "/api/settings/email-templates") return false;
+    await fulfillJson(route, {
+      emailTemplates: {
+        definitions: [
+          {
+            type: "dteReceipt",
+            label: "Envío de comprobante",
+            description: "Correo que recibe el donante con su CDE en PDF y JSON.",
+            defaultSubject: "Comprobante de su donación {{numeroControl}}",
+            defaultBody: "Cuerpo salvadoreño"
+          },
+          {
+            type: "dteInvalidation",
+            label: "Invalidación de comprobante",
+            description: "Correo que recibe el donante cuando su CDE queda invalidado.",
+            defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
+            defaultBody: "Cuerpo de invalidación"
+          }
+        ],
+        placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"],
+        templates: {
+          dteReceipt: {
+            subject: "Comprobante de su donación {{numeroControl}}",
+            body: "Cuerpo salvadoreño"
+          },
+          dteInvalidation: {
+            subject: "Invalidación de su comprobante {{numeroControl}}",
+            body: "Cuerpo de invalidación"
+          }
+        }
+      }
+    });
+    return true;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Plantillas/ }).click();
+
+  const templatePanel = page.locator(".email-template-panel");
+  const salvadoranTemplates = templatePanel.getByRole("region", { name: "Plantillas de El Salvador — CDE" });
+  const usTemplates = templatePanel.getByRole("region", { name: "Plantillas de EE. UU. — Stripe 501(c)(3)" });
+  await expect(salvadoranTemplates.getByRole("heading", { name: "El Salvador — CDE" })).toBeVisible();
+  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas" })).toBeVisible();
+  await expect(usTemplates.getByRole("heading", { name: "EE. UU. — Stripe 501(c)(3)" })).toBeVisible();
+  await expect(usTemplates.getByText("Texto legal protegido")).toBeVisible();
+  await expect(usTemplates.getByText("Constancia inmediata")).toBeVisible();
+  await expect(usTemplates.getByText("Corrección o revocación por reembolso")).toBeVisible();
+  await expect(usTemplates.getByText("Constancia anual")).toBeVisible();
+  await expect(usTemplates.locator("input, textarea")).toHaveCount(0);
+});
+
+test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {
+  const rows = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      fechaEmision: `2026-08-${String(number).padStart(2, "0")}`,
+      nombre: `F960 Donante ${number}`,
+      correo: `f960-${number}@example.org`,
+      nit: "",
+      dui: String(100000000 + number),
+      monto: `${number}.00`,
+      periodo: "082026",
+      codigoGeneracion: `generation-${number}`,
+      sello: `seal-${number}`,
+      numeroControl: `DTE-${number}`
+    };
+  });
+  const svDonors = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      groupKey: `sv-${number}`,
+      donorName: `Donante SV ${number}`,
+      donorEmail: `sv-${number}@example.org`,
+      hasEmail: true,
+      count: 1,
+      totalLabel: `$${number}.00`,
+      hasTestEnvironment: true,
+      dossierTooLarge: false
+    };
+  });
+  const usDonors = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      donorKey: `us-${number}`,
+      donorName: `Donante EE. UU. ${number}`,
+      donorEmail: `us-${number}@example.org`,
+      hasEmail: true,
+      count: 1,
+      grossTotalLabel: `$${number}.00`,
+      refundedTotalLabel: "$0.00",
+      netTotalLabel: `$${number}.00`
+    };
+  });
+  const intents = Array.from({ length: 23 }, (_, index) => {
+    const number = index + 1;
+    return {
+      id: `intent-${number}`,
+      status: "COMPLETED",
+      amount_cents: number * 100,
+      document_id: `document-${number}`,
+      gift_type: number % 2 === 0 ? "OFRENDA" : "DIEZMO",
+      created_at: `2026-08-${String(number).padStart(2, "0")}T12:00:00.000Z`,
+      numero_control: `DTE-${number}`,
+      document_donor_name: `Donante en línea ${number}`
+    };
+  });
+
+  await installOwnerAdmin(page, async (route, url) => {
+    if (url.pathname === "/api/exports/f960") {
+      await fulfillJson(route, { rows, rowCount: rows.length, amountTotal: "276.00" });
+      return true;
+    }
+    if (url.pathname === "/api/certificates/annual") {
+      await fulfillJson(route, { year: 2026, donors: svDonors, hasMore: false, nextCursor: null });
+      return true;
+    }
+    if (url.pathname === "/api/statements/stripe/annual" && route.request().method() === "GET") {
+      await fulfillJson(route, {
+        year: 2026,
+        livemode: false,
+        timeZone: "America/New_York",
+        donors: usDonors,
+        hasMore: false,
+        nextCursor: null
+      });
+      return true;
+    }
+    if (url.pathname === "/api/donations/intents") {
+      await fulfillJson(route, { intents });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Exportar");
+
+  const f960 = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "F960", exact: true }) });
+  const sv = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "El Salvador — CDE", exact: true }) });
+  const us = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "EE. UU. — Stripe", exact: true }) });
+  const online = page.locator("section.export-panel").filter({ has: page.getByRole("heading", { name: "Donaciones en línea", exact: true }) });
+
+  for (const [panel, label] of [
+    [f960, "F960"],
+    [sv, "constancias de El Salvador"],
+    [us, "constancias de EE. UU."],
+    [online, "donaciones en línea"]
+  ] as const) {
+    await expect(panel.locator("tbody tr")).toHaveCount(10);
+    await expect(panel.getByRole("navigation", { name: `Paginación de ${label}` })).toContainText("Página 1 de 3");
+  }
+
+  const f960Pagination = f960.getByRole("navigation", { name: "Paginación de F960" });
+  await f960Pagination.getByRole("button", { name: "Siguiente" }).click();
+  await expect(f960.locator("tbody tr").first()).toContainText("F960 Donante 11");
+  await expect(f960Pagination).toContainText("Página 2 de 3");
+});
+
 test("does not dispatch user creation until name and a valid email are present", async ({ page }) => {
   const harness = await installOwnerAdmin(page);
   await openView(page, "Usuarios");

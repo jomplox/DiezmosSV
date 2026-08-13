@@ -18,11 +18,18 @@ describe("Stripe owner settings UI", () => {
   test("renders write-only replacements, visible timezone, and no active webhook replacement", () => {
     for (const label of [
       "Clave restringida", "Clave publicable", "Configuración de métodos de entrega",
-      "Configuración del portal", "Nombre legal", "EIN", "Zona horaria"
+      "Configuración del portal", "Nombre legal", "EIN", "Zona horaria",
+      "Teléfono de la organización", "Sitio web", "Dirección postal",
+      "Nombre del firmante autorizado", "Cargo del firmante autorizado"
     ]) {
       expect(panelSource).toContain(label);
     }
     expect(panelSource).toContain('value={input.stripeTimeZone}');
+    expect(panelSource).toContain('value={input.stripeOrganizationPhone}');
+    expect(panelSource).toContain('value={input.stripeOrganizationWebsite}');
+    expect(panelSource).toContain('value={input.stripeOrganizationMailingAddress}');
+    expect(panelSource).toContain('value={input.stripeSignerName}');
+    expect(panelSource).toContain('value={input.stripeSignerTitle}');
     expect(panelSource).toContain('name="stripe-webhook-secret-next"');
     expect(panelSource).not.toContain('name="stripe-webhook-secret-active"');
     expect(panelSource).toContain("Los campos de reemplazo nunca se precargan");
@@ -52,5 +59,10 @@ describe("Stripe owner settings UI", () => {
     expect(appSource).toContain('"/api/settings/stripe/webhook-secret/promote"');
     expect(appSource).toContain('"/api/settings/stripe/webhook-secret/cancel"');
     expect(appSource).toContain("emptyStripeCredentialInput()");
+    expect(appSource).toContain("organizationPhone: credentialInput.stripeOrganizationPhone");
+    expect(appSource).toContain("organizationWebsite: credentialInput.stripeOrganizationWebsite");
+    expect(appSource).toContain("organizationMailingAddress: credentialInput.stripeOrganizationMailingAddress");
+    expect(appSource).toContain("signerName: credentialInput.stripeSignerName");
+    expect(appSource).toContain("signerTitle: credentialInput.stripeSignerTitle");
   });
 });

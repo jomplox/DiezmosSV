@@ -1,9 +1,10 @@
-import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFImage, type PDFPage } from "pdf-lib";
 import { formatCents } from "../../shared/money";
 import type {
   Repository,
   StripeAnnualStatementDonorTarget,
-  StripeAnnualStatementGift
+  StripeAnnualStatementGift,
+  StripeDonorAddress
 } from "../storage/repository";
 import { StripeAnnualStatementReservationFenceError } from "../storage/repository/stripeAnnualStatements";
 import type { Env } from "../types";
@@ -20,23 +21,21 @@ import {
 import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
 import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./emailSender";
-import { ORG_LOGO_VIEW_BOX } from "./orgLogo";
 import {
-  drawOrganizationLogo,
   loadPdfBrandingLogo,
   pdfSafeText,
   type PdfBrandingLogo
 } from "./pdf";
 import { logWorkerError } from "./observability";
 import { resolveStripeConfiguration } from "./stripeDonations";
+import { STRIPE_ANNUAL_LOGO_BYTES } from "./stripePdfAssets";
 
 export const STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE = 50;
 export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
-const MARGIN = 42;
-export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v2" as const;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v3" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -112,7 +111,13 @@ export interface StripeAnnualStatementSnapshot {
   version: 2;
   year: number;
   livemode: boolean;
-  donor: { key: string; name: string; email: string | null };
+  donor: {
+    key: string;
+    name: string;
+    email: string | null;
+    phone: string | null;
+    address: StripeDonorAddress | null;
+  };
   document: StripeAnnualStatementDocumentEvidence;
   items: StripeAnnualStatementItem[];
   totals: {
@@ -132,6 +137,11 @@ export interface StripeAnnualStatementDocumentEvidence {
   timeZone: string;
   accentColor: string;
   logo: { format: PdfBrandingLogo["format"]; hash: string } | null;
+  organizationContact: {
+    phone: string;
+    website: string;
+    mailingAddress: string[];
+  };
   email: {
     organizationName: string;
     supportEmail: string;
@@ -195,6 +205,14 @@ export async function buildStripeAnnualStatementSnapshot(input: {
   if (totals.netAmountCents < 0) {
     throw new Error("Stripe annual statement contains a negative annual net amount");
   }
+  const newestGifts = [...input.gifts]
+    .sort((left, right) => right.settled_at.localeCompare(left.settled_at) || right.id.localeCompare(left.id));
+  const donorPhone = newestGifts
+    .map((gift) => gift.donor_phone?.trim() || null)
+    .find((value): value is string => value !== null) ?? null;
+  const donorAddress = newestGifts
+    .map((gift) => parseStripeDonorAddress(gift.donor_address_json))
+    .find((value): value is StripeDonorAddress => value !== null) ?? null;
   const canonical = {
     version: 2 as const,
     year: input.year,
@@ -202,7 +220,9 @@ export async function buildStripeAnnualStatementSnapshot(input: {
     donor: {
       key: input.donorKey.trim(),
       name: input.donorName.trim() || "Donante",
-      email: normalizedEmail(input.donorEmail)
+      email: normalizedEmail(input.donorEmail),
+      phone: donorPhone,
+      address: donorAddress
     },
     document: {
       rendererVersion: input.document.rendererVersion,
@@ -211,6 +231,11 @@ export async function buildStripeAnnualStatementSnapshot(input: {
       timeZone: input.document.timeZone,
       accentColor: input.document.accentColor.trim().toLowerCase(),
       logo: input.document.logo,
+      organizationContact: {
+        phone: input.document.organizationContact.phone.trim(),
+        website: input.document.organizationContact.website.trim(),
+        mailingAddress: input.document.organizationContact.mailingAddress.map((line) => line.trim()).filter(Boolean)
+      },
       email: input.document.email,
       settings: input.document.settings
     },
@@ -238,86 +263,44 @@ export async function renderStripeAnnualStatementPdf(
   const pdf = await PDFDocument.create();
   const regular = await pdf.embedFont(StandardFonts.Helvetica);
   const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
-  const accent = accentRgb(input.snapshot.document.accentColor);
-  const muted = rgb(0.32, 0.36, 0.38);
-  let page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-  let y = await drawStatementHeader(pdf, page, input, regular, bold, accent);
+  const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);
+  const logo = await annualStatementLogo(pdf, input.logo);
+  const firstPageItems = input.snapshot.items.slice(0, 5);
+  const continuationItems = input.snapshot.items.slice(5);
+  const pages: StripeAnnualStatementItem[][] = [firstPageItems];
+  for (let index = 0; index < continuationItems.length; index += 12) {
+    pages.push(continuationItems.slice(index, index + 12));
+  }
 
-  for (const item of input.snapshot.items) {
-    if (y < 142) {
-      page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-      page.drawText(`Constancia anual de donaciones — EE. UU. ${input.snapshot.year} — continuación`, {
-        x: MARGIN,
-        y: 744,
-        size: 12,
-        font: bold,
-        color: accent
+  pages.forEach((items, pageIndex) => {
+    const page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    const finalPage = pageIndex === pages.length - 1;
+    if (pageIndex === 0) {
+      drawAnnualCover(page, input, logo, regular, bold, italic);
+      drawAnnualContributionTable(page, items, {
+        topY: 215.613,
+        rowHeight: 24.75,
+        regular,
+        bold,
+        timeZone: input.snapshot.document.timeZone,
+        total: finalPage ? input.snapshot.totals : null
       });
-      y = drawTableHeader(page, bold, 716, accent);
+    } else {
+      drawAnnualContributionTable(page, items, {
+        topY: 752.316,
+        rowHeight: 24.75,
+        regular,
+        bold,
+        timeZone: input.snapshot.document.timeZone,
+        total: finalPage ? input.snapshot.totals : null
+      });
     }
-    const date = formatUsDate(item.settledAt, input.snapshot.document.timeZone);
-    page.drawText(date, { x: MARGIN + 4, y, size: 8, font: regular });
-    page.drawText(giftTypeLabel(item.giftType), { x: 112, y, size: 8, font: regular });
-    page.drawText(frequencyLabel(item.frequency), { x: 176, y, size: 8, font: regular });
-    drawRight(page, formatCents(item.grossAmountCents), 337, y, 8, regular);
-    drawRight(page, formatCents(item.refundedAmountCents), 432, y, 8, regular);
-    drawRight(page, formatCents(item.netAmountCents), PAGE_WIDTH - MARGIN - 4, y, 8, regular);
-    page.drawLine({
-      start: { x: MARGIN, y: y - 5 },
-      end: { x: PAGE_WIDTH - MARGIN, y: y - 5 },
-      thickness: 0.35,
-      color: rgb(0.84, 0.86, 0.87)
-    });
-    y -= 20;
-  }
-
-  if (y < 158) {
-    page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-    y = 724;
-  }
-  page.drawText(`Total neto anual (${input.snapshot.totals.count} ${input.snapshot.totals.count === 1 ? "donación" : "donaciones"})`, {
-    x: MARGIN,
-    y,
-    size: 10,
-    font: bold
-  });
-  drawRight(page, formatCents(input.snapshot.totals.netAmountCents), PAGE_WIDTH - MARGIN, y, 11, bold);
-  y -= 22;
-  page.drawText("No se proporcionaron bienes ni servicios a cambio de estas donaciones.", {
-    x: MARGIN,
-    y,
-    size: 9,
-    font: bold,
-    maxWidth: PAGE_WIDTH - MARGIN * 2
-  });
-  y -= 18;
-  page.drawText("Documento informativo para sus registros; no constituye asesoría fiscal.", {
-    x: MARGIN,
-    y,
-    size: 8.5,
-    font: regular,
-    color: muted
-  });
-  page.drawText(`Emitida el ${formatUsDate(input.issuedOn, input.snapshot.document.timeZone)}.`, {
-    x: MARGIN,
-    y: y - 16,
-    size: 8.5,
-    font: regular,
-    color: muted
+    drawAnnualFooter(page, input, pageIndex + 1, pages.length, regular);
   });
 
-  for (const currentPage of pdf.getPages()) {
-    currentPage.drawLine({ start: { x: MARGIN, y: 54 }, end: { x: PAGE_WIDTH - MARGIN, y: 54 }, thickness: 0.5, color: rgb(0.8, 0.82, 0.83) });
-    drawWrappedText(currentPage, input.snapshot.document.legalName, {
-      x: MARGIN,
-      y: 40,
-      size: 7.5,
-      lineHeight: 9,
-      maxWidth: PAGE_WIDTH - MARGIN * 2,
-      font: regular,
-      color: muted
-    });
-  }
+  pdf.setTitle(`Annual Giving Statement ${input.snapshot.year}`);
+  pdf.setAuthor(input.snapshot.document.legalName);
+  pdf.setProducer(STRIPE_ANNUAL_STATEMENT_PDF_VERSION);
   return pdf.save();
 }
 
@@ -680,6 +663,11 @@ async function loadStripeAnnualStatementContext(
         senderName: branding.senderName,
         replyToAddress: branding.replyToAddress
       },
+      organizationContact: {
+        phone: configuration.organizationPhone,
+        website: configuration.organizationWebsite,
+        mailingAddress: configuration.organizationMailingAddress
+      },
       settings
     }
   };
@@ -768,52 +756,349 @@ function previewDonor(target: StripeAnnualStatementDonorTarget): StripeAnnualSta
   };
 }
 
-async function drawStatementHeader(
+async function annualStatementLogo(
   pdf: PDFDocument,
+  configured: PdfBrandingLogo | null | undefined
+): Promise<PDFImage> {
+  if (configured) {
+    try {
+      return configured.format === "png"
+        ? await pdf.embedPng(configured.bytes)
+        : await pdf.embedJpg(configured.bytes);
+    } catch {
+      // The approved built-in mark keeps the statement renderable when an
+      // operator-uploaded raster is corrupt or unsupported by pdf-lib.
+    }
+  }
+  return pdf.embedPng(STRIPE_ANNUAL_LOGO_BYTES);
+}
+
+function drawAnnualCover(
   page: PDFPage,
   input: RenderStripeAnnualStatementPdfInput,
+  logo: PDFImage,
   regular: PDFFont,
   bold: PDFFont,
-  accent: ReturnType<typeof rgb>
-): Promise<number> {
-  const logoHeight = 42;
-  const logoWidth = ORG_LOGO_VIEW_BOX.width * (logoHeight / ORG_LOGO_VIEW_BOX.height);
-  await drawOrganizationLogo(pdf, page, {
-    x: (PAGE_WIDTH - logoWidth) / 2,
-    bottomY: 730,
-    height: logoHeight,
-    centered: true
-  }, input.logo);
-  let y = drawWrappedCentered(page, input.snapshot.document.legalName, 706, 11, 13, bold);
-  drawCentered(page, `EIN: ${input.snapshot.document.ein}`, y - 2, 9, regular);
-  y -= 33;
-  drawCentered(page, "Constancia anual de donaciones — EE. UU.", y, 17, bold, accent);
-  y -= 20;
-  drawCentered(page, `Año calendario ${input.snapshot.year}`, y, 11, bold);
+  italic: PDFFont
+): void {
+  const left = 45.354;
+  const right = 566.646;
+  const preparedX = 316.426;
+  const gray = rgb(0.32, 0.32, 0.32);
+  const logoFit = Math.min(75 / logo.width, 30 / logo.height);
+  page.drawImage(logo, {
+    x: left,
+    y: 716,
+    width: logo.width * logoFit,
+    height: logo.height * logoFit
+  });
+  drawRight(page, "Annual Giving Statement", right, 737, 15.5, bold);
+  drawRight(page, `Statement No. AGS-${input.snapshot.year}-${input.snapshot.hash.slice(0, 8).toUpperCase()}`, right, 721, 8, regular, gray);
+  drawRight(page, `Tax Year ${input.snapshot.year} · Generated ${formatAnnualLongDate(input.issuedOn, input.snapshot.document.timeZone)}`, right, 709, 8, regular, gray);
   if (input.corrected) {
-    y -= 21;
-    drawCentered(page, "CONSTANCIA CORREGIDA", y, 10, bold, rgb(0.65, 0.2, 0.12));
+    drawRight(page, "CORRECTED STATEMENT", right, 698, 8.5, bold, rgb(0.55, 0.13, 0.1));
   }
-  y -= input.corrected ? 31 : 28;
-  y = drawWrappedText(page, `Donante: ${input.snapshot.donor.name}`, {
-    x: MARGIN,
-    y,
-    size: 9.5,
-    lineHeight: 12,
-    maxWidth: PAGE_WIDTH - MARGIN * 2,
+  page.drawLine({ start: { x: left, y: 695 }, end: { x: right, y: 695 }, thickness: 1.25, color: rgb(0.12, 0.12, 0.12) });
+
+  drawPdfLabel(page, "FROM", left, 674, bold);
+  drawPdfLabel(page, "PREPARED FOR", preparedX, 674, bold);
+  drawWrappedText(page, input.snapshot.document.legalName, {
+    x: left,
+    y: 656,
+    size: 12,
+    lineHeight: 13.5,
+    maxWidth: 220,
+    font: bold
+  });
+  drawPdfTextLine(page, "A 501(c)(3) Public Charity", left, 638, 9.8, regular);
+  drawPdfTextLine(page, `EIN ${input.snapshot.document.ein}`, left, 625, 9.8, regular);
+  drawPdfTextLine(page, `${input.snapshot.document.email.supportEmail}  ·  ${input.snapshot.document.organizationContact.phone}`, left, 612, 9.3, regular, gray);
+  drawPdfTextLine(page, input.snapshot.document.organizationContact.website, left, 599, 9.3, regular, gray);
+  input.snapshot.document.organizationContact.mailingAddress.slice(0, 3).forEach((line, index) => {
+    drawPdfTextLine(page, line, left, 586 - index * 13, 9.3, regular, gray);
+  });
+
+  drawWrappedText(page, input.snapshot.donor.name, {
+    x: preparedX,
+    y: 656,
+    size: 12,
+    lineHeight: 13.5,
+    maxWidth: right - preparedX,
+    font: bold
+  });
+  const donorContactLines = annualDonorContactLines(input.snapshot.donor);
+  donorContactLines.slice(0, 4).forEach((line, index) => {
+    drawPdfTextLine(page, line, preparedX, 638 - index * 13, 9.3, regular, gray);
+  });
+  drawAnnualRoundedRectangle(page, {
+    x: preparedX,
+    y: 522,
+    width: right - preparedX,
+    height: 79,
+    radius: 4.5,
+    borderColor: rgb(0.86, 0.87, 0.88),
+    borderWidth: 0.7,
+    color: rgb(0.975, 0.978, 0.982)
+  });
+  drawPdfLabel(page, "CONTRIBUTION PERIOD", preparedX + 10, 585, bold);
+  drawPdfTextLine(page, annualPeriodLabel(input.snapshot.year), preparedX + 10, 570, 10, regular);
+  drawPdfLabel(page, "TOTAL TAX-DEDUCTIBLE CONTRIBUTIONS", preparedX + 10, 555, bold);
+  const summaryAmount = formatCents(input.snapshot.totals.netAmountCents);
+  drawPdfTextLine(page, summaryAmount, 326.176, 535, 20, bold);
+  drawPdfTextLine(
+    page,
+    "USD",
+    326.176 + bold.widthOfTextAtSize(summaryAmount, 20) + 5,
+    535,
+    9,
+    bold,
+    gray
+  );
+
+  drawAnnualRoundedRectangle(page, {
+    x: left,
+    y: 366.184,
+    width: right - left,
+    height: 145.652,
+    radius: 3.75,
+    borderColor: rgb(0.82, 0.82, 0.82),
+    borderWidth: 0.7,
+    color: rgb(0.985, 0.985, 0.985)
+  });
+  page.drawLine({
+    start: { x: left + 1.2, y: 367.5 },
+    end: { x: left + 1.2, y: 509.5 },
+    thickness: 2.4,
+    color: rgb(0.1, 0.1, 0.1)
+  });
+  drawPdfTextLine(page, "Tax-Deductible Contribution Acknowledgment", left + 12.75, 493, 9.4, bold);
+  const legalName = input.snapshot.document.legalName;
+  drawWrappedText(page, `${legalName} is a tax-exempt organization as described in Section 501(c)(3) of the Internal Revenue Code (EIN ${input.snapshot.document.ein}). Contributions to ${legalName} are tax-deductible to the extent allowed by law.`, {
+    x: left + 12.75,
+    y: 477.8,
+    size: 8,
+    lineHeight: 13.05,
+    maxWidth: right - left - 25.5,
     font: regular
   });
-  if (input.snapshot.donor.email) {
-    y = drawWrappedText(page, `Correo: ${input.snapshot.donor.email}`, {
-      x: MARGIN,
-      y: y - 3,
-      size: 9.5,
-      lineHeight: 12,
-      maxWidth: PAGE_WIDTH - MARGIN * 2,
-      font: regular
-    });
+  drawWrappedText(page, `This letter is your contemporaneous written acknowledgment of the charitable contributions itemized below. During ${annualPeriodLabel(input.snapshot.year)}, you made cash contributions totaling ${formatCents(input.snapshot.totals.netAmountCents)} USD. No goods or services were provided to you in exchange for these contributions.`, {
+    x: left + 12.75,
+    y: 447.2,
+    size: 8,
+    lineHeight: 13.05,
+    maxWidth: right - left - 25.5,
+    font: regular
+  });
+  drawWrappedText(page, "Please retain this acknowledgment with your tax records. To claim a charitable deduction, the IRS requires that you obtain written acknowledgment of each contribution of $250 or more before the earlier of the date you file your federal income tax return for the year of the contribution or the due date (including extensions) of that return. This document does not constitute tax advice.", {
+    x: left + 12.75,
+    y: 403,
+    size: 8,
+    lineHeight: 11.85,
+    maxWidth: right - left - 25.5,
+    font: regular
+  });
+
+  drawWrappedText(page, "Le expresamos nuestro más sincero agradecimiento por su generoso apoyo a la Obra del Señor. Su aporte marca una gran diferencia en el alcance del evangelio y nos impulsa a seguir cumpliendo nuestra misión.", {
+    x: left,
+    y: 347.3,
+    size: 9.2,
+    lineHeight: 11.5,
+    maxWidth: right - left,
+    font: regular
+  });
+  drawWrappedText(page, "«Traigan íntegro el diezmo a la tesorería del Templo; así habrá alimento en mi casa. Pruébenme en esto —dice el Señor de los Ejércitos—, y vean si no abro las compuertas del cielo y derramo sobre ustedes bendición hasta que sobreabunde.»", {
+    x: left + 13,
+    y: 308,
+    size: 8.6,
+    lineHeight: 10.5,
+    maxWidth: right - left - 26,
+    font: italic
+  });
+  page.drawRectangle({
+    x: left,
+    y: 270.664,
+    width: 1.5,
+    height: 49.922,
+    color: rgb(0.788, 0.8, 0.82)
+  });
+  drawPdfTextLine(page, "— Malaquías 3:10", left + 13, 278, 8.6, italic);
+
+  drawPdfLabel(page, "CONTRIBUTIONS", left, 249, bold);
+  drawWrappedText(page, "Amounts shown are net of refunds and other adjustments recorded for the period.", {
+    x: left,
+    y: 236,
+    size: 7.4,
+    lineHeight: 9,
+    maxWidth: right - left,
+    font: regular,
+    color: gray
+  });
+}
+
+function drawAnnualContributionTable(
+  page: PDFPage,
+  items: StripeAnnualStatementItem[],
+  options: {
+    topY: number;
+    rowHeight: number;
+    regular: PDFFont;
+    bold: PDFFont;
+    timeZone: string;
+    total: StripeAnnualStatementSnapshot["totals"] | null;
   }
-  return drawTableHeader(page, bold, y - 17, accent);
+): void {
+  const left = 45.354;
+  const right = 566.646;
+  const headerHeight = 22.578;
+  const amountRight = 235.938;
+  const sourceX = 250.945;
+  const methodX = 407.332;
+  const rule = rgb(0.78, 0.78, 0.78);
+  const stripe = rgb(0.98822, 0.98822, 0.992157);
+  const headerText = rgb(0.298, 0.337, 0.391);
+  page.drawRectangle({
+    x: left,
+    y: options.topY - headerHeight,
+    width: right - left,
+    height: headerHeight,
+    color: rgb(0.952927, 0.956848, 0.964691)
+  });
+  page.drawLine({ start: { x: left, y: options.topY }, end: { x: right, y: options.topY }, thickness: 0.7, color: rule });
+  const headerBaseline = options.topY - 12.273;
+  drawPdfTextLine(page, "DATE", left + 7.5, headerBaseline, 8, options.bold, headerText);
+  drawPdfTextLine(page, "AMOUNT", 146.687, headerBaseline, 8, options.bold, headerText);
+  drawPdfTextLine(page, "DONATION ID", sourceX, headerBaseline, 8, options.bold, headerText);
+  drawPdfTextLine(page, "DONATION METHOD", methodX, headerBaseline, 8, options.bold, headerText);
+  page.drawLine({ start: { x: left, y: options.topY - headerHeight }, end: { x: right, y: options.topY - headerHeight }, thickness: 0.7, color: rule });
+
+  let rowTop = options.topY - headerHeight;
+  items.forEach((item, index) => {
+    const rowBottom = rowTop - options.rowHeight;
+    if (index % 2 === 1) {
+      page.drawRectangle({ x: left, y: rowBottom, width: right - left, height: options.rowHeight, color: stripe });
+    }
+    const baseline = rowBottom + options.rowHeight / 2 - 1.63;
+    drawPdfTextLine(page, formatAnnualShortDate(item.settledAt, options.timeZone), left + 7.5, baseline, 9, options.regular);
+    drawRight(page, formatCents(item.netAmountCents), amountRight, baseline, 9, options.regular);
+    drawPdfTextLine(page, fitPdfText(item.sourceId, options.regular, 9, methodX - sourceX - 12), sourceX, baseline, 9, options.regular);
+    drawPdfTextLine(page, "Stripe", methodX, baseline, 9, options.regular);
+    page.drawLine({ start: { x: left, y: rowBottom }, end: { x: right, y: rowBottom }, thickness: 0.35, color: rgb(0.86, 0.86, 0.86) });
+    rowTop = rowBottom;
+  });
+
+  if (options.total) {
+    const totalHeight = 36.223;
+    page.drawRectangle({
+      x: left,
+      y: rowTop - totalHeight,
+      width: right - left,
+      height: totalHeight,
+      color: rgb(0.965, 0.965, 0.965)
+    });
+    page.drawLine({
+      start: { x: left, y: rowTop },
+      end: { x: right, y: rowTop },
+      thickness: 1.4,
+      color: rgb(0.1, 0.1, 0.1)
+    });
+    drawPdfTextLine(page, `TOTAL — ${options.total.count}`, left + 7.5, rowTop - 17.32, 9.9, options.bold);
+    drawPdfTextLine(
+      page,
+      options.total.count === 1 ? "CONTRIBUTION" : "CONTRIBUTIONS",
+      left + 7.5,
+      rowTop - 29.62,
+      9.9,
+      options.bold
+    );
+    drawRight(page, `${formatCents(options.total.netAmountCents)} USD`, amountRight, rowTop - 22.38, 9, options.bold);
+    page.drawLine({ start: { x: left, y: rowTop - totalHeight }, end: { x: right, y: rowTop - totalHeight }, thickness: 0.7, color: rule });
+  }
+}
+
+function drawAnnualFooter(
+  page: PDFPage,
+  input: RenderStripeAnnualStatementPdfInput,
+  pageNumber: number,
+  pageCount: number,
+  regular: PDFFont
+): void {
+  const left = 45.354;
+  const right = 566.646;
+  page.drawLine({ start: { x: left, y: 37.5 }, end: { x: right, y: 37.5 }, thickness: 0.6, color: rgb(0.75, 0.75, 0.75) });
+  const identity = `${input.snapshot.document.email.organizationName} · A 501(c)(3) Public Charity · EIN ${input.snapshot.document.ein}`;
+  drawPdfTextLine(page, fitPdfText(identity, regular, 7.5, 430), left, 24.5, 7.5, regular, rgb(0.604, 0.627, 0.651));
+  drawRight(page, `Page ${pageNumber} of ${pageCount}`, right, 24.5, 7.5, regular, rgb(0.604, 0.627, 0.651));
+}
+
+function drawPdfLabel(page: PDFPage, text: string, x: number, y: number, font: PDFFont): void {
+  drawPdfTextLine(page, text, x, y, 8.2, font, rgb(0.627, 0.649, 0.671));
+}
+
+function drawPdfTextLine(
+  page: PDFPage,
+  text: string,
+  x: number,
+  y: number,
+  size: number,
+  font: PDFFont,
+  color = rgb(0, 0, 0)
+): void {
+  page.drawText(pdfSafeText(text, font), { x, y, size, font, color });
+}
+
+function annualPeriodLabel(year: number): string {
+  return `January 1, ${year} – December 31, ${year}`;
+}
+
+function drawAnnualRoundedRectangle(
+  page: PDFPage,
+  options: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    radius: number;
+    color: ReturnType<typeof rgb>;
+    borderColor: ReturnType<typeof rgb>;
+    borderWidth: number;
+  }
+): void {
+  const { x, y, width, height, radius, color, borderColor, borderWidth } = options;
+  const path = [
+    `M ${radius} 0`,
+    `L ${width - radius} 0`,
+    `Q ${width} 0 ${width} ${radius}`,
+    `L ${width} ${height - radius}`,
+    `Q ${width} ${height} ${width - radius} ${height}`,
+    `L ${radius} ${height}`,
+    `Q 0 ${height} 0 ${height - radius}`,
+    `L 0 ${radius}`,
+    `Q 0 0 ${radius} 0`,
+    "Z"
+  ].join(" ");
+  page.drawSvgPath(path, {
+    x,
+    y: y + height,
+    color,
+    borderColor,
+    borderWidth
+  });
+}
+
+function formatAnnualLongDate(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric", timeZone }).format(new Date(iso));
+}
+
+function formatAnnualShortDate(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { month: "2-digit", day: "2-digit", year: "numeric", timeZone }).format(new Date(iso));
+}
+
+function fitPdfText(text: string, font: PDFFont, size: number, maxWidth: number): string {
+  const safe = pdfSafeText(text, font);
+  if (font.widthOfTextAtSize(safe, size) <= maxWidth) return safe;
+  let fitted = safe;
+  while (fitted && font.widthOfTextAtSize(`${fitted}...`, size) > maxWidth) fitted = fitted.slice(0, -1);
+  return `${fitted}...`;
 }
 
 function drawWrappedText(
@@ -838,25 +1123,6 @@ function drawWrappedText(
     color: options.color
   }));
   return options.y - lines.length * options.lineHeight;
-}
-
-function drawWrappedCentered(
-  page: PDFPage,
-  text: string,
-  y: number,
-  size: number,
-  lineHeight: number,
-  font: PDFFont
-): number {
-  const maxWidth = PAGE_WIDTH - MARGIN * 2;
-  const lines = wrapPdfText(text, font, size, maxWidth);
-  lines.forEach((line, index) => page.drawText(line, {
-    x: MARGIN + (maxWidth - font.widthOfTextAtSize(line, size)) / 2,
-    y: y - index * lineHeight,
-    size,
-    font
-  }));
-  return y - lines.length * lineHeight;
 }
 
 function wrapPdfText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
@@ -892,29 +1158,6 @@ function wrapPdfText(text: string, font: PDFFont, size: number, maxWidth: number
   return lines;
 }
 
-function drawTableHeader(page: PDFPage, bold: PDFFont, y: number, accent: ReturnType<typeof rgb>): number {
-  page.drawRectangle({ x: MARGIN, y: y - 5, width: PAGE_WIDTH - MARGIN * 2, height: 18, color: accent });
-  page.drawText("Fecha", { x: MARGIN + 4, y, size: 8, font: bold, color: rgb(1, 1, 1) });
-  page.drawText("Tipo", { x: 112, y, size: 8, font: bold, color: rgb(1, 1, 1) });
-  page.drawText("Frecuencia", { x: 176, y, size: 8, font: bold, color: rgb(1, 1, 1) });
-  drawRight(page, "Bruto", 337, y, 8, bold, rgb(1, 1, 1));
-  drawRight(page, "Reintegrado", 432, y, 8, bold, rgb(1, 1, 1));
-  drawRight(page, "Neto", PAGE_WIDTH - MARGIN - 4, y, 8, bold, rgb(1, 1, 1));
-  return y - 22;
-}
-
-function drawCentered(
-  page: PDFPage,
-  text: string,
-  y: number,
-  size: number,
-  font: PDFFont,
-  color = rgb(0, 0, 0)
-): void {
-  const safeText = pdfSafeText(text, font);
-  page.drawText(safeText, { x: (PAGE_WIDTH - font.widthOfTextAtSize(safeText, size)) / 2, y, size, font, color });
-}
-
 function drawRight(
   page: PDFPage,
   text: string,
@@ -928,23 +1171,62 @@ function drawRight(
   page.drawText(safeText, { x: right - font.widthOfTextAtSize(safeText, size), y, size, font, color });
 }
 
-function accentRgb(value: string | undefined): ReturnType<typeof rgb> {
-  const match = /^#([0-9a-f]{6})$/i.exec(value?.trim() ?? "");
-  if (!match) return rgb(0.06, 0.46, 0.43);
-  const encoded = Number.parseInt(match[1], 16);
-  return rgb(((encoded >> 16) & 0xff) / 255, ((encoded >> 8) & 0xff) / 255, (encoded & 0xff) / 255);
+function annualDonorContactLines(
+  donor: StripeAnnualStatementSnapshot["donor"]
+): string[] {
+  const lines: string[] = [];
+  if (donor.address?.line1) lines.push(donor.address.line1);
+  if (donor.address?.line2) lines.push(donor.address.line2);
+  if (donor.address) {
+    const locality = [
+      [donor.address.city, donor.address.state].filter(Boolean).join(", "),
+      donor.address.postalCode
+    ].filter(Boolean).join(" ");
+    const country = donor.address.country === "US"
+      ? "United States"
+      : donor.address.country;
+    const localityCountry = [locality, country].filter(Boolean).join(", ");
+    if (localityCountry) lines.push(localityCountry);
+  }
+  if (donor.phone) lines.push(donor.phone);
+  if (lines.length === 0 && donor.email) lines.push(donor.email);
+  return lines;
 }
 
-function giftTypeLabel(value: StripeAnnualStatementGift["gift_type"]): string {
-  return value === "TITHE" ? "Diezmo" : value === "OFFERING" ? "Ofrenda" : "No especificado";
-}
-
-function frequencyLabel(value: StripeAnnualStatementGift["frequency"]): string {
-  return value === "MONTHLY" ? "Mensual" : "Única";
-}
-
-function formatUsDate(iso: string, timeZone: string): string {
-  return new Intl.DateTimeFormat("es-US", { dateStyle: "medium", timeZone }).format(new Date(iso));
+function parseStripeDonorAddress(value: string | null): StripeDonorAddress | null {
+  if (!value) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("Stripe annual statement donor address evidence is invalid");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Stripe annual statement donor address evidence is invalid");
+  }
+  const record = parsed as Record<string, unknown>;
+  const field = (name: string, maxLength: number): string | null => {
+    const candidate = record[name];
+    if (candidate == null) return null;
+    if (typeof candidate !== "string") {
+      throw new Error("Stripe annual statement donor address evidence is invalid");
+    }
+    const normalized = candidate.trim().replace(/\s+/gu, " ");
+    if (!normalized) return null;
+    if (normalized.length > maxLength) {
+      throw new Error("Stripe annual statement donor address evidence is invalid");
+    }
+    return normalized;
+  };
+  const address: StripeDonorAddress = {
+    line1: field("line1", 200),
+    line2: field("line2", 200),
+    city: field("city", 100),
+    state: field("state", 100),
+    postalCode: field("postalCode", 32),
+    country: field("country", 2)?.toUpperCase() ?? null
+  };
+  return Object.values(address).some(Boolean) ? address : null;
 }
 
 function normalizedEmail(value: string | null): string | null {

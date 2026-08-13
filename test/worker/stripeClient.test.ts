@@ -167,6 +167,11 @@ describe("Stripe SDK boundary", () => {
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
       STRIPE_US_LEGAL_NAME: "Example Nonprofit",
       STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: "+1 (555) 010-0200",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Example Street\nExample City, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Example Treasurer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer",
       STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
     }));
     const params = buildStripeCheckoutSessionParams({

@@ -193,7 +193,12 @@ describe("Stripe owner settings", () => {
         STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_private",
         STRIPE_US_LEGAL_NAME: "Private Legal Name",
         STRIPE_US_EIN: "12-3456789",
-        STRIPE_US_TIME_ZONE: "America/New_York"
+        STRIPE_US_TIME_ZONE: "America/New_York",
+        STRIPE_US_PHONE: "+1 555 010 0100",
+        STRIPE_US_WEBSITE: "https://example.org",
+        STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+        STRIPE_US_SIGNER_NAME: "Test Signer",
+        STRIPE_US_SIGNER_TITLE: "Treasurer"
       })
     );
 

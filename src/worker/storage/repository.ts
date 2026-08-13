@@ -278,6 +278,7 @@ export type { DteDocumentListPage } from "./repository/dteDocuments";
 export type {
   StripeAcknowledgmentClaim,
   StripeCheckoutRecord,
+  StripeDonorAddress,
   StripeGiftFrequency,
   StripeGiftType,
   StripeGiftRecord

@@ -2293,7 +2293,12 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         billingPortalConfigurationId: credentialInput.stripeBillingPortalConfigurationId,
         legalName: credentialInput.stripeLegalName,
         ein: credentialInput.stripeEin,
-        timeZone: credentialInput.stripeTimeZone
+        timeZone: credentialInput.stripeTimeZone,
+        organizationPhone: credentialInput.stripeOrganizationPhone,
+        organizationWebsite: credentialInput.stripeOrganizationWebsite,
+        organizationMailingAddress: credentialInput.stripeOrganizationMailingAddress,
+        signerName: credentialInput.stripeSignerName,
+        signerTitle: credentialInput.stripeSignerTitle
       };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
       if (!control.commit(() => {
@@ -4784,6 +4789,11 @@ export interface CredentialFormInput {
   stripeLegalName: string;
   stripeEin: string;
   stripeTimeZone: string;
+  stripeOrganizationPhone: string;
+  stripeOrganizationWebsite: string;
+  stripeOrganizationMailingAddress: string;
+  stripeSignerName: string;
+  stripeSignerTitle: string;
 }
 
 export interface F960Preview {
@@ -4862,6 +4872,11 @@ function emptyStripeCredentialInput(): Pick<
   | "stripeLegalName"
   | "stripeEin"
   | "stripeTimeZone"
+  | "stripeOrganizationPhone"
+  | "stripeOrganizationWebsite"
+  | "stripeOrganizationMailingAddress"
+  | "stripeSignerName"
+  | "stripeSignerTitle"
 > {
   return {
     stripeRestrictedKey: "",
@@ -4871,6 +4886,11 @@ function emptyStripeCredentialInput(): Pick<
     stripeBillingPortalConfigurationId: "",
     stripeLegalName: "",
     stripeEin: "",
-    stripeTimeZone: ""
+    stripeTimeZone: "",
+    stripeOrganizationPhone: "",
+    stripeOrganizationWebsite: "",
+    stripeOrganizationMailingAddress: "",
+    stripeSignerName: "",
+    stripeSignerTitle: ""
   };
 }

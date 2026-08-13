@@ -59,7 +59,20 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       gifts
     });
 
-    expect(snapshot.donor).toEqual({ key: "ana@example.org", name: "Ana", email: "ana@example.org" });
+    expect(snapshot.donor).toEqual({
+      key: "ana@example.org",
+      name: "Ana",
+      email: "ana@example.org",
+      phone: "+1 281 974 9002",
+      address: {
+        line1: "332 Tangle Birch Court",
+        line2: null,
+        city: "Montgomery",
+        state: "TX",
+        postalCode: "77316",
+        country: "US"
+      }
+    });
     expect(snapshot.items.map((item) => ({ id: item.sourceId, net: item.netAmountCents }))).toEqual([
       { id: "pi_gift_a", net: 10_000 },
       { id: "pi_gift_b", net: 0 }
@@ -126,7 +139,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     });
   });
 
-  it("renders the U.S. legal identity, itemized types/refunds, substantiation, and neutral disclaimer", async () => {
+  it("renders the U.S. legal identity, refund-aware itemization, substantiation, and neutral disclaimer", async () => {
     const snapshot = await buildStripeAnnualStatementSnapshot({
       year: 2025,
       livemode: false,
@@ -148,19 +161,150 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     const pdfPath = join(directory, "statement.pdf");
     writeFileSync(pdfPath, bytes);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const normalizedText = text.replace(/\s+/g, " ");
 
-    expect(text).toContain("Constancia anual de donaciones — EE. UU.");
-    expect(text).toContain("CONSTANCIA CORREGIDA");
+    expect(text).toContain("Annual Giving Statement");
+    expect(text).toContain("CORRECTED STATEMENT");
     expect(text).toContain("Friends of Example Church, Inc.");
-    expect(text).toContain("EIN: 12-3456789");
-    expect(text).toContain("Diezmo");
-    expect(text).toContain("Ofrenda");
-    expect(text).toContain("$50.00");
+    expect(text).toContain("EIN 12-3456789");
+    expect(text).toContain("pi_gift_tithe");
+    expect(text).toContain("pi_gift_refund");
+    expect(text).toContain("$100.00");
     expect(text).toContain("$0.00");
-    expect(text).toContain("No se proporcionaron bienes ni servicios a cambio de estas donaciones.");
-    expect(text).toContain("no constituye asesoría fiscal");
+    expect(normalizedText).toContain("No goods or services were provided to you in exchange for these contributions.");
+    expect(normalizedText).toContain("Amounts shown are net of refunds and other adjustments");
+    expect(normalizedText).toContain("does not constitute tax advice");
     expect(text).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b|deducible garantizada/i);
     expect(readFileSync(pdfPath).subarray(0, 4).toString()).toBe("%PDF");
+  });
+
+  it("matches the supplied two-page annual giving statement composition", async () => {
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const drawSvgPath = vi.spyOn(PDFPage.prototype, "drawSvgPath");
+    const amounts = [34700, 17000, 21600, 17000, 18300, 18500, 28650, 85100, 17000, 22100, 21100, 38400, 21800, 14800, 33200, 16000, 22000];
+    const dates = ["01-03", "01-16", "02-02", "02-20", "03-01", "03-16", "04-05", "06-22", "07-03", "07-18", "08-01", "08-31", "09-16", "10-03", "11-06", "11-18", "12-04"];
+    const snapshot = await buildStripeAnnualStatementSnapshot({
+      year: 2025,
+      livemode: false,
+      donorKey: "annual@example.org",
+      donorName: "Herlinda Trejo",
+      donorEmail: "annual@example.org",
+      document: statementDocument({
+        legalName: "Misión Cristiana Elim",
+        ein: "82-0889012",
+        organizationContact: {
+          phone: "+1 (786) 505-8446",
+          website: "https://www.elim.click",
+          mailingAddress: [
+            "2885 Sanford Ave SW, PMB 41357",
+            "Grandville, MI 49418, USA"
+          ]
+        },
+        email: {
+          organizationName: "Misión Cristiana Elim",
+          supportEmail: "fmce@example.org",
+          logoUrl: null,
+          senderName: "Misión Cristiana Elim",
+          replyToAddress: "fmce@example.org"
+        }
+      }),
+      gifts: amounts.map((amount_cents, index) => gift({
+        id: `gift_${index + 1}`,
+        source_id: String(32180 + index),
+        stripe_payment_intent_id: String(32180 + index),
+        settled_at: `2025-${dates[index]}T12:00:00.000Z`,
+        amount_cents,
+        donor_phone: "+1 281 974 9002",
+        donor_address_json: JSON.stringify({
+          line1: "332 Tangle Birch Court",
+          line2: null,
+          city: "Montgomery",
+          state: "TX",
+          postalCode: "77316",
+          country: "US"
+        })
+      }))
+    });
+    const bytes = await renderStripeAnnualStatementPdf({
+      snapshot,
+      issuedOn: "2026-06-05T12:00:00.000Z",
+      corrected: false
+    });
+    const pdf = await PDFDocument.load(bytes);
+    expect(pdf.getPageCount()).toBe(2);
+
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-layout-"));
+    const pdfPath = join(directory, "statement.pdf");
+    writeFileSync(pdfPath, bytes);
+    const pageOne = execFileSync("pdftotext", ["-f", "1", "-l", "1", "-layout", pdfPath, "-"], { encoding: "utf8" });
+    const pageTwo = execFileSync("pdftotext", ["-f", "2", "-l", "2", "-layout", pdfPath, "-"], { encoding: "utf8" });
+    const normalizedPageOne = pageOne.replace(/\s+/g, " ");
+    for (const label of [
+      "Annual Giving Statement",
+      "FROM",
+      "PREPARED FOR",
+      "CONTRIBUTION PERIOD",
+      "TOTAL TAX-DEDUCTIBLE CONTRIBUTIONS",
+      "Tax-Deductible Contribution Acknowledgment",
+      "CONTRIBUTIONS",
+      "DATE",
+      "AMOUNT",
+      "DONATION ID",
+      "DONATION METHOD",
+      "Page 1 of 2"
+    ]) {
+      expect(pageOne).toContain(label);
+    }
+    expect(pageOne).toContain("January 1, 2025 – December 31, 2025");
+    expect(normalizedPageOne).toContain("No goods or services were provided to you in exchange for these contributions.");
+    expect(pageOne).toContain("Malaquías 3:10");
+    expect(pageOne).toContain("+1 (786) 505-8446");
+    expect(pageOne).toContain("https://www.elim.click");
+    expect(pageOne).toContain("2885 Sanford Ave SW, PMB 41357");
+    expect(pageOne).toContain("332 Tangle Birch Court");
+    expect(pageOne).toContain("Montgomery, TX 77316, United States");
+    expect(pageOne).toContain("+1 281 974 9002");
+    expect(pageOne).toContain("32180");
+    expect(pageOne).not.toContain("32185");
+    expect(pageTwo).toContain("32185");
+    expect(pageTwo).toContain("TOTAL — 17");
+    expect(pageTwo).toContain("CONTRIBUTIONS");
+    expect(pageTwo).toContain("Page 2 of 2");
+    expect(pageTwo).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b/i);
+
+    expect(drawSvgPath).toHaveBeenCalledTimes(2);
+    expect(drawText.mock.calls).toContainEqual([
+      "DATE",
+      expect.objectContaining({ x: 52.854, size: 8 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "DONATION ID",
+      expect.objectContaining({ x: 250.945, size: 8 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "DONATION METHOD",
+      expect.objectContaining({ x: 407.332, size: 8 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "TOTAL — 17",
+      expect.objectContaining({ x: 52.854, size: 9.9 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "CONTRIBUTIONS",
+      expect.objectContaining({ x: 52.854, size: 9.9 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "$4,472.50",
+      expect.objectContaining({ x: 326.176, size: 20 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "USD",
+      expect.objectContaining({ size: 9 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "Page 2 of 2",
+      expect.objectContaining({ y: 24.5, size: 7.5 })
+    ]);
   });
 
   it("renders unsupported Unicode deterministically without changing source identity", async () => {
@@ -457,8 +601,8 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     writeFileSync(pdfPath, message.attachments[0].content);
     const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
 
-    expect(text).toContain("Emitida el 11 ene 2026.");
-    expect(text).not.toContain("Emitida el 10 ene 2026.");
+    expect(text).toContain("Generated January 11, 2026");
+    expect(text).not.toContain("Generated January 10, 2026");
   });
 
   it("records dispatch-start evidence before deterministic mock acceptance", async () => {
@@ -841,20 +985,37 @@ function statementDocument(overrides: Partial<{
   legalName: string;
   ein: string;
   timeZone: string;
+  organizationContact: {
+    phone: string;
+    website: string;
+    mailingAddress: string[];
+  };
+  email: {
+    organizationName: string;
+    supportEmail: string;
+    logoUrl: string | null;
+    senderName: string;
+    replyToAddress: string | null;
+  };
 }> = {}) {
   return {
-    rendererVersion: "stripe-annual-statement-pdf:v2" as const,
+    rendererVersion: "stripe-annual-statement-pdf:v3" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",
     accentColor: "#0f766e",
     logo: null,
-    email: {
+    email: overrides.email ?? {
       organizationName: "ExamplePerson1",
       supportEmail: "legacy-contact-1@example.com",
       logoUrl: null,
       senderName: "ExamplePerson1",
       replyToAddress: null
+    },
+    organizationContact: overrides.organizationContact ?? {
+      phone: "+1 555 555 0100",
+      website: "https://example.org",
+      mailingAddress: ["100 Example Avenue", "New York, NY 10001, USA"]
     },
     settings: {
       brandingDisplayName: null,
@@ -885,6 +1046,17 @@ function gift(overrides: Partial<StripeAnnualStatementGift> & { id: string }): S
     currency: "usd",
     donor_name: overrides.donor_name ?? "Ana",
     donor_email: overrides.donor_email === undefined ? "ana@example.org" : overrides.donor_email,
+    donor_phone: overrides.donor_phone === undefined ? "+1 281 974 9002" : overrides.donor_phone,
+    donor_address_json: overrides.donor_address_json === undefined
+      ? JSON.stringify({
+          line1: "332 Tangle Birch Court",
+          line2: null,
+          city: "Montgomery",
+          state: "TX",
+          postalCode: "77316",
+          country: "US"
+        })
+      : overrides.donor_address_json,
     settled_at: overrides.settled_at ?? "2025-06-01T12:00:00.000Z",
     status: overrides.status ?? "PAID",
     refunded_amount_cents: refundedCents,
@@ -904,9 +1076,9 @@ function seedGift(database: ReturnType<typeof migratedDatabase>, row: StripeAnnu
   database.prepare(
     `INSERT INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
-       frequency, gift_type, amount_cents, donor_name, donor_email, settled_at,
-       status, refunded_amount_cents
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       frequency, gift_type, amount_cents, donor_name, donor_email,
+       donor_phone, donor_address_json, settled_at, status, refunded_amount_cents
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.source_type,
@@ -918,6 +1090,8 @@ function seedGift(database: ReturnType<typeof migratedDatabase>, row: StripeAnnu
     row.amount_cents,
     row.donor_name,
     row.donor_email,
+    row.donor_phone,
+    row.donor_address_json,
     row.settled_at,
     row.status,
     row.refunded_amount_cents

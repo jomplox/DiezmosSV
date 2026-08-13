@@ -157,7 +157,12 @@ describe("Stripe Checkout donation contract", () => {
       STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
       STRIPE_US_LEGAL_NAME: "Example Nonprofit",
-      STRIPE_US_EIN: "12-3456789"
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
     };
     expect(resolveStripeConfiguration(valid)).toEqual({
       apiKey: "rk_test_fixture",
@@ -168,6 +173,11 @@ describe("Stripe Checkout donation contract", () => {
       billingPortalConfigurationId: "bpc_fixture",
       legalName: "Example Nonprofit",
       ein: "12-3456789",
+      organizationPhone: "+1 555 010 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: ["100 Test Avenue", "New York, NY 10001, USA"],
+      signerName: "Test Signer",
+      signerTitle: "Treasurer",
       apiProxyUrl: null,
       livemode: false,
       mock: false
@@ -194,7 +204,12 @@ describe("Stripe Checkout donation contract", () => {
       { STRIPE_US_LEGAL_NAME: "" },
       { STRIPE_US_LEGAL_NAME: "A".repeat(201) },
       { STRIPE_US_EIN: "invalid" },
-      { STRIPE_US_EIN: "00-0000000" }
+      { STRIPE_US_EIN: "00-0000000" },
+      { STRIPE_US_PHONE: "short" },
+      { STRIPE_US_WEBSITE: "http://example.org" },
+      { STRIPE_US_MAILING_ADDRESS: "one line only" },
+      { STRIPE_US_SIGNER_NAME: "" },
+      { STRIPE_US_SIGNER_TITLE: "" }
     ]) {
       expect(() => resolveStripeConfiguration({ ...valid, ...override }))
         .toThrow(StripeConfigurationError);
@@ -220,7 +235,12 @@ describe("Stripe Checkout donation contract", () => {
       STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_fixture",
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_fixture",
       STRIPE_US_LEGAL_NAME: "Example Nonprofit",
-      STRIPE_US_EIN: "12-3456789"
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer"
     };
 
     expect(resolveStripeConfiguration({

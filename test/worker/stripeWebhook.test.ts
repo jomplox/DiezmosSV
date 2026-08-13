@@ -79,10 +79,32 @@ describe("Stripe signed webhooks", () => {
       payment_status: "PAID",
       stripe_payment_intent_id: "pi_once_fixture",
       stripe_customer_id: "cus_fixture",
-      donor_email: "donante@example.org"
+      donor_email: "donante@example.org",
+      donor_phone: "+1 281 974 9002",
+      donor_address_json: JSON.stringify({
+        line1: "332 Tangle Birch Court",
+        line2: null,
+        city: "Montgomery",
+        state: "TX",
+        postalCode: "77316",
+        country: "US"
+      })
     });
     expect(count(database, "stripe_gifts")).toBe(1);
     expect(count(database, "stripe_acknowledgment_deliveries")).toBe(1);
+    expect(database.prepare(
+      "SELECT donor_phone, donor_address_json FROM stripe_gifts WHERE source_id = 'pi_once_fixture'"
+    ).get()).toEqual({
+      donor_phone: "+1 281 974 9002",
+      donor_address_json: JSON.stringify({
+        line1: "332 Tangle Birch Court",
+        line2: null,
+        city: "Montgomery",
+        state: "TX",
+        postalCode: "77316",
+        country: "US"
+      })
+    });
 
     const replay = await sendSignedWebhook(workerEnv, event);
     expect(replay.status).toBe(200);
@@ -770,6 +792,11 @@ function stripeProviderEnv(workerEnv: Env): Env {
     STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_terminal_fixture",
     STRIPE_US_LEGAL_NAME: "Example Nonprofit",
     STRIPE_US_EIN: "12-3456789",
+    STRIPE_US_PHONE: "+1 555 010 0100",
+    STRIPE_US_WEBSITE: "https://example.org",
+    STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+    STRIPE_US_SIGNER_NAME: "Test Signer",
+    STRIPE_US_SIGNER_TITLE: "Treasurer",
     STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
   };
 }
@@ -863,7 +890,16 @@ function checkoutSession(input: {
     payment_intent: input.paymentIntentId,
     customer_details: {
       email: "donante@example.org",
-      name: "Donante Ejemplo"
+      name: "Donante Ejemplo",
+      phone: "+1 281 974 9002",
+      address: {
+        line1: "332 Tangle Birch Court",
+        line2: null,
+        city: "Montgomery",
+        state: "TX",
+        postal_code: "77316",
+        country: "US"
+      }
     },
     metadata: {
       checkout_id: input.checkoutId,

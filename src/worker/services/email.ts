@@ -310,6 +310,8 @@ export class EmailService {
       subject: string;
       text: string;
       html: string;
+      pdfBytes: Uint8Array;
+      filename: string;
       idempotencyKey: string;
     },
     beforeProviderDispatch?: () => void | Promise<void>
@@ -321,9 +323,18 @@ export class EmailService {
       subject: input.subject,
       text: input.text,
       html: input.html,
-      attachments: []
+      attachments: [{
+        filename: input.filename,
+        contentType: "application/pdf",
+        contentBase64: bytesToBase64(input.pdfBytes)
+      }]
     };
-    const providerResponse = await this.dispatch(payload, [], beforeProviderDispatch);
+    const providerResponse = await this.dispatch(payload, [{
+      filename: input.filename,
+      type: "application/pdf",
+      disposition: "attachment",
+      content: input.pdfBytes
+    }], beforeProviderDispatch);
     return {
       providerResponse,
       providerDeliveryId: deliveryIdFromProvider(providerResponse)

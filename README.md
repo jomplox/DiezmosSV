@@ -401,6 +401,11 @@ node scripts/run-private-wrangler.mjs secret put STRIPE_PAYMENT_METHOD_CONFIGURA
 node scripts/run-private-wrangler.mjs secret put STRIPE_BILLING_PORTAL_CONFIGURATION_ID --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_LEGAL_NAME --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_EIN --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_PHONE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
 
 # Migrate and deploy through package scripts that use the same private wrapper.
 npm run cf:migrate:staging
@@ -563,6 +568,8 @@ selected private config and are duplicated per Wrangler environment:
 | `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` for the Spanish monthly-gift management path. |
 | `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Exact US 501(c)(3) legal identity printed in the Spanish acknowledgment. |
 | `STRIPE_US_TIME_ZONE` | IANA timezone used to define the U.S. annual-statement calendar year and contribution dates. It is visible/editable only in the OWNER settings panel. |
+| `STRIPE_US_PHONE` · `STRIPE_US_WEBSITE` · `STRIPE_US_MAILING_ADDRESS` | U.S. organization contact block printed on the one-gift receipt and annual giving statement. Use newline-separated mailing-address lines. |
+| `STRIPE_US_SIGNER_NAME` · `STRIPE_US_SIGNER_TITLE` | Authorized representative printed on each immediate U.S. charitable receipt. |
 | `STRIPE_MOCK_MODE` | Deterministic local/staging-only transport when exactly `"1"`; production rejects it. Never place it in a production config. |
 | `STRIPE_API_PROXY_URL` | Optional loopback-only HTTP bridge for local `workerd` environments without outbound HTTPS. Run `npm run dev:stripe-api-proxy`; staging, production, non-loopback hosts, credentials, and URL paths are rejected. |
 
@@ -714,8 +721,10 @@ gift type, frequency, and identifiers before recording durable session/gift hist
 that durable state rather than trusting the browser redirect. A monthly invoice becomes one gift only
 after `invoice.paid` and a paid Stripe InvoicePayment prove a PaymentIntent-backed settlement; either
 event order converges once. Billing Portal provides the recurring-management path. The app sends a distinct Spanish
-501(c)(3) immediate acknowledgment with the configured legal name, EIN, type, frequency, date, amount,
-and no-goods-or-services statement through its durable email fence. Its **Constancia anual de donaciones —
+501(c)(3) immediate acknowledgment with the configured legal name, EIN, authorized signer, contact block,
+type, frequency, date, amount, and no-goods-or-services statement through its durable email fence. Stripe's
+billing address and phone are retained as immutable donor evidence for the matching receipt and annual-statement
+layout. Its **Constancia anual de donaciones —
 EE. UU.** is a separate annual statement over settled Stripe gifts, net of refunds, in
 `STRIPE_US_TIME_ZONE`; it is never a Salvadoran CDE or a Salvadoran annual dossier.
 
@@ -731,7 +740,9 @@ webhook events, sandbox gates, rollback, and the live handoff are documented in
 **OWNER settings and live boundary.** **Configuración → Stripe EE. UU.** lists presence-only status for
 `STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
 `STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
-`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, and `STRIPE_US_EIN`; it exposes only
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, `STRIPE_US_EIN`,
+`STRIPE_US_PHONE`, `STRIPE_US_WEBSITE`, `STRIPE_US_MAILING_ADDRESS`, `STRIPE_US_SIGNER_NAME`, and
+`STRIPE_US_SIGNER_TITLE`; it exposes only
 the non-secret `STRIPE_US_TIME_ZONE`. “Configurado” does not mean provider-verified: payment-method,
 Billing Portal, and account ownership remain unverified by the app. The derived `/webhooks/stripe` address
 and sanitized latest-event health are read-only; only a successfully processed, mode-matching event earns
@@ -974,7 +985,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0038)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0039)</strong></summary>
 
 <br/>
 

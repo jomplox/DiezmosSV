@@ -14,6 +14,11 @@ STRIPE_US_TIME_ZONE="America/New_York"
 # STRIPE_US_LEGAL_NAME="Replace with exact US 501(c)(3) legal name"
 # STRIPE_US_EIN="00-0000000"
 # STRIPE_US_TIME_ZONE="America/New_York"
+# STRIPE_US_PHONE="+1 555 010 0100"
+# STRIPE_US_WEBSITE="https://example.org"
+# STRIPE_US_MAILING_ADDRESS="100 Test Avenue\nNew York, NY 10001, USA"
+# STRIPE_US_SIGNER_NAME="Authorized Representative"
+# STRIPE_US_SIGNER_TITLE="Treasurer"
 # Optional only when local workerd cannot make outbound HTTPS requests. Run
 # `npm run dev:stripe-api-proxy`; staging and production reject this override.
 # STRIPE_API_PROXY_URL="http://127.0.0.1:8791"

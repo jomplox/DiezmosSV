@@ -24,6 +24,11 @@ describe("credential status", () => {
       STRIPE_US_LEGAL_NAME: "Private Legal Name",
       STRIPE_US_EIN: "12-3456789",
       STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 555 010 0100",
+      STRIPE_US_WEBSITE: "https://example.org",
+      STRIPE_US_MAILING_ADDRESS: "100 Test Avenue\nNew York, NY 10001, USA",
+      STRIPE_US_SIGNER_NAME: "Test Signer",
+      STRIPE_US_SIGNER_TITLE: "Treasurer",
       STRIPE_API_PROXY_URL: "http://127.0.0.1:8791"
     }));
 
@@ -41,7 +46,12 @@ describe("credential status", () => {
         name: "STRIPE_US_TIME_ZONE",
         configured: true,
         displayValue: "America/New_York"
-      })
+      }),
+      expect.objectContaining({ name: "STRIPE_US_PHONE", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_WEBSITE", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_MAILING_ADDRESS", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_SIGNER_NAME", configured: true, protected: true }),
+      expect.objectContaining({ name: "STRIPE_US_SIGNER_TITLE", configured: true, protected: true })
     ]));
     expect(status.stripeOperational).toEqual({
       appEnv: "staging",
@@ -52,7 +62,8 @@ describe("credential status", () => {
     const serialized = JSON.stringify(status);
     for (const protectedValue of [
       "rk_test_private", "pk_test_private", "whsec_active_private", "whsec_next_private",
-      "pmc_private", "bpc_private", "Private Legal Name", "12-3456789"
+      "pmc_private", "bpc_private", "Private Legal Name", "12-3456789",
+      "+1 555 010 0100", "https://example.org", "100 Test Avenue", "Test Signer", "Treasurer"
     ]) {
       expect(serialized).not.toContain(protectedValue);
     }
@@ -216,6 +227,11 @@ describe("credential secret patch", () => {
       legalName: " Example Nonprofit ",
       ein: "12-3456789",
       timeZone: "America/Chicago",
+      organizationPhone: "+1 (786) 505-8446",
+      organizationWebsite: "https://www.elim.click",
+      organizationMailingAddress: "2885 Sanford Ave SW, PMB 41357\nGrandville, MI 49418, USA",
+      signerName: "Mathieu Guély",
+      signerTitle: "Treasurer",
       activeWebhookSecret: "whsec_must_be_ignored"
     } as never, env({ APP_ENV: "staging" }));
 
@@ -226,7 +242,12 @@ describe("credential secret patch", () => {
       STRIPE_BILLING_PORTAL_CONFIGURATION_ID: { type: "secret_text", name: "STRIPE_BILLING_PORTAL_CONFIGURATION_ID", text: "bpc_new" },
       STRIPE_US_LEGAL_NAME: { type: "secret_text", name: "STRIPE_US_LEGAL_NAME", text: "Example Nonprofit" },
       STRIPE_US_EIN: { type: "secret_text", name: "STRIPE_US_EIN", text: "12-3456789" },
-      STRIPE_US_TIME_ZONE: { type: "secret_text", name: "STRIPE_US_TIME_ZONE", text: "America/Chicago" }
+      STRIPE_US_TIME_ZONE: { type: "secret_text", name: "STRIPE_US_TIME_ZONE", text: "America/Chicago" },
+      STRIPE_US_PHONE: { type: "secret_text", name: "STRIPE_US_PHONE", text: "+1 (786) 505-8446" },
+      STRIPE_US_WEBSITE: { type: "secret_text", name: "STRIPE_US_WEBSITE", text: "https://www.elim.click" },
+      STRIPE_US_MAILING_ADDRESS: { type: "secret_text", name: "STRIPE_US_MAILING_ADDRESS", text: "2885 Sanford Ave SW, PMB 41357\nGrandville, MI 49418, USA" },
+      STRIPE_US_SIGNER_NAME: { type: "secret_text", name: "STRIPE_US_SIGNER_NAME", text: "Mathieu Guély" },
+      STRIPE_US_SIGNER_TITLE: { type: "secret_text", name: "STRIPE_US_SIGNER_TITLE", text: "Treasurer" }
     });
     expect(patch).not.toHaveProperty("STRIPE_WEBHOOK_SECRET");
     expect(patch).not.toHaveProperty("STRIPE_WEBHOOK_SECRET_NEXT");
@@ -245,7 +266,12 @@ describe("credential secret patch", () => {
       { billingPortalConfigurationId: "pmc_not_bpc" },
       { legalName: "A".repeat(201) },
       { ein: "00-0000000" },
-      { timeZone: "Mars/Olympus_Mons" }
+      { timeZone: "Mars/Olympus_Mons" },
+      { organizationPhone: "short" },
+      { organizationWebsite: "http://example.org" },
+      { organizationMailingAddress: "one line only" },
+      { signerName: "A".repeat(121) },
+      { signerTitle: "A".repeat(121) }
     ]) {
       expect(() => buildStripeCredentialSecretPatch(input, staging)).toThrow(StripeCredentialValidationError);
     }

@@ -1,3 +1,4 @@
+import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { formatCents } from "../../shared/money";
 import type { Repository, StripeGiftFrequency, StripeGiftType } from "../storage/repository";
 import type { Env } from "../types";
@@ -14,6 +15,11 @@ import {
 import { resolveStripeConfiguration } from "./stripeDonations";
 import { stripeUsTimeZone } from "./stripeAnnualStatement";
 import { logWorkerError } from "./observability";
+import { pdfSafeText } from "./pdf";
+import { STRIPE_RECEIPT_LOGO_BYTES } from "./stripePdfAssets";
+
+export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v2" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v1" as const;
 
 export interface StripeAcknowledgmentContentInput {
   donorName: string | null;
@@ -94,6 +100,238 @@ export function stripeAcknowledgmentContent(
   };
 }
 
+export interface RenderStripeAcknowledgmentPdfInput {
+  donorName: string | null;
+  amountCents: number;
+  refundedAmountCents: number;
+  frequency: StripeGiftFrequency;
+  giftType: StripeGiftType;
+  sourceId: string;
+  settledAt: string;
+  timeZone: string;
+  legalName: string;
+  ein: string;
+  organizationName: string;
+  supportEmail: string;
+  organizationPhone: string;
+  organizationWebsite: string;
+  organizationMailingAddress: string[];
+  signerName: string;
+  signerTitle: string;
+  kind: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
+}
+
+export async function renderStripeAcknowledgmentPdf(
+  input: RenderStripeAcknowledgmentPdfInput
+): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const page = pdf.addPage([612, 792]);
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+  const italic = await pdf.embedFont(StandardFonts.HelveticaOblique);
+  const logo = await pdf.embedPng(STRIPE_RECEIPT_LOGO_BYTES);
+  const contentX = 113.22;
+  const contentWidth = 385.56;
+  const muted = rgb(0.28, 0.28, 0.28);
+
+  page.drawImage(logo, { x: 224.3, y: 713.5, width: 163.75, height: 34.38 });
+
+  drawPdfText(page, `Dear ${input.donorName?.trim() || "Donor"},`, {
+    x: contentX,
+    y: 635,
+    size: 11.25,
+    font: regular
+  });
+
+  const originalAmount = `${formatCents(input.amountCents)} USD`;
+  const refundedAmount = `${formatCents(input.refundedAmountCents)} USD`;
+  const netAmountCents = Math.max(0, input.amountCents - input.refundedAmountCents);
+  const netAmount = `${formatCents(netAmountCents)} USD`;
+  const receivedDate = formatEnglishDate(input.settledAt, input.timeZone);
+  const contributionParagraph = input.kind === "ORIGINAL"
+    ? `Thank you for your cash contribution of ${originalAmount} that ${input.legalName} received on ${receivedDate}. No goods or services were provided in exchange for your contribution. God bless you.`
+    : input.kind === "PARTIAL_REFUND"
+      ? `This corrected receipt replaces the prior acknowledgment for your ${originalAmount} cash contribution received on ${receivedDate}. A cumulative refund of ${refundedAmount} leaves a net charitable contribution of ${netAmount}. No goods or services were provided in exchange for your contribution.`
+      : `This receipt revokes the prior acknowledgment for your ${originalAmount} cash contribution received on ${receivedDate}. A full refund of ${refundedAmount} leaves a net charitable contribution of ${netAmount}.`;
+  drawPdfWrapped(page, contributionParagraph, {
+    x: contentX,
+    y: 604,
+    size: 11.25,
+    lineHeight: 17.46,
+    maxWidth: contentWidth,
+    font: regular
+  });
+
+  drawPdfText(page, input.signerName, { x: contentX, y: 535.5, size: 11.25, font: bold });
+  drawPdfText(page, `${input.signerTitle.replace(/[.]$/u, "")}.`, { x: contentX, y: 518.5, size: 11.25, font: regular });
+  drawPdfText(page, input.organizationName, { x: contentX, y: 501.5, size: 11.25, font: regular });
+
+  drawPdfText(page, "Receipt of Charitable Donation:", {
+    x: contentX,
+    y: 442.5,
+    size: 12.5,
+    font: bold
+  });
+  const giftType = input.giftType === "TITHE"
+    ? "Tithe"
+    : input.giftType === "OFFERING"
+      ? "Offering"
+      : "Donation";
+  const status = input.kind === "ORIGINAL"
+    ? "Completed"
+    : input.kind === "PARTIAL_REFUND"
+      ? "Corrected"
+      : "Revoked";
+  const facts = [
+    ["DONATION NAME:", `${giftType} · ${input.frequency === "MONTHLY" ? "Monthly" : "One-time"}`],
+    ["DONATION AMOUNT:", input.kind === "ORIGINAL" ? originalAmount : netAmount],
+    ["DONATION METHOD:", "Stripe"],
+    ["DONATION STATUS:", status],
+    ["DONATION DATE:", formatEnglishYear(input.settledAt, input.timeZone)],
+    ["DONATION ID:", input.sourceId]
+  ] as const;
+  facts.forEach(([label, value], index) => {
+    const y = 417.5 - index * 14.4;
+    drawPdfText(page, label, { x: contentX, y, size: 10, font: bold });
+    drawPdfText(page, value, {
+      x: contentX + bold.widthOfTextAtSize(`${label} `, 10) + 2,
+      y,
+      size: 10,
+      font: regular
+    });
+  });
+
+  drawPdfWrapped(page, input.legalName, {
+    x: contentX,
+    y: 294.1,
+    size: 10,
+    lineHeight: 12,
+    maxWidth: 171,
+    font: bold
+  });
+  drawPdfText(page, "A 501(c)(3) Public Charity", { x: contentX, y: 275, size: 10, font: italic });
+  drawPdfText(page, `EIN ${input.ein}`, { x: contentX, y: 254.7, size: 10, font: bold });
+
+  drawPdfWrapped(
+    page,
+    `La organización ${input.legalName} es una organización sin fines de lucro 501(c)(3) que apoya la labor de ${input.organizationName} en su misión de difusión y servicio del evangelio.`,
+    {
+      x: 292.1,
+      y: 297.8,
+      size: 9.2,
+      lineHeight: 12,
+      maxWidth: 203.1,
+      font: regular
+    }
+  );
+
+  drawPdfCentered(
+    page,
+    [input.supportEmail, input.organizationPhone].filter(Boolean).join(" · "),
+    192.3,
+    9.5,
+    bold,
+    contentX,
+    499
+  );
+  drawPdfCentered(page, input.organizationMailingAddress.join(" "), 177.3, 9.5, bold, contentX, 499);
+
+  page.drawRectangle({ x: 0, y: 0, width: 612, height: 169, color: rgb(0.93, 0.93, 0.93) });
+  const scripture = [
+    "Traigan íntegro el diezmo a la tesorería del Templo; así habrá alimento en mi casa.",
+    "Pruébenme en esto —dice el Señor de los Ejércitos—, y vean si no abro las",
+    "compuertas del cielo y derramo sobre ustedes bendición hasta que sobreabunde."
+  ];
+  scripture.forEach((line, index) => {
+    drawPdfCentered(page, line, 108 - index * 15, 9.2, italic, 95, 517, muted);
+  });
+  drawPdfCentered(page, "— Malaquías 3:10", 60, 9.2, italic, 95, 517, muted);
+
+  pdf.setTitle(`Receipt of Charitable Donation ${input.sourceId}`);
+  pdf.setAuthor(input.legalName);
+  pdf.setProducer(STRIPE_ACKNOWLEDGMENT_PDF_VERSION);
+  return pdf.save();
+}
+
+function drawPdfText(
+  page: PDFPage,
+  text: string,
+  options: { x: number; y: number; size: number; font: PDFFont; color?: ReturnType<typeof rgb> }
+): void {
+  page.drawText(pdfSafeText(text, options.font), options);
+}
+
+function drawPdfWrapped(
+  page: PDFPage,
+  text: string,
+  options: {
+    x: number;
+    y: number;
+    size: number;
+    lineHeight: number;
+    maxWidth: number;
+    font: PDFFont;
+    color?: ReturnType<typeof rgb>;
+  }
+): number {
+  const lines = wrapStripePdfText(text, options.font, options.size, options.maxWidth);
+  lines.forEach((line, index) => drawPdfText(page, line, {
+    x: options.x,
+    y: options.y - index * options.lineHeight,
+    size: options.size,
+    font: options.font,
+    color: options.color
+  }));
+  return options.y - lines.length * options.lineHeight;
+}
+
+function drawPdfCentered(
+  page: PDFPage,
+  text: string,
+  y: number,
+  size: number,
+  font: PDFFont,
+  left: number,
+  right: number,
+  color = rgb(0, 0, 0)
+): void {
+  const safe = pdfSafeText(text, font);
+  const width = right - left;
+  page.drawText(safe, {
+    x: left + (width - font.widthOfTextAtSize(safe, size)) / 2,
+    y,
+    size,
+    font,
+    color
+  });
+}
+
+function wrapStripePdfText(text: string, font: PDFFont, size: number, maxWidth: number): string[] {
+  const safe = pdfSafeText(text, font).trim();
+  if (!safe) return [""];
+  const lines: string[] = [];
+  let current = "";
+  for (const word of safe.split(/\s+/u)) {
+    const candidate = current ? `${current} ${word}` : word;
+    if (font.widthOfTextAtSize(candidate, size) <= maxWidth) {
+      current = candidate;
+      continue;
+    }
+    if (current) lines.push(current);
+    current = word;
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function formatEnglishDate(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { dateStyle: "long", timeZone }).format(new Date(iso));
+}
+
+function formatEnglishYear(iso: string, timeZone: string): string {
+  return new Intl.DateTimeFormat("en-US", { year: "numeric", timeZone }).format(new Date(iso));
+}
+
 interface StripeAcknowledgmentEvidenceV1 {
   version: 1;
   deliveryId: string;
@@ -107,7 +345,20 @@ interface StripeAcknowledgmentEvidenceV1 {
   timeZone: string;
   branding: Awaited<ReturnType<typeof loadEmailBranding>>;
   content: { subject: string; text: string; html: string };
+  pdf?: StripeAcknowledgmentPdfEvidence;
 }
+
+type StripeAcknowledgmentPdfEvidence = Omit<
+  RenderStripeAcknowledgmentPdfInput,
+  "organizationPhone" | "organizationWebsite" | "organizationMailingAddress" | "signerName" | "signerTitle"
+> & {
+  rendererVersion: typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION;
+  organizationPhone?: string;
+  organizationWebsite?: string;
+  organizationMailingAddress?: string[];
+  signerName?: string;
+  signerTitle?: string;
+};
 
 export async function snapshotStripeAcknowledgmentEvidence(
   env: Env,
@@ -148,7 +399,28 @@ export async function snapshotStripeAcknowledgmentEvidence(
     ein: configuration.ein,
     timeZone,
     branding,
-    content
+    content,
+    pdf: {
+      rendererVersion: STRIPE_ACKNOWLEDGMENT_PDF_VERSION,
+      donorName: source.donor_name,
+      amountCents: source.amount_cents,
+      refundedAmountCents: source.evidence_refunded_amount_cents,
+      frequency: source.frequency,
+      giftType: source.gift_type,
+      sourceId: source.source_id,
+      settledAt: source.settled_at,
+      timeZone,
+      legalName: configuration.legalName,
+      ein: configuration.ein,
+      organizationName: branding.organizationName,
+      supportEmail: branding.supportEmail,
+      organizationPhone: configuration.organizationPhone,
+      organizationWebsite: configuration.organizationWebsite,
+      organizationMailingAddress: configuration.organizationMailingAddress,
+      signerName: configuration.signerName,
+      signerTitle: configuration.signerTitle,
+      kind: source.kind
+    }
   };
   const snapshotJson = JSON.stringify(evidence);
   const snapshotHash = await sha256Hex(utf8Bytes(snapshotJson));
@@ -186,6 +458,7 @@ async function parseStripeAcknowledgmentEvidence(
     || typeof parsed.content.subject !== "string"
     || typeof parsed.content.text !== "string"
     || typeof parsed.content.html !== "string"
+    || (parsed.pdf !== undefined && !validStripeAcknowledgmentPdfEvidence(parsed.pdf))
   ) {
     throw new Error("Stripe acknowledgment evidence snapshot is invalid");
   }
@@ -237,11 +510,30 @@ export async function deliverNextStripeAcknowledgment(
 
   let providerDispatchStarted = false;
   try {
+    const pdfInput = completeStripeAcknowledgmentPdfInput(evidence.pdf ?? {
+      rendererVersion: LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION,
+      donorName: claim.donor_name,
+      amountCents: claim.amount_cents,
+      refundedAmountCents: evidence.refundedAmountCents,
+      frequency: claim.frequency,
+      giftType: claim.gift_type,
+      sourceId: claim.source_id,
+      settledAt: claim.settled_at,
+      timeZone: evidence.timeZone,
+      legalName: evidence.legalName,
+      ein: evidence.ein,
+      organizationName: evidence.branding.organizationName,
+      supportEmail: evidence.branding.supportEmail,
+      kind: evidence.kind
+    });
+    const pdfBytes = await renderStripeAcknowledgmentPdf(pdfInput);
     const result = await new EmailService(env, undefined, evidence.branding).sendStripeAcknowledgment({
       toEmail: evidence.recipientEmail,
       subject: evidence.content.subject,
       text: evidence.content.text,
       html: evidence.content.html,
+      pdfBytes,
+      filename: `constancia-donacion-eeuu-${claim.id}-r${evidence.revision}.pdf`,
       idempotencyKey: `stripe-acknowledgment:${claim.id}`
     }, async () => {
       providerDispatchStarted = await repo.markStripeAcknowledgmentDispatchStarted({
@@ -295,6 +587,46 @@ export async function deliverNextStripeAcknowledgment(
     );
     return { processed: true, outcome, giftId: claim.gift_id };
   }
+}
+
+function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAcknowledgmentPdfEvidence {
+  if (!isRecord(value)) return false;
+  return (value.rendererVersion === STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION)
+    && (value.donorName === null || typeof value.donorName === "string")
+    && Number.isSafeInteger(value.amountCents)
+    && Number(value.amountCents) >= 0
+    && Number.isSafeInteger(value.refundedAmountCents)
+    && Number(value.refundedAmountCents) >= 0
+    && ["ONCE", "MONTHLY"].includes(String(value.frequency))
+    && ["TITHE", "OFFERING", "UNSPECIFIED"].includes(String(value.giftType))
+    && typeof value.sourceId === "string"
+    && typeof value.settledAt === "string"
+    && typeof value.timeZone === "string"
+    && typeof value.legalName === "string"
+    && typeof value.ein === "string"
+    && typeof value.organizationName === "string"
+    && typeof value.supportEmail === "string"
+    && (value.organizationPhone === undefined || typeof value.organizationPhone === "string")
+    && (value.organizationWebsite === undefined || typeof value.organizationWebsite === "string")
+    && (value.organizationMailingAddress === undefined
+      || (Array.isArray(value.organizationMailingAddress) && value.organizationMailingAddress.every((line) => typeof line === "string")))
+    && (value.signerName === undefined || typeof value.signerName === "string")
+    && (value.signerTitle === undefined || typeof value.signerTitle === "string")
+    && ["ORIGINAL", "PARTIAL_REFUND", "FULL_REFUND"].includes(String(value.kind));
+}
+
+function completeStripeAcknowledgmentPdfInput(
+  evidence: StripeAcknowledgmentPdfEvidence
+): RenderStripeAcknowledgmentPdfInput {
+  return {
+    ...evidence,
+    organizationPhone: evidence.organizationPhone ?? "",
+    organizationWebsite: evidence.organizationWebsite ?? "",
+    organizationMailingAddress: evidence.organizationMailingAddress ?? [],
+    signerName: evidence.signerName ?? "Authorized Representative",
+    signerTitle: evidence.signerTitle ?? "Authorized representative"
+  };
 }
 
 async function auditAcknowledgmentBestEffort(

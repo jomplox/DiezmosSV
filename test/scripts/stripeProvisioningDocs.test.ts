@@ -22,7 +22,12 @@ const requiredRuntimeNames = [
   "STRIPE_BILLING_PORTAL_CONFIGURATION_ID",
   "STRIPE_US_LEGAL_NAME",
   "STRIPE_US_EIN",
-  "STRIPE_US_TIME_ZONE"
+  "STRIPE_US_TIME_ZONE",
+  "STRIPE_US_PHONE",
+  "STRIPE_US_WEBSITE",
+  "STRIPE_US_MAILING_ADDRESS",
+  "STRIPE_US_SIGNER_NAME",
+  "STRIPE_US_SIGNER_TITLE"
 ] as const;
 
 describe("Stripe US giving provisioning documentation", () => {
@@ -142,7 +147,7 @@ describe("Stripe US giving provisioning documentation", () => {
 
   it("keeps every additive Stripe migration in the rollback preservation boundary", () => {
     const rollback = runbook.slice(runbook.indexOf("## Handoff del propietario y rollback"));
-    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038"]) {
+    for (const migration of ["0032", "0033", "0034", "0035", "0036", "0037", "0038", "0039"]) {
       expect(rollback).toContain(migration);
     }
     expect(rollback).toMatch(/no.*elimine|conserve/is);
@@ -170,6 +175,11 @@ describe("Stripe US giving provisioning documentation", () => {
   it("keeps the staged webhook secret and U.S. statement timezone in local examples", () => {
     expect(devVars).toContain('STRIPE_WEBHOOK_SECRET_NEXT="whsec_replace-with-next-endpoint-secret"');
     expect(devVars).toContain('STRIPE_US_TIME_ZONE="America/New_York"');
+    expect(devVars).toContain('STRIPE_US_PHONE="+1 555 010 0100"');
+    expect(devVars).toContain('STRIPE_US_WEBSITE="https://example.org"');
+    expect(devVars).toContain('STRIPE_US_MAILING_ADDRESS="100 Test Avenue\\nNew York, NY 10001, USA"');
+    expect(devVars).toContain('STRIPE_US_SIGNER_NAME="Authorized Representative"');
+    expect(devVars).toContain('STRIPE_US_SIGNER_TITLE="Treasurer"');
   });
 
   it("keeps U.S. annual fixture hydration read-only", () => {

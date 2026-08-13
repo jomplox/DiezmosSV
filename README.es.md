@@ -414,6 +414,11 @@ node scripts/run-private-wrangler.mjs secret put STRIPE_PAYMENT_METHOD_CONFIGURA
 node scripts/run-private-wrangler.mjs secret put STRIPE_BILLING_PORTAL_CONFIGURATION_ID --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_LEGAL_NAME --env staging
 node scripts/run-private-wrangler.mjs secret put STRIPE_US_EIN --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_PHONE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_WEBSITE --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_MAILING_ADDRESS --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_NAME --env staging
+node scripts/run-private-wrangler.mjs secret put STRIPE_US_SIGNER_TITLE --env staging
 
 # Migre y despliegue con los scripts de npm, que usan la misma envoltura privada.
 npm run cf:migrate:staging
@@ -581,6 +586,8 @@ configuración privada seleccionada y se duplican por ambiente de Wrangler:
 | `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | `bpc_…` para la ruta en español de administración de la entrega mensual. |
 | `STRIPE_US_LEGAL_NAME` · `STRIPE_US_EIN` | Identidad legal exacta de la 501(c)(3) estadounidense que aparece en el recibo en español. |
 | `STRIPE_US_TIME_ZONE` | Zona IANA que define el año calendario y las fechas de aportación de la constancia anual estadounidense; solo es visible/editable para OWNER. |
+| `STRIPE_US_PHONE` · `STRIPE_US_WEBSITE` · `STRIPE_US_MAILING_ADDRESS` | Bloque de contacto de la organización estadounidense que aparece en el recibo individual y la constancia anual. Separe los renglones de la dirección postal con saltos de línea. |
+| `STRIPE_US_SIGNER_NAME` · `STRIPE_US_SIGNER_TITLE` | Representante autorizado que aparece en cada recibo caritativo inmediato de EE. UU. |
 | `STRIPE_MOCK_MODE` | Transporte determinista solo para local/staging cuando vale `"1"`; producción lo rechaza. Nunca lo coloque en una configuración de producción. |
 | `STRIPE_API_PROXY_URL` | Puente HTTP opcional y exclusivo de loopback para entornos locales de `workerd` sin HTTPS saliente. Ejecute `npm run dev:stripe-api-proxy`; staging, producción, hosts que no sean loopback, credenciales y rutas URL se rechazan. |
 
@@ -745,8 +752,8 @@ entrega, frecuencia e identificadores antes de guardar en D1 el historial durabl
 página de resultado en español consulta ese estado durable en vez de confiar en la redirección del navegador.
 Una factura mensual produce una sola entrega únicamente cuando `invoice.paid` y un InvoicePayment pagado
 de Stripe demuestran una liquidación respaldada por PaymentIntent; ambos órdenes de eventos convergen una
-sola vez. Billing Portal ofrece la ruta de administración recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, tipo,
-frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La
+sola vez. Billing Portal ofrece la ruta de administración recurrente. La aplicación envía un acuse inmediato 501(c)(3) en español con nombre legal, EIN, firmante autorizado, bloque de contacto, tipo,
+frecuencia, fecha, monto y declaración de bienes/servicios a través de su cerca durable de correo. La dirección de facturación y el teléfono recogidos por Stripe se conservan como evidencia inmutable del donante para el recibo y la constancia anual correspondientes. La
 **Constancia anual de donaciones — EE. UU.** es un estado separado, sobre entregas Stripe liquidadas,
 netas de reembolsos y dentro de `STRIPE_US_TIME_ZONE`; nunca es un CDE ni un dossier anual salvadoreño.
 
@@ -763,7 +770,9 @@ exactos del webhook, gates de sandbox, rollback y handoff live están documentad
 **Configuración OWNER y frontera live.** **Configuración → Stripe EE. UU.** muestra solo presencia para
 `STRIPE_RESTRICTED_KEY`, `STRIPE_PUBLISHABLE_KEY`, `STRIPE_WEBHOOK_SECRET`,
 `STRIPE_WEBHOOK_SECRET_NEXT`, `STRIPE_PAYMENT_METHOD_CONFIGURATION_ID`,
-`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME` y `STRIPE_US_EIN`; solo expone la
+`STRIPE_BILLING_PORTAL_CONFIGURATION_ID`, `STRIPE_US_LEGAL_NAME`, `STRIPE_US_EIN`,
+`STRIPE_US_PHONE`, `STRIPE_US_WEBSITE`, `STRIPE_US_MAILING_ADDRESS`, `STRIPE_US_SIGNER_NAME` y
+`STRIPE_US_SIGNER_TITLE`; solo expone la
 no-secreta `STRIPE_US_TIME_ZONE`. «Configurado» no significa verificado por el proveedor: configuración de
 métodos, Billing Portal y propiedad de cuenta siguen sin verificar por la aplicación. La dirección derivada
 `/webhooks/stripe` y la salud resumida del último evento son de solo lectura; únicamente un evento
@@ -1013,7 +1022,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0038)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0039)</strong></summary>
 
 <br/>
 

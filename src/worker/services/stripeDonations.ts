@@ -40,6 +40,11 @@ export interface StripeRuntimeConfiguration {
   billingPortalConfigurationId: string;
   legalName: string;
   ein: string;
+  organizationPhone: string;
+  organizationWebsite: string;
+  organizationMailingAddress: string[];
+  signerName: string;
+  signerTitle: string;
   livemode: boolean;
   mock: boolean;
 }
@@ -55,6 +60,11 @@ export interface StripeConfigurationEnv {
   STRIPE_BILLING_PORTAL_CONFIGURATION_ID?: string;
   STRIPE_US_LEGAL_NAME?: string;
   STRIPE_US_EIN?: string;
+  STRIPE_US_PHONE?: string;
+  STRIPE_US_WEBSITE?: string;
+  STRIPE_US_MAILING_ADDRESS?: string;
+  STRIPE_US_SIGNER_NAME?: string;
+  STRIPE_US_SIGNER_TITLE?: string;
   STRIPE_MOCK_MODE?: string;
 }
 
@@ -228,6 +238,11 @@ export function resolveStripeConfiguration(
       billingPortalConfigurationId: "bpc_mock",
       legalName: "Nonprofit Test Fixture",
       ein: "00-0000000",
+      organizationPhone: "+1 555 555 0100",
+      organizationWebsite: "https://example.org",
+      organizationMailingAddress: ["100 Example Avenue", "New York, NY 10001, USA"],
+      signerName: "Authorized Representative",
+      signerTitle: "Treasurer",
       livemode: false,
       mock: true
     };
@@ -273,6 +288,20 @@ export function resolveStripeConfiguration(
   if (!EIN_PATTERN.test(ein) || ein === "00-0000000") {
     throw new StripeConfigurationError("invalid_ein");
   }
+  const organizationPhone = requiredValue(env.STRIPE_US_PHONE, "missing_us_phone");
+  if (organizationPhone.length < 7 || organizationPhone.length > 40 || hasControlCharacters(organizationPhone)) {
+    throw new StripeConfigurationError("invalid_us_phone");
+  }
+  const organizationWebsite = validatedOrganizationWebsite(env.STRIPE_US_WEBSITE);
+  const organizationMailingAddress = validatedMailingAddress(env.STRIPE_US_MAILING_ADDRESS);
+  const signerName = requiredValue(env.STRIPE_US_SIGNER_NAME, "missing_us_signer_name");
+  if (signerName.length > 120 || hasControlCharacters(signerName)) {
+    throw new StripeConfigurationError("invalid_us_signer_name");
+  }
+  const signerTitle = requiredValue(env.STRIPE_US_SIGNER_TITLE, "missing_us_signer_title");
+  if (signerTitle.length > 120 || hasControlCharacters(signerTitle)) {
+    throw new StripeConfigurationError("invalid_us_signer_title");
+  }
   return {
     apiKey,
     apiProxyUrl,
@@ -283,9 +312,46 @@ export function resolveStripeConfiguration(
     billingPortalConfigurationId,
     legalName,
     ein,
+    organizationPhone,
+    organizationWebsite,
+    organizationMailingAddress,
+    signerName,
+    signerTitle,
     livemode,
     mock: false
   };
+}
+
+function validatedOrganizationWebsite(value: string | undefined): string {
+  const configured = requiredValue(value, "missing_us_website");
+  if (configured.length > 200 || hasControlCharacters(configured)) {
+    throw new StripeConfigurationError("invalid_us_website");
+  }
+  try {
+    const parsed = new URL(configured);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+      throw new Error("invalid");
+    }
+  } catch {
+    throw new StripeConfigurationError("invalid_us_website");
+  }
+  return configured;
+}
+
+function validatedMailingAddress(value: string | undefined): string[] {
+  const configured = requiredValue(value, "missing_us_mailing_address");
+  if (configured.length > 600 || hasControlCharacters(configured.replace(/\r?\n/gu, ""))) {
+    throw new StripeConfigurationError("invalid_us_mailing_address");
+  }
+  const lines = configured.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+  if (lines.length < 2 || lines.length > 4 || lines.some((line) => line.length > 200)) {
+    throw new StripeConfigurationError("invalid_us_mailing_address");
+  }
+  return lines;
+}
+
+function hasControlCharacters(value: string): boolean {
+  return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
 }
 
 function resolveLocalStripeApiProxy(value: string | undefined, appEnv: string): string | null {

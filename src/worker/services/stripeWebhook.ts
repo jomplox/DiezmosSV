@@ -80,6 +80,8 @@ async function processCheckoutSessionEvent(
   const customerDetails = optionalRecord(session.customer_details);
   const donorName = donorText(customerDetails?.name, 200);
   const donorEmail = donorEmailValue(customerDetails?.email ?? session.customer_email);
+  const donorPhone = donorPhoneValue(customerDetails?.phone);
+  const donorAddressJson = donorAddressValue(customerDetails?.address);
   const paymentStatus = event.type === "checkout.session.async_payment_succeeded"
     ? "PAID"
     : session.payment_status === "paid"
@@ -105,6 +107,8 @@ async function processCheckoutSessionEvent(
     stripePaymentIntentId: paymentIntentId,
     donorName,
     donorEmail,
+    donorPhone,
+    donorAddressJson,
     completedAt,
     eventCreated,
     eventRank: paymentStatus === "PAID"
@@ -140,6 +144,8 @@ async function processCheckoutSessionEvent(
       amountCents: updated.amount_cents,
       donorName: updated.donor_name,
       donorEmail: updated.donor_email,
+      donorPhone: updated.donor_phone,
+      donorAddressJson: updated.donor_address_json,
       settledAt: completedAt ?? eventTime(event),
       now
     });
@@ -170,6 +176,8 @@ async function processInvoicePaidEvent(
     throw new StripeWebhookEventError("invoice_amount_mismatch");
   }
   const settledAt = epochIso(optionalRecord(invoice.status_transitions)?.paid_at) ?? eventTime(event);
+  const donorPhone = donorPhoneValue(invoice.customer_phone);
+  const donorAddressJson = donorAddressValue(invoice.customer_address);
   const updated = await repo.updateStripeCheckoutFromInvoice({
     id: checkout.id,
     stripeCustomerId: optionalStripeId(invoice.customer, "cus_"),
@@ -177,6 +185,8 @@ async function processInvoicePaidEvent(
     subscriptionStatus: "ACTIVE",
     donorName: donorText(invoice.customer_name, 200),
     donorEmail: donorEmailValue(invoice.customer_email),
+    donorPhone,
+    donorAddressJson,
     settled: true,
     completedAt: settledAt,
     eventCreated: providerEventCreated(event),
@@ -192,6 +202,8 @@ async function processInvoicePaidEvent(
     amountCents: amountPaid,
     donorName: updated.donor_name,
     donorEmail: updated.donor_email,
+    donorPhone: updated.donor_phone,
+    donorAddressJson: updated.donor_address_json,
     settledAt,
     livemode: event.livemode,
     eventId: providerEventId(event),
@@ -221,6 +233,8 @@ async function processInvoiceFailedEvent(
     subscriptionStatus: "PAST_DUE",
     donorName: donorText(invoice.customer_name, 200),
     donorEmail: donorEmailValue(invoice.customer_email),
+    donorPhone: donorPhoneValue(invoice.customer_phone),
+    donorAddressJson: donorAddressValue(invoice.customer_address),
     settled: false,
     completedAt: null,
     eventCreated: providerEventCreated(event),
@@ -313,6 +327,8 @@ async function recordReadyInvoiceSettlement(
     amountCents: settlement.amount_cents,
     donorName: settlement.donor_name,
     donorEmail: settlement.donor_email,
+    donorPhone: settlement.donor_phone,
+    donorAddressJson: settlement.donor_address_json,
     settledAt: settlement.settled_at,
     now
   });
@@ -502,6 +518,25 @@ function donorEmailValue(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.trim().toLowerCase();
   return normalized.length <= 254 && isValidEmail(normalized) ? normalized : null;
+}
+
+function donorPhoneValue(value: unknown): string | null {
+  const phone = donorText(value, 40);
+  return phone && phone.length >= 7 ? phone : null;
+}
+
+function donorAddressValue(value: unknown): string | null {
+  const address = optionalRecord(value);
+  if (!address) return null;
+  const normalized = {
+    line1: donorText(address.line1, 200),
+    line2: donorText(address.line2, 200),
+    city: donorText(address.city, 100),
+    state: donorText(address.state, 100),
+    postalCode: donorText(address.postal_code, 32),
+    country: donorText(address.country, 2)?.toUpperCase() ?? null
+  };
+  return Object.values(normalized).some(Boolean) ? JSON.stringify(normalized) : null;
 }
 
 function positiveInteger(value: unknown, code: string): number {

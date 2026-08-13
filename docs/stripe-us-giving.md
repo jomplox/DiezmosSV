@@ -57,6 +57,11 @@ No cambiar ni modificar **live** hasta completar y documentar todo este bloque e
    - `STRIPE_BILLING_PORTAL_CONFIGURATION_ID=bpc_…`
    - `STRIPE_US_LEGAL_NAME=<nombre legal exacto de la entidad estadounidense>`
    - `STRIPE_US_EIN=NN-NNNNNNN`
+   - `STRIPE_US_PHONE=<teléfono público de la entidad estadounidense>`
+   - `STRIPE_US_WEBSITE=https://…`
+   - `STRIPE_US_MAILING_ADDRESS=<dirección postal; un renglón por línea>`
+   - `STRIPE_US_SIGNER_NAME=<nombre del firmante autorizado>`
+   - `STRIPE_US_SIGNER_TITLE=<cargo del firmante autorizado>`
 5. Use el wrapper privado del repositorio para escribir cada valor de runtime; no ejecute Wrangler remoto sin ese wrapper. La clave publicable es segura para el navegador y el Worker la devuelve únicamente después de crear la sesión, pero sigue separada por ambiente y no se fija en el bundle. Los identificadores que no son credenciales también permanecen fuera del repositorio público porque identifican la cuenta y el despliegue.
 
 `STRIPE_MOCK_MODE="1"` es una facilidad determinista para local y staging aislado. Está prohibido en producción y el Worker falla cerrado si intenta combinarlo con `APP_ENV=production`.
@@ -97,6 +102,8 @@ Los valores son de reemplazo por escritura y se limpian al guardar; los vacíos 
 | `STRIPE_BILLING_PORTAL_CONFIGURATION_ID` | ID `bpc_…`, de solo escritura y estado solamente; la aplicación no verifica su cuenta o propiedad. |
 | `STRIPE_US_LEGAL_NAME` / `STRIPE_US_EIN` | Identidad exacta de la entidad estadounidense para acuses y constancias; reemplazo de solo escritura. |
 | `STRIPE_US_TIME_ZONE` | Zona IANA de los años y fechas de constancias; valor visible y editable. |
+| `STRIPE_US_PHONE` / `STRIPE_US_WEBSITE` / `STRIPE_US_MAILING_ADDRESS` | Bloque público de contacto impreso con la composición legal de los recibos y constancias; reemplazo de solo escritura. |
+| `STRIPE_US_SIGNER_NAME` / `STRIPE_US_SIGNER_TITLE` | Representante autorizado impreso en el recibo inmediato; reemplazo de solo escritura. |
 
 `APP_ENV`, el modo (`Simulado`, `Pruebas` o `Producción`) y el estado del proxy local son diagnósticos de solo lectura. `STRIPE_MOCK_MODE` y `STRIPE_API_PROXY_URL` son controles del despliegue/local y no se editan desde el navegador. Payment Method Configuration, Billing Portal y la exclusión de BNPL se administran en Stripe Dashboard por el propietario de la cuenta: el panel no tiene botones que pretendan cambiar Stripe.
 
@@ -144,10 +151,10 @@ Pendiente del propietario del despliegue:
 
 - crear las configuraciones sandbox/live de métodos y Portal;
 - activar Cash App Pay solamente si Stripe confirma elegibilidad de la cuenta;
-- confirmar el nombre legal y EIN exactos que aparecerán en el recibo;
+- confirmar el nombre legal, EIN, teléfono, sitio, dirección postal y firmante exactos que aparecerán en los PDF;
 - crear y custodiar las claves restringidas, publicables y secretos de webhook;
 - autorizar por escrito la prueba live y cualquier cambio de configuración live.
 
 Para detener nuevas entregas sin perder la reconciliación, mantenga la revisión actual compatible con Stripe y configure `DONATION_INTAKE_DISABLED=true`. Ese interruptor bloquea la creación de Checkout nueva, pero debe conservar `/webhooks/stripe`, la consulta durable `/api/donations/stripe/session/`, `/api/donations/stripe/portal`, los acuses de recibo pendientes y la conciliación de constancias anuales.
 
-Si el incidente exige desplegar código anterior, use solamente una revisión conocida compatible con Stripe que retenga esas rutas y tareas; nunca despliegue un SHA anterior a la integración Stripe mientras existan sesiones, facturas o suscripciones abiertas. Conserve las migraciones aditivas `0032` (tablas base), `0033` (tipo de entrega), `0034` (constancias anuales), `0035` (cronología monotónica del proveedor), `0036` (retención consistente), `0037` (seguridad de entregas) y `0038` (cercas finales de integridad), junto con todas sus filas. No elimine ni revierta esas migraciones: una reversión de código no revierte D1, webhooks, facturas, suscripciones, constancias ni evidencia de cronología. Mantenga la clave activa y el secreto de webhook operativo hasta conciliar sesiones abiertas y entregas mensuales. Desactivar una configuración o clave sin esa conciliación puede impedir renovaciones o administración de la persona donante.
+Si el incidente exige desplegar código anterior, use solamente una revisión conocida compatible con Stripe que retenga esas rutas y tareas; nunca despliegue un SHA anterior a la integración Stripe mientras existan sesiones, facturas o suscripciones abiertas. Conserve las migraciones aditivas `0032` (tablas base), `0033` (tipo de entrega), `0034` (constancias anuales), `0035` (cronología monotónica del proveedor), `0036` (retención consistente), `0037` (seguridad de entregas), `0038` (cercas finales de integridad) y `0039` (evidencia de contacto del donante), junto con todas sus filas. No elimine ni revierta esas migraciones: una reversión de código no revierte D1, webhooks, facturas, suscripciones, constancias ni evidencia de cronología. Mantenga la clave activa y el secreto de webhook operativo hasta conciliar sesiones abiertas y entregas mensuales. Desactivar una configuración o clave sin esa conciliación puede impedir renovaciones o administración de la persona donante.

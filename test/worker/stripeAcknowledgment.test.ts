@@ -1,7 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { PDFDocument, PDFPage } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EmailService } from "../../src/worker/services/email";
 import {
   deliverNextStripeAcknowledgment,
+  renderStripeAcknowledgmentPdf,
   stripeAcknowledgmentContent
 } from "../../src/worker/services/stripeAcknowledgment";
 import { Repository } from "../../src/worker/storage/repository";
@@ -82,6 +88,88 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
 
     expect(content.text).toContain("Fecha: 31 de diciembre de 2025");
     expect(content.text).not.toContain("Fecha: 1 de enero de 2026");
+  });
+
+  it("renders the supplied one-page U.S. charitable receipt composition", async () => {
+    const drawRectangle = vi.spyOn(PDFPage.prototype, "drawRectangle");
+    const drawText = vi.spyOn(PDFPage.prototype, "drawText");
+    const bytes = await renderStripeAcknowledgmentPdf({
+      donorName: "Edith Anaya",
+      amountCents: 90_000,
+      refundedAmountCents: 0,
+      frequency: "ONCE",
+      giftType: "OFFERING",
+      sourceId: "pi_30298",
+      settledAt: "2024-12-31T17:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName: "Friends of Misión Cristiana Elim",
+      ein: "82-0889012",
+      organizationName: "Misión Cristiana Elim",
+      supportEmail: "fmce@example.org",
+      organizationPhone: "+1 (786) 505-8446",
+      organizationWebsite: "https://www.elim.click",
+      organizationMailingAddress: [
+        "2885 Sanford Ave SW, PMB 41357",
+        "Grandville, MI 49418, USA"
+      ],
+      signerName: "Mathieu Guély",
+      signerTitle: "Treasurer",
+      kind: "ORIGINAL"
+    });
+    const pdf = await PDFDocument.load(bytes);
+    expect(pdf.getPageCount()).toBe(1);
+
+    const directory = mkdtempSync(join(tmpdir(), "stripe-ack-pdf-"));
+    const pdfPath = join(directory, "receipt.pdf");
+    writeFileSync(pdfPath, bytes);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const normalizedText = text.replace(/\s+/g, " ");
+    expect(text).toContain("Dear Edith Anaya,");
+    expect(text).toContain("Receipt of Charitable Donation:");
+    expect(text).toContain("DONATION AMOUNT: $900.00 USD");
+    expect(text).toContain("DONATION METHOD: Stripe");
+    expect(text).toContain("DONATION STATUS: Completed");
+    expect(text).toContain("DONATION ID: pi_30298");
+    expect(normalizedText).toContain("No goods or services were provided in exchange for your contribution.");
+    expect(text).toContain("Friends of Misión Cristiana Elim");
+    expect(text).toContain("Mathieu Guély");
+    expect(text).toContain("Treasurer");
+    expect(text).toContain("+1 (786) 505-8446");
+    expect(text).toContain("2885 Sanford Ave SW, PMB 41357");
+    expect(text).toContain("A 501(c)(3) Public Charity");
+    expect(text).toContain("EIN 82-0889012");
+    expect(text).toContain("Malaquías 3:10");
+    expect(text).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b/i);
+    expect(readFileSync(pdfPath).subarray(0, 4).toString()).toBe("%PDF");
+
+    expect(drawRectangle.mock.calls).toContainEqual([
+      expect.objectContaining({ x: 0, y: 0, width: 612, height: 169 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "fmce@example.org · +1 (786) 505-8446",
+      expect.objectContaining({ y: 192.3, size: 9.5 })
+    ]);
+    expect(drawText.mock.calls).toContainEqual([
+      "2885 Sanford Ave SW, PMB 41357 Grandville, MI 49418, USA",
+      expect.objectContaining({ y: 177.3, size: 9.5 })
+    ]);
+  });
+
+  it("attaches the immutable one-page receipt before crossing the email provider boundary", async () => {
+    let attachment: { pdfBytes?: Uint8Array; filename?: string } | undefined;
+    vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
+      .mockImplementation(async (input, beforeProviderDispatch) => {
+        attachment = input;
+        await beforeProviderDispatch?.();
+        return { providerResponse: {}, providerDeliveryId: `sha256:${"a".repeat(64)}` };
+      });
+
+    expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).toMatchObject({ outcome: "SENT" });
+    expect(attachment?.filename).toBe("constancia-donacion-eeuu-stripe_ack_fixture-r1.pdf");
+    expect(attachment?.pdfBytes).toBeInstanceOf(Uint8Array);
+    expect(await PDFDocument.load(attachment!.pdfBytes!)).toBeInstanceOf(PDFDocument);
   });
 
   it("claims, dispatches, and finalizes one acknowledgment idempotently", async () => {
