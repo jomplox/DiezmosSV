@@ -31,20 +31,23 @@ describe("Stripe U.S. PDF preview command", () => {
     }
 
     const receiptText = execFileSync("pdftotext", ["-layout", previews.receiptPath, "-"], { encoding: "utf8" });
-    expect(receiptText).toContain("Preview Receipt Donor 413");
-    expect(receiptText).toContain("pi_preview_receipt_413");
-    expect(receiptText).toContain("Preview Receipt Legal Foundation");
-    expect(receiptText).toContain("preview-receipt@example.org");
-    expect(receiptText).toContain("Preview Receipt Address 4");
+    const normalizedReceiptText = receiptText.replace(/\s+/gu, " ");
+    expect(receiptText).toContain("Ana Morales");
+    expect(receiptText).toContain("pi_sample_receipt_2025_0413");
+    expect(normalizedReceiptText).toContain("Friends of Misión Cristiana Elim, Inc.");
+    expect(receiptText).toContain("giving@example.org");
+    expect(receiptText).toContain("United States");
 
     const annualText = execFileSync("pdftotext", ["-layout", previews.annualPath, "-"], { encoding: "utf8" });
-    expect(annualText).toContain("Preview Annual Donor 517");
-    expect(annualText).toContain("pi_preview_annual_517");
-    expect(annualText).toContain("Preview Annual Legal Foundation");
-    expect(annualText).toContain("preview-annual@example.org");
-    expect(annualText).toContain("Preview Annual Address 4");
+    const normalizedAnnualText = annualText.replace(/\s+/gu, " ");
+    expect(annualText).toContain("Ana Morales");
+    expect(annualText).toContain("pi_sample_annual_2025");
+    expect(normalizedAnnualText).toContain("Friends of Misión Cristiana Elim, Inc.");
+    expect(annualText).toContain("giving@example.org");
+    expect(annualText).toContain("United States");
     for (let index = 1; index <= 5; index += 1) {
-      expect(annualText).toContain(`pi_preview_annual_517_${index}`);
+      expect(annualText).toContain(`pi_sample_annual_2025_${String(index).padStart(2, "0")}`);
     }
+    expect(`${receiptText}\n${annualText}`).not.toMatch(/L{8}|A{8}|w{8}|2{8}/u);
   });
 });

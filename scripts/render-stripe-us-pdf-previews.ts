@@ -14,28 +14,28 @@ export async function renderStripeUsPdfPreviews(
   const annualPath = join(outputDirectory, "stripe-us-annual-giving-statement.pdf");
   const [receipt, annual] = await Promise.all([
     renderStripeAcknowledgmentPdf({
-      donorName: "Preview Receipt Donor 413",
-      amountCents: 41_300,
+      donorName: "Ana Morales",
+      amountCents: 25_000,
       refundedAmountCents: 0,
       frequency: "ONCE",
       giftType: "OFFERING",
-      sourceId: "pi_preview_receipt_413",
+      sourceId: "pi_sample_receipt_2025_0413",
       settledAt: "2025-04-13T16:00:00.000Z",
       timeZone: "America/New_York",
-      legalName: `Preview Receipt Legal Foundation ${"L".repeat(47)}`,
-      ein: "41-3000413",
-      organizationName: "Preview Receipt Ministry",
-      supportEmail: "preview-receipt@example.org",
-      organizationPhone: `+1${"2".repeat(38)}`,
-      organizationWebsite: `https://preview-receipt.example.org/${"w".repeat(64)}`,
+      legalName: "Friends of Misión Cristiana Elim, Inc.",
+      ein: "12-3456789",
+      organizationName: "Misión Cristiana Elim",
+      supportEmail: "giving@example.org",
+      organizationPhone: "+1 (616) 555-0143",
+      organizationWebsite: "https://www.elim.click",
       organizationMailingAddress: [
-        `413 Preview Receipt Way ${"A".repeat(56)}`,
-        `Preview Receipt Address 2 ${"A".repeat(54)}`,
-        `Preview Receipt Address 3 ${"A".repeat(54)}`,
-        `Preview Receipt Address 4 ${"A".repeat(54)}`
+        "2885 Sanford Avenue SW",
+        "PMB 41357",
+        "Grandville, MI 49418",
+        "United States"
       ],
-      signerName: "Preview Receipt Signer",
-      signerTitle: "Preview Treasurer",
+      signerName: "Mathieu Guély",
+      signerTitle: "Treasurer",
       kind: "ORIGINAL"
     }),
     renderAnnualPreview()
@@ -48,13 +48,13 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
   const snapshot = await buildStripeAnnualStatementSnapshot({
     year: 2025,
     livemode: false,
-    donorKey: "preview-annual-donor@example.org",
-    donorName: "Preview Annual Donor 517",
-    donorEmail: "preview-annual-donor@example.org",
+    donorKey: "ana.morales@example.org",
+    donorName: "Ana Morales",
+    donorEmail: "ana.morales@example.org",
     document: {
       rendererVersion: "stripe-annual-statement-pdf:v5",
-      legalName: `Preview Annual Legal Foundation ${"L".repeat(48)}`,
-      ein: "51-7000517",
+      legalName: "Friends of Misión Cristiana Elim, Inc.",
+      ein: "12-3456789",
       timeZone: "America/New_York",
       accentColor: "#0f766e",
       logo: {
@@ -62,20 +62,20 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
         hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c"
       },
       organizationContact: {
-        phone: `+1${"2".repeat(38)}`,
-        website: `https://preview-annual.example.org/${"w".repeat(65)}`,
+        phone: "+1 (616) 555-0143",
+        website: "https://www.elim.click",
         mailingAddress: [
-          `517 Preview Annual Avenue ${"A".repeat(54)}`,
-          `Preview Annual Address 2 ${"A".repeat(55)}`,
-          `Preview Annual Address 3 ${"A".repeat(55)}`,
-          `Preview Annual Address 4 ${"A".repeat(55)}`
+          "2885 Sanford Avenue SW",
+          "PMB 41357",
+          "Grandville, MI 49418",
+          "United States"
         ]
       },
       email: {
-        organizationName: "Preview Annual Ministry",
-        supportEmail: "preview-annual@example.org",
+        organizationName: "Misión Cristiana Elim",
+        supportEmail: "giving@example.org",
         logoUrl: null,
-        senderName: "Preview Annual Ministry",
+        senderName: "Misión Cristiana Elim",
         replyToAddress: null
       },
       settings: {
@@ -89,32 +89,32 @@ async function renderAnnualPreview(): Promise<Uint8Array> {
       }
     },
     gifts: Array.from({ length: 5 }, (_, index) => ({
-      id: `preview_annual_gift_517_${index + 1}`,
+      id: `sample_annual_gift_2025_${index + 1}`,
       source_type: "PAYMENT_INTENT",
-      source_id: `pi_preview_annual_517_${index + 1}`,
-      checkout_id: `checkout_preview_annual_517_${index + 1}`,
-      stripe_payment_intent_id: `pi_preview_annual_517_${index + 1}`,
+      source_id: `pi_sample_annual_2025_${String(index + 1).padStart(2, "0")}`,
+      checkout_id: `checkout_sample_annual_2025_${index + 1}`,
+      stripe_payment_intent_id: `pi_sample_annual_2025_${String(index + 1).padStart(2, "0")}`,
       stripe_invoice_id: null,
       stripe_subscription_id: null,
       frequency: "MONTHLY",
       gift_type: "TITHE",
-      amount_cents: 51_700,
+      amount_cents: 50_000,
       currency: "usd",
-      donor_name: "Preview Annual Donor 517",
-      donor_email: "preview-annual-donor@example.org",
-      donor_phone: "+1 555 010 1517",
+      donor_name: "Ana Morales",
+      donor_email: "ana.morales@example.org",
+      donor_phone: "+1 (616) 555-0192",
       donor_address_json: JSON.stringify({
-        line1: "517 Preview Donor Street",
+        line1: "1250 Cedar Street",
         line2: null,
-        city: "Austin",
-        state: "TX",
-        postalCode: "78751",
+        city: "Grand Rapids",
+        state: "MI",
+        postalCode: "49503",
         country: "US"
       }),
-      settled_at: `2025-0${index + 1}-17T16:00:00.000Z`,
+      settled_at: `2025-0${index + 1}-15T16:00:00.000Z`,
       status: "PAID",
       refunded_amount_cents: 0,
-      net_amount_cents: 51_700,
+      net_amount_cents: 50_000,
       created_at: "2025-05-17T16:00:00.000Z",
       updated_at: "2025-05-17T16:00:00.000Z"
     }))
