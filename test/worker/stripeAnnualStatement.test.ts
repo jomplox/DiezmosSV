@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PDFDocument, PDFPage } from "pdf-lib";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import {
   buildStripeAnnualStatementPreview,
   buildStripeAnnualStatementSnapshot,
@@ -12,7 +12,9 @@ import {
   sendStripeAnnualStatements,
   stripeAnnualStatementEmailContent,
   stripeUsCurrentYear,
-  stripeUsYearWindow
+  stripeUsYearWindow,
+  type RenderStripeAnnualStatementPdfInput,
+  type StripeAnnualStatementDocumentEvidence
 } from "../../src/worker/services/stripeAnnualStatement";
 import * as stripePdfAssets from "../../src/worker/services/stripePdfAssets";
 import { Repository } from "../../src/worker/storage/repository";
@@ -63,7 +65,31 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     expect(pngDimensions(bytes)).toEqual({ width: 2393, height: 672 });
   });
 
-  it("keeps the fixed approved logo beside the title on U.S. Letter despite a runtime raster", async () => {
+  it("rejects annual snapshots that claim any logo other than the immutable FMCE PNG", async () => {
+    const invalidLogos = [
+      null,
+      { format: "jpeg", hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c" },
+      { format: "png", hash: "0".repeat(64) }
+    ];
+
+    for (const logo of invalidLogos) {
+      const document = {
+        ...statementDocument(),
+        logo
+      } as unknown as StripeAnnualStatementDocumentEvidence;
+      await expect(buildStripeAnnualStatementSnapshot({
+        year: 2025,
+        livemode: false,
+        donorKey: "logo-evidence@example.org",
+        donorName: "Logo Evidence Donor",
+        donorEmail: "logo-evidence@example.org",
+        document,
+        gifts: [gift({ id: "gift_logo_evidence" })]
+      })).rejects.toThrow(/immutable FMCE PNG/i);
+    }
+  });
+
+  it("keeps the fixed approved logo beside the title on U.S. Letter", async () => {
     const drawImage = vi.spyOn(PDFPage.prototype, "drawImage");
     const drawText = vi.spyOn(PDFPage.prototype, "drawText");
     const snapshot = await buildStripeAnnualStatementSnapshot({
@@ -75,16 +101,10 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       document: statementDocument(),
       gifts: [gift({ id: "gift_logo" })]
     });
-    const runtimeRaster = Uint8Array.from(Buffer.from(
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-      "base64"
-    ));
-
     const bytes = await renderStripeAnnualStatementPdf({
       snapshot,
       issuedOn: "2026-01-10T12:00:00.000Z",
-      corrected: false,
-      logo: { format: "png", bytes: runtimeRaster }
+      corrected: false
     });
     const pdf = await PDFDocument.load(bytes);
     expect(pdf.getPages().map((page) => page.getMediaBox()))
@@ -101,6 +121,8 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     expect(logoOptions.width! / logoOptions.height!).toBeCloseTo(2393 / 672, 8);
     const title = drawText.mock.calls.find(([text]) => text === "Annual Giving Statement");
     expect(logoOptions.x! + logoOptions.width!).toBeLessThanOrEqual(title?.[1]?.x ?? 0);
+    expectTypeOf<"logo" extends keyof RenderStripeAnnualStatementPdfInput ? true : false>()
+      .toEqualTypeOf<false>();
   });
 
   it("hashes normalized identity and ordered durable refund facts, including a zero-net refund", async () => {
@@ -609,6 +631,58 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       expect(normalizedText).toContain(expected);
     }
     expect(normalizedText).toMatch(/Statement No\. AGS-2025-[A-F0-9]{8}/);
+  });
+
+  it("keeps mutable email branding separate from immutable annual artwork evidence", async () => {
+    seedGift(database, gift({ id: "gift_branding_boundary", donor_email: "branding-boundary@example.org" }));
+    const emailLogo = JSON.stringify({
+      contentType: "image/jpeg",
+      size: 321,
+      version: "runtime-email-logo-v99"
+    });
+    const donorLogo = JSON.stringify({
+      contentType: "image/png",
+      size: 654,
+      version: "runtime-donor-logo-v42"
+    });
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?), (?, ?), (?, ?)"
+    ).run(
+      "branding_display_name",
+      "Runtime Branded Ministry",
+      "branding_logo",
+      emailLogo,
+      "branding_donor_logo",
+      donorLogo
+    );
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "branding-boundary@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    const row = database.prepare(
+      "SELECT snapshot_json FROM stripe_annual_statement_deliveries"
+    ).get() as { snapshot_json: string };
+    const snapshot = JSON.parse(row.snapshot_json) as {
+      document: {
+        logo: unknown;
+        email: { organizationName: string; logoUrl: string | null };
+        settings: { brandingLogo: string | null; brandingDonorLogo: string | null };
+      };
+    };
+    expect(snapshot.document.logo).toEqual({
+      format: "png",
+      hash: "ac235e246a9d15381b32501f49eec7e8f8fb60a52214e0fde9a6595e5c67e19c"
+    });
+    expect(snapshot.document.email).toMatchObject({
+      organizationName: "Runtime Branded Ministry",
+      logoUrl: expect.stringContaining("/api/branding/logo?v=runtime-email-logo-v99")
+    });
+    expect(snapshot.document.settings).toMatchObject({
+      brandingLogo: emailLogo,
+      brandingDonorLogo: donorLogo
+    });
   });
 
   it("threads a trimmed preview query to the grouped Stripe donor search", async () => {
@@ -1183,7 +1257,7 @@ function statementDocument(overrides: Partial<{
     senderName: string;
     replyToAddress: string | null;
   };
-}> = {}) {
+}> = {}): StripeAnnualStatementDocumentEvidence {
   return {
     rendererVersion: "stripe-annual-statement-pdf:v4" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",

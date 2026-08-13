@@ -21,10 +21,7 @@ import {
 import { classifyEmailDispatchError, EmailDispatchError, EmailService } from "./email";
 import { stripeAnnualStatementEmailHtml, type BrandingEmailOptions } from "./emailHtml";
 import { EMAIL_REPLY_TO_SETTING_KEY, EMAIL_SENDER_NAME_SETTING_KEY } from "./emailSender";
-import {
-  pdfSafeText,
-  type PdfBrandingLogo
-} from "./pdf";
+import { pdfSafeText } from "./pdf";
 import { logWorkerError } from "./observability";
 import { resolveStripeConfiguration } from "./stripeDonations";
 import {
@@ -138,7 +135,10 @@ export interface StripeAnnualStatementDocumentEvidence {
   ein: string;
   timeZone: string;
   accentColor: string;
-  logo: { format: PdfBrandingLogo["format"]; hash: string } | null;
+  logo: {
+    format: "png";
+    hash: typeof STRIPE_ANNUAL_FMCE_LOGO_SHA256;
+  };
   organizationContact: {
     phone: string;
     website: string;
@@ -173,6 +173,12 @@ export async function buildStripeAnnualStatementSnapshot(input: {
   document: StripeAnnualStatementDocumentEvidence;
   gifts: StripeAnnualStatementGift[];
 }): Promise<StripeAnnualStatementSnapshot> {
+  if (
+    input.document.logo?.format !== "png"
+    || input.document.logo.hash !== STRIPE_ANNUAL_FMCE_LOGO_SHA256
+  ) {
+    throw new Error("Stripe annual statement evidence must use the immutable FMCE PNG");
+  }
   const items = [...input.gifts]
     .sort((left, right) => left.settled_at.localeCompare(right.settled_at) || left.id.localeCompare(right.id))
     .map((gift): StripeAnnualStatementItem => {
@@ -256,8 +262,6 @@ export interface RenderStripeAnnualStatementPdfInput {
   snapshot: StripeAnnualStatementSnapshot;
   issuedOn: string;
   corrected: boolean;
-  // Retained as a compatibility no-op for callers replaying older render inputs.
-  logo?: PdfBrandingLogo | null;
 }
 
 export async function renderStripeAnnualStatementPdf(

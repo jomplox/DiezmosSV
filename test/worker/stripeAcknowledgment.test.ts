@@ -360,10 +360,25 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(alerts[0].text).not.toMatch(/Ana|ana@example\.org|Bearer|private-fixture/);
   });
 
-  it("marks a pre-dispatch failure retry-safe and reclaims it on the next sweep", async () => {
+  it("retries persisted v2 immediate-receipt evidence through the current renderer", async () => {
+    let retryAttachment: Uint8Array | undefined;
+    const saveSnapshot = repo.saveStripeAcknowledgmentSnapshot.bind(repo);
+    vi.spyOn(repo, "saveStripeAcknowledgmentSnapshot").mockImplementationOnce(async (input) => {
+      const evidence = JSON.parse(input.snapshotJson) as {
+        pdf: { rendererVersion: string };
+      };
+      evidence.pdf.rendererVersion = "stripe-acknowledgment-pdf:v2";
+      const snapshotJson = JSON.stringify(evidence);
+      return saveSnapshot({
+        ...input,
+        snapshotJson,
+        snapshotHash: createHash("sha256").update(snapshotJson).digest("hex")
+      });
+    });
     const send = vi.spyOn(EmailService.prototype, "sendStripeAcknowledgment")
       .mockRejectedValueOnce(new Error("failed before provider dispatch"))
-      .mockImplementationOnce(async (_input, beforeProviderDispatch) => {
+      .mockImplementationOnce(async (input, beforeProviderDispatch) => {
+        retryAttachment = input.pdfBytes;
         await beforeProviderDispatch?.();
         return { providerResponse: {}, providerDeliveryId: "sha256:" + "a".repeat(64) };
       });
@@ -379,10 +394,18 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       retry_safe: 1
     });
 
+    expect(JSON.parse((database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string }).snapshot_json)).toMatchObject({
+      pdf: { rendererVersion: "stripe-acknowledgment-pdf:v2" }
+    });
+
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
       now: "2026-08-10T12:06:00.000Z"
     })).toMatchObject({ processed: true, outcome: "SENT" });
     expect(send).toHaveBeenCalledTimes(2);
+    expect(retryAttachment).toBeInstanceOf(Uint8Array);
+    expect(await PDFDocument.load(retryAttachment!)).toBeInstanceOf(PDFDocument);
   });
 
   it("moves an absent donor address to review without invoking the provider", async () => {
