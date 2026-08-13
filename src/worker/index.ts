@@ -3935,6 +3935,16 @@ async function handleStripeSettings(ctx: ApiRouteContext): Promise<Response> {
       stripe: {
         credentials: status.groups.stripe,
         operational: status.stripeOperational,
+        configuration: {
+          legalName: ctx.env.STRIPE_US_LEGAL_NAME?.trim() ?? "",
+          ein: ctx.env.STRIPE_US_EIN?.trim() ?? "",
+          timeZone: ctx.env.STRIPE_US_TIME_ZONE?.trim() ?? "",
+          organizationPhone: ctx.env.STRIPE_US_PHONE?.trim() ?? "",
+          organizationWebsite: ctx.env.STRIPE_US_WEBSITE?.trim() ?? "",
+          organizationMailingAddress: ctx.env.STRIPE_US_MAILING_ADDRESS?.trim() ?? "",
+          signerName: ctx.env.STRIPE_US_SIGNER_NAME?.trim() ?? "",
+          signerTitle: ctx.env.STRIPE_US_SIGNER_TITLE?.trim() ?? ""
+        },
         webhookHealth
       }
     });

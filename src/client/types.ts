@@ -212,6 +212,16 @@ export interface StripeOperationalStatus {
 export interface StripeSettingsState {
   credentials: CredentialStatusGroup;
   operational: StripeOperationalStatus;
+  configuration: {
+    legalName: string;
+    ein: string;
+    timeZone: string;
+    organizationPhone: string;
+    organizationWebsite: string;
+    organizationMailingAddress: string;
+    signerName: string;
+    signerTitle: string;
+  };
   webhookHealth: {
     state: "none" | "observed";
     label?: string;

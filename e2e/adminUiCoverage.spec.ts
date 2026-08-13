@@ -623,8 +623,97 @@ test("does not show the prior account Stripe status while the next account loads
   }
 });
 
+test("preloads and edits owner-visible U.S. organization settings while Stripe credentials stay write-only", async ({ page }) => {
+  const configuration = {
+    legalName: "Friends of Example Church, Inc.",
+    ein: "12-3456789",
+    timeZone: "America/New_York",
+    organizationPhone: "+1 (616) 555-0143",
+    organizationWebsite: "https://example.org",
+    organizationMailingAddress: "100 Example Avenue\nGrandville, MI 49418\nUnited States",
+    signerName: "Alex Example",
+    signerTitle: "Treasurer"
+  };
+  let submitted: Record<string, unknown> | null = null;
+  await installOwnerAdmin(page, async (route, url) => {
+    const request = route.request();
+    if (url.pathname === "/api/settings/emission-environment" && request.method() === "GET") {
+      await fulfillJson(route, {
+        emissionEnvironment: {
+          environment: "01",
+          source: "deployment_default",
+          appEnv: "production",
+          locked: true,
+          allowedEnvironments: ["01"]
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/credentials" && request.method() === "GET") {
+      await fulfillJson(route, {
+        credentials: {
+          target: { appEnv: "staging", scriptName: "staging-worker", writerConfigured: true, writerMissing: [] },
+          groups: {},
+          certificateExpiresAt: null,
+          stripeOperational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      await fulfillJson(route, {
+        stripe: {
+          credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+          operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+          configuration,
+          webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+        }
+      });
+      return true;
+    }
+    if (url.pathname === "/api/settings/stripe" && request.method() === "POST") {
+      submitted = request.postDataJSON() as Record<string, unknown>;
+      await fulfillJson(route, { updated: ["STRIPE_US_PHONE", "STRIPE_US_TIME_ZONE"] });
+      return true;
+    }
+    return false;
+  });
+
+  await openView(page, "Configuración");
+  await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
+
+  await expect(page.getByLabel("Nombre legal")).toHaveValue(configuration.legalName);
+  await expect(page.getByLabel("EIN")).toHaveValue(configuration.ein);
+  await expect(page.getByLabel("Zona horaria")).toHaveValue(configuration.timeZone);
+  await expect(page.getByLabel("Zona horaria")).toHaveJSProperty("tagName", "SELECT");
+  await expect(page.getByLabel("Teléfono de la organización")).toHaveValue(configuration.organizationPhone);
+  await expect(page.getByLabel("Sitio web")).toHaveValue(configuration.organizationWebsite);
+  await expect(page.getByLabel("Dirección postal")).toHaveValue(configuration.organizationMailingAddress);
+  await expect(page.getByLabel("Nombre del firmante autorizado")).toHaveValue(configuration.signerName);
+  await expect(page.getByLabel("Cargo del firmante autorizado")).toHaveValue(configuration.signerTitle);
+  await expect(page.getByLabel("Clave restringida")).toHaveValue("");
+  await expect(page.getByLabel("Clave restringida")).toHaveAttribute("type", "password");
+
+  await page.getByLabel("Zona horaria").selectOption("America/Chicago");
+  await page.getByLabel("Teléfono de la organización").fill("+1 (312) 555-0100");
+  await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
+
+  await expect.poll(() => submitted).toMatchObject({
+    legalName: configuration.legalName,
+    ein: configuration.ein,
+    timeZone: "America/Chicago",
+    organizationPhone: "+1 (312) 555-0100",
+    organizationWebsite: configuration.organizationWebsite,
+    organizationMailingAddress: configuration.organizationMailingAddress,
+    signerName: configuration.signerName,
+    signerTitle: configuration.signerTitle,
+    restrictedKey: ""
+  });
+});
+
 test("clears Stripe write-only replacements after POST success even when status refresh fails", async ({ page }) => {
   let postSucceeded = false;
+  const legalName = "Friends of Durable Example, Inc.";
   await installOwnerAdmin(page, async (route, url) => {
     const request = route.request();
     if (url.pathname === "/api/credentials" && request.method() === "GET") {
@@ -647,8 +736,28 @@ test("clears Stripe write-only replacements after POST success even when status 
       await fulfillJson(route, { updated: ["STRIPE_RESTRICTED_KEY"] });
       return true;
     }
-    if (postSucceeded && url.pathname === "/api/settings/stripe" && request.method() === "GET") {
-      await fulfillJson(route, { error: "refresh_failed" }, 503);
+    if (url.pathname === "/api/settings/stripe" && request.method() === "GET") {
+      if (postSucceeded) {
+        await fulfillJson(route, { error: "refresh_failed" }, 503);
+      } else {
+        await fulfillJson(route, {
+          stripe: {
+            credentials: { label: "Stripe EE. UU.", ready: true, items: [] },
+            operational: { appEnv: "staging", mode: "Pruebas", mockMode: false, localProxyConfigured: false },
+            configuration: {
+              legalName,
+              ein: "12-3456789",
+              timeZone: "America/New_York",
+              organizationPhone: "+1 555 010 0100",
+              organizationWebsite: "https://example.org",
+              organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+              signerName: "Test Signer",
+              signerTitle: "Treasurer"
+            },
+            webhookHealth: { state: "none", label: "Sin eventos recibidos" }
+          }
+        });
+      }
       return true;
     }
     return false;
@@ -656,12 +765,15 @@ test("clears Stripe write-only replacements after POST success even when status 
   await openView(page, "Configuración");
   await page.getByRole("button", { name: /^Stripe EE\. UU\./ }).click();
   const replacement = page.getByLabel("Clave restringida");
+  const visibleLegalName = page.getByLabel("Nombre legal");
+  await expect(visibleLegalName).toHaveValue(legalName);
   await replacement.fill("rk_test_write_only_fixture");
 
   await page.getByRole("button", { name: "Guardar configuración de Stripe" }).click();
 
   await expect.poll(() => postSucceeded).toBe(true);
   await expect(replacement).toHaveValue("");
+  await expect(visibleLegalName).toHaveValue(legalName);
   await expect(page.getByRole("status")).toContainText(
     "Configuración de Stripe guardada, pero no se pudo actualizar el estado mostrado."
   );

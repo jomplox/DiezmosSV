@@ -15,7 +15,7 @@ describe("Stripe owner settings UI", () => {
     }));
   });
 
-  test("renders write-only replacements, visible timezone, and no active webhook replacement", () => {
+  test("keeps credentials write-only while organization fields and timezone are directly editable", () => {
     for (const label of [
       "Clave restringida", "Clave publicable", "Configuración de métodos de entrega",
       "Configuración del portal", "Nombre legal", "EIN", "Zona horaria",
@@ -32,7 +32,7 @@ describe("Stripe owner settings UI", () => {
     expect(panelSource).toContain('value={input.stripeSignerTitle}');
     expect(panelSource).toContain('name="stripe-webhook-secret-next"');
     expect(panelSource).not.toContain('name="stripe-webhook-secret-active"');
-    expect(panelSource).toContain("Los campos de reemplazo nunca se precargan");
+    expect(panelSource).toContain("Las credenciales y secretos de reemplazo nunca se precargan");
   });
 
   test("shows operational mode, safe webhook health, and a copyable endpoint", () => {

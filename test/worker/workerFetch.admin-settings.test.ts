@@ -166,7 +166,7 @@ describe("credential administration", () => {
 });
 
 describe("Stripe owner settings", () => {
-  it("returns presence-only configuration and safe last-webhook health to owners", async () => {
+  it("returns owner-visible organization configuration while keeping provider credentials private", async () => {
     const db = new InMemoryD1();
     db.sessionUser = { id: "user_owner", email: "owner@example.org", name: "Owner", role: "OWNER" };
     db.stripeWebhookEvents.push({
@@ -208,6 +208,16 @@ describe("Stripe owner settings", () => {
       stripe: {
         credentials: { ready: true },
         operational: { appEnv: "staging", mode: "Pruebas", mockMode: false },
+        configuration: {
+          legalName: "Private Legal Name",
+          ein: "12-3456789",
+          timeZone: "America/New_York",
+          organizationPhone: "+1 555 010 0100",
+          organizationWebsite: "https://example.org",
+          organizationMailingAddress: "100 Test Avenue\nNew York, NY 10001, USA",
+          signerName: "Test Signer",
+          signerTitle: "Treasurer"
+        },
         webhookHealth: {
           lastReceivedAt: "2026-08-11T10:00:00.000Z",
           eventType: "checkout.session.completed",
@@ -220,7 +230,7 @@ describe("Stripe owner settings", () => {
     const serialized = JSON.stringify(data);
     for (const privateValue of [
       "rk_test_private", "pk_test_private", "whsec_private", "pmc_private", "bpc_private",
-      "Private Legal Name", "12-3456789", "evt_private_object_id", "donor@example.org", "private_failure_internal"
+      "evt_private_object_id", "donor@example.org", "private_failure_internal"
     ]) {
       expect(serialized).not.toContain(privateValue);
     }

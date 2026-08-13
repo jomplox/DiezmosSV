@@ -518,7 +518,17 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
     if (!allowed) return;
     const credentialEnvironment = allowed === "01" ? "production" : "test";
     setCredentialInput((current) =>
-      current.environment === credentialEnvironment ? current : emptyCredentialInput(credentialEnvironment)
+      current.environment === credentialEnvironment ? current : {
+        ...emptyCredentialInput(credentialEnvironment),
+        stripeLegalName: current.stripeLegalName,
+        stripeEin: current.stripeEin,
+        stripeTimeZone: current.stripeTimeZone,
+        stripeOrganizationPhone: current.stripeOrganizationPhone,
+        stripeOrganizationWebsite: current.stripeOrganizationWebsite,
+        stripeOrganizationMailingAddress: current.stripeOrganizationMailingAddress,
+        stripeSignerName: current.stripeSignerName,
+        stripeSignerTitle: current.stripeSignerTitle
+      }
     );
   }, [emissionEnvironment]);
 
@@ -930,7 +940,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       ]);
       commitRefreshState(control, () => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
+        applyStripeSettings(stripeResult.stripe);
         setStripeRotationStatusStale(false);
         setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
         setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -2302,7 +2312,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       };
       const result = await accountApi<{ updated: string[] }>("/api/settings/stripe", { method: "POST", body });
       if (!control.commit(() => {
-        setCredentialInput((current) => ({ ...current, ...emptyStripeCredentialInput() }));
+        setCredentialInput((current) => ({ ...current, ...emptyStripeWriteOnlyInput() }));
         setToast(`Configuración de Stripe actualizada: ${result.updated.length}`);
       })) {
         return;
@@ -2325,7 +2335,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
+        applyStripeSettings(stripeResult.stripe);
         setStripeRotationStatusStale(false);
       });
     });
@@ -2362,7 +2372,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
       }
       control.commit(() => {
         setCredentials(credentialResult.credentials);
-        setStripeSettings(stripeResult.stripe);
+        applyStripeSettings(stripeResult.stripe, false);
         setStripeRotationStatusStale(false);
       });
     });
@@ -2382,7 +2392,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          setStripeSettings(stripeResult.stripe);
+          applyStripeSettings(stripeResult.stripe, false);
           setStripeRotationStatusStale(false);
         });
       } catch (error) {
@@ -2408,7 +2418,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
         ]);
         control.commit(() => {
           setCredentials(credentialResult.credentials);
-          setStripeSettings(stripeResult.stripe);
+          applyStripeSettings(stripeResult.stripe, false);
           setStripeRotationStatusStale(false);
         });
       } catch (error) {
@@ -2460,6 +2470,16 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
   function applyEmailTemplates(settings: EmailTemplateSettings) {
     setEmailTemplates(settings);
     setEmailTemplateDraft(cloneEmailTemplates(settings.templates));
+  }
+
+  function applyStripeSettings(settings: StripeSettingsState, hydrateConfiguration = true) {
+    setStripeSettings(settings);
+    if (hydrateConfiguration) {
+      setCredentialInput((current) => ({
+        ...current,
+        ...stripeOrganizationCredentialInput(settings.configuration)
+      }));
+    }
   }
 
   function applyEmailSender(sender: EmailSenderState) {
@@ -3126,7 +3146,7 @@ export function App({ initialResetToken = null }: { initialResetToken?: string |
                 accountApi<AlertEmailState>("/api/settings/alert-email")
               ]);
               setCredentials(credentialResult.credentials);
-              setStripeSettings(stripeResult.stripe);
+              applyStripeSettings(stripeResult.stripe);
               setStripeRotationStatusStale(false);
               setStripeAcknowledgmentReconciliation(acknowledgmentResult.acknowledgments);
               setEmissionEnvironment(environmentResult.emissionEnvironment);
@@ -4879,18 +4899,49 @@ function emptyStripeCredentialInput(): Pick<
   | "stripeSignerTitle"
 > {
   return {
+    ...emptyStripeWriteOnlyInput(),
+    ...stripeOrganizationCredentialInput()
+  };
+}
+
+function emptyStripeWriteOnlyInput(): Pick<
+  CredentialFormInput,
+  | "stripeRestrictedKey"
+  | "stripePublishableKey"
+  | "stripeWebhookSecretNext"
+  | "stripePaymentMethodConfigurationId"
+  | "stripeBillingPortalConfigurationId"
+> {
+  return {
     stripeRestrictedKey: "",
     stripePublishableKey: "",
     stripeWebhookSecretNext: "",
     stripePaymentMethodConfigurationId: "",
-    stripeBillingPortalConfigurationId: "",
-    stripeLegalName: "",
-    stripeEin: "",
-    stripeTimeZone: "",
-    stripeOrganizationPhone: "",
-    stripeOrganizationWebsite: "",
-    stripeOrganizationMailingAddress: "",
-    stripeSignerName: "",
-    stripeSignerTitle: ""
+    stripeBillingPortalConfigurationId: ""
+  };
+}
+
+function stripeOrganizationCredentialInput(
+  configuration?: StripeSettingsState["configuration"]
+): Pick<
+  CredentialFormInput,
+  | "stripeLegalName"
+  | "stripeEin"
+  | "stripeTimeZone"
+  | "stripeOrganizationPhone"
+  | "stripeOrganizationWebsite"
+  | "stripeOrganizationMailingAddress"
+  | "stripeSignerName"
+  | "stripeSignerTitle"
+> {
+  return {
+    stripeLegalName: configuration?.legalName ?? "",
+    stripeEin: configuration?.ein ?? "",
+    stripeTimeZone: configuration?.timeZone ?? "",
+    stripeOrganizationPhone: configuration?.organizationPhone ?? "",
+    stripeOrganizationWebsite: configuration?.organizationWebsite ?? "",
+    stripeOrganizationMailingAddress: configuration?.organizationMailingAddress ?? "",
+    stripeSignerName: configuration?.signerName ?? "",
+    stripeSignerTitle: configuration?.signerTitle ?? ""
   };
 }
