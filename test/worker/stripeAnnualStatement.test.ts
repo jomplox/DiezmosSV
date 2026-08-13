@@ -16,6 +16,7 @@ import {
   type RenderStripeAnnualStatementPdfInput,
   type StripeAnnualStatementDocumentEvidence
 } from "../../src/worker/services/stripeAnnualStatement";
+import { EmailService } from "../../src/worker/services/email";
 import * as stripePdfAssets from "../../src/worker/services/stripePdfAssets";
 import { Repository } from "../../src/worker/storage/repository";
 import type { StripeAnnualStatementGift } from "../../src/worker/storage/repository/stripeAnnualStatements";
@@ -676,6 +677,27 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       expect(content.text).not.toMatch(/Ministerio de Hacienda|\bMH\b|\bCDE\b|validez fiscal/i);
     }
   });
+
+  it("renders the editable annual email wrapper with annual and correction values", () => {
+    const content = stripeAnnualStatementEmailContent({
+      donorName: "Ana",
+      year: 2025,
+      count: 2,
+      netTotalCents: 9_900,
+      corrected: true,
+      branding: { organizationName: "Example Church" },
+      template: {
+        subject: "RESUMEN {{anio}} — {{donante}} — {{tipoConstancia}}",
+        body: "CUERPO ANUAL\n{{descripcionDonaciones}} · {{totalNeto}}{{detalleCorreccion}}"
+      }
+    });
+
+    expect(content.subject).toBe("RESUMEN 2025 — Ana — Constancia anual corregida de donaciones");
+    expect(content.text).toContain("CUERPO ANUAL");
+    expect(content.text).toContain("2 donaciones · $99.00");
+    expect(content.text).toContain("Esta versión corregida reemplaza la constancia anterior");
+    expect(content.html).toContain("CUERPO ANUAL");
+  });
 });
 
 describe("Stripe U.S. annual statement preview and delivery", () => {
@@ -914,6 +936,92 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     ]);
     expect(emailSend).toHaveBeenCalledTimes(2);
     expect((emailSend.mock.calls[1][0] as { subject: string }).subject).toContain("corregida");
+  });
+
+  it("dispatches the configured annual email wrapper without changing the fixed annual PDF", async () => {
+    seedGift(database, gift({ id: "gift_custom_annual_email", amount_cents: 12_345 }));
+    database.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)").run(
+      "email_templates_json",
+      JSON.stringify({
+        stripeAnnualStatement: {
+          subject: "RESUMEN PERSONALIZADO {{anio}} — {{donante}}",
+          body: "CUERPO ANUAL PERSONALIZADO {{descripcionDonaciones}} · {{totalNeto}}"
+        }
+      })
+    );
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    const message = emailSend.mock.calls[0]?.[0] as {
+      subject: string;
+      text: string;
+      html: string;
+      attachments?: Array<{ content: Uint8Array }>;
+    };
+    expect(message.subject).toBe("RESUMEN PERSONALIZADO 2025 — Ana");
+    expect(message.text).toBe("CUERPO ANUAL PERSONALIZADO 1 donación · $123.45");
+    expect(message.html).toContain("CUERPO ANUAL PERSONALIZADO");
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-template-boundary-"));
+    temporaryDirectories.push(directory);
+    const pdfPath = join(directory, "annual-statement.pdf");
+    writeFileSync(pdfPath, message.attachments![0].content);
+    const pdfText = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    expect(pdfText.replace(/\s+/g, " ")).toContain("No goods or services were provided to you in exchange for these contributions.");
+    expect(pdfText).not.toContain("CUERPO ANUAL PERSONALIZADO");
+  });
+
+  it("reuses immutable annual email content when a safe retry follows a template change", async () => {
+    seedGift(database, gift({ id: "gift_annual_template_retry", amount_cents: 12_345 }));
+    database.prepare("INSERT INTO app_settings (key, value) VALUES (?, ?)").run(
+      "email_templates_json",
+      JSON.stringify({
+        stripeAnnualStatement: {
+          subject: "PRIMER CORREO {{anio}} — {{donante}}",
+          body: "PRIMER CUERPO {{totalNeto}}"
+        }
+      })
+    );
+    const attempts: Array<{ subject: string; text: string; idempotencyKey: string }> = [];
+    vi.spyOn(EmailService.prototype, "sendStripeAnnualStatement")
+      .mockImplementation(async (input, beforeProviderDispatch) => {
+        attempts.push({ subject: input.subject, text: input.text, idempotencyKey: input.idempotencyKey });
+        await beforeProviderDispatch?.();
+        return { providerResponse: {}, providerDeliveryId: `sha256:${"e".repeat(64)}` };
+      });
+    vi.spyOn(repo, "markStripeAnnualStatementDispatchStarted")
+      .mockRejectedValueOnce(new Error("simulated safe failure before provider entry"));
+
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 0, failed: 1, review: 0 });
+
+    database.prepare("UPDATE app_settings SET value = ? WHERE key = ?").run(
+      JSON.stringify({
+        stripeAnnualStatement: {
+          subject: "SEGUNDO CORREO {{anio}} — {{donante}}",
+          body: "SEGUNDO CUERPO {{totalNeto}}"
+        }
+      }),
+      "email_templates_json"
+    );
+    await expect(sendStripeAnnualStatements(workerEnv, repo, 2025, false, "user_operator", {
+      donor: "ana@example.org",
+      now: "2026-01-10T12:01:00.000Z"
+    })).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    expect(attempts.map((attempt) => attempt.subject)).toEqual([
+      "PRIMER CORREO 2025 — Ana",
+      "PRIMER CORREO 2025 — Ana"
+    ]);
+    expect(attempts.map((attempt) => attempt.text)).toEqual([
+      "PRIMER CUERPO $123.45",
+      "PRIMER CUERPO $123.45"
+    ]);
+    expect(new Set(attempts.map((attempt) => attempt.idempotencyKey))).toHaveLength(1);
   });
 
   it("does not redispatch a SENT snapshot after a different snapshot failed before provider entry", async () => {

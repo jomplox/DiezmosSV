@@ -89,7 +89,7 @@ facturado por invocación, auditable y barato de operar.
 | 🔎 **Explorador de donantes** | La vista **Donantes** resuelve los CDE aceptados en un registro de donantes — identidad, contacto, ubicación, cantidad de aportaciones, total histórico y última aportación — con llave en el documento fiscal, con respaldo en el correo y luego en el documento mismo. Filtre por tipo/número de documento, nombre, correo, rango de monto, diezmo/ofrenda y origen en línea/manual; exporte el conjunto filtrado como CSV. ADMIN en adelante; los números de documento se enmascaran en la tabla y solo se revelan en el panel de detalle. |
 | 🏷️ **Marca blanca** | Personalice el panel, las páginas del donante, el correo al donante, **el PDF del comprobante y la constancia anual** con el nombre visible de su iglesia, su color de acento, su dirección de soporte y sus logos (guardados en R2) desde la configuración de **Marca** — sin necesidad de un fork. Un logo cargado se ajusta a la misma banda de tinta reservada que trae el logo por defecto, de modo que el diseño alrededor sigue siendo válido. |
 | 🛡️ **Acceso seguro** | Hash de contraseñas con PBKDF2, sesiones por token bearer, control de acceso basado en roles, restablecimiento de contraseña autogestionado y limitación de tasa respaldada en D1 sobre el inicio de sesión, el restablecimiento de contraseña y los endpoints públicos de donación — con procedencia auditada por cada claim. |
-| 📬 **Correo con marca** | Todo el correo al donante (comprobante, aviso de invalidación, constancia anual, restablecimiento de contraseña) se envía como HTML con la marca de la organización y plantillas configurables. |
+| 📬 **Correo con marca** | Todo el correo al donante se envía como HTML con la marca de la organización. Los propietarios pueden editar plantillas separadas de asunto/cuerpo para comprobantes CDE e invalidaciones de El Salvador, y para constancias inmediatas, correcciones/revocaciones por reembolso y constancias anuales de Stripe en EE. UU. Los PDF estadounidenses permanecen como documentos legales fijos. |
 | 🚨 **Alertas operativas** | Alerta a una dirección de correo configurable ante fallos de emisión, fallos de entrega del comprobante, indisponibilidad de MH, eventos estancados, fallos de retención y vencimiento del certificado de firma de MH. Cada incidente emite además un evento `operational_alert` en Workers Logs, libre de datos personales, para alertar de forma independiente desde Cloudflare Observability y entregar por Notifications. |
 | 🗃️ **Retención legal** | Un cron mensual exporta a R2 una instantánea inmutable y verificada por hash de todos los registros legales, para retención tributaria de varios años con independencia de D1. El panel **Respaldos mensuales** permite explorar, verificar y descargar cada mes como ZIP. |
 
@@ -206,7 +206,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0040)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0041)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -1022,7 +1022,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0040)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0041)</strong></summary>
 
 <br/>
 

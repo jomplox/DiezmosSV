@@ -4,6 +4,7 @@ import {
   DEFAULT_EMAIL_TEMPLATES,
   EMAIL_TEMPLATE_DEFINITIONS,
   normalizeEmailTemplateSettings,
+  parseEmailTemplates,
   renderEmailTemplate,
   TRANSITORIO_RECEIPT_TEMPLATE
 } from "../../src/worker/services/emailTemplates";
@@ -124,6 +125,37 @@ describe("transitory (deferred) receipt template", () => {
 });
 
 describe("email template defaults", () => {
+  it("exposes three independently editable U.S. email wrappers alongside the Salvadoran templates", () => {
+    const usDefinitions = EMAIL_TEMPLATE_DEFINITIONS.filter(
+      (definition) => (definition as { scope?: string }).scope === "US_STRIPE"
+    );
+
+    expect(usDefinitions.map((definition) => definition.type)).toEqual([
+      "stripeAcknowledgment",
+      "stripeRefund",
+      "stripeAnnualStatement"
+    ]);
+    for (const definition of usDefinitions) {
+      expect(definition.defaultSubject.trim()).not.toBe("");
+      expect(definition.defaultBody.trim()).not.toBe("");
+      expect((DEFAULT_EMAIL_TEMPLATES as Record<string, { subject: string; body: string }>)[definition.type])
+        .toEqual({ subject: definition.defaultSubject, body: definition.defaultBody });
+    }
+  });
+
+  it("preserves existing Salvadoran settings while adding default U.S. templates", () => {
+    const parsed = parseEmailTemplates(JSON.stringify({
+      dteReceipt: { subject: "CDE existente", body: "Cuerpo existente" },
+      dteInvalidation: { subject: "Anulación existente", body: "Cuerpo de anulación" }
+    }));
+
+    expect(parsed.dteReceipt).toEqual({ subject: "CDE existente", body: "Cuerpo existente" });
+    expect(parsed.dteInvalidation).toEqual({ subject: "Anulación existente", body: "Cuerpo de anulación" });
+    expect(parsed.stripeAcknowledgment).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment);
+    expect(parsed.stripeRefund).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeRefund);
+    expect(parsed.stripeAnnualStatement).toEqual(DEFAULT_EMAIL_TEMPLATES.stripeAnnualStatement);
+  });
+
   it("spells out the tax authority in donor-facing defaults", () => {
     const invalidation = EMAIL_TEMPLATE_DEFINITIONS.find((definition) => definition.type === "dteInvalidation");
 

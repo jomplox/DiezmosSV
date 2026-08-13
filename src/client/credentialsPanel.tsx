@@ -1356,8 +1356,44 @@ function EmailTemplateEditor({
   onSubmit: () => Promise<void>;
 }) {
   const definitions = settings?.definitions ?? [];
-  const placeholders = settings?.placeholders ?? [];
+  const legacyPlaceholders = settings?.placeholders ?? [];
+  const salvadoranDefinitions = definitions.filter((definition) => definition.scope !== "US_STRIPE");
+  const usDefinitions = definitions.filter((definition) => definition.scope === "US_STRIPE");
   const complete = definitions.every((definition) => draft[definition.type]?.subject.trim() && draft[definition.type]?.body.trim());
+  const groupPlaceholders = (group: typeof definitions): string[] => Array.from(new Set(
+    group.flatMap((definition) => definition.placeholders ?? legacyPlaceholders)
+  ));
+  const renderTemplateCards = (group: typeof definitions) => (
+    <div className="email-template-list">
+      {group.map((definition) => {
+        const value = draft[definition.type] ?? { subject: "", body: "" };
+        return (
+          <section className="email-template-card" key={definition.type}>
+            <div>
+              <h4>{definition.label}</h4>
+              <p>{definition.description}</p>
+            </div>
+            <label>
+              <span>Asunto</span>
+              <input
+                value={value.subject}
+                onChange={(event) => onChange(definition.type, { subject: event.target.value })}
+                placeholder={definition.defaultSubject}
+              />
+            </label>
+            <label>
+              <span>Cuerpo del correo</span>
+              <textarea
+                value={value.body}
+                onChange={(event) => onChange(definition.type, { body: event.target.value })}
+                placeholder={definition.defaultBody}
+              />
+            </label>
+          </section>
+        );
+      })}
+    </div>
+  );
   return (
     <section className="credential-form-panel email-template-panel">
       <div className="panel-head">
@@ -1382,38 +1418,10 @@ function EmailTemplateEditor({
             <div className="email-template-guidance">
               <span>Use estas variables solamente en los correos CDE de El Salvador.</span>
               <div className="email-template-placeholders" aria-label="Variables disponibles para El Salvador">
-                {placeholders.map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+                {groupPlaceholders(salvadoranDefinitions).map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
               </div>
             </div>
-            <div className="email-template-list">
-              {definitions.map((definition) => {
-                const value = draft[definition.type] ?? { subject: "", body: "" };
-                return (
-                  <section className="email-template-card" key={definition.type}>
-                    <div>
-                      <h4>{definition.label}</h4>
-                      <p>{definition.description}</p>
-                    </div>
-                    <label>
-                      <span>Asunto</span>
-                      <input
-                        value={value.subject}
-                        onChange={(event) => onChange(definition.type, { subject: event.target.value })}
-                        placeholder={definition.defaultSubject}
-                      />
-                    </label>
-                    <label>
-                      <span>Cuerpo del correo</span>
-                      <textarea
-                        value={value.body}
-                        onChange={(event) => onChange(definition.type, { body: event.target.value })}
-                        placeholder={definition.defaultBody}
-                      />
-                    </label>
-                  </section>
-                );
-              })}
-            </div>
+            {renderTemplateCards(salvadoranDefinitions)}
             <div className="credential-actions email-template-actions">
               <div>
                 <Mail size={16} />
@@ -1421,35 +1429,38 @@ function EmailTemplateEditor({
               </div>
               <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
                 <Mail size={16} />
-                {busy ? "Guardando" : "Guardar plantillas"}
+                {busy ? "Guardando" : "Guardar plantillas de El Salvador"}
               </button>
             </div>
           </section>
 
-          <section className="email-template-country-group email-template-country-group-protected" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
+          <section className="email-template-country-group email-template-country-group-us" aria-label="Plantillas de EE. UU. — Stripe 501(c)(3)">
             <div className="email-template-country-head">
               <div>
                 <h3>EE. UU. — Stripe 501(c)(3)</h3>
                 <p>Constancias estadounidenses separadas de los mensajes CDE salvadoreños.</p>
               </div>
-              <span className="email-template-protected-badge"><Lock size={13} />Texto legal protegido</span>
+              <span className="email-template-protected-badge"><Lock size={13} />PDF legal protegido</span>
             </div>
             <p className="email-template-protected-note">
-              El sistema incorpora el nombre legal, EIN, fecha, monto y la declaración sobre bienes o servicios. Estas cláusulas no usan ni modifican las plantillas de El Salvador. La marca, el remitente y el correo de respuesta se configuran en sus secciones correspondientes.
+              El asunto y cuerpo de estos correos son editables. Los PDF adjuntos de la constancia inmediata y anual conservan su diseño y contenido legal fijo.
             </p>
-            <div className="email-template-managed-list">
-              <article>
-                <h4>Constancia inmediata</h4>
-                <p>Se envía al confirmarse una donación única o mensual de Stripe.</p>
-              </article>
-              <article>
-                <h4>Corrección o revocación por reembolso</h4>
-                <p>Reemplaza o revoca la constancia anterior según el monto reembolsado.</p>
-              </article>
-              <article>
-                <h4>Constancia anual</h4>
-                <p>Resume el total neto anual y emite una corrección si cambian las donaciones o reembolsos.</p>
-              </article>
+            <div className="email-template-guidance">
+              <span>Use estas variables solamente en los correos de EE. UU.</span>
+              <div className="email-template-placeholders" aria-label="Variables disponibles para Estados Unidos">
+                {groupPlaceholders(usDefinitions).map((placeholder) => <code key={placeholder}>{placeholder}</code>)}
+              </div>
+            </div>
+            {renderTemplateCards(usDefinitions)}
+            <div className="credential-actions email-template-actions">
+              <div>
+                <Mail size={16} />
+                <span>Estos textos se aplican al próximo correo de Stripe que se prepare.</span>
+              </div>
+              <button className="primary" type="button" disabled={busy || !complete} onClick={() => void onSubmit()}>
+                <Mail size={16} />
+                {busy ? "Guardando" : "Guardar plantillas de EE. UU."}
+              </button>
             </div>
           </section>
         </>

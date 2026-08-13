@@ -349,7 +349,7 @@ const allowedWranglerDocumentationCases = [
 describe("remote provisioning documentation", () => {
   it("mirrors the current Stripe migration range and non-archived ledgers in both READMEs", () => {
     for (const document of [readme, readmeEs]) {
-      expect(document).toContain("0001…0040");
+      expect(document).toContain("0001…0041");
       expect(document).toContain("stripe_retention_generations");
       expect(document).toContain("stripe_invoice_settlement_retention_generations");
       expect(document).toContain("Stripe");

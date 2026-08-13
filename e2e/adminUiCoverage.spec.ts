@@ -292,38 +292,73 @@ test("covers every owner navigation surface with accessible filters and no app r
   expect(runtimeErrors).toEqual([]);
 });
 
-test("keeps Salvadoran and U.S. legal email templates visibly separated", async ({ page }) => {
+test("edits Salvadoran and U.S. email templates separately while identifying the fixed U.S. PDFs", async ({ page }) => {
+  let savedTemplates: Record<string, { subject: string; body: string }> | null = null;
+  const definitions = [
+    {
+      type: "dteReceipt",
+      scope: "SV_CDE",
+      label: "Envío de comprobante",
+      description: "Correo que recibe el donante con su CDE en PDF y JSON.",
+      defaultSubject: "Comprobante de su donación {{numeroControl}}",
+      defaultBody: "Cuerpo salvadoreño",
+      placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"]
+    },
+    {
+      type: "dteInvalidation",
+      scope: "SV_CDE",
+      label: "Invalidación de comprobante",
+      description: "Correo que recibe el donante cuando su CDE queda invalidado.",
+      defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
+      defaultBody: "Cuerpo de invalidación",
+      placeholders: ["{{numeroControl}}", "{{donante}}", "{{estado}}"]
+    },
+    {
+      type: "stripeAcknowledgment",
+      scope: "US_STRIPE",
+      label: "Constancia inmediata",
+      description: "Se envía al confirmarse una donación única o mensual de Stripe.",
+      defaultSubject: "Constancia de su donación",
+      defaultBody: "Cuerpo inmediato",
+      placeholders: ["{{donante}}", "{{monto}}", "{{nombreLegal}}"]
+    },
+    {
+      type: "stripeRefund",
+      scope: "US_STRIPE",
+      label: "Corrección o revocación por reembolso",
+      description: "Reemplaza o revoca la constancia anterior según el monto reembolsado.",
+      defaultSubject: "{{tipoConstancia}} de su donación",
+      defaultBody: "Cuerpo de reembolso",
+      placeholders: ["{{donante}}", "{{tipoConstancia}}", "{{montoNeto}}"]
+    },
+    {
+      type: "stripeAnnualStatement",
+      scope: "US_STRIPE",
+      label: "Constancia anual",
+      description: "Resume el total neto anual.",
+      defaultSubject: "Constancia anual {{anio}} — EE. UU.",
+      defaultBody: "Cuerpo anual",
+      placeholders: ["{{donante}}", "{{anio}}", "{{totalNeto}}"]
+    }
+  ];
+  let templates = Object.fromEntries(definitions.map((definition) => [
+    definition.type,
+    { subject: definition.defaultSubject, body: definition.defaultBody }
+  ]));
   await installOwnerAdmin(page, async (route, url) => {
     if (url.pathname !== "/api/settings/email-templates") return false;
+    if (route.request().method() === "PUT") {
+      const payload = route.request().postDataJSON() as {
+        templates: Record<string, { subject: string; body: string }>;
+      };
+      savedTemplates = payload.templates;
+      templates = payload.templates;
+    }
     await fulfillJson(route, {
       emailTemplates: {
-        definitions: [
-          {
-            type: "dteReceipt",
-            label: "Envío de comprobante",
-            description: "Correo que recibe el donante con su CDE en PDF y JSON.",
-            defaultSubject: "Comprobante de su donación {{numeroControl}}",
-            defaultBody: "Cuerpo salvadoreño"
-          },
-          {
-            type: "dteInvalidation",
-            label: "Invalidación de comprobante",
-            description: "Correo que recibe el donante cuando su CDE queda invalidado.",
-            defaultSubject: "Invalidación de su comprobante {{numeroControl}}",
-            defaultBody: "Cuerpo de invalidación"
-          }
-        ],
+        definitions,
         placeholders: ["{{numeroControl}}", "{{donante}}", "{{monto}}"],
-        templates: {
-          dteReceipt: {
-            subject: "Comprobante de su donación {{numeroControl}}",
-            body: "Cuerpo salvadoreño"
-          },
-          dteInvalidation: {
-            subject: "Invalidación de su comprobante {{numeroControl}}",
-            body: "Cuerpo de invalidación"
-          }
-        }
+        templates
       }
     });
     return true;
@@ -336,13 +371,17 @@ test("keeps Salvadoran and U.S. legal email templates visibly separated", async 
   const salvadoranTemplates = templatePanel.getByRole("region", { name: "Plantillas de El Salvador — CDE" });
   const usTemplates = templatePanel.getByRole("region", { name: "Plantillas de EE. UU. — Stripe 501(c)(3)" });
   await expect(salvadoranTemplates.getByRole("heading", { name: "El Salvador — CDE" })).toBeVisible();
-  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas" })).toBeVisible();
+  await expect(salvadoranTemplates.getByRole("button", { name: "Guardar plantillas de El Salvador" })).toBeVisible();
   await expect(usTemplates.getByRole("heading", { name: "EE. UU. — Stripe 501(c)(3)" })).toBeVisible();
-  await expect(usTemplates.getByText("Texto legal protegido")).toBeVisible();
-  await expect(usTemplates.getByText("Constancia inmediata")).toBeVisible();
-  await expect(usTemplates.getByText("Corrección o revocación por reembolso")).toBeVisible();
-  await expect(usTemplates.getByText("Constancia anual")).toBeVisible();
-  await expect(usTemplates.locator("input, textarea")).toHaveCount(0);
+  await expect(usTemplates.getByText("PDF legal protegido")).toBeVisible();
+  await expect(usTemplates.getByText(/El asunto y cuerpo de estos correos son editables/)).toBeVisible();
+  await expect(usTemplates.getByRole("textbox")).toHaveCount(6);
+
+  const immediate = usTemplates.locator(".email-template-card").filter({ hasText: "Constancia inmediata" });
+  await immediate.getByLabel("Asunto").fill("Gracias por su entrega, {{donante}}");
+  await usTemplates.getByRole("button", { name: "Guardar plantillas de EE. UU." }).click();
+  await expect.poll(() => savedTemplates?.stripeAcknowledgment.subject ?? null)
+    .toBe("Gracias por su entrega, {{donante}}");
 });
 
 test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {

@@ -160,6 +160,24 @@ export function stripeAnnualStatementEmailHtml(input: StripeAnnualStatementEmail
   );
 }
 
+export function editableDonorEmailHtml(input: {
+  organizationName: string;
+  title: string;
+  bodyText: string;
+  brandColor?: string;
+  supportEmail?: string;
+  logoUrl?: string | null;
+}): string {
+  return emailDocument(
+    input.organizationName,
+    input.title,
+    input.brandColor ?? DEFAULT_BRAND_COLOR,
+    input.supportEmail,
+    input.logoUrl,
+    [paragraphs(input.bodyText)]
+  );
+}
+
 export function passwordResetEmailHtml(
   name: string,
   link: string,

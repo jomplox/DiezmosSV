@@ -88,7 +88,7 @@ auditable, and cheap to run.
 | 🔎 **Donor explorer** | The **Donantes** view resolves accepted CDEs into a donor register — identity, contact, location, gift count, lifetime total, and last gift — keyed by fiscal document, falling back to email, then to the document itself. Filter by document type/number, name, email, amount range, diezmo/ofrenda, and online/manual origin; export the filtered set as CSV. ADMIN and above; document numbers are masked in the table and revealed only in the detail panel. |
 | 🏷️ **White-label** | Rebrand the panel, donor pages, donor email, **the receipt PDF, and the annual certificate** with your church's display name, accent color, support address, and logos (stored in R2) from the **Marca** settings — no fork needed. An uploaded logo is fitted into the same reserved ink band as the built-in default, so the surrounding layout stays valid. |
 | 🛡️ **Secure access** | PBKDF2 password hashing, bearer-token sessions, role-based access control, self-service password reset, and D1-backed rate limiting on login, password reset, and public donation endpoints — with per-claim audit provenance. |
-| 📬 **Branded email** | All donor email (receipt, invalidation notice, annual certificate, password reset) is sent as branded HTML with configurable templates. |
+| 📬 **Branded email** | All donor email is sent as branded HTML. Owners can edit separate subject/body templates for Salvadoran CDE receipts and invalidations, and for U.S. Stripe immediate acknowledgments, refund corrections/revocations, and annual statements. The U.S. PDF attachments remain fixed legal documents. |
 | 🚨 **Operational alerting** | Alerts a configurable email address on emission failures, receipt-delivery failures, MH unavailability, stalled events, retention failures, and MH signer-certificate expiry. Each incident also emits a privacy-safe `operational_alert` Workers Logs event for independent Cloudflare Observability alerting and Notifications delivery. |
 | 🗃️ **Legal retention** | A monthly cron exports an immutable, hash-verified snapshot of all legal records to R2 for multi-year tax retention independent of D1. The **Respaldos mensuales** panel browses, verifies, and downloads each month as a ZIP. |
 
@@ -200,7 +200,7 @@ DiezmosSV/
 │   ├── client/                 # React + Vite admin panel, /donar, fonts, assets
 │   └── shared/                 # Catalogs · DUI · NIT · legal windows · password policy
 │                               # fiscal corrections · checkout · money · email
-├── migrations/                 # D1 schema (incremental, append-only 0001…0040)
+├── migrations/                 # D1 schema (incremental, append-only 0001…0041)
 ├── DTE/svfe-json-schemas/      # MH-bundled JSON schemas for validation
 ├── docs/                       # Deploy/UAT · operator runbook · retention-restore
 │                               # fiscal-claim cutover/reconciliation · pre-CDE recovery
@@ -985,7 +985,7 @@ The safety model is the fiscal-claim model applied to a repair path:
 ## 🗄 Data model
 
 <details>
-<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0040)</strong></summary>
+<summary><strong>D1 tables (migrations/0001_init.sql, extended through 0041)</strong></summary>
 
 <br/>
 

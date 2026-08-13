@@ -104,7 +104,7 @@ test("uses neutral donor attribution when public branding has no configured name
   await page.getByLabel("Monto").fill("100.00");
   await page.getByRole("button", { name: "Continuar con su diezmo", exact: true }).click();
   await expect(page.locator(".donar-intro")).toContainText("apoya a esta iglesia en El Salvador");
-  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501(c)(3)");
+  await expect(page.locator(".donar-intro")).toContainText("una organización estadounidense 501c3");
   await expect(page.getByText(/ExamplePerson1|ExampleOrganization/)).toHaveCount(0);
 });
 
@@ -574,7 +574,7 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   await expect(page.getByText("Su entrega", { exact: true })).toBeVisible();
   await expect(page.getByText("Ofrenda · Mensual · $100.00")).toBeVisible();
   await expect(page.locator(".donar-intro")).toContainText(`apoya a ${BRANDING_DISPLAY_NAME} en El Salvador`);
-  await expect(page.locator(".donar-intro")).toContainText("organización estadounidense 501(c)(3)");
+  await expect(page.locator(".donar-intro")).toContainText("Friends of Iglesia Ejemplo Central (501c3)");
   await expect(
     page.getByText("Stripe mostrará en español las opciones disponibles para usted de forma segura.")
   ).toHaveCount(0);

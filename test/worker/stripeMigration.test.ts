@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
+import { claimStripeAnnualStatementDelivery } from "../../src/worker/storage/repository/stripeAnnualStatements";
 import { migratedDatabase, migratedDatabaseThrough, migrationFiles } from "./support/migratedDatabase";
+import { sqliteD1 } from "./support/sqliteD1";
 
 const migrationsDirectory = resolve(import.meta.dirname, "../../migrations");
 
@@ -22,6 +24,10 @@ const retentionGenerationMigrationPath = resolve(
 const paymentMethodMigrationPath = resolve(
   import.meta.dirname,
   "../../migrations/0040_stripe_payment_method_evidence.sql"
+);
+const annualEmailEvidenceMigrationPath = resolve(
+  import.meta.dirname,
+  "../../migrations/0041_stripe_annual_email_evidence.sql"
 );
 
 describe("Stripe U.S. donation persistence", () => {
@@ -150,6 +156,65 @@ describe("Stripe U.S. donation persistence", () => {
        ) VALUES ('gift_bad_method', 'PAYMENT_INTENT', 'pi_bad_method', 'ONCE',
          'TITHE', 5000, '2026-08-13T12:00:00.000Z', 'PAID', 'Card!')`
     ).run()).toThrow(/CHECK constraint failed/);
+  });
+
+  it("adds immutable annual email evidence without rewriting the legal statement snapshot", async () => {
+    const database = track(openDatabases, migratedDatabaseThrough("0040"));
+    database.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, attempt_count, failure_code, retry_safe, created_at, updated_at
+       ) VALUES (?, 2025, 0, 'ana@example.org', 'Ana', 'ana@example.org',
+         ?, '{"version":2}', 1, NULL, 'FAILED', 1, 'EMAIL_PRE_DISPATCH_FAILED', 1, ?, ?)`
+    ).run(
+      "annual_email_upgrade",
+      "a".repeat(64),
+      "2026-01-10T12:00:00.000Z",
+      "2026-01-10T12:00:00.000Z"
+    );
+    database.prepare(
+      `INSERT INTO stripe_annual_statement_deliveries (
+         id, year, livemode, donor_key, donor_name, donor_email,
+         snapshot_hash, snapshot_json, revision, supersedes_delivery_id,
+         status, attempt_count, processing_claim_id, lease_expires_at,
+         retry_safe, created_at, updated_at
+       ) VALUES (?, 2025, 0, 'bea@example.org', 'Bea', 'bea@example.org',
+         ?, '{"version":2}', 1, NULL, 'PROCESSING', 1, 'legacy_claim', ?, 0, ?, ?)`
+    ).run(
+      "annual_email_stale_processing",
+      "b".repeat(64),
+      "2026-01-10T11:00:00.000Z",
+      "2026-01-10T10:00:00.000Z",
+      "2026-01-10T10:00:00.000Z"
+    );
+
+    database.exec(readFileSync(annualEmailEvidenceMigrationPath, "utf8"));
+    expect(columnNames(database, "stripe_annual_statement_deliveries")).toContain("email_content_json");
+    expect(database.prepare(
+      "SELECT snapshot_json, email_content_json FROM stripe_annual_statement_deliveries WHERE id = ?"
+    ).get("annual_email_upgrade")).toEqual({ snapshot_json: '{"version":2}', email_content_json: null });
+
+    const evidence = JSON.stringify({ version: 1, subject: "Asunto", text: "Cuerpo", html: "<p>Cuerpo</p>" });
+    expect(database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET email_content_json = ? WHERE id = ?"
+    ).run(evidence, "annual_email_upgrade").changes).toBe(1);
+    expect(() => database.prepare(
+      "UPDATE stripe_annual_statement_deliveries SET email_content_json = ? WHERE id = ?"
+    ).run(JSON.stringify({ version: 1, subject: "Otro", text: "Otro", html: "Otro" }), "annual_email_upgrade"))
+      .toThrow(/stripe_annual_statement_email_content_immutable/);
+
+    const reclaimed = await claimStripeAnnualStatementDelivery(sqliteD1(database), {
+      id: "annual_email_stale_processing",
+      claimId: "replacement_claim",
+      emailContentJson: evidence,
+      now: "2026-01-10T12:00:00.000Z"
+    });
+    expect(reclaimed).toMatchObject({
+      status: "PROCESSING",
+      processing_claim_id: "replacement_claim",
+      email_content_json: evidence
+    });
   });
 
   it("upgrades the exact 0031 schema without mutating historical migrations", () => {

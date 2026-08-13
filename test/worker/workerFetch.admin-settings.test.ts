@@ -732,6 +732,18 @@ describe("email template settings", () => {
             dteInvalidation: {
               subject: "CDE {{numeroControl}} invalidado",
               body: "El CDE {{numeroControl}} quedó {{estado}}."
+            },
+            stripeAcknowledgment: {
+              subject: "Constancia inmediata para {{donante}}",
+              body: "Gracias por su entrega de {{monto}} a {{nombreLegal}}."
+            },
+            stripeRefund: {
+              subject: "{{tipoConstancia}} para {{donante}}",
+              body: "El monto neto reconocido es {{montoNeto}}."
+            },
+            stripeAnnualStatement: {
+              subject: "Constancia anual {{anio}} para {{donante}}",
+              body: "Adjuntamos el resumen de {{descripcionDonaciones}} por {{totalNeto}}."
             }
           }
         })
@@ -744,7 +756,10 @@ describe("email template settings", () => {
       emailTemplates: {
         definitions: [
           expect.objectContaining({ type: "dteReceipt", label: "Envío de comprobante" }),
-          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de comprobante" })
+          expect.objectContaining({ type: "dteInvalidation", label: "Invalidación de comprobante" }),
+          expect.objectContaining({ type: "stripeAcknowledgment", scope: "US_STRIPE", label: "Constancia inmediata" }),
+          expect.objectContaining({ type: "stripeRefund", scope: "US_STRIPE", label: "Corrección o revocación por reembolso" }),
+          expect.objectContaining({ type: "stripeAnnualStatement", scope: "US_STRIPE", label: "Constancia anual" })
         ],
         placeholders: expect.arrayContaining(["{{numeroControl}}", "{{donante}}", "{{monto}}"]),
         templates: {
@@ -755,6 +770,18 @@ describe("email template settings", () => {
           dteInvalidation: {
             subject: "CDE {{numeroControl}} invalidado",
             body: "El CDE {{numeroControl}} quedó {{estado}}."
+          },
+          stripeAcknowledgment: {
+            subject: "Constancia inmediata para {{donante}}",
+            body: "Gracias por su entrega de {{monto}} a {{nombreLegal}}."
+          },
+          stripeRefund: {
+            subject: "{{tipoConstancia}} para {{donante}}",
+            body: "El monto neto reconocido es {{montoNeto}}."
+          },
+          stripeAnnualStatement: {
+            subject: "Constancia anual {{anio}} para {{donante}}",
+            body: "Adjuntamos el resumen de {{descripcionDonaciones}} por {{totalNeto}}."
           }
         }
       }
@@ -781,7 +808,10 @@ describe("email template settings", () => {
       emailTemplates: {
         templates: {
           dteReceipt: { subject: "CDE {{numeroControl}} emitido" },
-          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" }
+          dteInvalidation: { subject: "CDE {{numeroControl}} invalidado" },
+          stripeAcknowledgment: { subject: "Constancia inmediata para {{donante}}" },
+          stripeRefund: { subject: "{{tipoConstancia}} para {{donante}}" },
+          stripeAnnualStatement: { subject: "Constancia anual {{anio}} para {{donante}}" }
         }
       }
     });

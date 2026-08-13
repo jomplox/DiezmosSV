@@ -9,9 +9,16 @@ import { sendOperationalAlert } from "./alerts";
 import { loadEmailBranding } from "./branding";
 import { classifyEmailDispatchError, EmailService } from "./email";
 import {
-  stripeAcknowledgmentEmailHtml,
+  editableDonorEmailHtml,
   type BrandingEmailOptions
 } from "./emailHtml";
+import {
+  DEFAULT_EMAIL_TEMPLATES,
+  EMAIL_TEMPLATES_SETTING_KEY,
+  parseEmailTemplates,
+  renderEmailTemplateValue,
+  type EmailTemplateValue
+} from "./emailTemplates";
 import { resolveStripeConfiguration } from "./stripeDonations";
 import { stripeUsTimeZone } from "./stripeAnnualStatement";
 import { logWorkerError } from "./observability";
@@ -38,6 +45,7 @@ export interface StripeAcknowledgmentContentInput {
   branding: BrandingEmailOptions;
   kind?: "ORIGINAL" | "PARTIAL_REFUND" | "FULL_REFUND";
   refundedAmountCents?: number;
+  template?: EmailTemplateValue;
 }
 
 export function stripeAcknowledgmentContent(
@@ -68,39 +76,38 @@ export function stripeAcknowledgmentContent(
       ? `Se registró un reembolso total de ${refundedAmountLabel}. ` +
         `La constancia anterior queda revocada y el monto neto reconocido es ${netAmountLabel}.\n\n`
       : "";
-  const text =
-    `Estimado(a) ${donorName}:\n\n` +
-    `Gracias por su donación voluntaria de ${amountLabel}.\n\n` +
-    correctionText +
-      `Organización legal: ${input.legalName}\n` +
-      `EIN ${input.ein}\n` +
-      `Fecha: ${settledDateLabel}\n` +
-      `Tipo: ${giftTypeLabel}\n` +
-    `Frecuencia: ${frequencyLabel}\n\n` +
-    `No se proporcionaron bienes ni servicios a cambio de esta donación.\n\n` +
-    `Conserve este correo con sus registros. Consulte con su asesor sobre la aplicación a su situación fiscal.`;
+  const typeLabel = kind === "PARTIAL_REFUND"
+    ? "Constancia corregida"
+    : kind === "FULL_REFUND"
+      ? "Constancia revocada"
+      : "Constancia";
+  const template = input.template ?? (kind === "ORIGINAL"
+    ? DEFAULT_EMAIL_TEMPLATES.stripeAcknowledgment
+    : DEFAULT_EMAIL_TEMPLATES.stripeRefund);
+  const rendered = renderEmailTemplateValue(template, {
+    "{{donante}}": donorName,
+    "{{monto}}": amountLabel,
+    "{{montoOriginal}}": amountLabel,
+    "{{montoReembolsado}}": refundedAmountLabel,
+    "{{montoNeto}}": netAmountLabel,
+    "{{detalleReembolso}}": correctionText.trim(),
+    "{{tipoConstancia}}": typeLabel,
+    "{{fecha}}": settledDateLabel,
+    "{{tipoEntrega}}": giftTypeLabel,
+    "{{frecuencia}}": frequencyLabel,
+    "{{nombreLegal}}": input.legalName,
+    "{{ein}}": input.ein
+  });
   return {
-    subject: kind === "PARTIAL_REFUND"
-      ? "Constancia corregida de su donación"
-      : kind === "FULL_REFUND"
-        ? "Constancia revocada de su donación"
-        : "Constancia de su donación",
-    text,
-    html: stripeAcknowledgmentEmailHtml({
-      donorName,
-      amountLabel,
-      settledDateLabel,
-      giftTypeLabel,
-      frequencyLabel,
-      legalName: input.legalName,
-      ein: input.ein,
+    subject: rendered.subject,
+    text: rendered.text,
+    html: editableDonorEmailHtml({
       organizationName: input.branding.organizationName,
+      title: rendered.subject,
+      bodyText: rendered.text,
       brandColor: input.branding.brandColor,
       supportEmail: input.branding.supportEmail,
-      logoUrl: input.branding.logoUrl,
-      kind,
-      refundedAmountLabel,
-      netAmountLabel
+      logoUrl: input.branding.logoUrl
     })
   };
 }
@@ -577,6 +584,7 @@ export async function snapshotStripeAcknowledgmentEvidence(
   }
   const configuration = resolveStripeConfiguration(env);
   const branding = await loadEmailBranding(repo, env);
+  const templates = parseEmailTemplates(await repo.getSetting(EMAIL_TEMPLATES_SETTING_KEY));
   const timeZone = stripeUsTimeZone(env);
   const content = stripeAcknowledgmentContent({
     donorName: source.donor_name,
@@ -589,7 +597,10 @@ export async function snapshotStripeAcknowledgmentEvidence(
     ein: configuration.ein,
     branding,
     kind: source.kind,
-    refundedAmountCents: source.evidence_refunded_amount_cents
+    refundedAmountCents: source.evidence_refunded_amount_cents,
+    template: source.kind === "ORIGINAL"
+      ? templates.stripeAcknowledgment
+      : templates.stripeRefund
   });
   const evidence: StripeAcknowledgmentEvidenceV1 = {
     version: 1,
