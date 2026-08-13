@@ -632,6 +632,11 @@ test("the EE. UU. door mounts one idempotent monthly Stripe form in Spanish", as
   const givebutterChoice = page.getByRole("button", { name: /Dar con Givebutter.*Formulario en inglés/i });
   await expect(givebutterChoice).toBeVisible();
   await expect(givebutterChoice.locator("img")).toBeVisible();
+  const givebutterChoiceBox = await givebutterChoice.boundingBox();
+  expect(givebutterChoiceBox).not.toBeNull();
+  expect(givebutterChoiceBox!.width).toBeLessThanOrEqual(360);
+  expect(givebutterChoiceBox!.height).toBeGreaterThanOrEqual(44);
+  expect(givebutterChoiceBox!.height).toBeLessThanOrEqual(54);
   expect(givebutterRequests).toEqual([]);
   await givebutterChoice.click();
   await expect(page.locator(".donar-stripe-embedded")).toHaveCount(0);

@@ -4061,19 +4061,19 @@ pre {
 }
 
 .donar-provider-choice {
-  width: min(100%, 440px);
-  min-height: 62px;
+  width: min(100%, 360px);
+  min-height: 50px;
   justify-self: center;
   display: grid;
-  grid-template-columns: 36px 1fr auto;
+  grid-template-columns: 30px 1fr auto;
   align-items: center;
-  gap: 12px;
-  padding: 10px 14px;
-  border: 1.5px solid #d8d8d8;
-  border-radius: 15px;
+  gap: 10px;
+  padding: 7px 11px;
+  border: 1px solid #d8d8d8;
+  border-radius: 12px;
   color: #111111;
   background: #ffffff;
-  box-shadow: 0 5px 16px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.07);
   text-align: left;
   cursor: pointer;
   transition: transform 140ms ease, box-shadow 140ms ease, border-color 140ms ease;
@@ -4082,7 +4082,7 @@ pre {
 .donar-provider-choice:hover {
   transform: translateY(-1px);
   border-color: #111111;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 5px 14px rgba(0, 0, 0, 0.1);
 }
 
 .donar-provider-choice:focus-visible {
@@ -4097,9 +4097,9 @@ pre {
 
 .donar-provider-choice img,
 .donar-provider-stripe-mark {
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
 }
 
 .donar-provider-choice img {
@@ -4118,7 +4118,7 @@ pre {
   content: "S";
   color: #ffffff;
   font-family: Arial, sans-serif;
-  font-size: 23px;
+  font-size: 19px;
   font-weight: 700;
 }
 
@@ -4129,18 +4129,18 @@ pre {
 
 .donar-provider-choice-copy strong {
   font-family: var(--font-gotham-bold);
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .donar-provider-choice-copy small {
   color: #5d5d5d;
   font-family: var(--font-gotham-book);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .donar-provider-choice-arrow {
   color: #4f4f4f;
-  font-size: 20px;
+  font-size: 17px;
 }
 
 .donar-givebutter-surface {
