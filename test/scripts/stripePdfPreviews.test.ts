@@ -50,7 +50,7 @@ describe("Stripe U.S. PDF preview command", () => {
     expect(normalizedReceiptText).toContain("Friends of Misión Cristiana Elim");
     expect(receiptText).toContain("EIN 82-0889012");
     expect(receiptText).toContain("fmce@example.org");
-    expect(receiptText).toContain("PAYMENT METHOD: Stripe");
+    expect(receiptText).toContain("PAYMENT METHOD: Card");
     expect(receiptText).toContain("PAYMENT ID: pi_sample_receipt_2025_0413");
     expect(receiptText).not.toMatch(/12-3456789|giving@example\.org|555-01/u);
 
@@ -63,6 +63,8 @@ describe("Stripe U.S. PDF preview command", () => {
     expect(annualText).toContain("EIN 82-0889012");
     expect(annualText).toContain("fmce@example.org · +1 (786) 505-8446");
     expect(annualText).toContain("PAYMENT METHOD");
+    expect(annualText).toContain("Apple Pay");
+    expect(annualText).toContain("ACH Direct Debit");
     expect(annualText).not.toMatch(/12-3456789|giving@example\.org|\+1 \(616\) 555-0143/u);
     for (let index = 1; index <= 5; index += 1) {
       expect(annualText).toContain(`pi_sample_annual_2025_${String(index).padStart(2, "0")}`);

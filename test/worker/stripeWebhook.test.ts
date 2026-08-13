@@ -35,6 +35,260 @@ describe("Stripe signed webhooks", () => {
     database.close();
   });
 
+  it("persists the actual one-time payment method when Charge arrives before Checkout", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "5f51f70e-9c9c-4cde-a95a-aed1a101fd89",
+      amount: 50,
+      frequency: "once"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const charge = stripeEvent("evt_charge_apple_pay_first", "charge.succeeded", succeededCharge({
+      id: "ch_apple_pay_first",
+      paymentIntentId: "pi_apple_pay_first",
+      amountCents: 5000,
+      checkoutId: row.id,
+      methodType: "card",
+      walletType: "apple_pay"
+    }));
+
+    expect((await sendSignedWebhook(workerEnv, charge)).status).toBe(200);
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet, payment_method_charge_id
+         FROM stripe_checkout_sessions WHERE id = ?`
+    ).get(row.id)).toEqual({
+      payment_method_type: "card",
+      payment_method_wallet: "apple_pay",
+      payment_method_charge_id: "ch_apple_pay_first"
+    });
+    expect(count(database, "stripe_gifts")).toBe(0);
+
+    const completed = stripeEvent("evt_checkout_apple_pay_after", "checkout.session.completed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 5000,
+      frequency: "once",
+      paymentIntentId: "pi_apple_pay_first"
+    }));
+    expect((await sendSignedWebhook(workerEnv, completed)).status).toBe(200);
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet, payment_method_charge_id
+         FROM stripe_gifts WHERE source_id = 'pi_apple_pay_first'`
+    ).get()).toEqual({
+      payment_method_type: "card",
+      payment_method_wallet: "apple_pay",
+      payment_method_charge_id: "ch_apple_pay_first"
+    });
+    const snapshot = database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({
+      pdf: { paymentMethod: "Apple Pay" }
+    });
+  });
+
+  it("waits for actual method evidence when Checkout arrives before Charge", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "77d8426d-881f-4a9a-b5c8-9b07c7f9e84a",
+      amount: 50,
+      frequency: "once"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const completed = stripeEvent("evt_checkout_link_first", "checkout.session.completed", checkoutSession({
+      id: checkout.sessionId,
+      checkoutId: row.id,
+      amountCents: 5000,
+      frequency: "once",
+      paymentIntentId: "pi_link_after"
+    }));
+
+    expect((await sendSignedWebhook(workerEnv, completed)).status).toBe(200);
+    expect(database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get()).toEqual({ snapshot_json: null });
+
+    const charge = stripeEvent("evt_charge_link_after", "charge.succeeded", succeededCharge({
+      id: "ch_link_after",
+      paymentIntentId: "pi_link_after",
+      amountCents: 5000,
+      checkoutId: row.id,
+      methodType: "link"
+    }));
+    expect((await sendSignedWebhook(workerEnv, charge)).status).toBe(200);
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet, payment_method_charge_id
+         FROM stripe_gifts WHERE source_id = 'pi_link_after'`
+    ).get()).toEqual({
+      payment_method_type: "link",
+      payment_method_wallet: null,
+      payment_method_charge_id: "ch_link_after"
+    });
+    const snapshot = database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({
+      pdf: { paymentMethod: "Link" }
+    });
+  });
+
+  it("converges the actual method into a monthly gift when Charge arrives first", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "6221cf52-a7b8-4225-873e-7d8d27038d7b",
+      amount: 25,
+      frequency: "monthly"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    const charge = stripeEvent("evt_charge_ach_first", "charge.succeeded", succeededCharge({
+      id: "ch_ach_first",
+      paymentIntentId: "pi_ach_first",
+      amountCents: 2500,
+      methodType: "us_bank_account"
+    }));
+    expect((await sendSignedWebhook(workerEnv, charge)).status).toBe(200);
+    expect(database.prepare(
+      `SELECT stripe_payment_intent_id, payment_method_type, payment_method_charge_id
+         FROM stripe_webhook_events WHERE id = 'evt_charge_ach_first'`
+    ).get()).toEqual({
+      stripe_payment_intent_id: "pi_ach_first",
+      payment_method_type: "us_bank_account",
+      payment_method_charge_id: "ch_ach_first"
+    });
+
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_ach_after",
+      "invoice.paid",
+      invoice({
+        id: "in_ach_first",
+        checkoutId: row.id,
+        subscriptionId: "sub_ach_first",
+        amountCents: 2500
+      })
+    ))).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_payment_ach_after",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_ach_first",
+        invoiceId: "in_ach_first",
+        amountCents: 2500,
+        paymentIntentId: "pi_ach_first"
+      })
+    ))).status).toBe(200);
+
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet, payment_method_charge_id
+         FROM stripe_gifts WHERE source_id = 'in_ach_first'`
+    ).get()).toEqual({
+      payment_method_type: "us_bank_account",
+      payment_method_wallet: null,
+      payment_method_charge_id: "ch_ach_first"
+    });
+    const snapshot = database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({
+      pdf: { paymentMethod: "ACH Direct Debit" }
+    });
+  });
+
+  it("adds monthly method evidence and snapshots the receipt when Charge arrives last", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "03964e51-c29f-4afb-a374-9cae3494fa44",
+      amount: 25,
+      frequency: "monthly"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_before_method",
+      "invoice.paid",
+      invoice({
+        id: "in_method_after",
+        checkoutId: row.id,
+        subscriptionId: "sub_method_after",
+        amountCents: 2500
+      })
+    ))).status).toBe(200);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_invoice_payment_before_method",
+      "invoice_payment.paid",
+      invoicePaymentProof({
+        id: "inpay_method_after",
+        invoiceId: "in_method_after",
+        amountCents: 2500,
+        paymentIntentId: "pi_method_after"
+      })
+    ))).status).toBe(200);
+    expect(database.prepare(
+      `SELECT payment_method_type FROM stripe_gifts WHERE source_id = 'in_method_after'`
+    ).get()).toEqual({ payment_method_type: null });
+    expect(database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get()).toEqual({ snapshot_json: null });
+
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_charge_google_pay_after",
+      "charge.succeeded",
+      succeededCharge({
+        id: "ch_google_pay_after",
+        paymentIntentId: "pi_method_after",
+        amountCents: 2500,
+        methodType: "card",
+        walletType: "google_pay"
+      })
+    ))).status).toBe(200);
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet
+         FROM stripe_gifts WHERE source_id = 'in_method_after'`
+    ).get()).toEqual({ payment_method_type: "card", payment_method_wallet: "google_pay" });
+    const snapshot = database.prepare(
+      "SELECT snapshot_json FROM stripe_acknowledgment_deliveries"
+    ).get() as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json)).toMatchObject({
+      pdf: { paymentMethod: "Google Pay" }
+    });
+  });
+
+  it("rejects conflicting signed method evidence without overwriting the first Charge", async () => {
+    const checkout = await createCheckout(workerEnv, {
+      requestId: "10cecc84-d3cc-41bd-9620-e6b3be18f51a",
+      amount: 50,
+      frequency: "once"
+    });
+    const row = checkoutRow(database, checkout.sessionId);
+    expect((await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_charge_method_original",
+      "charge.succeeded",
+      succeededCharge({
+        id: "ch_method_original",
+        paymentIntentId: "pi_method_conflict",
+        amountCents: 5000,
+        checkoutId: row.id,
+        methodType: "card",
+        walletType: "apple_pay"
+      })
+    ))).status).toBe(200);
+
+    const conflict = await sendSignedWebhook(workerEnv, stripeEvent(
+      "evt_charge_method_conflict",
+      "charge.succeeded",
+      succeededCharge({
+        id: "ch_method_conflict",
+        paymentIntentId: "pi_method_conflict",
+        amountCents: 5000,
+        checkoutId: row.id,
+        methodType: "link"
+      })
+    ));
+    expect(conflict.status).toBe(500);
+    expect(database.prepare(
+      `SELECT payment_method_type, payment_method_wallet, payment_method_charge_id
+         FROM stripe_checkout_sessions WHERE id = ?`
+    ).get(row.id)).toEqual({
+      payment_method_type: "card",
+      payment_method_wallet: "apple_pay",
+      payment_method_charge_id: "ch_method_original"
+    });
+  });
+
   it("rejects forged and wrong-environment events, then idempotently settles one one-time gift", async () => {
     const checkout = await createCheckout(workerEnv, {
       requestId: "0c2e2165-edb7-4e4b-bc50-95a7fa3cdfe5",
@@ -965,6 +1219,40 @@ function invoicePaymentProof(input: {
       payment_intent: input.paymentIntentId
     },
     status: "paid"
+  };
+}
+
+function succeededCharge(input: {
+  id: string;
+  paymentIntentId: string;
+  amountCents: number;
+  checkoutId?: string;
+  methodType: string;
+  walletType?: string;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    object: "charge",
+    livemode: false,
+    paid: true,
+    status: "succeeded",
+    amount: input.amountCents,
+    currency: "usd",
+    payment_intent: input.paymentIntentId,
+    metadata: input.checkoutId
+      ? {
+          checkout_id: input.checkoutId,
+          frequency: "once",
+          gift_type: "tithe",
+          lane: "eeuu_501c3"
+        }
+      : {},
+    payment_method_details: {
+      type: input.methodType,
+      ...(input.methodType === "card"
+        ? { card: { wallet: input.walletType ? { type: input.walletType } : null } }
+        : {})
+    }
   };
 }
 

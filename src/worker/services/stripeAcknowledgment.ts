@@ -17,8 +17,10 @@ import { stripeUsTimeZone } from "./stripeAnnualStatement";
 import { logWorkerError } from "./observability";
 import { pdfSafeText } from "./pdf";
 import { STRIPE_RECEIPT_ELIM_LOGO_BYTES } from "./stripePdfAssets";
+import { stripePaymentMethodLabel } from "./stripePaymentMethod";
 
-export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v5" as const;
+export const STRIPE_ACKNOWLEDGMENT_PDF_VERSION = "stripe-acknowledgment-pdf:v6" as const;
+const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5 = "stripe-acknowledgment-pdf:v5" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4 = "stripe-acknowledgment-pdf:v4" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3 = "stripe-acknowledgment-pdf:v3" as const;
 const LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2 = "stripe-acknowledgment-pdf:v2" as const;
@@ -110,6 +112,7 @@ export interface RenderStripeAcknowledgmentPdfInput {
   frequency: StripeGiftFrequency;
   giftType: StripeGiftType;
   sourceId: string;
+  paymentMethod?: string;
   settledAt: string;
   timeZone: string;
   legalName: string;
@@ -220,7 +223,7 @@ export async function renderStripeAcknowledgmentPdf(
   const facts = [
     ["DONATION NAME:", `${giftType} · ${input.frequency === "MONTHLY" ? "Monthly" : "One-time"}`],
     ["DONATION AMOUNT:", input.kind === "ORIGINAL" ? originalAmount : netAmount],
-    ["PAYMENT METHOD:", "Stripe"],
+    ["PAYMENT METHOD:", input.paymentMethod ?? "Stripe"],
     ["DONATION STATUS:", status === "Completed" ? "Completado" : status],
     ["DONATION DATE:", formatEnglishYear(input.settledAt, input.timeZone)],
     ["PAYMENT ID:", input.sourceId]
@@ -549,6 +552,7 @@ type StripeAcknowledgmentPdfEvidence = Omit<
 > & {
   rendererVersion:
     | typeof STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+    | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
     | typeof LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
@@ -608,6 +612,10 @@ export async function snapshotStripeAcknowledgmentEvidence(
       frequency: source.frequency,
       giftType: source.gift_type,
       sourceId: source.source_id,
+      paymentMethod: stripePaymentMethodLabel(
+        source.payment_method_type,
+        source.payment_method_wallet
+      ),
       settledAt: source.settled_at,
       timeZone,
       legalName: configuration.legalName,
@@ -792,6 +800,7 @@ export async function deliverNextStripeAcknowledgment(
 function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAcknowledgmentPdfEvidence {
   if (!isRecord(value)) return false;
   return (value.rendererVersion === STRIPE_ACKNOWLEDGMENT_PDF_VERSION
+      || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V5
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V4
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V3
       || value.rendererVersion === LEGACY_STRIPE_ACKNOWLEDGMENT_PDF_VERSION_V2
@@ -804,6 +813,7 @@ function validStripeAcknowledgmentPdfEvidence(value: unknown): value is StripeAc
     && ["ONCE", "MONTHLY"].includes(String(value.frequency))
     && ["TITHE", "OFFERING", "UNSPECIFIED"].includes(String(value.giftType))
     && typeof value.sourceId === "string"
+    && (value.paymentMethod === undefined || typeof value.paymentMethod === "string")
     && typeof value.settledAt === "string"
     && typeof value.timeZone === "string"
     && typeof value.legalName === "string"
@@ -824,6 +834,7 @@ function completeStripeAcknowledgmentPdfInput(
 ): RenderStripeAcknowledgmentPdfInput {
   return {
     ...evidence,
+    paymentMethod: evidence.paymentMethod ?? "Stripe",
     organizationPhone: evidence.organizationPhone ?? "",
     organizationWebsite: evidence.organizationWebsite ?? "",
     organizationMailingAddress: evidence.organizationMailingAddress ?? [],

@@ -28,6 +28,7 @@ import {
   STRIPE_ANNUAL_FMCE_LOGO_BYTES,
   STRIPE_ANNUAL_FMCE_LOGO_SHA256
 } from "./stripePdfAssets";
+import { stripePaymentMethodLabel } from "./stripePaymentMethod";
 
 export const STRIPE_ANNUAL_STATEMENT_PREVIEW_PAGE_SIZE = 50;
 export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
@@ -104,6 +105,7 @@ export interface StripeAnnualStatementItem {
   grossAmountCents: number;
   refundedAmountCents: number;
   netAmountCents: number;
+  paymentMethod?: string;
 }
 
 export interface StripeAnnualStatementSnapshot {
@@ -188,6 +190,12 @@ export async function buildStripeAnnualStatementSnapshot(input: {
       if (netAmountCents < 0) {
         throw new Error("Stripe annual statement contains a negative net amount");
       }
+      if (!gift.payment_method_type) {
+        throw new Error("Stripe annual statement gift is missing payment method evidence");
+      }
+      const paymentMethod = gift.payment_method_type === "legacy_stripe"
+        ? null
+        : stripePaymentMethodLabel(gift.payment_method_type, gift.payment_method_wallet);
       return {
         sourceId: gift.source_id,
         settledAt: normalizedIso(gift.settled_at),
@@ -195,7 +203,8 @@ export async function buildStripeAnnualStatementSnapshot(input: {
         frequency: gift.frequency,
         grossAmountCents,
         refundedAmountCents,
-        netAmountCents
+        netAmountCents,
+        ...(paymentMethod ? { paymentMethod } : {})
       };
     });
   if (items.length === 0) {
@@ -1028,7 +1037,14 @@ function drawAnnualContributionTable(
     drawPdfTextLine(page, formatAnnualShortDate(item.settledAt, options.timeZone), left + 7.5, baseline, 9, options.regular);
     drawRight(page, formatCents(item.netAmountCents), amountRight, baseline, 9, options.regular);
     drawPdfTextLine(page, fitPdfText(item.sourceId, options.regular, 9, methodX - sourceX - 12), sourceX, baseline, 9, options.regular);
-    drawPdfTextLine(page, "Stripe", methodX, baseline, 9, options.regular);
+    drawPdfTextLine(
+      page,
+      fitPdfText(item.paymentMethod ?? "Stripe", options.regular, 9, right - methodX - 7.5),
+      methodX,
+      baseline,
+      9,
+      options.regular
+    );
     page.drawLine({ start: { x: left, y: rowBottom }, end: { x: right, y: rowBottom }, thickness: 0.35, color: rgb(0.86, 0.86, 0.86) });
     rowTop = rowBottom;
   });

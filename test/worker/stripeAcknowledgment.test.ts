@@ -116,6 +116,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       frequency: "ONCE",
       giftType: "OFFERING",
       sourceId: "pi_30298",
+      paymentMethod: "Apple Pay",
       settledAt: "2024-12-31T17:00:00.000Z",
       timeZone: "America/New_York",
       legalName: "Friends of Misión Cristiana Elim",
@@ -139,7 +140,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const metadataPath = join(metadataDirectory, "receipt.pdf");
     writeFileSync(metadataPath, bytes);
     expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
-      .toContain("Producer:        stripe-acknowledgment-pdf:v5");
+      .toContain("Producer:        stripe-acknowledgment-pdf:v6");
     expect(pdf.getPage(0).getMediaBox()).toEqual({ x: 0, y: 0, width: 612, height: 792 });
 
     expect(drawImage).toHaveBeenCalledTimes(1);
@@ -161,7 +162,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(text).toContain("Dear Edith Anaya,");
     expect(text).toContain("Receipt of Charitable Donation:");
     expect(text).toContain("DONATION AMOUNT: $900.00 USD");
-    expect(text).toContain("PAYMENT METHOD: Stripe");
+    expect(text).toContain("PAYMENT METHOD: Apple Pay");
     expect(text).toContain("DONATION STATUS: Completado");
     expect(text).toContain("PAYMENT ID: pi_30298");
     expect(text).not.toContain("DONATION METHOD:");

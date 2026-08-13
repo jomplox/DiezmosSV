@@ -81,6 +81,7 @@ import {
   getStripeCheckoutById as getStripeCheckoutByIdRepository,
   getStripeCheckoutByRequestId as getStripeCheckoutByRequestIdRepository,
   getStripeCheckoutBySessionId as getStripeCheckoutBySessionIdRepository,
+  getStripeChargePaymentMethodByPaymentIntent as getStripeChargePaymentMethodByPaymentIntentRepository,
   getStripeGiftBySourceId as getStripeGiftBySourceIdRepository,
   markStripeAcknowledgmentDispatchStarted as markStripeAcknowledgmentDispatchStartedRepository,
   markStripeInvoiceSettlementRecorded as markStripeInvoiceSettlementRecordedRepository,
@@ -88,6 +89,9 @@ import {
   reclaimStripeCheckoutCreation as reclaimStripeCheckoutCreationRepository,
   reconcileStripeAcknowledgment as reconcileStripeAcknowledgmentRepository,
   recordStripeGiftAndAcknowledgment as recordStripeGiftAndAcknowledgmentRepository,
+  recordStripePaymentMethodForCheckout as recordStripePaymentMethodForCheckoutRepository,
+  recordStripePaymentMethodForInvoiceByPaymentIntent as recordStripePaymentMethodForInvoiceByPaymentIntentRepository,
+  recordStripeWebhookPaymentMethodEvidence as recordStripeWebhookPaymentMethodEvidenceRepository,
   reserveStripeCheckout as reserveStripeCheckoutRepository,
   saveStripeAcknowledgmentSnapshot as saveStripeAcknowledgmentSnapshotRepository,
   stageStripeInvoicePaid as stageStripeInvoicePaidRepository,
@@ -97,6 +101,7 @@ import {
   updateStripeSubscriptionStatus as updateStripeSubscriptionStatusRepository,
   type StripeAcknowledgmentClaim,
   type StripeAcknowledgmentReconciliationRecord,
+  type StripeChargePaymentMethodRecord,
   type StripeCheckoutRecord,
   type StripeGiftRecord,
   type StripeWebhookHealthRecord
@@ -408,6 +413,30 @@ export class Repository {
     input: Parameters<typeof recordStripeGiftAndAcknowledgmentRepository>[1]
   ): Promise<{ inserted: boolean; record: StripeGiftRecord; acknowledgmentId: string }> {
     return recordStripeGiftAndAcknowledgmentRepository(this.db, input);
+  }
+
+  async recordStripePaymentMethodForCheckout(
+    input: Parameters<typeof recordStripePaymentMethodForCheckoutRepository>[1]
+  ) {
+    return recordStripePaymentMethodForCheckoutRepository(this.db, input);
+  }
+
+  async recordStripeWebhookPaymentMethodEvidence(
+    input: Parameters<typeof recordStripeWebhookPaymentMethodEvidenceRepository>[1]
+  ) {
+    return recordStripeWebhookPaymentMethodEvidenceRepository(this.db, input);
+  }
+
+  async getStripeChargePaymentMethodByPaymentIntent(
+    paymentIntentId: string
+  ): Promise<StripeChargePaymentMethodRecord | null> {
+    return getStripeChargePaymentMethodByPaymentIntentRepository(this.db, paymentIntentId);
+  }
+
+  async recordStripePaymentMethodForInvoiceByPaymentIntent(
+    input: Parameters<typeof recordStripePaymentMethodForInvoiceByPaymentIntentRepository>[1]
+  ) {
+    return recordStripePaymentMethodForInvoiceByPaymentIntentRepository(this.db, input);
   }
 
   async applyStripeRefund(

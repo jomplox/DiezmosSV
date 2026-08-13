@@ -19,6 +19,10 @@ const retentionGenerationMigrationPath = resolve(
   import.meta.dirname,
   "../../migrations/0036_stripe_retention_generations.sql"
 );
+const paymentMethodMigrationPath = resolve(
+  import.meta.dirname,
+  "../../migrations/0040_stripe_payment_method_evidence.sql"
+);
 
 describe("Stripe U.S. donation persistence", () => {
   const openDatabases: DatabaseSync[] = [];
@@ -55,6 +59,10 @@ describe("Stripe U.S. donation persistence", () => {
       "payment_status",
       "stripe_customer_id",
       "stripe_subscription_id",
+      "payment_method_type",
+      "payment_method_wallet",
+      "payment_method_charge_id",
+      "payment_method_event_id",
       "subscription_status",
       "stripe_payment_intent_id",
       "rate_limit_claim_id",
@@ -70,7 +78,12 @@ describe("Stripe U.S. donation persistence", () => {
       "processing_claim_id",
       "failure_code",
       "received_at",
-      "processed_at"
+      "processed_at",
+      "stripe_payment_intent_id",
+      "payment_method_type",
+      "payment_method_wallet",
+      "payment_method_charge_id",
+      "payment_method_amount_cents"
     ]));
     expect(columnNames(database, "stripe_gifts")).toEqual(expect.arrayContaining([
       "source_type",
@@ -81,6 +94,10 @@ describe("Stripe U.S. donation persistence", () => {
       "currency",
       "donor_name",
       "donor_email",
+      "payment_method_type",
+      "payment_method_wallet",
+      "payment_method_charge_id",
+      "payment_method_event_id",
       "settled_at",
       "status",
       "refunded_amount_cents"
@@ -95,6 +112,44 @@ describe("Stripe U.S. donation persistence", () => {
       "failure_code",
       "sent_at"
     ]));
+    expect(columnNames(database, "stripe_invoice_settlements")).toEqual(expect.arrayContaining([
+      "payment_method_type",
+      "payment_method_wallet",
+      "payment_method_charge_id",
+      "payment_method_event_id",
+      "payment_method_payment_intent_id",
+      "payment_method_amount_cents",
+      "payment_method_livemode"
+    ]));
+  });
+
+  it("upgrades 0039 gifts as legacy evidence and makes newly attached methods immutable", () => {
+    const database = track(openDatabases, migratedDatabaseThrough("0039"));
+    insertCheckout(database, "checkout_method_upgrade", "request_method_upgrade", "fingerprint_method_upgrade");
+    insertGift(database, "gift_method_upgrade", "pi_method_upgrade", "checkout_method_upgrade");
+
+    database.exec(readFileSync(paymentMethodMigrationPath, "utf8"));
+    expect(database.prepare(
+      "SELECT payment_method_type FROM stripe_gifts WHERE id = 'gift_method_upgrade'"
+    ).get()).toEqual({ payment_method_type: "legacy_stripe" });
+
+    expect(database.prepare(
+      `UPDATE stripe_gifts
+          SET payment_method_type = 'card', payment_method_wallet = 'apple_pay',
+              payment_method_charge_id = 'ch_method_upgrade',
+              payment_method_event_id = 'evt_method_upgrade'
+        WHERE id = 'gift_method_upgrade'`
+    ).run().changes).toBe(1);
+    expect(() => database.prepare(
+      "UPDATE stripe_gifts SET payment_method_type = 'link' WHERE id = 'gift_method_upgrade'"
+    ).run()).toThrow(/stripe_payment_method_immutable/);
+    expect(() => database.prepare(
+      `INSERT INTO stripe_gifts (
+         id, source_type, source_id, frequency, gift_type, amount_cents,
+         settled_at, status, payment_method_type
+       ) VALUES ('gift_bad_method', 'PAYMENT_INTENT', 'pi_bad_method', 'ONCE',
+         'TITHE', 5000, '2026-08-13T12:00:00.000Z', 'PAID', 'Card!')`
+    ).run()).toThrow(/CHECK constraint failed/);
   });
 
   it("upgrades the exact 0031 schema without mutating historical migrations", () => {

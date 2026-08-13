@@ -1,9 +1,10 @@
 import type Stripe from "stripe";
 import { isValidEmail } from "../../shared/email";
-import type { Repository, StripeCheckoutRecord } from "../storage/repository";
+import type { Repository, StripeCheckoutRecord, StripeGiftRecord } from "../storage/repository";
 import type { Env } from "../types";
 import { newId } from "../utils/ids";
 import { snapshotStripeAcknowledgmentEvidence } from "./stripeAcknowledgment";
+import { stripePaymentMethodEvidence } from "./stripePaymentMethod";
 
 export class StripeWebhookEventError extends Error {
   constructor(readonly code: string) {
@@ -36,6 +37,9 @@ export async function processStripeWebhookEvent(
       return;
     case "customer.subscription.deleted":
       await processSubscriptionDeletedEvent(repo, event, now);
+      return;
+    case "charge.succeeded":
+      await processChargeSucceededEvent(repo, event, now, env);
       return;
     case "charge.refunded":
       await processChargeRefundedEvent(repo, event, now, env);
@@ -142,6 +146,10 @@ async function processCheckoutSessionEvent(
       frequency: "ONCE",
       giftType: requiredCheckoutGiftType(updated),
       amountCents: updated.amount_cents,
+      paymentMethodType: updated.payment_method_type,
+      paymentMethodWallet: updated.payment_method_wallet,
+      paymentMethodChargeId: updated.payment_method_charge_id,
+      paymentMethodEventId: updated.payment_method_event_id,
       donorName: updated.donor_name,
       donorEmail: updated.donor_email,
       donorPhone: updated.donor_phone,
@@ -149,7 +157,7 @@ async function processCheckoutSessionEvent(
       settledAt: completedAt ?? eventTime(event),
       now
     });
-    if (env) {
+    if (env && recorded.record.payment_method_type) {
       await snapshotStripeAcknowledgmentEvidence(env, repo, recorded.acknowledgmentId, now);
     }
   }
@@ -265,7 +273,7 @@ async function processInvoicePaymentPaidEvent(
   if (invoicePayment.currency !== "usd") {
     throw new StripeWebhookEventError("invoice_payment_amount_mismatch");
   }
-  const settlement = await repo.stageStripeInvoicePayment({
+  let settlement = await repo.stageStripeInvoicePayment({
     invoiceId,
     invoicePaymentId,
     paymentIntentId,
@@ -274,6 +282,21 @@ async function processInvoicePaymentPaidEvent(
     eventId: providerEventId(event),
     now
   });
+  const methodEvidence = await repo.getStripeChargePaymentMethodByPaymentIntent(paymentIntentId);
+  if (methodEvidence) {
+    const attached = await repo.recordStripePaymentMethodForInvoiceByPaymentIntent({
+      paymentIntentId,
+      amountCents: methodEvidence.payment_method_amount_cents,
+      livemode: methodEvidence.livemode === 1,
+      methodType: methodEvidence.payment_method_type,
+      methodWallet: methodEvidence.payment_method_wallet,
+      chargeId: methodEvidence.payment_method_charge_id,
+      eventId: methodEvidence.event_id,
+      now
+    });
+    if (!attached) throw new StripeWebhookEventError("invoice_payment_method_missing");
+    settlement = attached.settlement;
+  }
   if (!settlement.checkout_id) return;
   const checkout = await repo.getStripeCheckoutById(settlement.checkout_id);
   if (!checkout || checkout.frequency !== "MONTHLY") {
@@ -313,6 +336,26 @@ async function recordReadyInvoiceSettlement(
   ) {
     throw new StripeWebhookEventError("invoice_payment_amount_mismatch");
   }
+  const methodEvidence = [
+    settlement.payment_method_type,
+    settlement.payment_method_charge_id,
+    settlement.payment_method_event_id,
+    settlement.payment_method_payment_intent_id,
+    settlement.payment_method_amount_cents,
+    settlement.payment_method_livemode
+  ];
+  const hasAnyMethodEvidence = methodEvidence.some((value) => value !== null);
+  const hasCompleteMethodEvidence = methodEvidence.every((value) => value !== null);
+  if (
+    hasAnyMethodEvidence !== hasCompleteMethodEvidence
+    || (hasCompleteMethodEvidence && (
+      settlement.payment_intent_id !== settlement.payment_method_payment_intent_id
+      || settlement.amount_cents !== settlement.payment_method_amount_cents
+      || settlement.invoice_livemode !== settlement.payment_method_livemode
+    ))
+  ) {
+    throw new StripeWebhookEventError("invoice_payment_method_mismatch");
+  }
   const recorded = await repo.recordStripeGiftAndAcknowledgment({
     giftId: settlement.gift_id ?? newId("stripe_gift"),
     acknowledgmentId: newId("stripe_ack"),
@@ -325,6 +368,10 @@ async function recordReadyInvoiceSettlement(
     frequency: "MONTHLY",
     giftType: requiredCheckoutGiftType(checkout),
     amountCents: settlement.amount_cents,
+    paymentMethodType: settlement.payment_method_type,
+    paymentMethodWallet: settlement.payment_method_wallet,
+    paymentMethodChargeId: settlement.payment_method_charge_id,
+    paymentMethodEventId: settlement.payment_method_event_id,
     donorName: settlement.donor_name,
     donorEmail: settlement.donor_email,
     donorPhone: settlement.donor_phone,
@@ -337,7 +384,7 @@ async function recordReadyInvoiceSettlement(
     giftId: recorded.record.id,
     now
   });
-  if (env) {
+  if (env && recorded.record.payment_method_type) {
     await snapshotStripeAcknowledgmentEvidence(env, repo, recorded.acknowledgmentId, now);
   }
 }
@@ -390,19 +437,151 @@ async function processChargeRefundedEvent(
   const paymentIntentId = optionalStripeId(charge.payment_intent, "pi_");
   if (!paymentIntentId) throw new StripeWebhookEventError("refund_payment_intent_missing");
   const amountRefunded = nonNegativeInteger(charge.amount_refunded, "refund_amount_invalid");
-  const gift = await repo.applyStripeRefund({
+  let gift = await repo.applyStripeRefund({
     stripePaymentIntentId: paymentIntentId,
     refundedAmountCents: amountRefunded,
     now
   });
   if (!gift) throw new StripeWebhookEventError("refund_gift_not_found");
-  if (env && gift.refunded_amount_cents > 0) {
+  if (
+    optionalRecord(charge.payment_method_details)
+    && (!gift.payment_method_type || gift.payment_method_type === "legacy_stripe")
+  ) {
+    await applyStripeChargePaymentMethod(repo, event, charge, now, env);
+    gift = await repo.getStripeGiftBySourceId(gift.source_id) ?? gift;
+  }
+  if (env && gift.refunded_amount_cents > 0 && gift.payment_method_type) {
     const correction = await repo.getStripeAcknowledgmentForGiftEvidence(
       gift.id,
       gift.refunded_amount_cents
     );
     if (!correction) throw new StripeWebhookEventError("refund_acknowledgment_missing");
     await snapshotStripeAcknowledgmentEvidence(env, repo, correction.id, now);
+  }
+}
+
+async function processChargeSucceededEvent(
+  repo: Repository,
+  event: Stripe.Event,
+  now: string,
+  env?: Env
+): Promise<void> {
+  const charge = record(event.data.object);
+  requireObjectType(charge, "charge");
+  if (charge.paid !== true || charge.status !== "succeeded") {
+    throw new StripeWebhookEventError("charge_not_succeeded");
+  }
+  await applyStripeChargePaymentMethod(repo, event, charge, now, env);
+}
+
+async function applyStripeChargePaymentMethod(
+  repo: Repository,
+  event: Stripe.Event,
+  charge: Record<string, unknown>,
+  now: string,
+  env?: Env
+): Promise<void> {
+  if (Boolean(charge.livemode) !== event.livemode) {
+    throw new StripeWebhookEventError("event_mode_mismatch");
+  }
+  if (charge.currency !== "usd") {
+    throw new StripeWebhookEventError("charge_amount_mismatch");
+  }
+  const amountCents = positiveInteger(charge.amount, "charge_amount_invalid");
+  const paymentIntentId = optionalStripeId(charge.payment_intent, "pi_");
+  if (!paymentIntentId) throw new StripeWebhookEventError("payment_intent_missing");
+  let method;
+  try {
+    method = stripePaymentMethodEvidence(charge, providerEventId(event));
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "payment_method_invalid";
+    throw new StripeWebhookEventError(code);
+  }
+  try {
+    await repo.recordStripeWebhookPaymentMethodEvidence({
+      eventId: method.eventId,
+      paymentIntentId,
+      amountCents,
+      livemode: event.livemode,
+      methodType: method.type,
+      methodWallet: method.wallet,
+      chargeId: method.chargeId,
+      now
+    });
+  } catch {
+    throw new StripeWebhookEventError("payment_method_identity_conflict");
+  }
+  let gift: StripeGiftRecord | null = null;
+  const metadata = optionalRecord(charge.metadata);
+  if (metadata?.lane === "eeuu_501c3" && metadata.frequency === "once") {
+    if (metadata.gift_type !== "tithe" && metadata.gift_type !== "offering") {
+      throw new StripeWebhookEventError("charge_metadata_invalid");
+    }
+    const checkoutId = stripeId(metadata.checkout_id, "stripe_checkout_");
+    const checkout = await repo.getStripeCheckoutById(checkoutId);
+    if (!checkout || checkout.frequency !== "ONCE") {
+      throw new StripeWebhookEventError("checkout_not_found");
+    }
+    assertEventMode(checkout, event.livemode);
+    if (
+      checkout.amount_cents !== amountCents
+      || metadata.gift_type !== (requiredCheckoutGiftType(checkout) === "TITHE" ? "tithe" : "offering")
+    ) {
+      throw new StripeWebhookEventError("charge_amount_mismatch");
+    }
+    try {
+      ({ gift } = await repo.recordStripePaymentMethodForCheckout({
+        checkoutId,
+        paymentIntentId,
+        amountCents,
+        livemode: event.livemode,
+        methodType: method.type,
+        methodWallet: method.wallet,
+        chargeId: method.chargeId,
+        eventId: method.eventId,
+        now
+      }));
+    } catch {
+      throw new StripeWebhookEventError("payment_method_identity_conflict");
+    }
+  } else {
+    if (metadata?.lane === "eeuu_501c3" && metadata.frequency !== "monthly") {
+      throw new StripeWebhookEventError("charge_metadata_invalid");
+    }
+    let result: Awaited<ReturnType<Repository["recordStripePaymentMethodForInvoiceByPaymentIntent"]>>;
+    try {
+      result = await repo.recordStripePaymentMethodForInvoiceByPaymentIntent({
+        paymentIntentId,
+        amountCents,
+        livemode: event.livemode,
+        methodType: method.type,
+        methodWallet: method.wallet,
+        chargeId: method.chargeId,
+        eventId: method.eventId,
+        now
+      });
+    } catch {
+      throw new StripeWebhookEventError("payment_method_identity_conflict");
+    }
+    if (!result) return;
+    gift = result.gift;
+    if (!gift && result.settlement.checkout_id) {
+      const checkout = await repo.getStripeCheckoutById(result.settlement.checkout_id);
+      if (!checkout || checkout.frequency !== "MONTHLY") {
+        throw new StripeWebhookEventError("monthly_checkout_not_found");
+      }
+      assertEventMode(checkout, event.livemode);
+      await recordReadyInvoiceSettlement(repo, result.settlement, checkout, now, env);
+      gift = await repo.getStripeGiftBySourceId(result.settlement.invoice_id);
+    }
+  }
+  if (env && gift) {
+    const delivery = await repo.getStripeAcknowledgmentForGiftEvidence(
+      gift.id,
+      gift.refunded_amount_cents
+    );
+    if (!delivery) throw new StripeWebhookEventError("acknowledgment_missing");
+    await snapshotStripeAcknowledgmentEvidence(env, repo, delivery.id, now);
   }
 }
 

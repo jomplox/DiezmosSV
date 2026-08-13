@@ -35,6 +35,10 @@ export interface StripeCheckoutRecord {
   stripe_subscription_id: string | null;
   subscription_status: "ACTIVE" | "PAST_DUE" | "CANCELED" | null;
   stripe_payment_intent_id: string | null;
+  payment_method_type: string | null;
+  payment_method_wallet: string | null;
+  payment_method_charge_id: string | null;
+  payment_method_event_id: string | null;
   donor_name: string | null;
   donor_email: string | null;
   donor_phone: string | null;
@@ -61,6 +65,10 @@ export interface StripeGiftRecord {
   stripe_payment_intent_id: string | null;
   stripe_invoice_id: string | null;
   stripe_subscription_id: string | null;
+  payment_method_type: string | null;
+  payment_method_wallet: string | null;
+  payment_method_charge_id: string | null;
+  payment_method_event_id: string | null;
   frequency: StripeGiftFrequency;
   gift_type: StripeGiftType;
   amount_cents: number;
@@ -88,6 +96,8 @@ export interface StripeAcknowledgmentClaim {
   donor_phone: string | null;
   donor_address_json: string | null;
   source_id: string;
+  payment_method_type: string | null;
+  payment_method_wallet: string | null;
   frequency: StripeGiftFrequency;
   gift_type: StripeGiftType;
   amount_cents: number;
@@ -130,6 +140,13 @@ export interface StripeInvoiceSettlementRecord {
   payment_currency: "usd" | null;
   payment_livemode: 0 | 1 | null;
   payment_event_id: string | null;
+  payment_method_type: string | null;
+  payment_method_wallet: string | null;
+  payment_method_charge_id: string | null;
+  payment_method_event_id: string | null;
+  payment_method_payment_intent_id: string | null;
+  payment_method_amount_cents: number | null;
+  payment_method_livemode: 0 | 1 | null;
   status: "PENDING" | "RECORDED" | "REVIEW";
   gift_id: string | null;
   failure_code: string | null;
@@ -600,6 +617,16 @@ export interface StripeWebhookHealthRecord {
   livemode: boolean;
 }
 
+export interface StripeChargePaymentMethodRecord {
+  event_id: string;
+  stripe_payment_intent_id: string;
+  payment_method_type: string;
+  payment_method_wallet: string | null;
+  payment_method_charge_id: string;
+  payment_method_amount_cents: number;
+  livemode: 0 | 1;
+}
+
 export async function getLatestStripeWebhookHealth(
   db: D1Database
 ): Promise<StripeWebhookHealthRecord | null> {
@@ -762,6 +789,10 @@ export async function recordStripeGiftAndAcknowledgment(
     stripePaymentIntentId: string | null;
     stripeInvoiceId: string | null;
     stripeSubscriptionId: string | null;
+    paymentMethodType?: string | null;
+    paymentMethodWallet?: string | null;
+    paymentMethodChargeId?: string | null;
+    paymentMethodEventId?: string | null;
     frequency: StripeGiftFrequency;
     giftType: Exclude<StripeGiftType, "UNSPECIFIED">;
     amountCents: number;
@@ -773,14 +804,19 @@ export async function recordStripeGiftAndAcknowledgment(
     now: string;
   }
 ): Promise<{ inserted: boolean; record: StripeGiftRecord; acknowledgmentId: string }> {
+  const paymentMethodType = input.paymentMethodType === undefined
+    ? "legacy_stripe"
+    : input.paymentMethodType;
   const giftStatement = db.prepare(
     `INSERT OR IGNORE INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
        stripe_invoice_id, stripe_subscription_id, frequency, gift_type, amount_cents,
-       currency, donor_name, donor_email, donor_phone, donor_address_json,
+       currency, payment_method_type, payment_method_wallet,
+       payment_method_charge_id, payment_method_event_id,
+       donor_name, donor_email, donor_phone, donor_address_json,
        settled_at, status,
        refunded_amount_cents, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, 'PAID', 0, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'usd', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PAID', 0, ?, ?)`
   ).bind(
     input.giftId,
     input.sourceType,
@@ -792,6 +828,10 @@ export async function recordStripeGiftAndAcknowledgment(
     input.frequency,
     input.giftType,
     input.amountCents,
+    paymentMethodType,
+    input.paymentMethodWallet ?? null,
+    input.paymentMethodChargeId ?? null,
+    input.paymentMethodEventId ?? null,
     input.donorName,
     input.donorEmail,
     input.donorPhone ?? null,
@@ -930,6 +970,8 @@ export async function stageStripeInvoicePayment(
          OR stripe_invoice_settlements.invoice_payment_id = excluded.invoice_payment_id)
        AND (stripe_invoice_settlements.payment_intent_id IS NULL
          OR stripe_invoice_settlements.payment_intent_id = excluded.payment_intent_id)
+       AND (stripe_invoice_settlements.payment_method_payment_intent_id IS NULL
+         OR stripe_invoice_settlements.payment_method_payment_intent_id = excluded.payment_intent_id)
        AND (stripe_invoice_settlements.payment_amount_cents IS NULL
          OR stripe_invoice_settlements.payment_amount_cents = excluded.payment_amount_cents)
        AND (stripe_invoice_settlements.payment_currency IS NULL
@@ -976,9 +1018,236 @@ function stripeGiftMatches(
     && record.stripe_payment_intent_id === input.stripePaymentIntentId
     && record.stripe_invoice_id === input.stripeInvoiceId
     && record.stripe_subscription_id === input.stripeSubscriptionId
+    && record.payment_method_type === (input.paymentMethodType === undefined
+      ? "legacy_stripe"
+      : input.paymentMethodType)
+    && record.payment_method_wallet === (input.paymentMethodWallet ?? null)
+    && record.payment_method_charge_id === (input.paymentMethodChargeId ?? null)
+    && record.payment_method_event_id === (input.paymentMethodEventId ?? null)
     && record.frequency === input.frequency
     && record.gift_type === input.giftType
     && record.amount_cents === input.amountCents;
+}
+
+export async function recordStripePaymentMethodForCheckout(
+  db: D1Database,
+  input: {
+    checkoutId: string;
+    paymentIntentId: string;
+    amountCents: number;
+    livemode: boolean;
+    methodType: string;
+    methodWallet: string | null;
+    chargeId: string;
+    eventId: string;
+    now: string;
+  }
+): Promise<{ checkout: StripeCheckoutRecord; gift: StripeGiftRecord | null }> {
+  const checkout = await db.prepare(
+    `UPDATE stripe_checkout_sessions
+        SET stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
+            payment_method_type = ?, payment_method_wallet = ?,
+            payment_method_charge_id = ?, payment_method_event_id = ?, updated_at = ?
+      WHERE id = ? AND frequency = 'ONCE' AND amount_cents = ? AND livemode = ?
+        AND (stripe_payment_intent_id IS NULL OR stripe_payment_intent_id = ?)
+        AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
+          OR (payment_method_type = ?
+            AND payment_method_wallet IS ?
+            AND payment_method_charge_id = ?
+            AND payment_method_event_id = ?))
+      RETURNING *`
+  ).bind(
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId,
+    input.now,
+    input.checkoutId,
+    input.amountCents,
+    input.livemode ? 1 : 0,
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId
+  ).first<StripeCheckoutRecord>();
+  if (!checkout) throw new Error("Stripe one-time payment method identity conflicts");
+  const gift = await db.prepare(
+    `UPDATE stripe_gifts
+        SET payment_method_type = ?, payment_method_wallet = ?,
+            payment_method_charge_id = ?, payment_method_event_id = ?, updated_at = ?
+      WHERE stripe_payment_intent_id = ?
+        AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
+          OR (payment_method_type = ?
+            AND payment_method_wallet IS ?
+            AND payment_method_charge_id = ?
+            AND payment_method_event_id = ?))
+      RETURNING *`
+  ).bind(
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId,
+    input.now,
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId
+  ).first<StripeGiftRecord>();
+  return { checkout, gift: gift ?? null };
+}
+
+export async function recordStripeWebhookPaymentMethodEvidence(
+  db: D1Database,
+  input: {
+    eventId: string;
+    paymentIntentId: string;
+    amountCents: number;
+    livemode: boolean;
+    methodType: string;
+    methodWallet: string | null;
+    chargeId: string;
+    now: string;
+  }
+): Promise<StripeChargePaymentMethodRecord> {
+  const evidence = await db.prepare(
+    `UPDATE stripe_webhook_events
+        SET stripe_payment_intent_id = ?, payment_method_type = ?,
+            payment_method_wallet = ?, payment_method_charge_id = ?,
+            payment_method_amount_cents = ?, updated_at = ?
+      WHERE id = ? AND event_type IN ('charge.succeeded', 'charge.refunded')
+        AND livemode = ? AND status = 'PROCESSING'
+        AND (payment_method_type IS NULL OR (
+          stripe_payment_intent_id = ? AND payment_method_type = ?
+          AND payment_method_wallet IS ? AND payment_method_charge_id = ?
+          AND payment_method_amount_cents = ?
+        ))
+      RETURNING id AS event_id, stripe_payment_intent_id,
+                payment_method_type, payment_method_wallet,
+                payment_method_charge_id, payment_method_amount_cents, livemode`
+  ).bind(
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.amountCents,
+    input.now,
+    input.eventId,
+    input.livemode ? 1 : 0,
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.amountCents
+  ).first<StripeChargePaymentMethodRecord>();
+  if (!evidence) throw new Error("Stripe webhook payment method identity conflicts");
+  return evidence;
+}
+
+export async function getStripeChargePaymentMethodByPaymentIntent(
+  db: D1Database,
+  paymentIntentId: string
+): Promise<StripeChargePaymentMethodRecord | null> {
+  return db.prepare(
+    `SELECT id AS event_id, stripe_payment_intent_id,
+            payment_method_type, payment_method_wallet,
+            payment_method_charge_id, payment_method_amount_cents, livemode
+       FROM stripe_webhook_events
+      WHERE event_type = 'charge.succeeded'
+        AND status IN ('PROCESSING', 'PROCESSED')
+        AND stripe_payment_intent_id = ?
+        AND payment_method_type IS NOT NULL
+      LIMIT 1`
+  ).bind(paymentIntentId).first<StripeChargePaymentMethodRecord>();
+}
+
+export async function recordStripePaymentMethodForInvoiceByPaymentIntent(
+  db: D1Database,
+  input: {
+    paymentIntentId: string;
+    amountCents: number;
+    livemode: boolean;
+    methodType: string;
+    methodWallet: string | null;
+    chargeId: string;
+    eventId: string;
+    now: string;
+  }
+): Promise<{ settlement: StripeInvoiceSettlementRecord; gift: StripeGiftRecord | null } | null> {
+  const settlement = await db.prepare(
+    `UPDATE stripe_invoice_settlements
+        SET payment_method_type = ?, payment_method_wallet = ?,
+            payment_method_charge_id = ?,
+            payment_method_event_id = COALESCE(payment_method_event_id, ?),
+            payment_method_payment_intent_id = ?,
+            payment_method_amount_cents = ?, payment_method_livemode = ?,
+            updated_at = ?
+      WHERE payment_intent_id = ? AND status <> 'REVIEW'
+        AND (amount_cents IS NULL OR amount_cents = ?)
+        AND (payment_amount_cents IS NULL OR payment_amount_cents = ?)
+        AND (invoice_livemode IS NULL OR invoice_livemode = ?)
+        AND (payment_livemode IS NULL OR payment_livemode = ?)
+        AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
+          OR (payment_method_type = ?
+            AND payment_method_wallet IS ?
+            AND payment_method_charge_id = ?
+            AND payment_method_payment_intent_id = ?
+            AND payment_method_amount_cents = ?
+            AND payment_method_livemode = ?))
+      RETURNING *`
+  ).bind(
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId,
+    input.paymentIntentId,
+    input.amountCents,
+    input.livemode ? 1 : 0,
+    input.now,
+    input.paymentIntentId,
+    input.amountCents,
+    input.amountCents,
+    input.livemode ? 1 : 0,
+    input.livemode ? 1 : 0,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.paymentIntentId,
+    input.amountCents,
+    input.livemode ? 1 : 0
+  ).first<StripeInvoiceSettlementRecord>();
+  if (!settlement) {
+    const existing = await db.prepare(
+      "SELECT 1 AS found FROM stripe_invoice_settlements WHERE payment_intent_id = ?"
+    ).bind(input.paymentIntentId).first<{ found: number }>();
+    if (existing) throw new Error("Stripe invoice payment method identity conflicts");
+    return null;
+  }
+  const gift = await db.prepare(
+    `UPDATE stripe_gifts
+        SET payment_method_type = ?, payment_method_wallet = ?,
+            payment_method_charge_id = ?,
+            payment_method_event_id = COALESCE(payment_method_event_id, ?), updated_at = ?
+      WHERE stripe_payment_intent_id = ?
+        AND (payment_method_type IS NULL OR payment_method_type = 'legacy_stripe'
+          OR (payment_method_type = ?
+            AND payment_method_wallet IS ?
+            AND payment_method_charge_id = ?))
+      RETURNING *`
+  ).bind(
+    input.methodType,
+    input.methodWallet,
+    input.chargeId,
+    input.eventId,
+    input.now,
+    input.paymentIntentId,
+    input.methodType,
+    input.methodWallet,
+    input.chargeId
+  ).first<StripeGiftRecord>();
+  return { settlement, gift: gift ?? null };
 }
 
 export async function claimNextStripeAcknowledgment(
@@ -1015,6 +1284,7 @@ export async function claimNextStripeAcknowledgment(
           FROM stripe_acknowledgment_deliveries
           JOIN stripe_gifts AS gift ON gift.id = stripe_acknowledgment_deliveries.gift_id
          WHERE stripe_acknowledgment_deliveries.attempt_count < 5
+           AND gift.payment_method_type IS NOT NULL
            AND stripe_acknowledgment_deliveries.evidence_refunded_amount_cents = gift.refunded_amount_cents
            AND COALESCE(stripe_acknowledgment_deliveries.next_attempt_at,
                         stripe_acknowledgment_deliveries.created_at) <= ?
@@ -1045,6 +1315,7 @@ export async function claimNextStripeAcknowledgment(
             delivery.snapshot_hash, delivery.snapshot_json,
             gift.donor_name, gift.donor_email, gift.donor_phone,
             gift.donor_address_json, gift.source_id,
+            gift.payment_method_type, gift.payment_method_wallet,
             gift.frequency, gift.gift_type, gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id
@@ -1215,7 +1486,9 @@ export async function getStripeAcknowledgmentEvidenceSource(
             delivery.dispatch_started_at, delivery.revision, delivery.kind,
             delivery.evidence_refunded_amount_cents,
             delivery.snapshot_hash, delivery.snapshot_json,
-            gift.donor_name, gift.donor_email, gift.source_id, gift.frequency, gift.gift_type,
+            gift.donor_name, gift.donor_email, gift.source_id,
+            gift.payment_method_type, gift.payment_method_wallet,
+            gift.frequency, gift.gift_type,
             gift.amount_cents, gift.settled_at
        FROM stripe_acknowledgment_deliveries AS delivery
        JOIN stripe_gifts AS gift ON gift.id = delivery.gift_id

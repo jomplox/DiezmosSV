@@ -308,6 +308,8 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
         id: `gift_${index + 1}`,
         source_id: String(32180 + index),
         stripe_payment_intent_id: String(32180 + index),
+        payment_method_type: index === 0 ? "card" : "us_bank_account",
+        payment_method_wallet: index === 0 ? "google_pay" : null,
         settled_at: `2025-${dates[index]}T12:00:00.000Z`,
         amount_cents,
         donor_phone: "+1 281 974 9002",
@@ -368,6 +370,8 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     expect(pageOne).toContain("Montgomery, TX 77316, United States");
     expect(pageOne).toContain("+1 281 974 9002");
     expect(pageOne).toContain("32180");
+    expect(pageOne).toContain("Google Pay");
+    expect(pageOne).toContain("ACH Direct Debit");
     expect(pageOne).not.toContain("32185");
     expect(pageTwo).toContain("32185");
     expect(pageTwo).toContain("TOTAL — 17");
@@ -1499,6 +1503,10 @@ function gift(overrides: Partial<StripeAnnualStatementGift> & { id: string }): S
     stripe_payment_intent_id: overrides.stripe_payment_intent_id ?? `pi_${overrides.id}`,
     stripe_invoice_id: null,
     stripe_subscription_id: null,
+    payment_method_type: overrides.payment_method_type ?? "legacy_stripe",
+    payment_method_wallet: overrides.payment_method_wallet ?? null,
+    payment_method_charge_id: overrides.payment_method_charge_id ?? null,
+    payment_method_event_id: overrides.payment_method_event_id ?? null,
     frequency: overrides.frequency ?? "ONCE",
     gift_type: overrides.gift_type ?? "TITHE",
     amount_cents: amountCents,
@@ -1535,15 +1543,20 @@ function seedGift(database: ReturnType<typeof migratedDatabase>, row: StripeAnnu
   database.prepare(
     `INSERT INTO stripe_gifts (
        id, source_type, source_id, checkout_id, stripe_payment_intent_id,
-       frequency, gift_type, amount_cents, donor_name, donor_email,
+       payment_method_type, payment_method_wallet, payment_method_charge_id,
+       payment_method_event_id, frequency, gift_type, amount_cents, donor_name, donor_email,
        donor_phone, donor_address_json, settled_at, status, refunded_amount_cents
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     row.id,
     row.source_type,
     row.source_id,
     row.checkout_id,
     row.stripe_payment_intent_id,
+    row.payment_method_type,
+    row.payment_method_wallet,
+    row.payment_method_charge_id,
+    row.payment_method_event_id,
     row.frequency,
     row.gift_type,
     row.amount_cents,

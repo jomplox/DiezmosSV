@@ -206,7 +206,7 @@ DiezmosSV/
 │   ├── client/                 # Panel React + Vite, /donar, fuentes, recursos
 │   └── shared/                 # Catálogos · DUI · NIT · ventanas legales · política de contraseñas
 │                               # correcciones fiscales · entrega · montos · correo
-├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0038)
+├── migrations/                 # Esquema D1 (incremental, solo se agrega, 0001…0040)
 ├── DTE/svfe-json-schemas/      # Esquemas JSON de MH para validación
 ├── docs/                       # Despliegue/UAT · manual del operador · restauración de retención
 │                               # cutover/conciliación de claims fiscales · recuperación previa al CDE
@@ -1022,7 +1022,7 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 ## 📚 Modelo de datos
 
 <details>
-<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0039)</strong></summary>
+<summary><strong>Tablas de D1 (migrations/0001_init.sql, extendidas hasta la 0040)</strong></summary>
 
 <br/>
 
@@ -1042,8 +1042,8 @@ El modelo de seguridad es el modelo del claim fiscal aplicado a una ruta de repa
 | `stripe_checkout_sessions` | Intento de Checkout del carril estadounidense y estado saneado del proveedor, con cronologías monotónicas independientes de Checkout y suscripción. |
 | `stripe_webhook_events` | Cerca contra repeticiones de eventos Stripe firmados y resultado saneado del procesamiento; nunca conserva cuerpos crudos de webhook. |
 | `stripe_provider_recovery_reads` | Registros de admisión acotados y con concesión para lecturas públicas de recuperación de Session respaldadas por el proveedor. |
-| `stripe_invoice_settlements` | Evidencia de factura mensual e InvoicePayment pagado independiente del orden; solo registra la entrega después de validar ambos lados. |
-| `stripe_gifts` | Fuente de verdad de entregas estadounidenses liquidadas, incluido el tipo elegido por el donante y el estado durable de reembolso/neto. |
+| `stripe_invoice_settlements` | Evidencia independiente del orden de factura mensual, InvoicePayment pagado y método real no sensible; registra la entrega al validar la evidencia financiera y retiene la constancia hasta que converja la evidencia Charge firmada. |
+| `stripe_gifts` | Fuente de verdad de entregas estadounidenses liquidadas, incluido el tipo elegido por el donante, la clasificación no sensible del método realmente usado y el estado durable de reembolso/neto. |
 | `stripe_acknowledgment_deliveries` | Evidencia inmutable y revisionada de acuses/correcciones inmediatas 501(c)(3) y resultados del proveedor. |
 | `stripe_annual_statement_deliveries` | Instantáneas inmutables de constancias anuales estadounidenses, linaje de revisiones, claims con concesión y resultados de envío. |
 | `stripe_retention_generations` | Libro interno y monotónico de pertenencia para exportaciones de retención Stripe acotadas y consistentes en sus referencias. Es metadato de restauración mantenido por triggers, no forma parte del payload archivado y se reconstruye automáticamente al restaurar las filas de Stripe. |
