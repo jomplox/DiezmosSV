@@ -119,7 +119,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     const metadataPath = join(metadataDirectory, "statement.pdf");
     writeFileSync(metadataPath, bytes);
     expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
-      .toContain("Producer:        stripe-annual-statement-pdf:v5");
+      .toContain("Producer:        stripe-annual-statement-pdf:v6");
     expect(pdf.getPages().map((page) => page.getMediaBox()))
       .toEqual([{ x: 0, y: 0, width: 612, height: 792 }]);
 
@@ -260,7 +260,8 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
 
     expect(text).toContain("Annual Giving Statement");
     expect(text).toContain("CORRECTED STATEMENT");
-    expect(text).toContain("Friends of Example Church, Inc.");
+    expect(text).toContain("ExamplePerson1");
+    expect(text).not.toContain("Friends of Example Church, Inc.");
     expect(text).toContain("EIN 12-3456789");
     expect(text).toContain("pi_gift_tithe");
     expect(text).toContain("pi_gift_refund");
@@ -285,7 +286,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorName: "Herlinda Trejo",
       donorEmail: "annual@example.org",
       document: statementDocument({
-        legalName: "Misión Cristiana Elim",
+        legalName: "Friends of Misión Cristiana Elim",
         ein: "82-0889012",
         organizationContact: {
           phone: "+1 (786) 505-8446",
@@ -350,15 +351,17 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       "DATE",
       "AMOUNT",
       "DONATION ID",
-      "DONATION METHOD",
+      "PAYMENT METHOD",
       "Page 1 of 2"
     ]) {
       expect(pageOne).toContain(label);
     }
     expect(pageOne).toContain("January 1, 2025 – December 31, 2025");
+    expect(pageOne).toContain("Misión Cristiana Elim");
+    expect(pageOne).not.toContain("Friends of Misión Cristiana Elim");
     expect(normalizedPageOne).toContain("No goods or services were provided to you in exchange for these contributions.");
     expect(pageOne).toContain("Malaquías 3:10");
-    expect(pageOne).toContain("+1 (786) 505-8446");
+    expect(pageOne).toContain("fmce@example.org · +1 (786) 505-8446");
     expect(pageOne).toContain("https://www.elim.click");
     expect(pageOne).toContain("2885 Sanford Ave SW, PMB 41357");
     expect(pageOne).toContain("332 Tangle Birch Court");
@@ -382,7 +385,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       expect.objectContaining({ x: 250.945, size: 8 })
     ]);
     expect(drawText.mock.calls).toContainEqual([
-      "DONATION METHOD",
+      "PAYMENT METHOD",
       expect.objectContaining({ x: 407.332, size: 8 })
     ]);
     expect(drawText.mock.calls).toContainEqual([
@@ -449,7 +452,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
   });
 
   it("preserves maximum renderer-safe contact fields and all four address lines", async () => {
-    const legalName = `LEGAL ${"L".repeat(74)}`;
+    const organizationName = `LEGAL ${"L".repeat(74)}`;
     const supportEmail = `${"e".repeat(87)}@example.org`;
     const phone = `+1${"2".repeat(38)}`;
     const website = `https://example.org/${"w".repeat(80)}`;
@@ -462,10 +465,10 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorName: "Maximum Contact Donor",
       donorEmail: "max-contact@example.org",
       document: statementDocument({
-        legalName,
+        legalName: "Friends of Maximum Contact Ministry",
         organizationContact: { phone, website, mailingAddress: address },
         email: {
-          organizationName: "Maximum Contact Ministry",
+          organizationName,
           supportEmail,
           logoUrl: null,
           senderName: "Maximum Contact Ministry",
@@ -484,7 +487,13 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       expect(text).toContain(marker);
     }
     for (const [drawn, options] of drawText.mock.calls) {
-      if (!options?.font || typeof options.x !== "number" || !String(drawn).match(/LEGAL|example\.org|ADDRESS-|^\+1/)) continue;
+      if (
+        !options?.font
+        || typeof options.x !== "number"
+        || typeof options.y !== "number"
+        || options.y < 45.5
+        || !String(drawn).match(/LEGAL|example\.org|ADDRESS-|^\+1/)
+      ) continue;
       expect(options.x).toBeGreaterThanOrEqual(45.354);
       expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(566.646);
       expect(options.y).toBeGreaterThanOrEqual(45.5);
@@ -498,9 +507,9 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
     }
   });
 
-  it("keeps both maximum-length legal-name repetitions inside the annual acknowledgment panel", async () => {
-    const legalName = `LEGAL-PANEL ${"L".repeat(68)}`;
-    expect(legalName).toHaveLength(80);
+  it("keeps both maximum-length statement-organization repetitions inside the annual acknowledgment panel", async () => {
+    const organizationName = `LEGAL-PANEL ${"L".repeat(68)}`;
+    expect(organizationName).toHaveLength(80);
     const drawText = vi.spyOn(PDFPage.prototype, "drawText");
     const snapshot = await buildStripeAnnualStatementSnapshot({
       year: 2025,
@@ -508,7 +517,15 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorKey: "legal-panel@example.org",
       donorName: "Legal Panel Donor",
       donorEmail: "legal-panel@example.org",
-      document: statementDocument({ legalName }),
+      document: statementDocument({
+        email: {
+          organizationName,
+          supportEmail: "legacy-contact-1@example.com",
+          logoUrl: null,
+          senderName: organizationName,
+          replyToAddress: null
+        }
+      }),
       gifts: [gift({ id: "gift_legal_panel", source_id: "pi_legal_panel" })]
     });
     await renderStripeAnnualStatementPdf({
@@ -585,7 +602,7 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
   });
 
   it("keeps maximum-length legal and donor identity text inside printable bounds", async () => {
-    const legalName = `LEGALMAX ${"L".repeat(191)}`;
+    const organizationName = `LEGALMAX ${"L".repeat(191)}`;
     const donorName = `DONORMAX ${"D".repeat(191)}`;
     const donorEmail = `EMAILMAX${"e".repeat(234)}@example.org`;
     const snapshot = await buildStripeAnnualStatementSnapshot({
@@ -594,7 +611,15 @@ describe("Stripe U.S. annual statement snapshot and rendering", () => {
       donorKey: donorEmail,
       donorName,
       donorEmail,
-      document: statementDocument({ legalName }),
+      document: statementDocument({
+        email: {
+          organizationName,
+          supportEmail: "legacy-contact-1@example.com",
+          logoUrl: null,
+          senderName: organizationName,
+          replyToAddress: null
+        }
+      }),
       gifts: [gift({ id: "gift_max_identity", donor_name: donorName, donor_email: donorEmail })]
     });
     const drawText = vi.spyOn(PDFPage.prototype, "drawText");
@@ -789,7 +814,6 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       "$222.22",
       "TOTAL — 2",
       "$345.67 USD",
-      "Annual Legal Name Sentinel",
       "EIN 98-7654321",
       "Annual Organization Sentinel",
       "annual-support-sentinel@example.org",
@@ -801,6 +825,7 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     ]) {
       expect(normalizedText).toContain(expected);
     }
+    expect(normalizedText).not.toContain("Annual Legal Name Sentinel");
     expect(normalizedText).toMatch(/Statement No\. AGS-2025-[A-F0-9]{8}/);
   });
 
@@ -1430,7 +1455,7 @@ function statementDocument(overrides: Partial<{
   };
 }> = {}): StripeAnnualStatementDocumentEvidence {
   return {
-    rendererVersion: "stripe-annual-statement-pdf:v5" as const,
+    rendererVersion: "stripe-annual-statement-pdf:v6" as const,
     legalName: overrides.legalName ?? "Friends of Example Church, Inc.",
     ein: overrides.ein ?? "12-3456789",
     timeZone: overrides.timeZone ?? "America/New_York",

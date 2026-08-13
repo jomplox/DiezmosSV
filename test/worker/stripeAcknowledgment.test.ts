@@ -139,7 +139,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     const metadataPath = join(metadataDirectory, "receipt.pdf");
     writeFileSync(metadataPath, bytes);
     expect(execFileSync("pdfinfo", [metadataPath], { encoding: "utf8" }))
-      .toContain("Producer:        stripe-acknowledgment-pdf:v4");
+      .toContain("Producer:        stripe-acknowledgment-pdf:v5");
     expect(pdf.getPage(0).getMediaBox()).toEqual({ x: 0, y: 0, width: 612, height: 792 });
 
     expect(drawImage).toHaveBeenCalledTimes(1);
@@ -161,9 +161,11 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(text).toContain("Dear Edith Anaya,");
     expect(text).toContain("Receipt of Charitable Donation:");
     expect(text).toContain("DONATION AMOUNT: $900.00 USD");
-    expect(text).toContain("DONATION METHOD: Stripe");
-    expect(text).toContain("DONATION STATUS: Completed");
-    expect(text).toContain("DONATION ID: pi_30298");
+    expect(text).toContain("PAYMENT METHOD: Stripe");
+    expect(text).toContain("DONATION STATUS: Completado");
+    expect(text).toContain("PAYMENT ID: pi_30298");
+    expect(text).not.toContain("DONATION METHOD:");
+    expect(text).not.toContain("DONATION ID:");
     expect(normalizedText).toContain("No goods or services were provided in exchange for your contribution.");
     expect(text).toContain("Friends of Misión Cristiana Elim");
     expect(text).toContain("Mathieu Guély");
@@ -179,16 +181,28 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(drawRectangle.mock.calls).toContainEqual([
       expect.objectContaining({ x: 0, y: 0, width: 612, height: 169 })
     ]);
-    for (const contact of [
-      "fmce@example.org",
-      "+1 (786) 505-8446",
-      "https://www.elim.click",
-      "2885 Sanford Ave SW, PMB 41357",
-      "Grandville, MI 49418, USA"
-    ]) expect(drawText.mock.calls).toContainEqual([
-      contact,
-      expect.objectContaining({ size: 7.2 })
-    ]);
+    expect(normalizedText).toContain("fmce@example.org • +1 (786) 505-8446");
+    expect(normalizedText).toContain("2885 Sanford Ave SW, PMB 41357 Grandville, MI 49418, USA");
+    expect(normalizedText).toContain("incorporada en Washington, D.C.");
+    expect(normalizedText).toContain("Misión Cristiana Elim en El Salvador");
+    expect(text).not.toContain("https://www.elim.click");
+    for (const contact of ["fmce@example.org • +1 (786) 505-8446"]) {
+      const contactCall = drawText.mock.calls.find(([drawn]) => drawn === contact);
+      if (!contactCall?.[1]?.font || typeof contactCall[1].x !== "number") {
+        throw new Error(`Centered receipt contact line missing: ${contact}`);
+      }
+      const center = contactCall[1].x
+        + contactCall[1].font.widthOfTextAtSize(contact, contactCall[1].size ?? 12) / 2;
+      expect(center).toBeCloseTo(306, 1);
+    }
+    const headingIndex = drawText.mock.calls.findIndex(([drawn]) => drawn === "Receipt of Charitable Donation:");
+    const signerIndex = drawText.mock.calls.findIndex(([drawn]) => drawn === "Mathieu Guély");
+    expect(drawText.mock.calls.slice(signerIndex, headingIndex).some(([drawn]) =>
+      drawn === "Friends of Misión Cristiana Elim"
+    )).toBe(true);
+    expect(drawText.mock.calls.slice(signerIndex, headingIndex).some(([drawn]) =>
+      drawn === "Misión Cristiana Elim"
+    )).toBe(false);
     const salutation = drawText.mock.calls.find(([text]) => text === "Dear Edith Anaya,");
     expect(logoOptions.y).toBeGreaterThan((salutation?.[1]?.y ?? Number.POSITIVE_INFINITY) + 24);
   });
@@ -239,10 +253,14 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       expect(options.x + options.font.widthOfTextAtSize(String(drawn), options.size ?? 12)).toBeLessThanOrEqual(567);
       expect(options.y, String(drawn)).toBeGreaterThanOrEqual(176);
     }
-    const contactCalls = drawText.mock.calls.filter(([, options]) =>
-      options?.x === 45 || options?.x === 312
+    const contactCalls = drawText.mock.calls.filter(([drawn, options]) =>
+      options?.y !== undefined
+      && options.y >= 177
+      && options.y <= 232
+      && options.x !== 292.1
+      && String(drawn).match(/example\.org|ADDRESS-|^\+1/)
     );
-    expect(contactCalls.length).toBeGreaterThanOrEqual(7);
+    expect(contactCalls.length).toBeGreaterThanOrEqual(5);
     for (const [drawn, options] of contactCalls) {
       expect(options?.y, String(drawn)).toBeGreaterThanOrEqual(177);
     }
@@ -285,9 +303,12 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       expect(text).toContain(marker);
     }
     const contactCalls = drawText.mock.calls.filter(([, options]) =>
-      options?.x === 45 || options?.x === 312
+      options?.y !== undefined
+      && options.y >= 177
+      && options.y <= 232
+      && options.x !== 292.1
     );
-    expect(contactCalls.length).toBeGreaterThanOrEqual(12);
+    expect(contactCalls.length).toBeGreaterThanOrEqual(8);
     for (const [drawn, options] of contactCalls) {
       if (!options?.font || typeof options.x !== "number") throw new Error("Contact draw geometry missing");
       expect(options.y, String(drawn)).toBeGreaterThanOrEqual(177);
@@ -754,31 +775,35 @@ function expectReceiptReservedBandGeometry(
     .toBeGreaterThanOrEqual(top(calls[einIndex]!) + 1.5);
 
   const spanishStart = requiredIndex(
-    ([value], index) => index > einIndex && String(value).startsWith(`La organización ${markers.legalMarker}`),
+    ([value], index) => index > einIndex && String(value).startsWith(`La Fundación ${markers.legalMarker}`),
     "Spanish legal acknowledgment"
   );
   const contactStart = requiredIndex(
-    ([, value], index) => index > spanishStart && (value?.x === 45 || value?.x === 312),
+    ([, value], index) => index > spanishStart
+      && typeof value?.y === "number"
+      && value.y <= 232
+      && value.x !== 292.1,
     "contact block"
   );
   const rightLegalCalls = calls.slice(spanishStart, contactStart);
-  const leftContactCalls = calls.filter(([, value], index) => index >= contactStart && value?.x === 45);
-  const rightContactCalls = calls.filter(([, value], index) => index >= contactStart && value?.x === 312);
-  expect(leftContactCalls.length).toBeGreaterThan(0);
-  expect(rightContactCalls.length).toBeGreaterThan(0);
+  const contactCalls = calls.filter(([, value], index) =>
+    index >= contactStart
+    && typeof value?.y === "number"
+    && value.y >= 177
+    && value.y <= 232
+    && value.x !== 292.1
+  );
+  expect(contactCalls.length).toBeGreaterThan(0);
   expect(options(calls[einIndex]!).y)
-    .toBeGreaterThanOrEqual(Math.max(...leftContactCalls.map(top)) + 1.5);
+    .toBeGreaterThanOrEqual(Math.max(...contactCalls.map(top)) + 1.5);
   expect(Math.min(...rightLegalCalls.map((call) => options(call).y)))
-    .toBeGreaterThanOrEqual(Math.max(...rightContactCalls.map(top)) + 1.5);
+    .toBeGreaterThanOrEqual(Math.max(...contactCalls.map(top)) + 1.5);
   for (const call of rightLegalCalls) {
     expect(options(call).x, text(call)).toBeGreaterThanOrEqual(292.1);
     expect(right(call), text(call)).toBeLessThanOrEqual(495.2);
   }
-  for (const call of leftContactCalls) {
-    expect(options(call).y, text(call)).toBeGreaterThanOrEqual(177);
-    expect(right(call), text(call)).toBeLessThanOrEqual(300);
-  }
-  for (const call of rightContactCalls) {
+  for (const call of contactCalls) {
+    expect(options(call).x, text(call)).toBeGreaterThanOrEqual(45);
     expect(options(call).y, text(call)).toBeGreaterThanOrEqual(177);
     expect(right(call), text(call)).toBeLessThanOrEqual(567);
   }

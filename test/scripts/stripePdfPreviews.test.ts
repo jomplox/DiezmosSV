@@ -17,7 +17,20 @@ describe("Stripe U.S. PDF preview command", () => {
     const directory = mkdtempSync(join(tmpdir(), "stripe-us-pdf-previews-"));
     directories.push(directory);
 
-    const previews = await renderStripeUsPdfPreviews(directory);
+    const previews = await renderStripeUsPdfPreviews(directory, {
+      legalName: "Friends of Misión Cristiana Elim",
+      ein: "82-0889012",
+      organizationName: "Misión Cristiana Elim",
+      supportEmail: "fmce@example.org",
+      organizationPhone: "+1 (786) 505-8446",
+      organizationWebsite: "https://www.elim.click",
+      organizationMailingAddress: [
+        "2885 Sanford Ave SW, PMB 41357",
+        "Grandville, MI 49418, USA"
+      ],
+      signerName: "Mathieu Guély",
+      signerTitle: "Treasurer"
+    });
 
     expect(previews).toEqual({
       receiptPath: join(directory, "stripe-us-single-gift-receipt.pdf"),
@@ -32,19 +45,25 @@ describe("Stripe U.S. PDF preview command", () => {
 
     const receiptText = execFileSync("pdftotext", ["-layout", previews.receiptPath, "-"], { encoding: "utf8" });
     const normalizedReceiptText = receiptText.replace(/\s+/gu, " ");
-    expect(receiptText).toContain("Ana Morales");
+    expect(receiptText).toContain("SAMPLE PREVIEW DONOR");
     expect(receiptText).toContain("pi_sample_receipt_2025_0413");
-    expect(normalizedReceiptText).toContain("Friends of Misión Cristiana Elim, Inc.");
-    expect(receiptText).toContain("giving@example.org");
-    expect(receiptText).toContain("United States");
+    expect(normalizedReceiptText).toContain("Friends of Misión Cristiana Elim");
+    expect(receiptText).toContain("EIN 82-0889012");
+    expect(receiptText).toContain("fmce@example.org");
+    expect(receiptText).toContain("PAYMENT METHOD: Stripe");
+    expect(receiptText).toContain("PAYMENT ID: pi_sample_receipt_2025_0413");
+    expect(receiptText).not.toMatch(/12-3456789|giving@example\.org|555-01/u);
 
     const annualText = execFileSync("pdftotext", ["-layout", previews.annualPath, "-"], { encoding: "utf8" });
     const normalizedAnnualText = annualText.replace(/\s+/gu, " ");
-    expect(annualText).toContain("Ana Morales");
+    expect(annualText).toContain("SAMPLE PREVIEW DONOR");
     expect(annualText).toContain("pi_sample_annual_2025");
-    expect(normalizedAnnualText).toContain("Friends of Misión Cristiana Elim, Inc.");
-    expect(annualText).toContain("giving@example.org");
-    expect(annualText).toContain("United States");
+    expect(normalizedAnnualText).toContain("Misión Cristiana Elim");
+    expect(annualText).not.toContain("Friends of Misión Cristiana Elim");
+    expect(annualText).toContain("EIN 82-0889012");
+    expect(annualText).toContain("fmce@example.org · +1 (786) 505-8446");
+    expect(annualText).toContain("PAYMENT METHOD");
+    expect(annualText).not.toMatch(/12-3456789|giving@example\.org|\+1 \(616\) 555-0143/u);
     for (let index = 1; index <= 5; index += 1) {
       expect(annualText).toContain(`pi_sample_annual_2025_${String(index).padStart(2, "0")}`);
     }

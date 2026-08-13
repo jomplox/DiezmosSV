@@ -34,7 +34,7 @@ export const STRIPE_ANNUAL_STATEMENT_BULK_DONOR_LIMIT = 10;
 
 const PAGE_WIDTH = 612;
 const PAGE_HEIGHT = 792;
-export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v5" as const;
+export const STRIPE_ANNUAL_STATEMENT_PDF_VERSION = "stripe-annual-statement-pdf:v6" as const;
 
 export class StripeAnnualStatementConfigurationError extends Error {
   constructor(message: string) {
@@ -306,7 +306,7 @@ export async function renderStripeAnnualStatementPdf(
   });
 
   pdf.setTitle(`Annual Giving Statement ${input.snapshot.year}`);
-  pdf.setAuthor(input.snapshot.document.legalName);
+  pdf.setAuthor(input.snapshot.document.email.organizationName);
   pdf.setProducer(STRIPE_ANNUAL_STATEMENT_PDF_VERSION);
   return pdf.save();
 }
@@ -791,7 +791,8 @@ function drawAnnualCover(
   drawPdfLabel(page, "FROM", left, 674, bold);
   drawPdfLabel(page, "PREPARED FOR", preparedX, 674, bold);
   const fromWidth = preparedX - left - 12;
-  let fromY = drawWrappedText(page, input.snapshot.document.legalName, {
+  const statementOrganizationName = input.snapshot.document.email.organizationName;
+  let fromY = drawWrappedText(page, statementOrganizationName, {
     x: left,
     y: 656,
     size: 10,
@@ -803,8 +804,10 @@ function drawAnnualCover(
   const fromContactLines = [
     "A 501(c)(3) Public Charity",
     `EIN ${input.snapshot.document.ein}`,
-    input.snapshot.document.email.supportEmail,
-    input.snapshot.document.organizationContact.phone,
+    [
+      input.snapshot.document.email.supportEmail,
+      input.snapshot.document.organizationContact.phone
+    ].filter(Boolean).join(" · "),
     input.snapshot.document.organizationContact.website,
     ...input.snapshot.document.organizationContact.mailingAddress
   ];
@@ -880,9 +883,8 @@ function drawAnnualCover(
     color: rgb(0.1, 0.1, 0.1)
   });
   drawPdfTextLine(page, "Tax-Deductible Contribution Acknowledgment", left + 12.75, 493, 9.4, bold);
-  const legalName = input.snapshot.document.legalName;
   const acknowledgmentParagraphs = [
-    `${legalName} is a tax-exempt organization as described in Section 501(c)(3) of the Internal Revenue Code (EIN ${input.snapshot.document.ein}). Contributions to ${legalName} are tax-deductible to the extent allowed by law.`,
+    `${statementOrganizationName} is a tax-exempt organization as described in Section 501(c)(3) of the Internal Revenue Code (EIN ${input.snapshot.document.ein}). Contributions to ${statementOrganizationName} are tax-deductible to the extent allowed by law.`,
     `This letter is your contemporaneous written acknowledgment of the charitable contributions itemized below. During ${annualPeriodLabel(input.snapshot.year)}, you made cash contributions totaling ${formatCents(input.snapshot.totals.netAmountCents)} USD. No goods or services were provided to you in exchange for these contributions.`,
     "Please retain this acknowledgment with your tax records. To claim a charitable deduction, the IRS requires that you obtain written acknowledgment of each contribution of $250 or more before the earlier of the date you file your federal income tax return for the year of the contribution or the due date (including extensions) of that return. This document does not constitute tax advice."
   ];
@@ -1013,7 +1015,7 @@ function drawAnnualContributionTable(
   drawPdfTextLine(page, "DATE", left + 7.5, headerBaseline, 8, options.bold, headerText);
   drawPdfTextLine(page, "AMOUNT", 146.687, headerBaseline, 8, options.bold, headerText);
   drawPdfTextLine(page, "DONATION ID", sourceX, headerBaseline, 8, options.bold, headerText);
-  drawPdfTextLine(page, "DONATION METHOD", methodX, headerBaseline, 8, options.bold, headerText);
+  drawPdfTextLine(page, "PAYMENT METHOD", methodX, headerBaseline, 8, options.bold, headerText);
   page.drawLine({ start: { x: left, y: options.topY - headerHeight }, end: { x: right, y: options.topY - headerHeight }, thickness: 0.7, color: rule });
 
   let rowTop = options.topY - headerHeight;
