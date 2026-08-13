@@ -378,10 +378,23 @@ test("edits Salvadoran and U.S. email templates separately while identifying the
   await expect(usTemplates.getByRole("textbox")).toHaveCount(6);
 
   const immediate = usTemplates.locator(".email-template-card").filter({ hasText: "Constancia inmediata" });
+  const body = immediate.getByLabel("Cuerpo del correo");
+  const applyFormat = async (button: string, expected: string) => {
+    await body.fill("Texto");
+    await body.evaluate((textarea: HTMLTextAreaElement) => textarea.select());
+    await immediate.getByRole("button", { name: button }).click();
+    await expect(body).toHaveValue(expected);
+  };
+  await expect(immediate.getByRole("toolbar", { name: "Formato del cuerpo" })).toBeVisible();
+  await applyFormat("Negrita", "**Texto**");
+  await applyFormat("Cursiva", "*Texto*");
+  await applyFormat("Subrayado", "++Texto++");
+  await applyFormat("Cita", "> Texto");
   await immediate.getByLabel("Asunto").fill("Gracias por su entrega, {{donante}}");
   await usTemplates.getByRole("button", { name: "Guardar plantillas de EE. UU." }).click();
   await expect.poll(() => savedTemplates?.stripeAcknowledgment.subject ?? null)
     .toBe("Gracias por su entrega, {{donante}}");
+  expect(savedTemplates?.stripeAcknowledgment.body).toBe("> Texto");
 });
 
 test("paginates every long preview table in Exportar without changing its data source", async ({ page }) => {

@@ -128,6 +128,31 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(refunded.text).toContain("Neto: $0.00 USD");
   });
 
+  it("does not interpret donor or organization values as operator formatting", () => {
+    const content = stripeAcknowledgmentContent({
+      donorName: "Ana **Estrella**",
+      amountCents: 5000,
+      frequency: "ONCE",
+      giftType: "TITHE",
+      settledAt: "2026-08-10T12:00:00.000Z",
+      timeZone: "America/New_York",
+      legalName: "Friends ++C++",
+      ein: "12-3456789",
+      branding: { organizationName: "Organización Visible", logoUrl: null },
+      template: {
+        subject: "Constancia",
+        body: "{{donante}}\n\n{{nombreLegal}}"
+      }
+    });
+
+    expect(content.text).toContain("Ana **Estrella**");
+    expect(content.text).toContain("Friends ++C++");
+    expect(content.html).toContain("Ana &#42;&#42;Estrella&#42;&#42;");
+    expect(content.html).toContain("Friends &#43;&#43;C&#43;&#43;");
+    expect(content.html).not.toContain("<strong>Estrella</strong>");
+    expect(content.html).not.toContain("<u>C</u>");
+  });
+
   it("formats the settled date in the configured U.S. timezone at the New Year boundary", () => {
     const content = stripeAcknowledgmentContent({
       donorName: "Ana",
@@ -386,7 +411,7 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
       JSON.stringify({
         stripeAcknowledgment: {
           subject: "CORREO PERSONALIZADO {{donante}}",
-          body: "CUERPO PERSONALIZADO {{monto}} · {{nombreLegal}}"
+          body: "**CUERPO PERSONALIZADO** *{{monto}}*\n\n> ++{{nombreLegal}}++"
         }
       })
     );
@@ -408,8 +433,11 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     })).resolves.toMatchObject({ outcome: "SENT" });
 
     expect(sent?.subject).toBe("CORREO PERSONALIZADO Ana Ejemplo");
-    expect(sent?.text).toBe("CUERPO PERSONALIZADO $50.00 USD · Nonprofit Test Fixture");
-    expect(sent?.html).toContain("CUERPO PERSONALIZADO");
+    expect(sent?.text).toBe("CUERPO PERSONALIZADO $50.00 USD\n\nNonprofit Test Fixture");
+    expect(sent?.html).toContain("<strong>CUERPO PERSONALIZADO</strong>");
+    expect(sent?.html).toContain("<em>$50.00 USD</em>");
+    expect(sent?.html).toContain("<u>Nonprofit Test Fixture</u>");
+    expect(sent?.html).toContain("<blockquote");
     const directory = mkdtempSync(join(tmpdir(), "stripe-ack-template-boundary-"));
     directories.push(directory);
     const pdfPath = join(directory, "acknowledgment.pdf");

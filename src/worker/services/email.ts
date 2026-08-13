@@ -245,7 +245,7 @@ export class EmailService {
       ...(idempotencyKey ? { idempotencyKey } : {}),
       subject: message.subject,
       text: message.text,
-      html: dteEmailHtml(record, message.text, {
+      html: dteEmailHtml(record, message.formattedText, {
         organizationName: this.resolveBranding().organizationName,
         brandColor: this.resolveBranding().brandColor,
         supportEmail: this.resolveBranding().supportEmail,
@@ -485,6 +485,7 @@ interface CloudflareEmailAttachment {
 interface EmailMessage {
   subject: string;
   text: string;
+  formattedText: string;
 }
 
 interface EmailSenderIdentity {

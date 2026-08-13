@@ -1,6 +1,7 @@
 import { formatCents } from "../../shared/money";
 import type { DteDocumentRecord } from "../types";
 import { isRecord } from "../utils/guards";
+import { emailTemplatePlainText } from "./emailHtml";
 
 export const EMAIL_TEMPLATES_SETTING_KEY = "email_templates_json";
 
@@ -227,19 +228,26 @@ export function normalizeEmailTemplateSettings(input: unknown): EmailTemplateSet
   return normalized;
 }
 
-export function renderEmailTemplate(template: EmailTemplateValue, record: DteDocumentRecord): { subject: string; text: string } {
+export function renderEmailTemplate(template: EmailTemplateValue, record: DteDocumentRecord): { subject: string; text: string; formattedText: string } {
   return renderEmailTemplateValue(template, placeholderValues(record));
 }
 
 export function renderEmailTemplateValue(
   template: EmailTemplateValue,
   values: Record<string, string>
-): { subject: string; text: string } {
+): { subject: string; text: string; formattedText: string } {
   const subject = replacePlaceholders(template.subject, values);
+  const formattedText = replacePlaceholders(
+    template.body,
+    Object.fromEntries(
+      Object.entries(values).map(([token, value]) => [token, escapeEmailTemplateFormattingValue(value)])
+    )
+  );
   assertSafeEmailSubject(subject);
   return {
     subject,
-    text: replacePlaceholders(template.body, values)
+    text: emailTemplatePlainText(formattedText),
+    formattedText
   };
 }
 
@@ -286,6 +294,14 @@ function placeholderValues(record: DteDocumentRecord): Record<string, string> {
 
 function replacePlaceholders(value: string, placeholders: Record<string, string>): string {
   return Object.entries(placeholders).reduce((text, [token, replacement]) => text.split(token).join(replacement), value);
+}
+
+function escapeEmailTemplateFormattingValue(value: string): string {
+  return value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("*", "\\*")
+    .replaceAll("+", "\\+")
+    .replace(/^(\s*)>/gm, "$1\\>");
 }
 
 function statusLabel(status: string): string {

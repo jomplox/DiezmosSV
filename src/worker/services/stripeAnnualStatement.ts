@@ -359,7 +359,7 @@ export function stripeAnnualStatementEmailContent(input: {
     html: editableDonorEmailHtml({
       organizationName: input.branding.organizationName,
       title: rendered.subject,
-      bodyText: rendered.text,
+      bodyText: rendered.formattedText,
       brandColor: input.branding.brandColor,
       supportEmail: input.branding.supportEmail,
       logoUrl: input.branding.logoUrl

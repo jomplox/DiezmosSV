@@ -945,7 +945,7 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       JSON.stringify({
         stripeAnnualStatement: {
           subject: "RESUMEN PERSONALIZADO {{anio}} — {{donante}}",
-          body: "CUERPO ANUAL PERSONALIZADO {{descripcionDonaciones}} · {{totalNeto}}"
+          body: "**CUERPO ANUAL PERSONALIZADO** *{{descripcionDonaciones}}*\n\n> ++{{totalNeto}}++"
         }
       })
     );
@@ -962,8 +962,11 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
       attachments?: Array<{ content: Uint8Array }>;
     };
     expect(message.subject).toBe("RESUMEN PERSONALIZADO 2025 — Ana");
-    expect(message.text).toBe("CUERPO ANUAL PERSONALIZADO 1 donación · $123.45");
-    expect(message.html).toContain("CUERPO ANUAL PERSONALIZADO");
+    expect(message.text).toBe("CUERPO ANUAL PERSONALIZADO 1 donación\n\n$123.45");
+    expect(message.html).toContain("<strong>CUERPO ANUAL PERSONALIZADO</strong>");
+    expect(message.html).toContain("<em>1 donación</em>");
+    expect(message.html).toContain("<u>$123.45</u>");
+    expect(message.html).toContain("<blockquote");
     const directory = mkdtempSync(join(tmpdir(), "stripe-annual-template-boundary-"));
     temporaryDirectories.push(directory);
     const pdfPath = join(directory, "annual-statement.pdf");

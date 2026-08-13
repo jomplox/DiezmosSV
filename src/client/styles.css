@@ -2762,6 +2762,44 @@ input.file-input-hidden {
   resize: vertical;
 }
 
+.email-template-body-field {
+  display: grid;
+  gap: 6px;
+}
+
+.email-template-body-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.email-template-format-toolbar {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.email-template-format-toolbar button {
+  width: 30px;
+  min-height: 28px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink-secondary);
+  font: inherit;
+}
+
+.email-template-format-toolbar button:hover {
+  border-color: var(--ink-muted);
+  color: var(--ink);
+}
+
+.email-template-format-help {
+  color: var(--ink-muted);
+  font-size: 11px;
+}
+
 .email-template-actions {
   margin-top: 0;
   padding-top: 2px;

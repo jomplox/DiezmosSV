@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { certificateEmailHtml, dteEmailHtml, operationalAlertHtml, passwordResetEmailHtml, stripeAnnualStatementEmailHtml } from "../../src/worker/services/emailHtml";
+import { certificateEmailHtml, dteEmailHtml, editableDonorEmailHtml, operationalAlertHtml, passwordResetEmailHtml, stripeAnnualStatementEmailHtml } from "../../src/worker/services/emailHtml";
 import type { DteDocumentRecord } from "../../src/worker/types";
 
 const LOGO_URL = "https://iglesia.example.org/api/branding/logo?v=v9";
@@ -92,6 +92,35 @@ describe("HTML email rendering", () => {
     expect(html).not.toContain("Cuerpo con <b>");
     expect(html).toContain("&lt;script&gt;");
     expect(html).toContain("Iglesia &lt;XSS&gt;");
+  });
+
+  it("renders the supported formatting in an editable Salvadoran template body", () => {
+    const html = dteEmailHtml(
+      record(),
+      "**Negrita** y *cursiva* y ++subrayado++\n\n> Una cita\n> en dos líneas",
+      { organizationName: "Iglesia" }
+    );
+
+    expect(html).toContain("<strong>Negrita</strong>");
+    expect(html).toContain("<em>cursiva</em>");
+    expect(html).toContain("<u>subrayado</u>");
+    expect(html).toContain("<blockquote");
+    expect(html).toContain("Una cita<br />en dos líneas");
+  });
+
+  it("renders the supported formatting in an editable U.S. template without accepting raw HTML", () => {
+    const html = editableDonorEmailHtml({
+      organizationName: "Iglesia",
+      title: "Constancia",
+      bodyText: "**Negrita** *cursiva* ++subrayado++\n\n> Cita <script>alert(1)</script>"
+    });
+
+    expect(html).toContain("<strong>Negrita</strong>");
+    expect(html).toContain("<em>cursiva</em>");
+    expect(html).toContain("<u>subrayado</u>");
+    expect(html).toContain("<blockquote");
+    expect(html).not.toContain("<script>");
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 
   it("renders the password reset email with a button link and expiry", () => {

@@ -13,7 +13,7 @@ import {
   Upload,
   X
 } from "lucide-react";
-import { type FormEvent, useMemo, useRef, useState } from "react";
+import { type FormEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   STRIPE_US_LEGAL_NAME_MAX_LENGTH,
   STRIPE_US_MAILING_ADDRESS_LINE_MAX_LENGTH,
@@ -1342,6 +1342,92 @@ function BrandingEditor({
   );
 }
 
+type EmailTemplateBodyFormat = "bold" | "italic" | "underline" | "quote";
+
+function EmailTemplateBodyEditor({
+  id,
+  value,
+  placeholder,
+  onChange
+}: {
+  id: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pendingSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  useLayoutEffect(() => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) return;
+    pendingSelectionRef.current = null;
+    textareaRef.current?.focus();
+    textareaRef.current?.setSelectionRange(pending.start, pending.end);
+  }, [value]);
+
+  const applyFormat = (format: EmailTemplateBodyFormat) => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const selectionStart = textarea.selectionStart;
+    const selectionEnd = textarea.selectionEnd;
+    let nextValue: string;
+    let nextSelectionStart: number;
+    let nextSelectionEnd: number;
+
+    if (format === "quote") {
+      const lineStart = value.lastIndexOf("\n", Math.max(0, selectionStart - 1)) + 1;
+      const nextLineBreak = value.indexOf("\n", selectionEnd);
+      const lineEnd = nextLineBreak === -1 ? value.length : nextLineBreak;
+      const block = value.slice(lineStart, lineEnd);
+      const lines = block.split("\n");
+      const removeQuote = lines.every((line) => /^\s*>\s?/.test(line));
+      const replacement = lines
+        .map((line) => removeQuote ? line.replace(/^\s*>\s?/, "") : `> ${line}`)
+        .join("\n");
+      nextValue = `${value.slice(0, lineStart)}${replacement}${value.slice(lineEnd)}`;
+      nextSelectionStart = lineStart;
+      nextSelectionEnd = lineStart + replacement.length;
+    } else {
+      const markers = format === "bold"
+        ? ["**", "**"]
+        : format === "italic"
+          ? ["*", "*"]
+          : ["++", "++"];
+      const selected = value.slice(selectionStart, selectionEnd);
+      const replacement = `${markers[0]}${selected}${markers[1]}`;
+      nextValue = `${value.slice(0, selectionStart)}${replacement}${value.slice(selectionEnd)}`;
+      nextSelectionStart = selectionStart + markers[0].length;
+      nextSelectionEnd = nextSelectionStart + selected.length;
+    }
+
+    pendingSelectionRef.current = { start: nextSelectionStart, end: nextSelectionEnd };
+    onChange(nextValue);
+  };
+
+  return (
+    <div className="email-template-body-field">
+      <div className="email-template-body-head">
+        <label htmlFor={id}><span>Cuerpo del correo</span></label>
+        <div className="email-template-format-toolbar" role="toolbar" aria-label="Formato del cuerpo">
+          <button type="button" aria-label="Negrita" title="Negrita: **texto**" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}><strong>B</strong></button>
+          <button type="button" aria-label="Cursiva" title="Cursiva: *texto*" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+          <button type="button" aria-label="Subrayado" title="Subrayado: ++texto++" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+          <button type="button" aria-label="Cita" title="Cita: > texto" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>❝</button>
+        </div>
+      </div>
+      <textarea
+        ref={textareaRef}
+        id={id}
+        aria-label="Cuerpo del correo"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        placeholder={placeholder}
+      />
+      <small className="email-template-format-help">Formato: **negrita**, *cursiva*, ++subrayado++ y &gt; cita.</small>
+    </div>
+  );
+}
+
 function EmailTemplateEditor({
   settings,
   draft,
@@ -1381,14 +1467,12 @@ function EmailTemplateEditor({
                 placeholder={definition.defaultSubject}
               />
             </label>
-            <label>
-              <span>Cuerpo del correo</span>
-              <textarea
-                value={value.body}
-                onChange={(event) => onChange(definition.type, { body: event.target.value })}
-                placeholder={definition.defaultBody}
-              />
-            </label>
+            <EmailTemplateBodyEditor
+              id={`email-template-body-${definition.type}`}
+              value={value.body}
+              onChange={(body) => onChange(definition.type, { body })}
+              placeholder={definition.defaultBody}
+            />
           </section>
         );
       })}

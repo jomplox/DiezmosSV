@@ -41,7 +41,7 @@ export function dteEmailHtml(record: DteDocumentRecord, bodyText: string, option
   const brandColor = options.brandColor ?? DEFAULT_BRAND_COLOR;
   return emailDocument(options.organizationName, "Comprobante de Donación Electrónico", brandColor, options.supportEmail, options.logoUrl, [
     banner,
-    paragraphs(bodyText),
+    emailTemplateBody(bodyText),
     details,
     testNote,
     footNote("Se adjuntan la representación gráfica en PDF y el documento electrónico en JSON.")
@@ -174,8 +174,20 @@ export function editableDonorEmailHtml(input: {
     input.brandColor ?? DEFAULT_BRAND_COLOR,
     input.supportEmail,
     input.logoUrl,
-    [paragraphs(input.bodyText)]
+    [emailTemplateBody(input.bodyText)]
   );
+}
+
+export function emailTemplatePlainText(bodyText: string): string {
+  return bodyText
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/^\s*>\s?/, ""))
+    .join("\n")
+    .replace(/(?<!\\)\*\*([^*\n]+)(?<!\\)\*\*/g, "$1")
+    .replace(/(?<!\\)\*([^*\n]+)(?<!\\)\*/g, "$1")
+    .replace(/(?<!\\)\+\+([^+\n]+)(?<!\\)\+\+/g, "$1")
+    .replace(/\\([\\*+>])/g, "$1");
 }
 
 export function passwordResetEmailHtml(
@@ -361,6 +373,54 @@ function paragraphs(bodyText: string): string {
     .split(/\n{2,}/)
     .map((block) => `<p style="margin:0 0 14px;">${escapeHtml(block.trim()).replaceAll("\n", "<br />")}</p>`)
     .join("\n");
+}
+
+function emailTemplateBody(bodyText: string): string {
+  const fragments: string[] = [];
+  let paragraphLines: string[] = [];
+  let quoteLines: string[] = [];
+  const flushParagraph = () => {
+    if (paragraphLines.length === 0) return;
+    fragments.push(`<p style="margin:0 0 14px;">${paragraphLines.map(formatEmailTemplateInline).join("<br />")}</p>`);
+    paragraphLines = [];
+  };
+  const flushQuote = () => {
+    if (quoteLines.length === 0) return;
+    fragments.push(
+      `<blockquote style="margin:0 0 14px;padding:10px 14px;border-left:3px solid ${BORDER_COLOR};background:${CARD_BACKGROUND};color:${MUTED_COLOR};">${quoteLines.map(formatEmailTemplateInline).join("<br />")}</blockquote>`
+    );
+    quoteLines = [];
+  };
+
+  for (const rawLine of bodyText.replace(/\r\n?/g, "\n").split("\n")) {
+    const quote = rawLine.match(/^\s*>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      quoteLines.push(quote[1]);
+      continue;
+    }
+    if (!rawLine.trim()) {
+      flushParagraph();
+      flushQuote();
+      continue;
+    }
+    flushQuote();
+    paragraphLines.push(rawLine.trim());
+  }
+  flushParagraph();
+  flushQuote();
+  return fragments.join("\n");
+}
+
+function formatEmailTemplateInline(value: string): string {
+  return escapeHtml(value)
+    .replace(/\\\\/g, "&#92;")
+    .replace(/\\\*/g, "&#42;")
+    .replace(/\\\+/g, "&#43;")
+    .replace(/\\&gt;/g, "&gt;")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/\+\+([^+\n]+)\+\+/g, "<u>$1</u>");
 }
 
 function detailsCard(rows: Array<[string, string]>): string {
