@@ -172,6 +172,91 @@ describe("Spanish Stripe 501(c)(3) acknowledgment", () => {
     expect(await PDFDocument.load(attachment!.pdfBytes!)).toBeInstanceOf(PDFDocument);
   });
 
+  it("wires durable fields into the attached Stripe acknowledgment PDF", async () => {
+    await repo.applyStripeRefund({
+      stripePaymentIntentId: "pi_fixture",
+      refundedAmountCents: 432,
+      now: "2026-08-10T12:00:30.000Z"
+    });
+    database.prepare(
+      `UPDATE stripe_gifts
+          SET donor_name = ?, source_id = ?, stripe_payment_intent_id = ?, frequency = ?, gift_type = ?, amount_cents = ?
+        WHERE id = 'stripe_gift_fixture'`
+    ).run(
+      "Donor Ack Sentinel",
+      "pi_ack_source_sentinel_82",
+      "pi_ack_source_sentinel_82",
+      "MONTHLY",
+      "OFFERING",
+      5_432
+    );
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?), (?, ?)"
+    ).run(
+      "branding_display_name",
+      "Ack Organization Sentinel",
+      "branding_support_email",
+      "ack-support-sentinel@example.org"
+    );
+    const emailSend = vi.fn().mockResolvedValue({ messageId: "ack-provider-sentinel" });
+    const configuredEnv: Env = {
+      ...workerEnv,
+      STRIPE_MOCK_MODE: undefined,
+      MOCK_EXTERNAL_SERVICES: "false",
+      STRIPE_RESTRICTED_KEY: "rk_test_ack_field_wiring",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_ack_field_wiring",
+      STRIPE_WEBHOOK_SECRET: "whsec_ack_field_wiring",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_ack_field_wiring",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_ack_field_wiring",
+      STRIPE_US_LEGAL_NAME: "Ack Legal Name Sentinel",
+      STRIPE_US_EIN: "12-3456789",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 555 010 8282",
+      STRIPE_US_WEBSITE: "https://ack-sentinel.example.org",
+      STRIPE_US_MAILING_ADDRESS: "82 Acknowledgment Way\nNew York, NY 10082, USA",
+      STRIPE_US_SIGNER_NAME: "Ack Signer Sentinel",
+      STRIPE_US_SIGNER_TITLE: "Acknowledgment Treasurer",
+      EMAIL_FROM: "sender@example.org",
+      EMAIL: { send: emailSend } as unknown as SendEmail
+    };
+
+    await expect(deliverNextStripeAcknowledgment(configuredEnv, repo, {
+      now: "2026-08-10T12:01:00.000Z"
+    })).resolves.toMatchObject({ outcome: "SENT" });
+
+    const message = emailSend.mock.calls[0]?.[0] as {
+      attachments?: Array<{ content: Uint8Array }>;
+    };
+    const pdfBytes = message.attachments?.[0]?.content;
+    expect(pdfBytes).toBeInstanceOf(Uint8Array);
+    const pdf = await PDFDocument.load(pdfBytes!);
+    expect(pdf.getPageCount()).toBe(1);
+    const directory = mkdtempSync(join(tmpdir(), "stripe-ack-wiring-"));
+    const pdfPath = join(directory, "acknowledgment.pdf");
+    writeFileSync(pdfPath, pdfBytes!);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const normalizedText = text.replace(/\s+/g, " ");
+
+    for (const expected of [
+      "Donor Ack Sentinel",
+      "$54.32 USD",
+      "$50.00 USD",
+      "Offering · Monthly",
+      "pi_ack_source_sentinel_82",
+      "August 10, 2026",
+      "Ack Legal Name Sentinel",
+      "EIN 12-3456789",
+      "Ack Organization Sentinel",
+      "ack-support-sentinel@example.org",
+      "+1 555 010 8282",
+      "82 Acknowledgment Way New York, NY 10082, USA",
+      "Ack Signer Sentinel",
+      "Acknowledgment Treasurer"
+    ]) {
+      expect(normalizedText).toContain(expected);
+    }
+  });
+
   it("claims, dispatches, and finalizes one acknowledgment idempotently", async () => {
     expect(await deliverNextStripeAcknowledgment(workerEnv, repo, {
       now: "2026-08-10T12:01:00.000Z"

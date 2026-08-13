@@ -431,6 +431,120 @@ describe("Stripe U.S. annual statement preview and delivery", () => {
     expect(next.donors).toEqual([expect.objectContaining({ donorKey: "gift:gift_no_email", hasEmail: false })]);
   });
 
+  it("wires durable fields into the attached Stripe annual statement PDF", async () => {
+    seedGift(database, gift({
+      id: "annual_wiring_one",
+      source_id: "pi_annual_source_sentinel_1",
+      stripe_payment_intent_id: "pi_annual_source_sentinel_1",
+      donor_name: "Annual Donor Sentinel",
+      donor_email: "annual-sentinel@example.org",
+      donor_phone: "+1 555 010 9191",
+      donor_address_json: JSON.stringify({
+        line1: "91 Annual Statement Lane",
+        line2: "Suite 2",
+        city: "Austin",
+        state: "TX",
+        postalCode: "78791",
+        country: "US"
+      }),
+      settled_at: "2025-03-04T12:00:00.000Z",
+      amount_cents: 12_345
+    }));
+    seedGift(database, gift({
+      id: "annual_wiring_two",
+      source_id: "pi_annual_source_sentinel_2",
+      stripe_payment_intent_id: "pi_annual_source_sentinel_2",
+      donor_name: "Annual Donor Sentinel",
+      donor_email: "annual-sentinel@example.org",
+      donor_phone: "+1 555 010 9191",
+      donor_address_json: JSON.stringify({
+        line1: "91 Annual Statement Lane",
+        line2: "Suite 2",
+        city: "Austin",
+        state: "TX",
+        postalCode: "78791",
+        country: "US"
+      }),
+      settled_at: "2025-11-14T12:00:00.000Z",
+      amount_cents: 23_456,
+      refunded_amount_cents: 1_234,
+      status: "PARTIALLY_REFUNDED"
+    }));
+    database.prepare(
+      "INSERT INTO app_settings (key, value) VALUES (?, ?), (?, ?)"
+    ).run(
+      "branding_display_name",
+      "Annual Organization Sentinel",
+      "branding_support_email",
+      "annual-support-sentinel@example.org"
+    );
+    const configuredEnv: Env = {
+      ...workerEnv,
+      STRIPE_MOCK_MODE: undefined,
+      STRIPE_RESTRICTED_KEY: "rk_test_annual_field_wiring",
+      STRIPE_PUBLISHABLE_KEY: "pk_test_annual_field_wiring",
+      STRIPE_WEBHOOK_SECRET: "whsec_annual_field_wiring",
+      STRIPE_PAYMENT_METHOD_CONFIGURATION_ID: "pmc_annual_field_wiring",
+      STRIPE_BILLING_PORTAL_CONFIGURATION_ID: "bpc_annual_field_wiring",
+      STRIPE_US_LEGAL_NAME: "Annual Legal Name Sentinel",
+      STRIPE_US_EIN: "98-7654321",
+      STRIPE_US_TIME_ZONE: "America/New_York",
+      STRIPE_US_PHONE: "+1 555 010 9292",
+      STRIPE_US_WEBSITE: "https://annual-sentinel.example.org",
+      STRIPE_US_MAILING_ADDRESS: "92 Annual Organization Road\nAustin, TX 78792, USA",
+      STRIPE_US_SIGNER_NAME: "Annual Signer Sentinel",
+      STRIPE_US_SIGNER_TITLE: "Annual Treasurer"
+    };
+
+    await expect(sendStripeAnnualStatements(configuredEnv, repo, 2025, false, "user_operator", {
+      donor: "annual-sentinel@example.org",
+      now: "2026-01-10T12:00:00.000Z"
+    })).resolves.toMatchObject({ sent: 1, failed: 0, review: 0 });
+
+    const message = emailSend.mock.calls[0]?.[0] as {
+      to?: string;
+      attachments?: Array<{ content: Uint8Array }>;
+    };
+    expect(message.to).toBe("annual-sentinel@example.org");
+    const pdfBytes = message.attachments?.[0]?.content;
+    expect(pdfBytes).toBeInstanceOf(Uint8Array);
+    const pdf = await PDFDocument.load(pdfBytes!);
+    expect(pdf.getPageCount()).toBe(1);
+    const directory = mkdtempSync(join(tmpdir(), "stripe-annual-wiring-"));
+    const pdfPath = join(directory, "annual-statement.pdf");
+    writeFileSync(pdfPath, pdfBytes!);
+    const text = execFileSync("pdftotext", ["-layout", pdfPath, "-"], { encoding: "utf8" });
+    const normalizedText = text.replace(/\s+/g, " ");
+
+    for (const expected of [
+      "Annual Donor Sentinel",
+      "+1 555 010 9191",
+      "91 Annual Statement Lane",
+      "Suite 2",
+      "Austin, TX 78791, United States",
+      "pi_annual_source_sentinel_1",
+      "pi_annual_source_sentinel_2",
+      "03/04/2025",
+      "11/14/2025",
+      "$123.45",
+      "$222.22",
+      "TOTAL — 2",
+      "$345.67 USD",
+      "Annual Legal Name Sentinel",
+      "EIN 98-7654321",
+      "Annual Organization Sentinel",
+      "annual-support-sentinel@example.org",
+      "+1 555 010 9292",
+      "https://annual-sentinel.example.org",
+      "92 Annual Organization Road",
+      "Austin, TX 78792, USA",
+      "Tax Year 2025"
+    ]) {
+      expect(normalizedText).toContain(expected);
+    }
+    expect(normalizedText).toMatch(/Statement No\. AGS-2025-[A-F0-9]{8}/);
+  });
+
   it("threads a trimmed preview query to the grouped Stripe donor search", async () => {
     seedGift(database, gift({ id: "gift_match", donor_email: "match@example.org", donor_name: "Ana Matching" }));
     seedGift(database, gift({ id: "gift_nonmatch", donor_email: "other@example.org", donor_name: "No coincide" }));
